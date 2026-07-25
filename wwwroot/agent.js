@@ -500,6 +500,27 @@ angular.module('kanbanApp')
                     $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () { vm.showQuestionModal = false; vm.pendingQuestion = null; });
                 };
 
+                vm.applyDiff = function (diffPath, step) {
+                    if (!diffPath || !vm.selectedProject) return;
+                    step._applyingDiff = true;
+                    $http.post('/api/agent/apply-diff', { project: vm.selectedProject, diffPath: diffPath }).then(function (resp) {
+                        step._applyingDiff = false;
+                        if (resp.data && resp.data.success) {
+                            step._diffApplied = true;
+                            step.status = 'done';
+                            step._diffPath = diffPath;
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '✓ Diff applied: ' + diffPath });
+                        } else {
+                            step._diffError = (resp.data && resp.data.error) || 'Apply failed';
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'error', message: '✕ Diff apply failed: ' + (step._diffError) });
+                        }
+                    }, function (err) {
+                        step._applyingDiff = false;
+                        step._diffError = 'HTTP error: ' + (err.statusText || err);
+                        if (vm.addLogEntry) vm.addLogEntry({ type: 'error', message: '✕ Diff HTTP error: ' + (step._diffError) });
+                    });
+                };
+
                 vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
                 vm.startBenchmark = function (level) {

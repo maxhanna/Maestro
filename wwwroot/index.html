@@ -587,6 +587,18 @@
                         <strong>Try:</strong>
                         <span class="file-edit-chip" ng-repeat="p in s.suggestions">{{p}}</span>
                       </div>
+                      <div class="diff-list" ng-if="s.diffs && s.diffs.length">
+                        <strong>Available undo diffs:</strong>
+                        <div class="diff-item" ng-repeat="d in s.diffs">
+                          <code class="diff-path">{{d}}</code>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, s)" ng-disabled="s._applyingDiff || s._diffApplied" ng-if="!s._diffApplied">
+                            <span ng-if="!s._applyingDiff">Apply</span>
+                            <span ng-if="s._applyingDiff">Applying...</span>
+                          </button>
+                          <span class="diff-applied" ng-if="s._diffApplied">✓ Applied</span>
+                          <span class="step-err" ng-if="s._diffError && d === s._diffPath">({{s._diffError}})</span>
+                        </div>
+                      </div>
                       <pre ng-if="s.snippet" class="snippet-hint">{{s.snippet}}</pre>
                     </div>
                   </div>
@@ -1513,23 +1525,40 @@
         }).catch(function () {});
       }
       window.__weaverNotify = function (title, body) {
-        if (swRegistration) {
-          swRegistration.showNotification(title || 'Weaver', { body: body || '', icon: '/weavericon.png' });
-        } else if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification(title || 'Weaver', { body: body || '', icon: '/weavericon.png' });
-        }
+        window.__weaverSwReady.then(function (reg) {
+          if (reg && reg.active) {
+            reg.active.postMessage({
+              type: 'show-notification',
+              title: title || 'Weaver',
+              body: body || '',
+              icon: '/weavericon.png',
+              data: { url: window.location.origin + '/' }
+            });
+          } else if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification(title || 'Weaver', {
+              body: body || '',
+              icon: '/weavericon.png',
+              silent: false,
+              requireInteraction: true
+            });
+          }
+        });
       };
       window.__weaverRequestPermission = function () {
         if (!('Notification' in window)) return Promise.resolve(false);
         if (Notification.permission === 'granted') {
-          if (swRegistration) subscribePush(swRegistration);
-          return Promise.resolve(true);
+          return window.__weaverSwReady.then(function (reg) {
+            if (reg) subscribePush(reg);
+            return true;
+          });
         }
         if (Notification.permission === 'denied') return Promise.resolve(false);
         return Notification.requestPermission().then(function (perm) {
           if (perm === 'granted') {
-            if (swRegistration) subscribePush(swRegistration);
-            return true;
+            return window.__weaverSwReady.then(function (reg) {
+              if (reg) subscribePush(reg);
+              return true;
+            });
           }
           return false;
         });
@@ -1542,6 +1571,19 @@
         for (var i = 0; i < rawData.length; ++i) output[i] = rawData.charCodeAt(i);
         return output;
       }
+      var deferredPrompt = null;
+      window.addEventListener('beforeinstallprompt', function (e) {
+        e.preventDefault();
+        deferredPrompt = e;
+      });
+      window.__weaverInstallApp = function () {
+        if (!deferredPrompt) return Promise.resolve(false);
+        deferredPrompt.prompt();
+        return deferredPrompt.userChoice.then(function (result) {
+          deferredPrompt = null;
+          return result.outcome === 'accepted';
+        });
+      };
     })();
   </script>
 </body>

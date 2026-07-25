@@ -2441,6 +2441,42 @@ h3 .small.ghost:hover {
 	overflow: auto;
 }
 
+.diff-list {
+	margin-top: 8px;
+	padding: 6px;
+	background: var(--bg-secondary, #1a1a2e);
+	border-radius: 4px;
+}
+.diff-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 4px 0;
+	padding: 4px;
+}
+.diff-path {
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	flex: 1;
+}
+.diff-apply-btn {
+	padding: 2px 10px;
+	font-size: 11px;
+	cursor: pointer;
+	background: var(--accent, #4a9eff);
+	color: #fff;
+	border: none;
+	border-radius: 3px;
+}
+.diff-apply-btn:hover {
+	opacity: 0.85;
+}
+.diff-applied {
+	color: var(--success, #4caf50);
+	font-size: 11px;
+}
+
 .agent-steps .snippet-hint {
 	font-size: 10px;
 	opacity: 0.7;
@@ -3018,7 +3054,7 @@ h3 .small.ghost:hover {
 }
 #weaver-toast-container {
 	position: fixed;
-	bottom: 24px;
+	top: 24px;
 	right: 24px;
 	z-index: 99999;
 	display: flex;
@@ -3041,8 +3077,8 @@ h3 .small.ghost:hover {
 	min-width: 280px;
 	max-width: 380px;
 	opacity: 0;
-	transform: translateY(16px) scale(0.96);
-	transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
+	transform: translateX(calc(100% + 48px)) scale(0.96);
+	transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
 	border-left: 3px solid var(--accent);
 	pointer-events: auto;
 }
@@ -3060,11 +3096,11 @@ h3 .small.ghost:hover {
 
 .weaver-toast.show {
 	opacity: 1;
-	transform: translateY(0) scale(1);
+	transform: translateX(0) scale(1);
 }
 
 .weaver-toast.hide {
 	opacity: 0;
-	transform: translateY(-8px) scale(0.96);
-	transition: transform 0.2s ease, opacity 0.2s ease;
+	transform: translateX(calc(100% + 48px)) scale(0.96);
+	transition: transform 0.25s ease, opacity 0.25s ease;
 }

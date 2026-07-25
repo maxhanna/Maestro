@@ -1,10 +1,12 @@
 {
   "name": "Weaver",
   "short_name": "Weaver",
+  "description": "AI-powered project management and development assistant",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#1a1a2e",
-  "theme_color": "#16213e",
+  "background_color": "#071025",
+  "theme_color": "#06b6d4",
+  "categories": ["productivity", "development", "utilities"],
   "icons": [
     { "src": "/weavericon.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/weavericon.png", "sizes": "512x512", "type": "image/png" }

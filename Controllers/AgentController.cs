@@ -909,11 +909,10 @@ public partial class AgentController : ControllerBase
                           "PRESERVE all existing inline SQL queries verbatim — never rewrite them.");
             sb.AppendLine("  • To MODIFY code WITHIN an existing method (add/change a few lines): use oldString/newString.");
             sb.AppendLine("  ⚠ NEVER use insertAfter:true when the method ALREADY EXISTS — that creates a DUPLICATE method, causing compilation errors.");
-            sb.AppendLine("To ADD a PROPERTY/FIELD: NEVER use targetType=\"class\". Instead, use oldString/newString. " +
-                          "Set oldString to the LAST 1-2 EXISTING property/method declarations at the end of the class body " +
-                          "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
-                          "Example: if adding `foo: string` and the last existing line before the closing `}` is `bar: number`, " +
-                          "oldString = the line containing `bar` (with exact indentation), newString = that line + newline + your new `foo` line.");
+            sb.AppendLine("To ADD a single PROPERTY/FIELD/VARIABLE: use insertAfter with targetName = the EXACT line to insert after. " +
+                          "PREFER a SHORT unique line (e.g. an import statement, a property declaration). " +
+                          "Set insertAfter=true, newCode = the new code line(s). No targetType needed. " +
+                          "Example: {\"targetName\": \"import { UserEventService } from '...';\", \"newCode\": \"declare var $: any;\", \"insertAfter\": true}");
             sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\") with newCode containing the FULL class declaration.");
             sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
         }
@@ -1269,23 +1268,26 @@ public partial class AgentController : ControllerBase
                     return (null, null, true, body, false, null, false);
                 }
             }
-            if (jRoot.TryGetProperty("targetType", out var ttEl) &&
-                jRoot.TryGetProperty("targetName", out var tnEl) &&
-                jRoot.TryGetProperty("newCode", out var ncEl))
+            var hasTargetType = jRoot.TryGetProperty("targetType", out var ttEl);
+            var hasTargetName = jRoot.TryGetProperty("targetName", out var tnEl);
+            var hasFmtNewCode = jRoot.TryGetProperty("newCode", out var ncEl);
+            var hasInsertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl);
+            var insertAfter = hasInsertAfter && iaEl.GetBoolean();
+            // Allow FORMAT C insertAfter without targetType — simple text-based search
+            if ((hasTargetType && hasTargetName && hasFmtNewCode) ||
+                (!hasTargetType && hasTargetName && hasFmtNewCode && insertAfter && System.IO.File.Exists(fullPath)))
             {
-                var targetType = ttEl.GetString();
+                var targetType = hasTargetType ? ttEl.GetString() : "code";
                 var targetName = tnEl.GetString();
                 var newCodeStr = ncEl.ValueKind == JsonValueKind.String
                         ? AgentUtilities.UnescapeString(ncEl.GetString() ?? "")
                     : ncEl.ValueKind == JsonValueKind.Array
                         ? string.Join("\n", ncEl.EnumerateArray().Select(e => AgentUtilities.UnescapeString(e.GetString() ?? "")))
                         : null;
-                if (!string.IsNullOrWhiteSpace(targetType) && !string.IsNullOrWhiteSpace(targetName) && newCodeStr != null)
+                if (!string.IsNullOrWhiteSpace(targetName) && newCodeStr != null && (hasTargetType ? !string.IsNullOrWhiteSpace(targetType) : true))
                 {
                     newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
                     newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
-                    var hasInsertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl);
-                    var insertAfter = hasInsertAfter && iaEl.GetBoolean();
                     var hasReplace = jRoot.TryGetProperty("replace", out var rpEl);
                     var replaceSection = hasReplace && rpEl.GetBoolean();
                     if (string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase))
@@ -1338,6 +1340,23 @@ public partial class AgentController : ControllerBase
                             return (matchedBlock, matchedBlock + "\n" + indented, false, null, false, null, true);
                         }
                         return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
+                    }
+                    if (insertAfter && !string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase) &&
+                        System.IO.File.Exists(fullPath))
+                    {
+                        var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
+                        var idx = sourceText.IndexOf(targetName, StringComparison.Ordinal);
+                        if (idx < 0)
+                            idx = sourceText.IndexOf(targetName, StringComparison.OrdinalIgnoreCase);
+                        if (idx >= 0)
+                        {
+                            var afterAnchor = idx + targetName.Length;
+                            var indented = AutoIndentCode(targetName, newCodeStr, relPath);
+                            newStr = sourceText[..afterAnchor] + "\n" + indented + sourceText[afterAnchor..];
+                            return (targetName, newStr, false, null, false, null, true);
+                        }
                     }
                     if (insertAfter)
                     {
@@ -1902,6 +1921,22 @@ public partial class AgentController : ControllerBase
                                 return (matchedBlock, matchedBlock + "\n" + newCodeStr, false, null, false, null, true);
                             }
                             return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
+                        }
+                        if (insertAfter && !string.Equals(tt, "method", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(tt, "class", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(tt, "html", StringComparison.OrdinalIgnoreCase) &&
+                            System.IO.File.Exists(fullPath))
+                        {
+                            var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
+                            var idx = sourceText.IndexOf(tn, StringComparison.Ordinal);
+                            if (idx < 0) idx = sourceText.IndexOf(tn, StringComparison.OrdinalIgnoreCase);
+                            if (idx >= 0)
+                            {
+                                var afterAnchor = idx + tn.Length;
+                                var indented = AutoIndentCode(tn, newCodeStr, relPath);
+                                newStr = sourceText[..afterAnchor] + "\n" + indented + sourceText[afterAnchor..];
+                                return (tn, newStr, false, null, false, null, true);
+                            }
                         }
                         if (insertAfter)
                         {
@@ -5463,6 +5498,7 @@ public partial class AgentController : ControllerBase
         await EmitLog(emitSse, "error",
             $"✗ FATAL: All resolve attempts AND {MaxReplanAttempts} replan cycles failed for {relPath}: {lastErr}",
             new { failureContext, attemptScores }, ct: ct);
+        var diffFiles = await CollectRecentDiffPathsAsync(relPath, projectRoot, ct);
         var fail = new Dictionary<string, object?>
         {
             ["index"] = stepIndex,
@@ -5474,7 +5510,8 @@ public partial class AgentController : ControllerBase
             ["failureContext"] = failureContext,
             ["attemptScores"] = attemptScores.Select(a => new { a.attempt, a.score, a.reason }).ToList(),
             ["bestScore"] = bestScore,
-            ["replanAttempts"] = MaxReplanAttempts
+            ["replanAttempts"] = MaxReplanAttempts,
+            ["diffs"] = diffFiles
         };
         if (emitSse) await SendSse(Response, "step", fail, ct);
         allResults.Add(fail);
@@ -7674,7 +7711,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!isSpecial && AgentUtilities.IsRelativePath(step.File))
         {
             var fullPath = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
-            var isModifyVerb = Regex.IsMatch(changeLower, @"^\s*(modify|update|change|replace|fix)\b");
+            var isModifyVerb = Regex.IsMatch(changeLower, @"^\s*(modify|update|change|replace|fix|add|insert|append|prepend)\b");
             var fileExists = System.IO.File.Exists(fullPath);
             var willBeCreatedEarlier = planSoFar.Any(p =>
                 (p.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
@@ -8217,6 +8254,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
                 var singleStepPlan = new AgentPlan { Plan = new List<PlanStep> { stepToRun }, Summary = stepToRun.Change, Score = 90 };
                 var beforeCount = allResults.Count;
+                var preEditContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (stepToRun?.File != null && !AgentUtilities.IsSpecialMarker(stepToRun.File))
+                {
+                    var fp = Path.GetFullPath(Path.Combine(projectRoot, (stepToRun.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
+                    if (System.IO.File.Exists(fp)) preEditContents[stepToRun.File] = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                }
                 try
                 {
                     await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
@@ -8227,9 +8270,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await EmitLog(emitSse, "error",
                         $"⛔ Interleaved execution halted — step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                    if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                    await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                        summary: $"Execution halted at step {planSoFar.Count + 1} — exception: {ex.Message}", score: 0,
+                        append: false);
                     break;
                 }
                 var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
+                var stepSucceeded = newResults.Any(r => r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
                 var globalPlanIdx = planSoFar.Count - 1;
                 if (globalPlanIdx > 0)
                 {
@@ -8271,6 +8319,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var synthPlan = new AgentPlan
                         { Plan = new List<PlanStep> { synthStep }, Summary = synthStep.Change, Score = 90 };
                         var synthBefore = allResults.Count;
+                        if (synthStep?.File != null && !AgentUtilities.IsSpecialMarker(synthStep.File))
+                        {
+                            var sfp = Path.GetFullPath(Path.Combine(projectRoot, synthStep.File.Replace('/', Path.DirectorySeparatorChar)));
+                            if (System.IO.File.Exists(sfp)) preEditContents[synthStep.File] = await System.IO.File.ReadAllTextAsync(sfp, Encoding.UTF8, ct);
+                        }
                         try
                         {
                             await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
@@ -8281,6 +8334,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             await EmitLog(emitSse, "error",
                                 $"⛔ Auto-generated step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                            if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
                             chainIntact = false;
                             break;
                         }
@@ -8312,12 +8366,35 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     .Where(p => !string.IsNullOrWhiteSpace(p))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
+                var stepDiffs = new List<string>();
+                if (stepSucceeded)
+                {
+                    foreach (var touched in touchedPaths)
+                    {
+                        var oldContent = preEditContents.GetValueOrDefault(touched);
+                        var fp = Path.GetFullPath(Path.Combine(projectRoot, touched.Replace('/', Path.DirectorySeparatorChar)));
+                        if (oldContent != null && System.IO.File.Exists(fp))
+                        {
+                            var newContent = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                            var diff = ComputeSimpleDiff(oldContent, newContent, touched);
+                            if (!string.IsNullOrWhiteSpace(diff)) stepDiffs.Add(diff);
+                        }
+                    }
+                }
                 foreach (var touched in touchedPaths)
                     discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+                if (stepDiffs.Count > 0)
+                {
+                    var diffSection = "\n### CHANGES FROM PREVIOUS STEP ###\n" +
+                        string.Join("\n", stepDiffs) + "\n" +
+                        "(These changes are already reflected in the file content above. " +
+                        "The next step MUST build on them, not repeat them.)\n";
+                    discoveryContext += diffSection;
+                }
                 var newEditLogLines = newResults
                     .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit" &&
                                 r.GetValueOrDefault("status")?.ToString() != "skipped")
-                    .Select(r => $"  · {r.GetValueOrDefault("path")}: {r.GetValueOrDefault("editAction") ?? "modified"}")
+                    .Select(r => $"  · {r.GetValueOrDefault("path")}: {r.GetValueOrDefault("change") ?? r.GetValueOrDefault("editAction") ?? "modified"}")
                     .ToList();
                 if (newEditLogLines.Count > 0)
                 {
@@ -8329,7 +8406,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var editLog = newResults
         .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
         .Select(r => $"  {r.GetValueOrDefault("path")} — " +
-            (r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
+            (r.GetValueOrDefault("change")?.ToString() ?? r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
         .ToList();
                 if (editLog.Count > 0)
                 {
@@ -8340,11 +8417,32 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var hadFailure = newResults.Any(r =>
                     r.GetValueOrDefault("status")?.ToString() == "error" ||
                     r.GetValueOrDefault("type")?.ToString() == "plan_halted");
-                if (hadFailure)
+                if (!stepSucceeded || hadFailure)
                 {
-                    await EmitLog(emitSse, "warn",
-                        $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
-                        "so post-execution verification can assess what genuinely remains.", ct: ct);
+                    if (!hadFailure)
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"Step {planSoFar.Count} produced no code changes — removing from plan and halting execution. " +
+                            "A step must actually modify, create, or delete code to count as complete.", ct: ct);
+                    }
+                    else
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
+                            "so post-execution verification can assess what genuinely remains.", ct: ct);
+                    }
+                    if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                    await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                        summary: $"Execution halted at step {planSoFar.Count + 1} — no code changes produced", score: 0,
+                        append: false);
+                    if (emitSse)
+                        await SendSse(Response, "plan-halted", new
+                        {
+                            reason = "Step produced no actual code changes",
+                            failedStep = stepToRun?.File,
+                            failedChange = stepToRun?.Change,
+                            remainingSteps = 0
+                        }, ct);
                     break;
                 }
                 var needsExtraResult = newResults
@@ -8458,6 +8556,29 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (pattern.IsMatch(discoveryContext))
             return pattern.Replace(discoveryContext, m => replacement, 1);
         return discoveryContext.TrimEnd() + "\n\n" + replacement;
+    }
+    private static string ComputeSimpleDiff(string oldContent, string newContent, string relPath)
+    {
+        var oldLines = oldContent.Split('\n');
+        var newLines = newContent.Split('\n');
+        var oldSet = new HashSet<string>(oldLines, StringComparer.Ordinal);
+        var newSet = new HashSet<string>(newLines, StringComparer.Ordinal);
+        var added = newLines.Where(l => !string.IsNullOrWhiteSpace(l) && !oldSet.Contains(l)).ToList();
+        var removed = oldLines.Where(l => !string.IsNullOrWhiteSpace(l) && !newSet.Contains(l)).ToList();
+        if (added.Count == 0 && removed.Count == 0) return "";
+        var sb = new StringBuilder();
+        sb.AppendLine($"  File: {relPath}");
+        if (removed.Count > 0)
+        {
+            var removeSample = string.Join("\n    ", removed.Take(10));
+            sb.AppendLine($"  Removed ({removed.Count} line(s)):\n    {removeSample}");
+        }
+        if (added.Count > 0)
+        {
+            var addSample = string.Join("\n    ", added.Take(10));
+            sb.AppendLine($"  Added ({added.Count} line(s)):\n    {addSample}");
+        }
+        return sb.ToString();
     }
     private async Task<IncrementalSubPlanProposal?> ProposeNextSubPlanAsync(
         string originalPrompt, string discoveryContext, List<MetaPlanSubPlan> subPlansSoFar,
@@ -9819,21 +9940,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string? steeringContext = null,
         string? cardId = null)
     {
-        var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
-        if (editKnowledge == null)
-        {
-            await _editKnowledge.EnsureExistsAsync(projectRoot, ct);
-            editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
-        }
-        var editKnowledgeHeader = EditKnowledgeService.FormatForContext(editKnowledge);
-        if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
-        {
-            await EmitLog(emitSse, "info",
-                $"Loaded edit knowledge for project: {editKnowledge!.ProjectName} " +
-                $"({editKnowledge.Do.Count} do, {editKnowledge.Dont.Count} dont, " +
-                $"{editKnowledge.Patterns.Count} pattern categories, " +
-                $"{editKnowledge.RecentFailures.Count} recent failures)", ct: ct);
-        }
+        // var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
+        // if (editKnowledge == null)
+        // {
+        //     await _editKnowledge.EnsureExistsAsync(projectRoot, ct);
+        //     editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
+        // }
+        // var editKnowledgeHeader = EditKnowledgeService.FormatForContext(editKnowledge);
+        // if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
+        // {
+        //     await EmitLog(emitSse, "info",
+        //         $"Loaded edit knowledge for project: {editKnowledge!.ProjectName} " +
+        //         $"({editKnowledge.Do.Count} do, {editKnowledge.Dont.Count} dont, " +
+        //         $"{editKnowledge.Patterns.Count} pattern categories, " +
+        //         $"{editKnowledge.RecentFailures.Count} recent failures)", ct: ct);
+        // }
         var allSteps = new List<object>();
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
@@ -9969,10 +10090,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 ? attachedSteering
                 : $"{steeringContext}\n\n{attachedSteering}";
         }
-        if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
-        {
-            discoveryContext = editKnowledgeHeader + "\n\n" + discoveryContext;
-        }
+        // if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
+        // {
+        //     discoveryContext = editKnowledgeHeader + "\n\n" + discoveryContext;
+        // }
         if (emitSse && !skipContextReview)
         {
             await EmitLog(emitSse, "info", $"Reviewing context from {ds.Count} discovery steps ...", ct: ct);
@@ -11465,15 +11586,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             failedFile = ex.FailedFilePath,
                             failureContext = ex.FailureContext
                         }, ct: ct);
+                    List<string> haltedDiffs = new();
                     if (emitSse)
                     {
+                        haltedDiffs = await CollectRecentDiffPathsAsync(ex.FailedFilePath ?? "", projectRoot, ct);
                         await SendSse(Response, "plan-halted", new
                         {
                             reason = "A plan step failed irrecoverably",
                             failedStep = ex.FailedFilePath,
                             failedChange = ex.FailedChangeDescription,
                             error = ex.Message,
-                            remainingSteps = planItems.Count - itemIdx - 1
+                            remainingSteps = planItems.Count - itemIdx - 1,
+                            diffs = haltedDiffs
                         }, ct);
                     }
                     allResults.Add(new Dictionary<string, object?>
@@ -11482,7 +11606,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         ["status"] = "error",
                         ["reason"] = $"Fatal step failure: {ex.Message}",
                         ["failedFile"] = ex.FailedFilePath,
-                        ["remainingSteps"] = planItems.Count - itemIdx - 1
+                        ["remainingSteps"] = planItems.Count - itemIdx - 1,
+                        ["diffs"] = haltedDiffs
                     });
                     return;
                 }
@@ -12012,6 +12137,27 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return (true, "Programmatic check passed", 10);
     }
+    private async Task<List<string>> CollectRecentDiffPathsAsync(string relPath, string projectRoot, CancellationToken ct)
+    {
+        var diffs = new List<string>();
+        try
+        {
+            var undoDir = Path.Combine(projectRoot, "data", "undo");
+            if (!Directory.Exists(undoDir)) return diffs;
+            var safeName = relPath.Replace('/', '_').Replace('\\', '_');
+            var files = Directory.GetFiles(undoDir, $"{safeName}*.diff")
+                .OrderByDescending(f => f)
+                .Take(10)
+                .ToList();
+            foreach (var f in files)
+            {
+                var rel = f.Replace(projectRoot, "").TrimStart('\\', '/');
+                diffs.Add(rel);
+            }
+        }
+        catch { }
+        return diffs;
+    }
     private async Task<List<PlanStep>?> ReplanRemainingSteps(
         string originalPrompt, List<PlanStep> remaining,
         string updatedContext, bool emitSse, CancellationToken ct)
@@ -12029,17 +12175,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var parsed = AgentUtilities.ParsePlan(cleaned);
         return parsed?.Plan?.Count > 0 ? parsed.Plan : null;
     }
-    private async Task SaveEditWithUndoAsync(
+    private async Task<string?> SaveEditWithUndoAsync(
         string fullPath, string newContent, string relPath,
         string projectRoot, string preEditContent, CancellationToken ct)
     {
+        string? diffPath = null;
         try
         {
             var undoDir = Path.Combine(projectRoot, "data", "undo");
             Directory.CreateDirectory(undoDir);
             var safeName = relPath.Replace('/', '_').Replace('\\', '_');
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-ffff");
-            var diffPath = Path.Combine(undoDir, $"{safeName}.{timestamp}.diff");
+            diffPath = Path.Combine(undoDir, $"{safeName}.{timestamp}.diff");
             var gitDir = Path.Combine(projectRoot, ".git");
             if (Directory.Exists(gitDir))
             {
@@ -12064,16 +12211,27 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     var undoHeader = $"; Undo for {relPath} @ {DateTime.UtcNow:O}\n" +
                                      $"; Restore with: git apply --reverse \"{diffPath}\"\n" +
-                                     $"; Or use: git checkout -- \"{relPath.Replace('/', Path.DirectorySeparatorChar)}\"\n";
+                                     $"; Or use: git checkout -- \"{relPath.Replace('/', Path.DirectorySeparatorChar)}\"\n" +
+                                     $"; To APPLY this diff: git apply \"{diffPath}\"\n";
                     await System.IO.File.WriteAllTextAsync(
                         diffPath, undoHeader + diffOutput, Encoding.UTF8, ct);
                 }
+                else
+                {
+                    diffPath = null;
+                }
+            }
+            else
+            {
+                diffPath = null;
             }
         }
         catch
         {
+            diffPath = null;
         }
         await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+        return diffPath;
     }
     private async Task<List<PlanStep>> PruneIrrelevantPlanStepsAsync(List<PlanStep> steps, string projectRoot, CancellationToken ct)
     {
@@ -12622,6 +12780,42 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
         return Ok(new { edits = editResults, commands = commandResults });
+    }
+    [HttpPost("apply-diff")]
+    public async Task<IActionResult> ApplyDiff([FromBody] ApplyDiffRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.DiffPath)) return BadRequest(new { error = "No diff path provided" });
+        var projectRoot = AgentUtilities.GetProjectRoot(req.Project, _config, _env);
+        var fullDiffPath = Path.GetFullPath(Path.Combine(projectRoot, req.DiffPath.TrimStart('/', '\\')));
+        if (!System.IO.File.Exists(fullDiffPath))
+            return NotFound(new { error = "Diff file not found", path = fullDiffPath });
+        try
+        {
+            var proc = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = $"apply \"{fullDiffPath}\"",
+                    WorkingDirectory = projectRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+            proc.Start();
+            var output = await proc.StandardOutput.ReadToEndAsync();
+            var error = await proc.StandardError.ReadToEndAsync();
+            proc.WaitForExit(10000);
+            if (proc.ExitCode != 0)
+                return Ok(new { success = false, error = $"git apply failed: {error}", output });
+            return Ok(new { success = true, output });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
+        }
     }
     [HttpPost("execute-stream")]
     public async Task ExecuteStream([FromBody] AgentRequest req)

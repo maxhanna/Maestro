@@ -78,7 +78,8 @@ angular.module('kanbanApp', [])
         toast.appendChild(span);
         container.appendChild(toast);
 
-        requestAnimationFrame(() => toast.classList.add("show"));
+        void toast.offsetHeight;
+        toast.classList.add("show");
 
         setTimeout(() => {
           toast.classList.remove("show");
