@@ -436,7 +436,7 @@ public partial class AgentController : ControllerBase
         }
         if (string.IsNullOrEmpty(baseIndent)) return newCode;
         var newLines = newCode.Split('\n');
-        if (newLines.Length <= 1) return newCode;
+        if (newLines.Length <= 1) return baseIndent + newCode.TrimStart();
         var nonEmpty = newLines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
         if (nonEmpty.Count == 0) return newCode;
         if (!AgentUtilities.IsWhitespaceSignificant(filePath))
@@ -5118,6 +5118,10 @@ public partial class AgentController : ControllerBase
                         var es2 = needsExtraStepFlags.Take(r + 1).Count(f => f);
                         if (keep2 >= 2 && es2 == 0) break;
                         if (es2 >= 2) break;
+                    }
+                    else if (r == 0 && d == "keep" && score >= 85 && !needsEs)
+                    {
+                        break;
                     }
                 }
                 stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
