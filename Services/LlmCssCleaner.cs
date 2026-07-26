@@ -11,6 +11,7 @@ public static class LlmCssCleaner
     private static readonly Regex CalcRx = new(@"calc\(([^)]+)\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex CalcOpRx = new(@"\s*([+\-*/])\s*", RegexOptions.Compiled);
     private static readonly Regex DblSpaceRx = new(@"\s+", RegexOptions.Compiled);
+    private static readonly Regex WordNumberRx = new(@"(?<=[\s(])([a-zA-Z][a-zA-Z-]*)(\d)", RegexOptions.Compiled);
     private static readonly Regex MissingColonRx = new(@"^(\s*[a-z-]+)\s+(?=\d|#|var\(--)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
     private static readonly Regex MissingSpaceAfterColonRx = new(@"^(\s*[a-z-]+):(\S)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
     private static readonly Regex TrailingCommaRx = new(@"^\s*[a-z-]+:\s*[^;{]+,\s*$", RegexOptions.Multiline | RegexOptions.Compiled);
@@ -49,6 +50,9 @@ public static class LlmCssCleaner
 
         // 4b. Fix missing space after colon (width:40px -> width: 40px)
         clean = MissingSpaceAfterColonRx.Replace(clean, "$1: $2");
+
+        // 4c. Fix squished keyword-number (all0.2s -> all 0.2s)
+        clean = WordNumberRx.Replace(clean, "$1 $2");
 
         // 5. Fix illegal trailing commas
         clean = TrailingCommaRx.Replace(clean, "$1;");

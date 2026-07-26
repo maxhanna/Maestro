@@ -42,6 +42,7 @@ angular.module('kanbanApp')
                 });
                 if (doneSteps.length > 0) { item.done = true; changed = true; }
             });
+            vm.verifyDiffs(vm.planItems);
             var activeCard = vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
             if (activeCard && activeCard._plan && changed) activeCard._plan.items = angular.copy(vm.planItems);
             if (changed && vm.saveCards) {
@@ -199,7 +200,8 @@ angular.module('kanbanApp')
                                                                          var prev = existingState[key] || {};
                                                                          return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '' };
                                                                      });
-                                                                    if (parsed.thinking) vm.streamingThinking = parsed.thinking;
+                                                                     vm.verifyDiffs(vm.planItems);
+                                                                     if (parsed.thinking) vm.streamingThinking = parsed.thinking;
                                                                     if (parsed.summary) vm.streamingSummary = parsed.summary;
                                                                     pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + parsed.items.length + ' steps)', { itemCount: parsed.items.length, score: parsed.score });
 
@@ -565,6 +567,45 @@ angular.module('kanbanApp')
                     }, function () {
                         p.deleting = false;
                         p.deleteError = 'HTTP error';
+                    });
+                };
+                vm.openDiffInIde = function (diffPath, step, $event) {
+                    if ($event) $event.stopPropagation();
+                    if (!diffPath || !vm.selectedProject) return;
+                    vm.showIDE = true;
+                    if (vm.openFile) {
+                        vm.openFile(diffPath);
+                    } else if (vm.ide && vm.ide.openFile) {
+                        vm.ide.openFile(diffPath);
+                    }
+                };
+                vm.verifyDiffs = function (planItems) {
+                    if (!planItems || !planItems.length || !vm.selectedProject) return;
+                    var allDiffs = [];
+                    var diffToItems = {};
+                    planItems.forEach(function (item) {
+                        if (item.diffs && item.diffs.length) {
+                            item.diffs.forEach(function (d) {
+                                if (!diffToItems[d]) diffToItems[d] = [];
+                                diffToItems[d].push(item);
+                            });
+                            allDiffs.push.apply(allDiffs, item.diffs);
+                        }
+                    });
+                    if (!allDiffs.length) return;
+                    var seen = {}; allDiffs = allDiffs.filter(function (d) { var k = d.toLowerCase(); var dup = seen[k]; seen[k] = true; return !dup; });
+                    $http.post('/api/agent/verify-diffs', { project: vm.selectedProject, diffPaths: allDiffs }).then(function (resp) {
+                        if (resp.data && resp.data.missing && resp.data.missing.length) {
+                            resp.data.missing.forEach(function (d) {
+                                var items = diffToItems[d];
+                                if (items) {
+                                    items.forEach(function (item) {
+                                        var idx = item.diffs.indexOf(d);
+                                        if (idx >= 0) item.diffs.splice(idx, 1);
+                                    });
+                                }
+                            });
+                        }
                     });
                 };
 

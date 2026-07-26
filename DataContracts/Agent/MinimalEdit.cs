@@ -24,3 +24,9 @@ public class ApplyDiffRequest
     public string Project { get; set; } = "";
     public string DiffPath { get; set; } = "";
 }
+
+public class VerifyDiffsRequest
+{
+    public string Project { get; set; } = "";
+    public List<string> DiffPaths { get; set; } = new();
+}

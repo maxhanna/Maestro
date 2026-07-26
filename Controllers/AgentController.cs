@@ -862,19 +862,25 @@ public partial class AgentController : ControllerBase
         {
             sb.AppendLine();
             sb.AppendLine("⚠ HTML FILE — FORMAT D is REQUIRED. This is the ONLY accepted format.");
+            sb.AppendLine("  ⚠ CRITICAL: ONE THING PER EDIT. Each FORMAT D edit does ONE replacement OR ONE insertion.");
+            sb.AppendLine("  Do NOT bundle multiple changes (wrapping sections, removing ngIf, adding wrappers, etc.) into one edit.");
+            sb.AppendLine("  If multiple changes are needed, you MUST output them as separate edits in separate LLM responses.");
             sb.AppendLine("  Three modes:");
             sb.AppendLine("  1. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
             sb.AppendLine("     REPLACE mode: newCode must be the FULL replacement HTML (including any parent tags and closing tags that should remain).");
+            sb.AppendLine("     REPLACE mode: targetName must be UNIQUE — it should be a single line that appears ONCE in the file.");
+            sb.AppendLine("     REPLACE mode: do NOT include surrounding content in targetName — only the specific element or line to replace.");
             sb.AppendLine("  2. {\"targetType\": \"html\", \"targetName\": \"...\", \"insertAfter\": true, \"newCode\": [...]} — INSERT newCode AFTER the matched code block.");
             sb.AppendLine("     INSERT mode: newCode contains ONLY the new HTML to insert. Do NOT include any </div> closing tags.");
+            sb.AppendLine("     INSERT mode: targetName must be EXACTLY one line from the file. Do NOT multi-line targetName in insert mode.");
             sb.AppendLine("  3. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
             sb.AppendLine("     Semantics: insertAfter:false → replace (when replace is absent); replace:false → insertAfter (when insertAfter is absent); no fields → insertBefore.");
             sb.AppendLine("  targetName is a CODE BLOCK — copy it VERBATIM from the file. " +
-                             "Multi-line is OK. The system finds this block then inserts/replaces relative to it.");
+                             "Multi-line is OK for replace mode. The system finds this block then inserts/replaces relative to it.");
             sb.AppendLine("  CRITICAL: newCode MUST NOT be empty when replace:true. " +
                             "With replace:true, newCode must contain the FULL replacement HTML " +
                             "including all content from targetName that should remain.");
-            sb.AppendLine("  DO NOT output oldString, newString, or fullFile fields. DO NOT use oldString/newString format.");
+            sb.AppendLine("  DO NOT output oldString, newString, or fullFile fields. DO NOT use oldString/newstring format.");
             sb.AppendLine("  ANCHOR SELECTION: prefer the SHORTEST unique line as targetName — a heading, " +
                             "a plain-text label (e.g. '<div class=\"groupDomainTitle\">YouTube Results</div>'), " +
                             "or a closing tag right before your insertion point. " +
@@ -916,6 +922,9 @@ public partial class AgentController : ControllerBase
                           "Set insertAfter=true, newCode = the new code line(s). No targetType needed. " +
                           "Example: {\"targetName\": \"import { UserEventService } from '...';\", \"newCode\": \"declare var $: any;\", \"insertAfter\": true}");
             sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\") with newCode containing the FULL class declaration.");
+            sb.AppendLine("⚠ fullFile format: ONLY valid when the file does NOT exist yet. " +
+                           "For existing files, fullFile WILL be rejected unless the file is very small (<500 chars). " +
+                           "Use oldString/newString or FORMAT C for existing files.");
             sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
         }
         if (history?.Count > 0)
@@ -1120,8 +1129,12 @@ public partial class AgentController : ControllerBase
         {
             sb.AppendLine("⚠ HTML FILE — Use FORMAT D: targetType=\"html\", targetName=CODE BLOCK, " +
                           "insertAfter=true/false, newCode=[your HTML lines]. " +
+                          "⚠ ONE THING PER EDIT — do NOT bundle multiple changes into one edit. " +
+                          "Each edit does ONE replacement OR ONE insertion. " +
                           "CRITICAL: targetName is a CODE BLOCK copied verbatim from the file. " +
-                          "It CAN be multi-line. Copy the exact lines you want to replace or insert after. " +
+                          "For insertAfter: use a SINGLE LINE as targetName. " +
+                          "For replace: targetName CAN be multi-line but must be UNIQUE in the file. " +
+                          "Copy the exact lines you want to replace or insert after. " +
                           "For insertAfter: the targetName block is found, and newCode is inserted AFTER that block. " +
                           "newCode in insertAfter mode should contain ONLY the new HTML. " +
                           "For replace: the targetName block is replaced entirely with newCode. " +
@@ -1145,10 +1158,14 @@ public partial class AgentController : ControllerBase
         }
         if (raw.Length > 6000 || raw.Split('\n').Length > 80)
         {
+            var ext2 = Path.GetExtension(relPath ?? "").ToLowerInvariant();
+            var formatHint = ext2 == ".cs"
+                ? "Use FORMAT C with insertAfter:true and newCode as an array of lines."
+                : "Use oldString/newString with 3-5 lines of anchor context. Copy lines verbatim from the file above, modify only what needs to change.";
             return (null, null, false, null, false,
                 "LLM response was too long (" + raw.Length + " chars) and likely truncated due to a repetition loop. " +
                 "Do NOT output massive blocks, do NOT use fullFile, and do NOT return alreadyDone. " +
-                "Use FORMAT C with insertAfter:true and newCode as an array of lines — this is the ONLY accepted format.", false);
+                formatHint, false);
         }
         string? oldStr = null, newStr = null;
         try
@@ -1334,7 +1351,8 @@ public partial class AgentController : ControllerBase
                         }
                         if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                         {
-                            return (matchedBlock, newCodeStr, false, null, false, null, true);
+                            var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                            return (matchedBlock, indented, false, null, false, null, true);
                         }
                         if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                         {
@@ -1346,7 +1364,7 @@ public partial class AgentController : ControllerBase
                     if (insertAfter && System.IO.File.Exists(fullPath))
                     {
                         var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
-                        var (fullStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        var (fullStr, astErr) = AstResolveEdit(fullPath, targetType!, targetName, returnTail: false);
                         if (fullStr != null)
                         {
                             var idx = sourceText.IndexOf(fullStr, StringComparison.Ordinal);
@@ -1373,7 +1391,7 @@ public partial class AgentController : ControllerBase
                     }
                     if (insertAfter)
                     {
-                        var (fullStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        var (fullStr, astErr) = AstResolveEdit(fullPath, targetType!, targetName, returnTail: false);
                         if (fullStr == null &&
                             string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) &&
                             System.IO.File.Exists(fullPath))
@@ -1385,7 +1403,7 @@ public partial class AgentController : ControllerBase
                             {
                                 var lastMethod = methodMatches[^1];
                                 var lastMethodName = lastMethod.Groups[1].Value;
-                                (fullStr, astErr) = AstResolveEdit(fullPath, targetType, lastMethodName, returnTail: false);
+                                (fullStr, astErr) = AstResolveEdit(fullPath, targetType!, lastMethodName, returnTail: false);
                                 if (fullStr != null)
                                 {
                                     targetName = lastMethodName;
@@ -1461,7 +1479,7 @@ public partial class AgentController : ControllerBase
                                     "Use insertAfter:true with an EXISTING method as targetName, and provide ONLY the new method in newCode.", false);
                             }
                         }
-                        var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType!, targetName, returnTail: false);
                         if (astOldStr != null)
                         {
                             var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
@@ -1927,11 +1945,13 @@ public partial class AgentController : ControllerBase
                             }
                             if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                             {
-                                return (matchedBlock, newCodeStr, false, null, false, null, true);
+                                var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                                return (matchedBlock, indented, false, null, false, null, true);
                             }
                             if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                             {
-                                return (matchedBlock, matchedBlock + "\n" + newCodeStr, false, null, false, null, true);
+                                var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                                return (matchedBlock, matchedBlock + "\n" + indented, false, null, false, null, true);
                             }
                             return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
                         }
@@ -6627,13 +6647,27 @@ public partial class AgentController : ControllerBase
                        "You MUST copy the exact implementation from oldString and modify it, not replace it with a stub.";
             }
             var normalizedOld = NormalizeForComparison(trimmed);
-            if (!newLinesSet.Contains(normalizedOld))
-                lostCacheLines.Add(trimmed);
+            if (newLinesSet.Contains(normalizedOld)) continue;
+            // Check if the same method call exists in newStr with different variable name
+            var methodCall = Regex.Match(trimmed, @"(\w+(?:\.\w+)+)\s*\.\s*(has|get|set|delete)\s*\(");
+            if (methodCall.Success)
+            {
+                var obj = methodCall.Groups[1].Value;
+                var method = methodCall.Groups[2].Value;
+                var searchPattern = $@"{Regex.Escape(obj)}\s*\.\s*{Regex.Escape(method)}\s*\(";
+                if (Regex.IsMatch(newStr, searchPattern, RegexOptions.IgnoreCase))
+                    continue; // Method call preserved (variable may have been renamed)
+            }
+            lostCacheLines.Add(trimmed);
         }
-        if (lostCacheLines.Count > 0)
+            if (lostCacheLines.Count > 0)
         {
             var preview = string.Join("; ", lostCacheLines.Take(3));
             if (lostCacheLines.Count > 3) preview += $"; (+{lostCacheLines.Count - 3} more)";
+            if (lostCacheLines.All(l => Regex.IsMatch(l, @"\w+\.\s*(has|get|set|delete)\s*\(")))
+                return $"CACHE-STATE LOSS — oldString contained cache/guard line(s) identified by method call that are MISSING from newString: [{preview}]. " +
+                       "These lines protect against redundant work or null derefs. You may rename variables but the method call (object.method) must remain. " +
+                       "Change only the VALUE being passed, not the structure.";
             return $"CACHE-STATE LOSS — oldString contained cache/guard line(s) that are MISSING from newString: [{preview}]. " +
                    "These lines protect against redundant work or null derefs. PRESERVE them in newString verbatim " +
                    "(only the property values you actually need to change should be edited, not the guard logic).";
@@ -8278,7 +8312,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (stepToRun?.File != null && !AgentUtilities.IsSpecialMarker(stepToRun.File))
                 {
                     var fp = Path.GetFullPath(Path.Combine(projectRoot, (stepToRun.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
-                    if (System.IO.File.Exists(fp)) preEditContents[stepToRun.File] = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                    if (System.IO.File.Exists(fp) && stepToRun.File != null) preEditContents[stepToRun.File] = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
                 }
                 try
                 {
@@ -8314,7 +8348,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var anyNestedGeneration = false;
                     for (var si = 1; si < singleStepPlan.Plan.Count; si++)
                     {
-                        var synthStep = singleStepPlan.Plan[si];
+                        var synthStep = singleStepPlan.Plan[si]!;
                         planSoFar.Add(synthStep);
                         await EmitLog(emitSse, "info",
                             $"▶ Executing auto-generated follow-up step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
@@ -8371,7 +8405,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                         if (synthPlan.Plan.Count > 1)
                             anyNestedGeneration = true;
-                        discoveryContext = await RefreshFileInDiscoveryContext(synthStep.File, discoveryContext, projectRoot, ct);
+                        if (synthStep!.File != null)
+                            discoveryContext = await RefreshFileInDiscoveryContext(synthStep.File, discoveryContext, projectRoot, ct);
                     }
                     if (chainIntact && !anyNestedGeneration)
                     {
@@ -8391,6 +8426,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     foreach (var touched in touchedPaths)
                     {
+                        if (touched == null) continue;
                         var oldContent = preEditContents.GetValueOrDefault(touched);
                         var fp = Path.GetFullPath(Path.Combine(projectRoot, touched.Replace('/', Path.DirectorySeparatorChar)));
                         if (oldContent != null && System.IO.File.Exists(fp))
@@ -8473,7 +8509,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var extraReason = needsExtraResult.GetValueOrDefault("extraStepReason")?.ToString();
                     var extraFile = needsExtraResult.GetValueOrDefault("extraStepFile")?.ToString()
                                     ?? needsExtraResult.GetValueOrDefault("path")?.ToString()
-                                    ?? stepToRun.File;
+                                    ?? stepToRun?.File ?? "";
                     var missingSymbolMatch = Regex.Match(extraReason ?? "",
                         @"(?:missing\s+(?:method|property|function)\s*)[\(`]?(?:vm\.)?(\w+)[\)`]?");
                     var missingSymbol = missingSymbolMatch.Success ? missingSymbolMatch.Groups[1].Value : null;
@@ -12881,6 +12917,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             return Ok(new { success = false, error = ex.Message });
         }
+    }
+
+    [HttpPost("verify-diffs")]
+    public async Task<IActionResult> VerifyDiffs([FromBody] VerifyDiffsRequest req)
+    {
+        if (req.DiffPaths == null || req.DiffPaths.Count == 0)
+            return Ok(new { existing = new List<string>(), missing = new List<string>() });
+        var projectRoot = AgentUtilities.GetProjectRoot(req.Project, _config, _env);
+        var existing = new List<string>();
+        var missing = new List<string>();
+        foreach (var diffPath in req.DiffPaths)
+        {
+            if (string.IsNullOrWhiteSpace(diffPath)) continue;
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, diffPath.TrimStart('/', '\\')));
+            if (System.IO.File.Exists(fullPath))
+                existing.Add(diffPath);
+            else
+                missing.Add(diffPath);
+        }
+        return Ok(new { existing, missing });
     }
     [HttpPost("execute-stream")]
     public async Task ExecuteStream([FromBody] AgentRequest req)
