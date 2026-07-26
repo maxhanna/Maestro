@@ -222,11 +222,15 @@ angular.module('kanbanApp')
                                                             case 'refresh':
                                                                 if (parsed && parsed.target === 'boarddata' && vm.refreshBoardData) vm.refreshBoardData(parsed);
                                                                 break;
-                                                            case 'step':
-                                                                if (parsed) {
-                                                                    upsertStreamingStep(vm, parsed, $scope, $timeout);
-                                                                    reconcilePlanItems(vm, $scope, $timeout);
-                                                                    if (parsed.message === 'Cancelled by user' && parsed.planItemIndex !== undefined && vm.planItems) {
+                                                                case 'step':
+                                                                 if (parsed) {
+                                                                     upsertStreamingStep(vm, parsed, $scope, $timeout);
+                                                                     reconcilePlanItems(vm, $scope, $timeout);
+                                                                     if (parsed.diffs && parsed.diffs.length && parsed.planItemIndex !== undefined && vm.planItems) {
+                                                                         var pi = vm.planItems.find(function (x) { return x.index === parsed.planItemIndex; });
+                                                                         if (pi && (!pi.diffs || pi.diffs.length !== parsed.diffs.length)) { pi.diffs = parsed.diffs; pi._diffStepStatus = parsed.status; }
+                                                                     }
+                                                                     if (parsed.message === 'Cancelled by user' && parsed.planItemIndex !== undefined && vm.planItems) {
                                                                         var cancelledItem = vm.planItems.find(function (pi) { return pi.index === parsed.planItemIndex; });
                                                                         if (cancelledItem) cancelledItem.cancelled = true;
                                                                     }

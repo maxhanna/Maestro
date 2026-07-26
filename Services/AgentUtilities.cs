@@ -1419,6 +1419,47 @@ public static class AgentUtilities
         }
         return sb.ToString().TrimEnd();
     }
+    public static string BuildUnifiedDiff(string oldStr, string newStr, string filePath)
+    {
+        var oldLines = (oldStr ?? "").Replace("\r\n", "\n").Split('\n');
+        var newLines = (newStr ?? "").Replace("\r\n", "\n").Split('\n');
+        var sb = new StringBuilder();
+        sb.Append("--- a/").AppendLine(filePath);
+        sb.Append("+++ b/").AppendLine(filePath);
+        int maxLen = Math.Max(oldLines.Length, newLines.Length);
+        int hunkStart = -1;
+        var hunkOld = new List<string>();
+        var hunkNew = new List<string>();
+        for (int idx = 0; idx < maxLen; idx++)
+        {
+            bool same = idx < oldLines.Length && idx < newLines.Length && oldLines[idx] == newLines[idx];
+            if (same)
+            {
+                if (hunkStart != -1)
+                {
+                    FlushHunkSimple(sb, hunkStart, hunkOld, hunkNew, filePath);
+                    hunkStart = -1; hunkOld.Clear(); hunkNew.Clear();
+                }
+                continue;
+            }
+            if (hunkStart == -1) hunkStart = idx;
+            if (idx < oldLines.Length) hunkOld.Add(oldLines[idx]);
+            if (idx < newLines.Length) hunkNew.Add(newLines[idx]);
+        }
+        if (hunkStart != -1 || hunkOld.Count > 0 || hunkNew.Count > 0)
+            FlushHunkSimple(sb, hunkStart == -1 ? 0 : hunkStart, hunkOld, hunkNew, filePath);
+        return sb.ToString();
+    }
+    private static void FlushHunkSimple(StringBuilder sb, int hunkStart,
+        List<string> hunkOld, List<string> hunkNew, string filePath)
+    {
+        int oldCount = hunkOld.Count;
+        int newCount = hunkNew.Count;
+        sb.Append("@@ -").Append(hunkStart + 1).Append(',').Append(oldCount)
+          .Append(" +").Append(hunkStart + 1).Append(',').Append(newCount).AppendLine(" @@");
+        foreach (var line in hunkOld) sb.Append('-').AppendLine(line);
+        foreach (var line in hunkNew) sb.Append('+').AppendLine(line);
+    }
     public static string? RepairJsonString(string json)
     {
         if (string.IsNullOrEmpty(json)) return json;

@@ -95,6 +95,8 @@ public partial class AgentController : ControllerBase
         if (!System.IO.File.Exists(fullPath))
             return (null, "File not found for AST edit");
         var ext = Path.GetExtension(fullPath).ToLowerInvariant();
+        if (ext is ".css" or ".scss" or ".less")
+            return (null, "AST not supported for stylesheet files — use text-based edit instead");
         var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
         if (string.IsNullOrWhiteSpace(sourceText))
             return (null, "File is empty");
@@ -1341,21 +1343,32 @@ public partial class AgentController : ControllerBase
                         }
                         return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
                     }
-                    if (insertAfter && !string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase) &&
-                        System.IO.File.Exists(fullPath))
+                    if (insertAfter && System.IO.File.Exists(fullPath))
                     {
                         var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
-                        var idx = sourceText.IndexOf(targetName, StringComparison.Ordinal);
-                        if (idx < 0)
-                            idx = sourceText.IndexOf(targetName, StringComparison.OrdinalIgnoreCase);
-                        if (idx >= 0)
+                        var (fullStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        if (fullStr != null)
                         {
-                            var afterAnchor = idx + targetName.Length;
-                            var indented = AutoIndentCode(targetName, newCodeStr, relPath);
-                            newStr = sourceText[..afterAnchor] + "\n" + indented + sourceText[afterAnchor..];
-                            return (targetName, newStr, false, null, false, null, true);
+                            var idx = sourceText.IndexOf(fullStr, StringComparison.Ordinal);
+                            if (idx >= 0)
+                            {
+                                var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
+                                newStr = sourceText[..(idx + fullStr.Length)] + "\n\n" + indented + sourceText[(idx + fullStr.Length)..];
+                                return (sourceText, newStr, false, null, false, null, true);
+                            }
+                        }
+                        var idx2 = sourceText.IndexOf(targetName, StringComparison.Ordinal);
+                        if (idx2 < 0)
+                            idx2 = sourceText.IndexOf(targetName, StringComparison.OrdinalIgnoreCase);
+                        if (idx2 >= 0)
+                        {
+                            var lineStart = sourceText.LastIndexOf('\n', idx2) + 1;
+                            var lineEnd = sourceText.IndexOf('\n', idx2);
+                            if (lineEnd < 0) lineEnd = sourceText.Length;
+                            var fullLine = sourceText[lineStart..lineEnd];
+                            var indented = AutoIndentCode(fullLine, newCodeStr, relPath);
+                            newStr = sourceText[..lineEnd] + "\n" + indented + sourceText[lineEnd..];
+                            return (sourceText, newStr, false, null, false, null, true);
                         }
                     }
                     if (insertAfter)
@@ -1922,10 +1935,7 @@ public partial class AgentController : ControllerBase
                             }
                             return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
                         }
-                        if (insertAfter && !string.Equals(tt, "method", StringComparison.OrdinalIgnoreCase) &&
-                            !string.Equals(tt, "class", StringComparison.OrdinalIgnoreCase) &&
-                            !string.Equals(tt, "html", StringComparison.OrdinalIgnoreCase) &&
-                            System.IO.File.Exists(fullPath))
+                        if (insertAfter && System.IO.File.Exists(fullPath))
                         {
                             var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
                             var idx = sourceText.IndexOf(tn, StringComparison.Ordinal);
@@ -3771,7 +3781,8 @@ public partial class AgentController : ControllerBase
         {
             var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             if (string.IsNullOrWhiteSpace(planOldStr) &&
-                AstCodeEditorService.IsSupportedExtension(fileExt))
+                AstCodeEditorService.IsSupportedExtension(fileExt) &&
+                fileExt is not ".css" and not ".scss" and not ".less")
             {
                 if (!string.IsNullOrWhiteSpace(exploration.TargetSymbol))
                 {
@@ -5159,7 +5170,7 @@ public partial class AgentController : ControllerBase
                 }
                 if (llmGateDecision == "abandon")
                 {
-                    await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
+                    var abandonDiffPath = await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
                     await EmitLog(emitSse, "warn",
                         $"⟲ LLM verify: ABANDON edit on {relPath} (score {llmGateScore}/100) — {llmGateReason}. " +
                         $"Reverted to pre-edit state; retrying. " +
@@ -5177,7 +5188,8 @@ public partial class AgentController : ControllerBase
                             score = llmGateScore,
                             bestScore,
                             attempt = attempt + 1,
-                            planItemIndex
+                            planItemIndex,
+                            diffs = abandonDiffPath != null ? new List<string> { abandonDiffPath } : new List<string>()
                         }, ct);
                     }
                     var abandonError =
@@ -5349,9 +5361,11 @@ public partial class AgentController : ControllerBase
             result["needsExtraStep"] = stepNeedsExtraStep;
             result["extraStepReason"] = stepExtraStepReason;
             result["extraStepFile"] = stepExtraStepFile;
+            var stepDiffs = await CollectRecentDiffPathsAsync(relPath, projectRoot, ct);
+            result["diffs"] = stepDiffs;
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
-            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, stepDiffs);
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
             {
                 stepIndex = await HandleMethodSignatureChange(
@@ -5522,7 +5536,7 @@ public partial class AgentController : ControllerBase
             step.Change ?? "",
             failureContext);
     }
-    private async Task PersistBoardDataPlanStepAsync(string? cardId, int planItemIndex, bool emitSse, CancellationToken ct)
+    private async Task PersistBoardDataPlanStepAsync(string? cardId, int planItemIndex, bool emitSse, CancellationToken ct, List<string>? diffs = null)
     {
         if (string.IsNullOrWhiteSpace(cardId) || planItemIndex < 0)
             return;
@@ -5548,6 +5562,8 @@ public partial class AgentController : ControllerBase
                     if (target is JsonObject stepObj)
                     {
                         stepObj["done"] = true;
+                        if (diffs != null && diffs.Count > 0)
+                            stepObj["diffs"] = new JsonArray(diffs.Select(d => JsonValue.Create(d)).ToArray());
                         var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
                         await _boardData.SaveRawAsync(saved);
                         if (emitSse)
@@ -12188,6 +12204,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-ffff");
             diffPath = Path.Combine(undoDir, $"{safeName}.{timestamp}.diff");
             var gitDir = Path.Combine(projectRoot, ".git");
+            string? diffOutput = null;
             if (Directory.Exists(gitDir))
             {
                 var proc = new System.Diagnostics.Process
@@ -12204,22 +12221,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                 };
                 proc.Start();
-                var diffOutput = await proc.StandardOutput.ReadToEndAsync();
+                var gitDiffOutput = await proc.StandardOutput.ReadToEndAsync();
                 var diffError = await proc.StandardError.ReadToEndAsync();
                 proc.WaitForExit(5000);
-                if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(diffOutput))
-                {
-                    var undoHeader = $"; Undo for {relPath} @ {DateTime.UtcNow:O}\n" +
-                                     $"; Restore with: git apply --reverse \"{diffPath}\"\n" +
-                                     $"; Or use: git checkout -- \"{relPath.Replace('/', Path.DirectorySeparatorChar)}\"\n" +
-                                     $"; To APPLY this diff: git apply \"{diffPath}\"\n";
-                    await System.IO.File.WriteAllTextAsync(
-                        diffPath, undoHeader + diffOutput, Encoding.UTF8, ct);
-                }
-                else
-                {
-                    diffPath = null;
-                }
+                if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(gitDiffOutput))
+                    diffOutput = gitDiffOutput;
+            }
+            if (diffOutput == null)
+            {
+                var currentContent = System.IO.File.Exists(fullPath)
+                    ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
+                    : "";
+                if (currentContent != newContent)
+                    diffOutput = AgentUtilities.BuildUnifiedDiff(currentContent, newContent, relPath);
+            }
+            if (!string.IsNullOrWhiteSpace(diffOutput))
+            {
+                var undoHeader = $"; Undo for {relPath} @ {DateTime.UtcNow:O}\n" +
+                                 $"; Restore with: git apply --reverse \"{diffPath}\"\n" +
+                                 $"; Or use: git checkout -- \"{relPath.Replace('/', Path.DirectorySeparatorChar)}\"\n" +
+                                 $"; To APPLY this diff: git apply \"{diffPath}\"\n";
+                await System.IO.File.WriteAllTextAsync(
+                    diffPath, undoHeader + diffOutput, Encoding.UTF8, ct);
             }
             else
             {

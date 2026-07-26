@@ -98,35 +98,49 @@
                   style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' :
                   '⬜'}}</span>
                 <div class="plan-item-body" style="flex:1;min-width:0;">
-                  <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
-                    <div class="plan-item-text">
-                      <span ng-if="item.metaGroup" class="plan-item-metagroup"
-                        title="Sub-plan group">{{item.metaGroup}}</span>
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
-                    </div>
+                    <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                      <div class="plan-item-text">
+                        <span ng-if="item.metaGroup" class="plan-item-metagroup"
+                          title="Sub-plan group">{{item.metaGroup}}</span>
+                        <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
+                        <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      </div>
 
-                    <span ng-if="item.oldString || item.newString"
-                      ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
-                      style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
-                      {{item._showDetail ? '▲' : '▼'}}
-                    </span>
-                    <span class="plan-item-icon"
-                      ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
-                      style="cursor:pointer;opacity:0.5;flex-shrink:0;" title="Remove this step">✕</span>
-                  </div>
-                  <div ng-if="item._showDetail" class="plan-item-detail"
-                    style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
-                    <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
-                      item.oldString.slice(0,200) + '…' : item.oldString}}</div>
-                    <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
-                      item.newString.slice(0,200) + '…' : item.newString}}</div>
+                      <span ng-if="item.oldString || item.newString"
+                        ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
+                        style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                        {{item._showDetail ? '▲' : '▼'}}
+                      </span>
+                      <span class="plan-item-icon"
+                        ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
+                        style="cursor:pointer;opacity:0.5;flex-shrink:0;" title="Remove this step">✕</span>
+                    </div>
+                    <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:10px;">
+                      <span ng-repeat="d in item.diffs" style="display:inline-block;margin:1px 4px 1px 0;">
+                        <code style="font-size:9px;opacity:0.8;">{{d.split('/').pop()}}</code>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied" ng-if="!item._diffApplied" style="font-size:8px;padding:0 3px;">Apply</button>
+                        <span ng-if="item._diffApplied" style="color:var(--green);font-size:9px;">✓</span>
+                      </span>
+                    </div>
+                    <div ng-if="item._showDetail" class="plan-item-detail"
+                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                        <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                          item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                        <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                          item.newString.slice(0,200) + '…' : item.newString}}</div>
+                        <div ng-if="item.diffs && item.diffs.length"><strong>DIFFS:</strong>
+                          <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
+                            <code>{{d}}</code>
+                            <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied" ng-if="!item._diffApplied" style="font-size:9px;padding:1px 4px;">Apply</button>
+                            <span ng-if="item._diffApplied" style="color:var(--green);">✓</span>
+                          </span>
+                        </div>
+                      </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-          <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
+            <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
             style="border-left-color: #ff6432;">
             <div class="plan-header" style="color:#ff6432;">🔍 Cohesion{{card._cohesion.file ? ' (' +
               card._cohesion.file + ')' : ''}}</div>
@@ -311,13 +325,27 @@
                       ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                       style="cursor:pointer;opacity:0.5;flex-shrink:0;" title="Remove this step">✕</span>
                   </div>
+                  <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:10px;">
+                    <span ng-repeat="d in item.diffs" style="display:inline-block;margin:1px 4px 1px 0;">
+                      <code style="font-size:9px;opacity:0.8;">{{d.split('/').pop()}}</code>
+                      <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied" ng-if="!item._diffApplied" style="font-size:8px;padding:0 3px;">Apply</button>
+                      <span ng-if="item._diffApplied" style="color:var(--green);font-size:9px;">✓</span>
+                    </span>
+                  </div>
                   <div ng-if="item._showDetail" class="plan-item-detail"
                     style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
-                    <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
-                      item.oldString.slice(0,200) + '…' : item.oldString}}</div>
-                    <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
-                      item.newString.slice(0,200) + '…' : item.newString}}</div>
-                  </div>
+                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                        item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                        item.newString.slice(0,200) + '…' : item.newString}}</div>
+                      <div ng-if="item.diffs && item.diffs.length"><strong>DIFFS:</strong>
+                        <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
+                          <code>{{d}}</code>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied" ng-if="!item._diffApplied" style="font-size:9px;padding:1px 4px;">Apply</button>
+                          <span ng-if="item._diffApplied" style="color:var(--green);">✓</span>
+                        </span>
+                      </div>
+                    </div>
                 </div>
               </div>
               <div ng-repeat="s in vm.streamingSteps track by s.index"
@@ -630,11 +658,18 @@
                   </div>
                   <div ng-if="item._showDetail" class="plan-item-detail"
                     style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
-                    <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
-                      item.oldString.slice(0,200) + '…' : item.oldString}}</div>
-                    <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
-                      item.newString.slice(0,200) + '…' : item.newString}}</div>
-                  </div>
+                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                        item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                        item.newString.slice(0,200) + '…' : item.newString}}</div>
+                      <div ng-if="item.diffs && item.diffs.length"><strong>DIFFS:</strong>
+                        <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
+                          <code>{{d}}</code>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied" ng-if="!item._diffApplied" style="font-size:9px;padding:1px 4px;">Apply</button>
+                          <span ng-if="item._diffApplied" style="color:var(--green);">✓</span>
+                        </span>
+                      </div>
+                    </div>
                 </div>
               </div>
             </div>

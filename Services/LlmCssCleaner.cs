@@ -34,7 +34,7 @@ public static class LlmCssCleaner
         clean = UnitRx.Replace(clean, "$1 ");
 
         // 2. Fix squished zeros (0000 -> 0 0 0 0)
-        clean = ZeroRx.Replace(clean, "$10 ");
+        clean = ZeroRx.Replace(clean, "${1}0 ");
 
         // 3. Fix missing spaces inside calc()
         clean = CalcRx.Replace(clean, match => {
