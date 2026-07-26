@@ -508,6 +508,12 @@ angular.module('kanbanApp')
 
                 vm.applyDiff = function (diffPath, step) {
                     if (!diffPath || !vm.selectedProject) return;
+                    var wasRunning = vm.streamingActive;
+                    var savedCardId = vm.activeCardId;
+                    var savedPrompt = vm.activeCardText;
+                    if (wasRunning) {
+                        vm.stopAgent();
+                    }
                     step._applyingDiff = true;
                     $http.post('/api/agent/apply-diff', { project: vm.selectedProject, diffPath: diffPath }).then(function (resp) {
                         step._applyingDiff = false;
@@ -515,7 +521,12 @@ angular.module('kanbanApp')
                             step._diffApplied = true;
                             step.status = 'done';
                             step._diffPath = diffPath;
-                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '✓ Diff applied: ' + diffPath });
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '✓ Diff applied: ' + diffPath + ' — halting agent' });
+                            if (wasRunning && savedCardId && savedPrompt) {
+                                vm.activeCardId = savedCardId;
+                                if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '↻ Restarting agent to continue plan…' });
+                                $timeout(function () { vm.executeAgent({ id: savedCardId, text: savedPrompt }, true); }, 500);
+                            }
                         } else {
                             step._diffError = (resp.data && resp.data.error) || 'Apply failed';
                             if (vm.addLogEntry) vm.addLogEntry({ type: 'error', message: '✕ Diff apply failed: ' + (step._diffError) });

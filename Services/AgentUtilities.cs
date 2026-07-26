@@ -1053,7 +1053,7 @@ public static class AgentUtilities
         return changed ? result : content;
     }
     private static readonly Regex OperatorSpacingRegex = new(
-        @"(===|!==|>=|<=|==|!=|&&|\|\||=>)\s*(\d)",
+        @"(===|!==|>=|<=|==|!=|&&|\|\||=>|=)\s*(\d)",
         RegexOptions.IgnoreCase);
     private static readonly Regex LtGtDigitRegex = new(@"(<|>)\s*(\d)");
     private static readonly Regex KeywordParenRegex = new(

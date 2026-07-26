@@ -201,6 +201,17 @@ public partial class AgentController : ControllerBase
             }
             if (!match.Success)
             {
+                if ((string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase)) &&
+                    ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                {
+                    var propertyPattern = new Regex(
+                        $@"^\s*(?:(?:public|private|protected|readonly|static)\s+)*{Regex.Escape(targetName)}\s*(?::\s*[^;=]+)?\s*(?:=|[;)])",
+                        RegexOptions.Multiline);
+                    var propMatch = propertyPattern.Match(sourceText);
+                    if (propMatch.Success)
+                        return (propMatch.Value, null);
+                }
                 var hint = ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".json" or ".css" or ".svg"
                     ? $" {ext} files don't contain named symbols — use oldString/newString format instead"
                     : ext is ".yaml" or ".yml" or ".toml"
@@ -5121,6 +5132,12 @@ public partial class AgentController : ControllerBase
                     }
                     else if (r == 0 && d == "keep" && score >= 85 && !needsEs)
                     {
+                        decisions.Add("keep");
+                        decisions.Add("keep");
+                        scores.Add(score);
+                        scores.Add(score);
+                        needsExtraStepFlags.Add(false);
+                        needsExtraStepFlags.Add(false);
                         break;
                     }
                 }
@@ -9373,8 +9390,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         const string system =
             "You are a file relevance selector for a coding agent. Given a task and candidate files, pick the 3-7 files most likely to own the requested change or define types/imports needed for it. " +
             "Prefer exact filename/path/symbol matches, neighboring component/template/style files, and files named in the task. Avoid generated, minified, dependency, build, or broad entry-point files unless the task clearly targets them. " +
+            "CRITICAL: a keyword match in the filename is NOT enough — the word must be used in the SAME SENSE as the file's purpose. For example, if the task says \"let the user increase\", 'user' is a generic person, NOT the user.component. Ignore incidental matches. " +
             "Output ONLY valid JSON, no markdown: {\"files\": [\"path1\", \"path2\"]}";
-        var user = $"Task: {prompt}\n\nCandidate files:\n{string.Join("\n", candidates)}\n\nDeterministic high-signal matches to include unless clearly irrelevant:\n{string.Join("\n", deterministic)}\n\nSelect 3-7 max.";
+        var user = $"Task: {prompt}\n\nCandidate files:\n{string.Join("\n", candidates)}\n\nDeterministic keyword-matched files (already counted below — include ONLY if genuinely relevant to the task, not just because a word matches):\n{string.Join("\n", deterministic)}\n\nSelect 3-7 max.";
         var (raw, _, err) = await CallLlmRaw(system, user, ct, TimeSpan.FromSeconds(25));
         if (string.IsNullOrWhiteSpace(raw))
             return deterministic.Concat(candidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
@@ -9397,10 +9415,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     .Where(f => !string.IsNullOrWhiteSpace(f) &&
                                 candidates.Any(c => string.Equals(c, f, StringComparison.OrdinalIgnoreCase)))
                     .ToList();
-                selected = deterministic.Concat(selected)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .Take(7)
-                    .ToList();
+                selected = selected.Take(7).ToList();
                 if (selected.Count > 0) return selected;
             }
         }
