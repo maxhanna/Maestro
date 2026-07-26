@@ -461,6 +461,9 @@
 .cm-s-weaver-dark .cm-link { color: #82aaff; text-decoration: underline; }
 .cm-s-weaver-dark .cm-error { color: #ff5370; }
 .cm-s-weaver-dark .cm-type { color: #c792ea; }
+.cm-s-weaver-dark .cm-negative { color: #ff7b72; background: rgba(255,123,114,0.08); }
+.cm-s-weaver-dark .cm-positive { color: #7ee787; background: rgba(126,231,135,0.08); }
+.cm-s-weaver-dark .cm-header { color: #79c0ff; }
 
 /* Floating IDE container */
 .ide-floating-panel {

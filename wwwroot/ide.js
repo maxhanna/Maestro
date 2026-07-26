@@ -247,7 +247,8 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         '.go': 'text/x-go', '.rs': 'text/x-rust', '.swift': 'text/x-swift',
         '.md': 'text/x-markdown', '.yaml': 'text/x-yaml', '.yml': 'text/x-yaml',
         '.sh': 'text/x-sh', '.bash': 'text/x-sh', '.ps1': 'text/x-sh',
-        '.kt': 'text/x-kotlin', '.kts': 'text/x-kotlin'
+        '.kt': 'text/x-kotlin', '.kts': 'text/x-kotlin',
+        '.diff': 'text/x-diff', '.patch': 'text/x-diff'
       };
       function detectMode(path) {
         if (!path) return null;
