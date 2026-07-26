@@ -1307,6 +1307,13 @@ public partial class AgentController : ControllerBase
                 {
                     newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
                     newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
+                    if (AgentUtilities.IsPlaceholderContent(newCodeStr))
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"newCode rejected — contains placeholder/generic names ('myNewMethod', 'MyMethod', '// body', etc.). You MUST write real code with the actual method name and body from the task, not templates.", ct: ct);
+                        return (null, null, false, null, false,
+                            $"PLACEHOLDER REJECTED: newCode contains placeholder names like 'myNewMethod' or 'MyMethod'. Write REAL code using the actual symbol name from the task. The method must have the correct name and a real implementation body.", false);
+                    }
                     var hasReplace = jRoot.TryGetProperty("replace", out var rpEl);
                     var replaceSection = hasReplace && rpEl.GetBoolean();
                     if (string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase))
@@ -1371,8 +1378,9 @@ public partial class AgentController : ControllerBase
                             if (idx >= 0)
                             {
                                 var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
-                                newStr = sourceText[..(idx + fullStr.Length)] + "\n\n" + indented + sourceText[(idx + fullStr.Length)..];
-                                return (sourceText, newStr, false, null, false, null, true);
+                                var prefix = sourceText[..(idx + fullStr.Length)];
+                                newStr = prefix + "\n\n" + indented;
+                                return (prefix, newStr, false, null, false, null, true);
                             }
                         }
                         var idx2 = sourceText.IndexOf(targetName, StringComparison.Ordinal);
@@ -1385,8 +1393,9 @@ public partial class AgentController : ControllerBase
                             if (lineEnd < 0) lineEnd = sourceText.Length;
                             var fullLine = sourceText[lineStart..lineEnd];
                             var indented = AutoIndentCode(fullLine, newCodeStr, relPath);
-                            newStr = sourceText[..lineEnd] + "\n" + indented + sourceText[lineEnd..];
-                            return (sourceText, newStr, false, null, false, null, true);
+                            var prefix = sourceText[..lineEnd];
+                            newStr = prefix + "\n" + indented;
+                            return (prefix, newStr, false, null, false, null, true);
                         }
                     }
                     if (insertAfter)

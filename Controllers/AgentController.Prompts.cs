@@ -1043,6 +1043,10 @@ public static class EscalationStateMachine
         int stepLineNumber)
     {
         sb.AppendLine("⚠ ESCALATION DIRECTIVE — your previous attempt(s) failed. You MUST change approach:");
+        sb.AppendLine("  ⚠ CRITICAL: NEVER use placeholder method names like 'myNewMethod', 'MyMethod', 'SomeMethod',");
+        sb.AppendLine("    'DoSomething', 'NewMethod', or 'PlaceholderMethod'. The method name MUST match what the task");
+        sb.AppendLine("    asks for (e.g. if the task says 'add {method_name} method', use THAT exact name).");
+        sb.AppendLine("    The newCode body MUST contain real implementation code — never '// body' or '// TODO'.");
 
         switch (level)
         {

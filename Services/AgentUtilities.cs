@@ -897,6 +897,31 @@ public static class AgentUtilities
         });
         return changed ? result : content;
     }
+    private static readonly Regex[] PlaceholderPatterns = new[]
+    {
+        new Regex(@"\bMyMethod\b", RegexOptions.Compiled),
+        new Regex(@"\bmyNewMethod\b", RegexOptions.Compiled),
+        new Regex(@"\bMyNewMethod\b", RegexOptions.Compiled),
+        new Regex(@"\bSomeMethod\b", RegexOptions.Compiled),
+        new Regex(@"\bDoSomething\b", RegexOptions.Compiled),
+        new Regex(@"\bNewMethod\b", RegexOptions.Compiled),
+        new Regex(@"\bPlaceholderMethod\b", RegexOptions.Compiled),
+        new Regex(@"\bTestMethod\b", RegexOptions.Compiled),
+        new Regex(@"\bMyProperty\b", RegexOptions.Compiled),
+        new Regex(@"\bSomeProperty\b", RegexOptions.Compiled),
+    };
+    public static bool IsPlaceholderContent(string newCode)
+    {
+        if (string.IsNullOrWhiteSpace(newCode)) return true;
+        foreach (var rx in PlaceholderPatterns)
+            if (rx.IsMatch(newCode))
+                return true;
+        var bodyOnly = Regex.Replace(newCode, @"//[^\n]*|/\*.*?\*/", "", RegexOptions.Singleline).Trim();
+        if (string.IsNullOrWhiteSpace(bodyOnly)) return true;
+        if (Regex.IsMatch(newCode, @"\{\s*(//\s*(body|todo|implement|placeholder|your code here)[^}]*)?\s*\}", RegexOptions.IgnoreCase))
+            return true;
+        return false;
+    }
     public static string PostEditCSharpFixup(string content)
     {
         if (string.IsNullOrWhiteSpace(content)) return content;
