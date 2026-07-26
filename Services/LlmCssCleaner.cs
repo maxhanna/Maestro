@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using AngleSharp.Css.Parser;
 
 namespace Weaver.Services;
 
@@ -12,7 +13,7 @@ public static class LlmCssCleaner
     private static readonly Regex DblSpaceRx = new(@"\s+", RegexOptions.Compiled);
     private static readonly Regex MissingColonRx = new(@"^(\s*[a-z-]+)\s+(?=\d|#|var\(--)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
     private static readonly Regex MissingSpaceAfterColonRx = new(@"^(\s*[a-z-]+):(\S)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
-    private static readonly Regex TrailingCommaRx = new(@"(:[^;\n]+),\s*$", RegexOptions.Multiline | RegexOptions.Compiled);
+    private static readonly Regex TrailingCommaRx = new(@"^\s*[a-z-]+:\s*[^;{]+,\s*$", RegexOptions.Multiline | RegexOptions.Compiled);
     private static readonly Regex SmashedBraceRx = new(@"\}(?=[^\s}])", RegexOptions.Compiled);
 
     public static string Clean(string cssContent)
@@ -56,5 +57,41 @@ public static class LlmCssCleaner
         clean = SmashedBraceRx.Replace(clean, "}\n");
 
         return clean;
+    }
+
+    public static string FixCssStructure(string css)
+    {
+        if (string.IsNullOrEmpty(css)) return css;
+
+        int openBraces = 0, closeBraces = 0;
+        foreach (var c in css)
+        {
+            if (c == '{') openBraces++;
+            else if (c == '}') closeBraces++;
+        }
+        if (openBraces == closeBraces) return css;
+
+        try
+        {
+            var parser = new CssParser(new CssParserOptions
+            {
+                IsIncludingUnknownDeclarations = true,
+                IsIncludingUnknownRules = true
+            });
+            var sheet = parser.ParseStyleSheet(css);
+
+            using var writer = new StringWriter();
+            sheet.ToCss(writer, new AngleSharp.Css.PrettyStyleFormatter
+            {
+                Indentation = "  ",
+                NewLine = "\n"
+            });
+            var fixedCss = writer.ToString();
+            return !string.IsNullOrWhiteSpace(fixedCss) ? fixedCss : css;
+        }
+        catch
+        {
+            return css;
+        }
     }
 }

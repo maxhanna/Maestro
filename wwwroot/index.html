@@ -468,10 +468,20 @@
                       </span>
                     </div>
                     <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:10px;">
-                      <span ng-repeat="d in item.diffs" style="display:inline-block;margin:1px 4px 1px 0;">
-                        <code style="font-size:9px;opacity:0.8;">{{d.split('/').pop()}}</code>
-                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied" ng-if="!item._diffApplied" style="font-size:8px;padding:0 3px;">Apply</button>
-                        <span ng-if="item._diffApplied" style="color:var(--green);font-size:9px;">✓</span>
+                      <span ng-repeat="d in item.diffs" style="display:block;margin:1px 0;">
+                        <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)" title="Click to preview diff">
+                          <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                          <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <code style="font-size:9px;opacity:0.8;">{{d.split('/').pop()}}</code>
+                        </span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:8px;padding:0 3px;">Apply</button>
+                        <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);font-size:9px;">✓</span>
+                        <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:8px;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:9px;">deleting…</span>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg2);border-radius:3px;max-height:120px;overflow-y:auto;font-family:monospace;font-size:9px;white-space:pre-wrap;word-break:break-all;">
+                          <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                        </div>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
                       </span>
                     </div>
                     <div ng-if="item._showDetail" class="plan-item-detail"
@@ -483,9 +493,19 @@
                       <div ng-if="item.diffs && item.diffs.length" style="margin-top:4px;">
                         <strong>DIFFS:</strong>
                         <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
-                          <code>{{d}}</code>
-                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied" ng-if="!item._diffApplied" style="font-size:9px;padding:1px 4px;">Apply</button>
-                          <span ng-if="item._diffApplied" style="color:var(--green);">✓ Applied</span>
+                          <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)">
+                            <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                            <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                            <code>{{d.split('/').pop()}}</code>
+                          </span>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:9px;padding:1px 4px;">Apply</button>
+                          <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);">✓</span>
+                          <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:9px;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                          <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:9px;">deleting…</span>
+                          <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:10px;white-space:pre-wrap;word-break:break-all;">
+                            <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                          </div>
+                          <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
                         </span>
                       </div>
                     </div>
@@ -607,13 +627,24 @@
                     <div class="step-detail" ng-if="s.diffs && s.diffs.length">
                       <strong>Available diffs:</strong>
                       <div class="diff-item" ng-repeat="d in s.diffs">
-                        <code class="diff-path">{{d}}</code>
-                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, s)" ng-disabled="s._applyingDiff || s._diffApplied" ng-if="!s._diffApplied">
+                        <span style="cursor:pointer;" ng-click="vm.previewDiff(d, s)">
+                          <span ng-if="(s._previews && s._previews[d] && s._previews[d].loading)">⏳</span>
+                          <span ng-if="!(s._previews && s._previews[d] && s._previews[d].loading)">{{(s._previews && s._previews[d] && s._previews[d].show) ? '▼' : '▶'}}</span>
+                          <code class="diff-path">{{d.split('/').pop()}}</code>
+                        </span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, s)" ng-disabled="s._applyingDiff || s._diffApplied || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)">
                           <span ng-if="!s._applyingDiff">Apply</span>
                           <span ng-if="s._applyingDiff">Applying...</span>
                         </button>
-                        <span class="diff-applied" ng-if="s._diffApplied">✓ Applied</span>
+                        <span class="diff-applied" ng-if="s._diffApplied || (s._previews && s._previews[d] && s._previews[d].deleted)">✓</span>
+                        <button ng-click="vm.deleteDiff(d, s, $event)" ng-disabled="s._applyingDiff || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:9px;padding:0 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <span ng-if="s._previews && s._previews[d] && s._previews[d].deleting" style="color:#e06c75;font-size:9px;">deleting…</span>
                         <span class="step-err" ng-if="s._diffError && d === s._diffPath">({{s._diffError}})</span>
+                        <div ng-if="s._previews && s._previews[d] && s._previews[d].show" style="margin-top:4px;padding:4px;background:var(--bg2);border-radius:3px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:10px;white-space:pre-wrap;word-break:break-all;">
+                          <pre style="margin:0;line-height:1.4;">{{s._previews[d].content}}</pre>
+                        </div>
+                        <div ng-if="s._previews && s._previews[d] && s._previews[d].error" style="color:#e06c75;font-size:9px;">{{s._previews[d].error}}</div>
+                        <span class="step-err" ng-if="s._previews && s._previews[d] && s._previews[d].deleteError">({{s._previews[d].deleteError}})</span>
                       </div>
                     </div>
                   </div>

@@ -188,17 +188,17 @@ angular.module('kanbanApp')
                                                                     if (sp) sp.done = parsed.done;
                                                                 }
                                                                 break;
-                                                            case 'plan':
-                                                                if (parsed && parsed.items && parsed.items.length) {
-                                                                    var existingDone = {};
-                                                                    if (vm.planItems) vm.planItems.forEach(function (pi) { existingDone[pi.file + '|' + pi.change] = pi.done; });
-                                                                    vm.planItems = parsed.items.map(function (item, i) {
-                                                                        var file = item.File || item.file || '?';
-                                                                        var change = item.Change || item.change || '';
-                                                                        var key = file + '|' + change;
-                                                                        var wasDone = existingDone[key] || item.done || false;
-                                                                        return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: wasDone, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '' };
-                                                                    });
+                                                             case 'plan':
+                                                                 if (parsed && parsed.items && parsed.items.length) {
+                                                                     var existingState = {};
+                                                                     if (vm.planItems) vm.planItems.forEach(function (pi) { existingState[pi.file + '|' + pi.change] = { done: pi.done, diffs: pi.diffs, _diffApplied: pi._diffApplied, _diffStepStatus: pi._diffStepStatus }; });
+                                                                     vm.planItems = parsed.items.map(function (item, i) {
+                                                                         var file = item.File || item.file || '?';
+                                                                         var change = item.Change || item.change || '';
+                                                                         var key = file + '|' + change;
+                                                                         var prev = existingState[key] || {};
+                                                                         return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '' };
+                                                                     });
                                                                     if (parsed.thinking) vm.streamingThinking = parsed.thinking;
                                                                     if (parsed.summary) vm.streamingSummary = parsed.summary;
                                                                     pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + parsed.items.length + ' steps)', { itemCount: parsed.items.length, score: parsed.score });
@@ -522,6 +522,49 @@ angular.module('kanbanApp')
                         step._applyingDiff = false;
                         step._diffError = 'HTTP error: ' + (err.statusText || err);
                         if (vm.addLogEntry) vm.addLogEntry({ type: 'error', message: '✕ Diff HTTP error: ' + (step._diffError) });
+                    });
+                };
+                vm.previewDiff = function (diffPath, step) {
+                    if (!diffPath || !vm.selectedProject) return;
+                    step._previews = step._previews || {};
+                    var p = step._previews[diffPath] = step._previews[diffPath] || {};
+                    if (p.content) { p.show = !p.show; return; }
+                    p.loading = true;
+                    $http.get('/api/agent/diff-content', { params: { project: vm.selectedProject, diffPath: diffPath } }).then(function (resp) {
+                        p.loading = false;
+                        if (resp.data && resp.data.success) {
+                            p.content = resp.data.content;
+                            p.show = true;
+                        } else {
+                            p.error = (resp.data && resp.data.error) || 'Preview failed';
+                        }
+                    }, function () {
+                        p.loading = false;
+                        p.error = 'HTTP error';
+                    });
+                };
+                vm.deleteDiff = function (diffPath, step, $event) {
+                    if ($event) $event.stopPropagation();
+                    if (!diffPath || !vm.selectedProject) return;
+                    step._previews = step._previews || {};
+                    var p = step._previews[diffPath] = step._previews[diffPath] || {};
+                    p.deleting = true;
+                    $http.post('/api/agent/delete-diff', { project: vm.selectedProject, diffPath: diffPath }).then(function (resp) {
+                        p.deleting = false;
+                        if (resp.data && resp.data.success) {
+                            p.deleted = true;
+                            if (step.diffs) {
+                                var idx = step.diffs.indexOf(diffPath);
+                                if (idx >= 0) step.diffs.splice(idx, 1);
+                            }
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '🗑 Diff deleted: ' + diffPath });
+                        } else {
+                            p.deleteError = (resp.data && resp.data.error) || 'Delete failed';
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'error', message: '✕ Diff delete failed: ' + (p.deleteError) });
+                        }
+                    }, function () {
+                        p.deleting = false;
+                        p.deleteError = 'HTTP error';
                     });
                 };
 

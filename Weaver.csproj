@@ -21,6 +21,7 @@
   </ItemGroup> 
 
   <ItemGroup>
+    <PackageReference Include="AngleSharp.Css" Version="0.18.0" />
     <PackageReference Include="MailKit" Version="4.17.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.12.0" />

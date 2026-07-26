@@ -4838,7 +4838,11 @@ public partial class AgentController : ControllerBase
             {
                 newContent = LlmCssCleaner.Clean(newContent);
                 if (!string.IsNullOrWhiteSpace(newStr))
+                {
                     newStr = LlmCssCleaner.Clean(newStr);
+                    newStr = LlmCssCleaner.FixCssStructure(newStr);
+                }
+                newContent = LlmCssCleaner.FixCssStructure(newContent);
             }
             preEditContent ??= fileContent;
             await SaveEditWithUndoAsync(fullPath, newContent, relPath, projectRoot, preEditContent, ct);
@@ -12834,6 +12838,44 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (proc.ExitCode != 0)
                 return Ok(new { success = false, error = $"git apply failed: {error}", output });
             return Ok(new { success = true, output });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
+        }
+    }
+
+    [HttpGet("diff-content")]
+    public async Task<IActionResult> DiffContent([FromQuery] string project, [FromQuery] string diffPath)
+    {
+        if (string.IsNullOrWhiteSpace(diffPath)) return BadRequest(new { error = "No diff path provided" });
+        var projectRoot = AgentUtilities.GetProjectRoot(project, _config, _env);
+        var fullDiffPath = Path.GetFullPath(Path.Combine(projectRoot, diffPath.TrimStart('/', '\\')));
+        if (!System.IO.File.Exists(fullDiffPath))
+            return NotFound(new { error = "Diff file not found", path = fullDiffPath });
+        try
+        {
+            var content = await System.IO.File.ReadAllTextAsync(fullDiffPath);
+            return Ok(new { success = true, content });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
+        }
+    }
+
+    [HttpPost("delete-diff")]
+    public async Task<IActionResult> DeleteDiff([FromBody] ApplyDiffRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.DiffPath)) return BadRequest(new { error = "No diff path provided" });
+        var projectRoot = AgentUtilities.GetProjectRoot(req.Project, _config, _env);
+        var fullDiffPath = Path.GetFullPath(Path.Combine(projectRoot, req.DiffPath.TrimStart('/', '\\')));
+        if (!System.IO.File.Exists(fullDiffPath))
+            return NotFound(new { error = "Diff file not found", path = fullDiffPath });
+        try
+        {
+            System.IO.File.Delete(fullDiffPath);
+            return Ok(new { success = true });
         }
         catch (Exception ex)
         {
