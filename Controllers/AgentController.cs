@@ -425,142 +425,44 @@ public partial class AgentController : ControllerBase
         oldStr = oldStr.Replace("\r\n", "\n").Replace("\r", "\n");
         return (oldStr, null);
     }
-    private static string DetectIndentUnit(string source)
-    {
-        if (string.IsNullOrWhiteSpace(source)) { return "    "; }
-        var lines = source.Split('\n');
-        foreach (var line in lines)
-        {
-            if (line.Length > 0 && line[0] == '\t') { return "\t"; }
-        }
-        return new string(' ', AgentUtilities.DetectIndentWidth(source));
-    }
-    private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null, string? explicitBaseIndent = null)
+    private static async Task<string> FormatSnippetAsync(string oldSource, string newCode, string? filePath, string? explicitBaseIndent = null)
     {
         var baseIndent = explicitBaseIndent;
         if (baseIndent == null)
         {
-            var oldLines = oldSource.Split('\n');
+            var oldLines = oldSource.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
             var firstRealLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
             if (firstRealLine == null) return newCode;
             baseIndent = Regex.Match(firstRealLine, @"^(\s*)").Value;
         }
         if (string.IsNullOrEmpty(baseIndent)) return newCode;
-        var newLines = newCode.Split('\n');
-        if (newLines.Length <= 1) return baseIndent + newCode.TrimStart();
-        var nonEmpty = newLines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
-        if (nonEmpty.Count == 0) return newCode;
-        if (!AgentUtilities.IsWhitespaceSignificant(filePath))
+
+        string formatted;
+        if (filePath != null && CodeFormatterService.CanFormat(filePath))
         {
-            var indentUnit = DetectIndentUnit(oldSource);
-            var ext = Path.GetExtension(filePath ?? "").ToLowerInvariant();
-            if (ext is ".html" or ".htm" or ".cshtml" or ".razor")
-                return ReindentHtmlTags(newCode, baseIndent, indentUnit);
-            var reindented = AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, indentUnit);
-            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
-                reindented = AgentUtilities.FixMultilineParenIndentation(reindented);
-            return reindented;
-        }
-        var minNewIndent = nonEmpty.Min(l => Regex.Match(l, @"^(\s*)").Groups[1].Length);
-        var result = new List<string>();
-        foreach (var line in newLines)
-        {
-            if (string.IsNullOrWhiteSpace(line))
+            try
             {
-                result.Add(line);
+                formatted = await CodeFormatterService.FormatAsync(filePath, newCode, CancellationToken.None);
             }
-            else
+            catch
             {
-                var trimmed = line.Length > minNewIndent
-                    ? line.Substring(minNewIndent)
-                    : line.TrimStart();
-                result.Add(baseIndent + trimmed);
+                formatted = newCode;
             }
         }
-        return string.Join("\n", result);
-    }
-    private static string ReindentHtmlTags(string code, string baseIndent, string indentUnit = "  ")
-    {
-        var lines = code.Split('\n');
-        var result = new List<string>();
-        var depth = 0;
-        var inTag = false;
-        var voidElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr" };
-        foreach (var line in lines)
+        else
         {
-            var trimmed = line.TrimStart();
-            if (string.IsNullOrWhiteSpace(trimmed))
-            {
-                result.Add(line);
-                continue;
-            }
-            int lineDepthChange = 0;
-            bool startsWithClosing = trimmed.StartsWith("</");
-            int i = 0;
-            while (i < trimmed.Length)
-            {
-                if (inTag)
-                {
-                    var closeIdx = trimmed.IndexOf('>', i);
-                    if (closeIdx >= 0)
-                    {
-                        inTag = false;
-                        i = closeIdx + 1;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
-                else
-                {
-                    var openIdx = trimmed.IndexOf('<', i);
-                    if (openIdx >= 0)
-                    {
-                        if (openIdx + 1 < trimmed.Length && trimmed[openIdx + 1] == '/')
-                        {
-                            lineDepthChange--;
-                            var closeIdx = trimmed.IndexOf('>', openIdx);
-                            if (closeIdx >= 0) i = closeIdx + 1;
-                            else { inTag = true; break; }
-                        }
-                        else
-                        {
-                            var closeIdx = trimmed.IndexOf('>', openIdx);
-                            if (closeIdx >= 0)
-                            {
-                                if (trimmed[closeIdx - 1] != '/')
-                                {
-                                    var tagContent = trimmed.Substring(openIdx + 1, closeIdx - openIdx - 1);
-                                    var tagName = tagContent.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.TrimEnd('/');
-                                    if (tagName != null && !voidElements.Contains(tagName))
-                                    {
-                                        lineDepthChange++;
-                                    }
-                                }
-                                i = closeIdx + 1;
-                            }
-                            else
-                            {
-                                inTag = true;
-                                break;
-                            }
-                        }
-                    }
-                    else break;
-                }
-            }
-            if (startsWithClosing && lineDepthChange < 0)
-            {
-                depth = Math.Max(0, depth - 1);
-                lineDepthChange++;
-            }
-            var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, depth));
-            result.Add(indent + trimmed);
-            depth = Math.Max(0, depth + lineDepthChange);
+            formatted = newCode;
         }
-        return string.Join("\n", result);
+
+        var lines = formatted.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(lines[i]))
+            {
+                lines[i] = baseIndent + lines[i].TrimStart();
+            }
+        }
+        return string.Join("\n", lines);
     }
     private async Task<(string? oldStr, string? newStr, bool fullFile,
       string? fullContent, bool alreadyDone, string? error, bool fromFormatC)>
@@ -636,40 +538,42 @@ public partial class AgentController : ControllerBase
             sb.AppendLine("⚠ You MUST adhere to this directive. Do NOT invent new logic if the directive tells you to reuse existing patterns. Your edit will be rejected if you break these constraints.");
             sb.AppendLine();
         }
-        sb.AppendLine("⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
-                      "If the change says \"instead of X use Y\", modify X to become Y. " +
-                      "Do NOT keep the old X and also add Y next to it. " +
-           "⚠ RULE: NEVER INVENT type names. Every type (class/record/struct/interface) referenced in newString MUST exist in the project. " +
-                        "The RELATED FILE CONTEXT section above shows type definitions found across the project. " +
-                        "If a type exists there (e.g. CalendarEntry, UserInfo), use it — do NOT invent a similar type with a different name. " +
-                        "If you need a type that is NOT in the context or project, define it in the same edit by including the full class definition. " +
-                        "⚠ RULE: NEVER INVENT property names. Every `.PropertyName` you access on an object MUST exactly match a property " +
-                        "defined in that type's class. Example: CalendarEntry has properties [Id, Type, Note, Date, Ownership] — NOT Title or Description. " +
-                        "Cross-reference EVERY property access against the type definition in AUTO-ENRICHED CONTEXT before writing newString. " +
-                        "If the class definition shows `string? Note { get; set; }` then use `.Note`, not `.Description`. " +
-                        "If the class definition shows `string? Type { get; set; }` then use `.Type`, not `.Title`." +
-                        "⚠ RULE: When adding pagination, filtering, or controls for a NEW data type (e.g., YouTube results), " +
-                        "create a NEW method dedicated to that data type. Do NOT repurpose an existing method that uses different " +
-                        "property names (e.g., `currentPage`/`totalPages`) and calls different APIs (`searchUrl`). " +
-                        "For example, if YouTube pagination needs `onYoutubePageChange`, create it — do NOT reuse `onPageChange` " +
-                        "because `onPageChange` sets `this.currentPage` and calls `this.searchUrl()`, which are specific to " +
-                        "crawler search results. A new method for YouTube would set `this.youtubeCurrentPage` and filter " +
-                        "`this.youtubeResults` locally without calling `searchUrl`." +
-                        "⚠ RULE: LOCATION ACCURACY & CONTEXT. If the CHANGE REQUIRED specifies a variable, array, or method name (e.g., 'in navigationItemDescriptions array'), " +
-                        "you MUST find and edit THAT specific location. Do not edit the first similar-looking code you find. " +
-                        "If there are multiple arrays with 'Crypto-Hub', find the one named 'navigationItemDescriptions'. " +
-                        "If the ORIGINAL USER REQUEST mentions 'under nicehash bot note', you MUST find the text containing 'NiceHash' and add the note there. " +
-                        "If the request mentions 'instructions can be found in the user settings', your added text MUST include that instruction. " +
-                        "Do NOT hallucinate generic text. Use the exact details from the ORIGINAL USER REQUEST." +
-                        "⚠ RULE: TEMPLATE LITERALS & PROPERTIES. " +
-                        "You CANNOT add a new property (like a second `content:` line) to an object that already has one. " +
-                        "If you need to add text to a backtick template literal (e.g. `content: \\`Some text\\``), you MUST:\n" +
-                        "  1. Set `oldString` to the ENTIRE existing property (e.g. `      content: \\`Crypto Hub does many...\\\n" +
-                        "      <ul>...</ul>\\\n" +
-                        "      <div>...NiceHash...</div>\\\n" +
-                        "      \\``)\n" +
-                        "  2. Set `newString` to that EXACT same property, but with your new text appended INSIDE the backticks before the closing \\`.\n" +
-                        "DO NOT take shortcuts. DO NOT add a new `content:` line above the existing one. ALWAYS modify the existing backtick block.");
+        sb.AppendLine(
+            "⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
+                "If the change says \"instead of X use Y\", modify X to become Y. " +
+                "Do NOT keep the old X and also add Y next to it. " +
+            "⚠ RULE: NEVER INVENT type names. Every type (class/record/struct/interface) referenced in newString MUST exist in the project. " +
+                "The RELATED FILE CONTEXT section above shows type definitions found across the project. " +
+                "If a type exists there (e.g. CalendarEntry, UserInfo), use it — do NOT invent a similar type with a different name. " +
+                "If you need a type that is NOT in the context or project, define it in the same edit by including the full class definition. " +
+            "⚠ RULE: NEVER INVENT property names. Every `.PropertyName` you access on an object MUST exactly match a property " +
+                "defined in that type's class. Example: CalendarEntry has properties [Id, Type, Note, Date, Ownership] — NOT Title or Description. " +
+                "Cross-reference EVERY property access against the type definition in AUTO-ENRICHED CONTEXT before writing newString. " +
+                "If the class definition shows `string? Note { get; set; }` then use `.Note`, not `.Description`. " +
+                "If the class definition shows `string? Type { get; set; }` then use `.Type`, not `.Title`." +
+            "⚠ RULE: Do not add comments inside new code." + 
+            "⚠ RULE: When adding pagination, filtering, or controls for a NEW data type (e.g., YouTube results), " +
+                "create a NEW method dedicated to that data type. Do NOT repurpose an existing method that uses different " +
+                "property names (e.g., `currentPage`/`totalPages`) and calls different APIs (`searchUrl`). " +
+                "For example, if YouTube pagination needs `onYoutubePageChange`, create it — do NOT reuse `onPageChange` " +
+                "because `onPageChange` sets `this.currentPage` and calls `this.searchUrl()`, which are specific to " +
+                "crawler search results. A new method for YouTube would set `this.youtubeCurrentPage` and filter " +
+                "`this.youtubeResults` locally without calling `searchUrl`." +
+            "⚠ RULE: LOCATION ACCURACY & CONTEXT. If the CHANGE REQUIRED specifies a variable, array, or method name (e.g., 'in navigationItemDescriptions array'), " +
+                "you MUST find and edit THAT specific location. Do not edit the first similar-looking code you find. " +
+                "If there are multiple arrays with 'Crypto-Hub', find the one named 'navigationItemDescriptions'. " +
+                "If the ORIGINAL USER REQUEST mentions 'under nicehash bot note', you MUST find the text containing 'NiceHash' and add the note there. " +
+                "If the request mentions 'instructions can be found in the user settings', your added text MUST include that instruction. " +
+                "Do NOT hallucinate generic text. Use the exact details from the ORIGINAL USER REQUEST." +
+            "⚠ RULE: TEMPLATE LITERALS & PROPERTIES. " +
+                "You CANNOT add a new property (like a second `content:` line) to an object that already has one. " +
+                "If you need to add text to a backtick template literal (e.g. `content: \\`Some text\\``), you MUST:\n" +
+                "  1. Set `oldString` to the ENTIRE existing property (e.g. `      content: \\`Crypto Hub does many...\\\n" +
+                "      <ul>...</ul>\\\n" +
+                "      <div>...NiceHash...</div>\\\n" +
+                "      \\``)\n" +
+                "  2. Set `newString` to that EXACT same property, but with your new text appended INSIDE the backticks before the closing \\`.\n" +
+                "DO NOT take shortcuts. DO NOT add a new `content:` line above the existing one. ALWAYS modify the existing backtick block.");
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         // Classify once here — used by all downstream prompt sections, system prompt selection,
         // and escalation logic. This is the single source of truth for the whole method.
@@ -1369,12 +1273,12 @@ public partial class AgentController : ControllerBase
                         }
                         if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                         {
-                            var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                            var indented = await FormatSnippetAsync(matchedBlock, newCodeStr, relPath);
                             return (matchedBlock, indented, false, null, false, null, true);
                         }
                         if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                         {
-                            var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                            var indented = await FormatSnippetAsync(matchedBlock, newCodeStr, relPath);
                             return (matchedBlock, matchedBlock + "\n" + indented, false, null, false, null, true);
                         }
                         return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
@@ -1388,7 +1292,7 @@ public partial class AgentController : ControllerBase
                             var idx = sourceText.IndexOf(fullStr, StringComparison.Ordinal);
                             if (idx >= 0)
                             {
-                                var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
+                                var indented = await FormatSnippetAsync(fullStr, newCodeStr, relPath);
                                 var prefix = sourceText[..(idx + fullStr.Length)];
                                 newStr = prefix + "\n\n" + indented;
                                 return (prefix, newStr, false, null, false, null, true);
@@ -1403,7 +1307,7 @@ public partial class AgentController : ControllerBase
                             var lineEnd = sourceText.IndexOf('\n', idx2);
                             if (lineEnd < 0) lineEnd = sourceText.Length;
                             var fullLine = sourceText[lineStart..lineEnd];
-                            var indented = AutoIndentCode(fullLine, newCodeStr, relPath);
+                            var indented = await FormatSnippetAsync(fullLine, newCodeStr, relPath);
                             var prefix = sourceText[..lineEnd];
                             newStr = prefix + "\n" + indented;
                             return (prefix, newStr, false, null, false, null, true);
@@ -1439,7 +1343,7 @@ public partial class AgentController : ControllerBase
                                 "Do NOT use the new method's name as targetName.", false);
                         if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
                         {
-                            var unit = DetectIndentUnit(fullStr);
+                            var unit = new string(' ', AgentUtilities.DetectIndentWidth(fullStr));
                             var memberIndent = unit + unit;
                             var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
                             var body = hasClassDecl ? AgentUtilities.StripClassWrapper(newCodeStr) : newCodeStr;
@@ -1471,7 +1375,7 @@ public partial class AgentController : ControllerBase
                                 return (fullStr, newStr, false, null, false, null, true);
                             }
                         }
-                        var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
+                        var indented = await FormatSnippetAsync(fullStr, newCodeStr, relPath);
                         newStr = fullStr + "\n" + indented;
                         return (fullStr, newStr, false, null, false, null, true);
                     }
@@ -1509,7 +1413,7 @@ public partial class AgentController : ControllerBase
                                 var lastBrace = astOldStr.LastIndexOf('}');
                                 if (lastBrace >= 0)
                                 {
-                                    var unit = DetectIndentUnit(astOldStr);
+                                    var unit = new string(' ', AgentUtilities.DetectIndentWidth(astOldStr));
                                     var methodIndent = unit + unit;
                                     var lines = newCodeStr.Split('\n');
                                     var nonEmpty = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
@@ -1551,7 +1455,7 @@ public partial class AgentController : ControllerBase
                                 var body = hasClassDecl ? AgentUtilities.StripClassWrapper(newCodeStr) : newCodeStr;
                                 if (!string.IsNullOrWhiteSpace(body))
                                 {
-                                    var unit = DetectIndentUnit(astOldStr);
+                                    var unit = new string(' ', AgentUtilities.DetectIndentWidth(astOldStr));
                                     var bodyIndented = AgentUtilities.ReindentToLevel(body, unit);
                                     var lastBrace = astOldStr.LastIndexOf('}');
                                     var openBrace = astOldStr.IndexOf('{');
@@ -1632,8 +1536,12 @@ public partial class AgentController : ControllerBase
                                             foreach (var line in oldBody.Split('\n'))
                                                 if (!string.IsNullOrWhiteSpace(line)) { bodyIndent = Regex.Match(line, @"^(\s*)").Value; break; }
                                             if (string.IsNullOrEmpty(bodyIndent))
-                                                bodyIndent = DetectIndentUnit(astOldStr) + DetectIndentUnit(astOldStr);
-                                            var reindented = AutoIndentCode(bodyIndent + "x", newCodeStr.TrimStart(), relPath, explicitBaseIndent: bodyIndent);
+                                            {
+                                                var w = AgentUtilities.DetectIndentWidth(astOldStr);
+                                                if (w <= 0) w = 2;
+                                                bodyIndent = new string(' ', w) + new string(' ', w);
+                                            }
+                                            var reindented = await FormatSnippetAsync(bodyIndent + "x", newCodeStr.TrimStart(), relPath, explicitBaseIndent: bodyIndent);
                                             var closingIndent = Regex.Match(signature, @"^(\s*)").Value;
                                             newCodeStr = signature + " {\n" + reindented + "\n" + closingIndent + "}";
                                         }
@@ -1653,7 +1561,7 @@ public partial class AgentController : ControllerBase
                                 }
                                 catch { }
                             }
-                            var indented = AutoIndentCode(astOldStr, fmtNewCode, relPath);
+                            var indented = await FormatSnippetAsync(astOldStr, fmtNewCode, relPath);
                             return (astOldStr, indented, false, null, false, null, true);
                         }
                         return (null, null, false, null, false, $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}", false);
@@ -1757,7 +1665,7 @@ public partial class AgentController : ControllerBase
                                     var insertBody = cleanNewStr[insertStart..];
                                     if (!string.IsNullOrWhiteSpace(insertBody))
                                     {
-                                        var indentedBody = AutoIndentCode(astOldStr, insertBody, relPath);
+                                        var indentedBody = await FormatSnippetAsync(astOldStr, insertBody, relPath);
                                         var mergedStr = astOldStr.TrimEnd('\n', '\r') + "\n\n" + indentedBody;
                                         return (astOldStr, mergedStr, false, null, false, null, true);
                                     }
@@ -1965,12 +1873,12 @@ public partial class AgentController : ControllerBase
                             }
                             if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                             {
-                                var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                                var indented = await FormatSnippetAsync(matchedBlock, newCodeStr, relPath);
                                 return (matchedBlock, indented, false, null, false, null, true);
                             }
                             if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                             {
-                                var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                                var indented = await FormatSnippetAsync(matchedBlock, newCodeStr, relPath);
                                 return (matchedBlock, matchedBlock + "\n" + indented, false, null, false, null, true);
                             }
                             return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
@@ -1983,7 +1891,7 @@ public partial class AgentController : ControllerBase
                             if (idx >= 0)
                             {
                                 var afterAnchor = idx + tn.Length;
-                                var indented = AutoIndentCode(tn, newCodeStr, relPath);
+                                var indented = await FormatSnippetAsync(tn, newCodeStr, relPath);
                                 newStr = sourceText[..afterAnchor] + "\n" + indented + sourceText[afterAnchor..];
                                 return (tn, newStr, false, null, false, null, true);
                             }
@@ -1991,12 +1899,12 @@ public partial class AgentController : ControllerBase
                         if (insertAfter)
                         {
                             var (fullStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr, relPath); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null, true); }
+                            if (fullStr != null) { var indented = await FormatSnippetAsync(fullStr, newCodeStr, relPath); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null, true); }
                         }
                         else
                         {
                             var (astOldStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr, relPath); return (astOldStr, indented, false, null, false, null, true); }
+                            if (astOldStr != null) { var indented = await FormatSnippetAsync(astOldStr, newCodeStr, relPath); return (astOldStr, indented, false, null, false, null, true); }
                         }
                     }
                 }
@@ -3922,26 +3830,11 @@ public partial class AgentController : ControllerBase
                         oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
                         newStr = AgentUtilities.NormalizeLineEndings(cleaned.Trim());
                         var fmtExt = Path.GetExtension(relPath).ToLowerInvariant();
-                        var prettierFormatted = false;
-                        if (CodeFormatterService.CanFormat(fmtExt))
-                        {
-                            var fmtNew = await CodeFormatterService.FormatAsync("dummy" + fmtExt, newStr, ct);
-                            if (!string.IsNullOrWhiteSpace(fmtNew) && fmtNew.Length > 10 && fmtNew != newStr)
-                            {
-                                newStr = AgentUtilities.NormalizeLineEndings(fmtNew.Trim());
-                                prettierFormatted = true;
-                            }
-                        }
                         if (fmtExt == ".css" || fmtExt == ".scss" || fmtExt == ".less")
                             newStr = LlmCssCleaner.Clean(newStr);
-                        if (!AgentUtilities.IsWhitespaceSignificant(relPath))
-                        {
-                            var jsLike = fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs";
-                            if (jsLike)
-                                newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
-                            if (!prettierFormatted)
-                                newStr = AutoIndentCode(planOldStr, newStr, relPath);
-                        }
+                        if (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                            newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
+                        newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
                         fromFormatC = true;
                         await EmitLog(emitSse, "info",
                             $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
@@ -4398,7 +4291,7 @@ public partial class AgentController : ControllerBase
                     }
                 }
             }
-            // Tree-sitter correction is handled in AutoIndentCode below
+            // Tree-sitter correction is handled in FormatSnippetAsync below
             if (replaced && string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr) &&
                             !(step.Change ?? "").Contains("remove", StringComparison.OrdinalIgnoreCase) &&
                             !(step.Change ?? "").Contains("delete", StringComparison.OrdinalIgnoreCase))
@@ -4411,25 +4304,6 @@ public partial class AgentController : ControllerBase
                 else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
                 if (stuckCount >= 2) goto RecordFailure;
                 continue;
-            }
-            if (fileExt == ".ts" && !string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
-            {
-                var changeLower = (step.Change ?? "").ToLowerInvariant();
-                if (changeLower.Contains("method") || changeLower.Contains("handler") || changeLower.Contains("function"))
-                {
-                    var hasMethodDecl = Regex.IsMatch(newStr, @"\b\w+\s*\([^)]*\)\s*(\{|=>)");
-                    if (!hasMethodDecl)
-                    {
-                        var err = "The step description asks to add methods/handlers, but the newString does not contain any method declarations (e.g., `methodName() { ... }`). " +
-                                  "You MUST include the full method implementation in newString.";
-                        await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
-                        history.Add((oldStr!, newStr ?? "", err));
-                        if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
-                        else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                        if (stuckCount >= 2) goto RecordFailure;
-                        continue;
-                    }
-                }
             }
             if (!string.IsNullOrWhiteSpace(oldStr) &&
                 AgentUtilities.NormalizeLineEndings(oldStr) == AgentUtilities.NormalizeLineEndings(newStr ?? ""))
@@ -4480,7 +4354,14 @@ public partial class AgentController : ControllerBase
                     oldStr!, newStr!, fileContent, relPath, step.Change);
                 if (wipeReason == null)
                 {
-                    wipeReason = AgentUtilities.DetectExcessiveBlankLines(newStr!);
+                    var repaired = AgentUtilities.CollapseExcessiveBlankLines(newStr!);
+                    if (repaired != newStr)
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"Auto-repaired excessive blank lines in {relPath} — collapsed {((newStr?.Split('\n').Length ?? 0) - repaired.Split('\n').Length)} blank lines",
+                            ct: ct);
+                        newStr = repaired;
+                    }
                 }
                 if (wipeReason == null)
                 {
@@ -11138,7 +11019,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         var sysPrompt =
             "Output ONLY the raw source code for ONE new method/function — nothing else. " +
-            "No JSON, no markdown fences, no explanation, no surrounding class/namespace. " +
+            "No JSON, no markdown fences, no explanation, no surrounding class/namespace, no comments, etc. " +
             "Include the full signature (attributes, access modifier, return type, parameters) and complete body. " +
             "If the method needs SQL table creation, put a CREATE TABLE IF NOT EXISTS statement as the FIRST " +
             "statement in the body, before any INSERT/UPDATE/SELECT — never as a separate method.";
@@ -11168,7 +11049,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.IsNullOrWhiteSpace(newCode)) return null;
         await EmitLog(emitSse, "info",
             $"  🎯 Forced FORMAT C insert after '{anchorName}' — model only supplied the method body ({newCode.Length} chars)", ct: ct);
-        var indented = AutoIndentCode(anchorBody, newCode, relPath);
+        var indented = await FormatSnippetAsync(anchorBody, newCode, relPath);
         var newStr = anchorBody + "\n\n" + indented;
         return (anchorBody, newStr, true);
     }
@@ -12101,7 +11982,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 $"Cross-reference the type definition in AUTO-ENRICHED CONTEXT and use the EXACT property names " +
                 $"shown there (e.g. CalendarEntry uses 'Type' and 'Note', not 'Title' and 'Description').", 2);
         }
-        if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10 && !normNew.Contains(normOld))
+        if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10 && !normNew.Contains(normOld) &&
+            normNew.Length <= normOld.Length * 1.3)
         {
             var strippedOld = AgentUtilities.StripLineLeadingWhitespace(normOld);
             var strippedOldContent = AgentUtilities.StripLineLeadingWhitespace(normOldContent);

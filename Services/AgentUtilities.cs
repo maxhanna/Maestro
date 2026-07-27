@@ -443,74 +443,6 @@ public static class AgentUtilities
             ? output[..maxCharsPerSection] + "\n    // ... [truncated]"
             : output;
     }
-    public static string FixMultilineParenIndentation(string code)
-    {
-        var lines = code.Split('\n');
-        if (lines.Length <= 2) return code;
-        var indentUnit = "    ";
-        var changed = false;
-        for (var i = 0; i < lines.Length; i++)
-        {
-            var line = lines[i];
-            var trimmed = line.TrimStart();
-            if (trimmed.Length == 0) continue;
-            var lastChar = trimmed[^1];
-            if (lastChar == '(' || lastChar == '[' || lastChar == '{')
-            {
-                var openChar = lastChar;
-                var closeChar = openChar == '(' ? ')' : openChar == '[' ? ']' : '}';
-                var depth = 0;
-                var closedOnSameLine = false;
-                foreach (var c in trimmed)
-                {
-                    if (c == openChar) depth++;
-                    else if (c == closeChar) depth--;
-                    if (depth == 0 && c == closeChar) { closedOnSameLine = true; break; }
-                }
-                if (!closedOnSameLine)
-                {
-                    var currentIndent = line.Substring(0, line.Length - trimmed.Length);
-                    var nextIndent = currentIndent + indentUnit;
-                    var blockDepth = 1;
-                    for (var j = i + 1; j < lines.Length; j++)
-                    {
-                        var innerLine = lines[j];
-                        var innerTrimmed = innerLine.TrimStart();
-                        if (string.IsNullOrWhiteSpace(innerLine))
-                        {
-                            continue;
-                        }
-                        var innerCurrentIndent = innerLine.Substring(0, innerLine.Length - innerTrimmed.Length);
-                        var startsWithAnyClose = innerTrimmed.StartsWith("}") || innerTrimmed.StartsWith("]") || innerTrimmed.StartsWith(")");
-                        var isClosingLine = innerTrimmed.StartsWith(closeChar);
-                        foreach (var c in innerTrimmed)
-                        {
-                            if (c == openChar) blockDepth++;
-                            else if (c == closeChar) blockDepth--;
-                        }
-                        if (isClosingLine && blockDepth <= 0)
-                        {
-                            if (innerCurrentIndent.Length != currentIndent.Length)
-                            {
-                                lines[j] = currentIndent + innerTrimmed;
-                                changed = true;
-                            }
-                            break;
-                        }
-                        else if (!startsWithAnyClose)
-                        {
-                            if (innerCurrentIndent.Length < nextIndent.Length)
-                            {
-                                lines[j] = nextIndent + innerTrimmed;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return changed ? string.Join("\n", lines) : code;
-    }
     private static HashSet<string> ExtractQuotedSnippets(string text)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1295,7 +1227,6 @@ public static class AgentUtilities
                 using var fallbackDoc = JsonDocument.Parse(fallbackCandidate, parseOpts);
                 var fallbackRoot = fallbackDoc.RootElement;
                 if (fallbackRoot.ValueKind != JsonValueKind.Object) return empty;
-                // Fallback for a single well-formed JSON object.
                 var readyFallback = fallbackRoot.TryGetProperty("ready", out var rEl2) && rEl2.ValueKind == JsonValueKind.True && rEl2.GetBoolean();
                 var filesFallback = new List<string>();
                 if (fallbackRoot.TryGetProperty("filesToRead", out var fArr2) && fArr2.ValueKind == JsonValueKind.Array)
@@ -1880,9 +1811,6 @@ public static class AgentUtilities
                 .Where(kw => kw.Length >= 5)
                 .OrderByDescending(kw => kw.Length)
                 .ToList();
-            // Extract file-type-aware anchor names from the change description.
-            // Each returns a list of (name, bonusMultiplier) pairs — higher multiplier
-            // means the anchor is a strong structural identifier for that file type.
             var anchors = ExtractAnchorsByFileType(changeDesc, ext);
             if (keywords.Count > 0 || anchors.Count > 0)
             {
@@ -2544,101 +2472,6 @@ public static class AgentUtilities
         if (standardMethods.Contains(name)) return true;
         return false;
     }
-    public static string ReindentByBraceDepth(string code, string baseIndent, string indentUnit = "  ")
-    {
-        var lines = code.Split('\n');
-        var result = new List<string>();
-        var depth = 0;
-        var inSQ = false;
-        var inDQ = false;
-        var inTmpl = false;
-        var inVerbatim = false;
-        var inLineComment = false;
-        var inBlockComment = false;
-        foreach (var line in lines)
-        {
-            var trimmed = line.TrimStart();
-            if (string.IsNullOrWhiteSpace(trimmed))
-            {
-                result.Add(line);
-                continue;
-            }
-            if (inVerbatim || inBlockComment)
-            {
-                result.Add(line);
-            }
-            else
-            {
-                var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
-                if (effectiveDepth < 0) effectiveDepth = 0;
-                var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, effectiveDepth));
-                result.Add(indent + trimmed);
-            }
-            for (var i = 0; i < trimmed.Length; i++)
-            {
-                var c = trimmed[i];
-                var p = i > 0 ? trimmed[i - 1] : '\0';
-                if (inLineComment) break;
-                if (inBlockComment)
-                {
-                    if (c == '*' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
-                    {
-                        inBlockComment = false;
-                        i++;
-                    }
-                    continue;
-                }
-                if (inVerbatim)
-                {
-                    if (c == '"')
-                    {
-                        if (i + 1 < trimmed.Length && trimmed[i + 1] == '"')
-                        {
-                            i++;
-                        }
-                        else
-                        {
-                            inVerbatim = false;
-                        }
-                    }
-                    continue;
-                }
-                if (inSQ || inDQ || inTmpl)
-                {
-                    if (c == '\\' && (inDQ || inTmpl)) { i++; continue; }
-                    if (c == '\'' && inSQ) inSQ = false;
-                    else if (c == '"' && inDQ) inDQ = false;
-                    else if (c == '`' && inTmpl) inTmpl = false;
-                    continue;
-                }
-                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
-                {
-                    inLineComment = true;
-                    break;
-                }
-                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '*')
-                {
-                    inBlockComment = true;
-                    i++;
-                    continue;
-                }
-                if (c == '@' && i + 1 < trimmed.Length && trimmed[i + 1] == '"')
-                {
-                    inVerbatim = true;
-                    i++;
-                    continue;
-                }
-                if (c == '\'') { inSQ = true; continue; }
-                if (c == '"') { inDQ = true; continue; }
-                if (c == '`') { inTmpl = true; continue; }
-                if (c == '{') depth++;
-                else if (c == '}') depth--;
-            }
-            inLineComment = false;
-            if (depth < 0) depth = 0;
-        }
-        return string.Join("\n", result);
-    }
     public static string? DetectHallucinatedProperties(string oldStr, string newStr, string fileContent, string relPath)
     {
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -2980,13 +2813,22 @@ public static class AgentUtilities
     }
     public static string? DetectExcessiveBlankLines(string newStr)
     {
-        if (string.IsNullOrWhiteSpace(newStr)) return null;
+        var repaired = CollapseExcessiveBlankLines(newStr);
+        if (repaired == newStr) return null;
         var lines = newStr.Split('\n');
-        if (lines.Length < 6) return null;
-        var codeLines = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
         var blankLines = lines.Where(l => string.IsNullOrWhiteSpace(l)).ToList();
-        if (codeLines.Count < 3) return null;
-        // Count the alternating pattern: code line → blank line → code line
+        var codeLines = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        return $"EXCESSIVE BLANK LINES — newString has a blank line between nearly every code line " +
+               $"({blankLines.Count} blank lines for {codeLines.Count} code lines). " +
+               "Remove the spurious blank lines.";
+    }
+    public static string CollapseExcessiveBlankLines(string newStr)
+    {
+        if (string.IsNullOrWhiteSpace(newStr)) return newStr;
+        var lines = newStr.Split('\n');
+        if (lines.Length < 6) return newStr;
+        var codeLines = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        if (codeLines.Count < 3) return newStr;
         var alternating = 0;
         for (var i = 0; i < lines.Length - 1; i++)
         {
@@ -2994,15 +2836,26 @@ public static class AgentUtilities
                 string.IsNullOrWhiteSpace(lines[i + 1]))
                 alternating++;
         }
-        // If ≥60% of code lines are followed by a blank line, it's the spurious pattern
-        if (alternating >= codeLines.Count * 0.6)
+        if (alternating < codeLines.Count * 0.6) return newStr;
+
+        var result = new List<string>();
+        var lastWasBlank = false;
+        for (var i = 0; i < lines.Length; i++)
         {
-            return $"EXCESSIVE BLANK LINES — newString has a blank line between nearly every code line " +
-                   $"({blankLines.Count} blank lines for {codeLines.Count} code lines, {alternating} alternating). " +
-                   "Remove the spurious blank lines. Statements should be on consecutive lines with normal spacing " +
-                   "(one blank line between logical sections at most, not between every single line).";
+            var isBlank = string.IsNullOrWhiteSpace(lines[i]);
+            if (isBlank && lastWasBlank) continue;
+            if (isBlank)
+            {
+                lastWasBlank = true;
+                result.Add(lines[i]);
+            }
+            else
+            {
+                lastWasBlank = false;
+                result.Add(lines[i]);
+            }
         }
-        return null;
+        return string.Join("\n", result);
     }
     public static List<string> ExtractDisambiguationKeywords(string? changeDesc)
     {
