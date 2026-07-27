@@ -9,3 +9,9 @@ weaverconfig.json
 *.trx
 **/TestResultsCoverage/
 *.cobertura.xml
+
+# Integration test scratch project directories (fake orchestrator runs write real
+# files/commands here; should default to the OS temp dir, but ignore any repo-local
+# fallback used for debugging a failed run)
+**/.scratch/
+tests/**/.fixtures/

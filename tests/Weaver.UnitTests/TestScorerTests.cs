@@ -1,5 +1,6 @@
 using Xunit;
 using Weaver;
+using Weaver.Controllers;
 
 namespace Weaver.UnitTests;
 
@@ -298,6 +299,43 @@ public class TestScorerTests
 
         Assert.Null(r.Gates.FormattingClean);
         Assert.False(r.PerfectPass);
+    }
+}
+
+public class AgentControllerTagStepOriginTests
+{
+    static Dictionary<string, object?> Step(string origin) =>
+        new() { ["type"] = "edit", ["status"] = "done", ["origin"] = origin };
+
+    static Dictionary<string, object?> UntaggedStep() =>
+        new() { ["type"] = "edit", ["status"] = "done" };
+
+    [Fact]
+    public void TagStepOrigin_ChainedPipelineStage_TagsPreviouslyUntaggedSteps()
+    {
+        // Mirrors the CommandExecution -> UnifiedPipeline chaining branch in
+        // AgentController: chainResult.steps are unplanned (the second stage only
+        // runs because the first stage's commands produced files), so every step
+        // that came back untagged must be marked "replan".
+        var chainSteps = new List<object> { UntaggedStep(), UntaggedStep() };
+
+        AgentController.TagStepOrigin(chainSteps, 0, "replan");
+
+        Assert.All(chainSteps, s => Assert.Equal("replan", ((Dictionary<string, object?>)s)["origin"]));
+    }
+
+    [Fact]
+    public void TagStepOrigin_ChainedPipelineStage_PreservesInternalRepairTag()
+    {
+        // If UnifiedPipeline already had to repair a step internally before
+        // returning, that more specific "repair" tag must survive the outer
+        // "replan" stamp applied at the chaining call site.
+        var chainSteps = new List<object> { UntaggedStep(), Step("repair") };
+
+        AgentController.TagStepOrigin(chainSteps, 0, "replan");
+
+        var tags = chainSteps.Select(s => (string?)((Dictionary<string, object?>)s)["origin"]).ToList();
+        Assert.Equal(new[] { "replan", "repair" }, tags);
     }
 }
 

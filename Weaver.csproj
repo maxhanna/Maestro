@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Weaver.UnitTests" />
+    <InternalsVisibleTo Include="Weaver.IntegrationTests" />
   </ItemGroup>
 
   <ItemGroup>

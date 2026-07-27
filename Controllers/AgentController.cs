@@ -8518,7 +8518,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     //  ORCHESTRATOR
     // ═══════════════════════════════════════════════════════════════════════
 
-    private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> Orchestrate(
+    // internal (not private) so integration tests can drive it directly, bypassing
+    // the HTTP controller action + SSE plumbing.
+    internal async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> Orchestrate(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,
@@ -8740,8 +8742,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         attachedFiles: combinedAttachments, skipContextReview: skipContextReview,
                         steeringContext: $"Previous stage created files: {string.Join(", ", createdFiles)}. Task: {prompt}",
                         cardId: cardId);
+                    // These steps were never part of the plan approved before execution
+                    // started — the orchestrator only decided to run a second pipeline
+                    // stage after seeing what the first stage's commands produced. That's
+                    // a course change, so it disqualifies noReplan the same as an explicit
+                    // replan/repair. TagStepOrigin only stamps untagged steps, so any
+                    // "repair" tag UnifiedPipeline already set internally is preserved.
+                    TagStepOrigin(chainResult.steps, 0, "replan");
                     allSteps.AddRange(chainResult.steps);
-                    plan = chainResult.plan ?? plan;
+                    // Combine plan step counts across both stages instead of discarding
+                    // the first stage's plan — otherwise exactStepCount only sees the
+                    // second stage's step count.
+                    if (chainResult.plan != null)
+                    {
+                        if (plan != null) plan.Plan.AddRange(chainResult.plan.Plan);
+                        else plan = chainResult.plan;
+                    }
                 }
             }
         }
@@ -9493,7 +9509,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     //  UNIFIED PIPELINE  (discover → plan → execute)
     // ═══════════════════════════════════════════════════════════════════════
 
-    private async Task<(List<object> steps, AgentPlan plan)> UnifiedPipeline(
+    // internal virtual so integration tests can substitute a scripted result for
+    // this pipeline's own multi-phase LLM machinery (discovery, planning convergence,
+    // validation, pre-audit, edit resolution) via a TestableAgentController override,
+    // while still exercising the real Orchestrate/CommandExecutionPipeline/chaining
+    // code around it.
+    internal virtual async Task<(List<object> steps, AgentPlan plan)> UnifiedPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         bool skipContextReview = false,
@@ -12043,7 +12064,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// appended directly into a shared list; call with a dedicated list directly
     /// when the results were accumulated separately before being merged in.
     /// </summary>
-    private static void TagStepOrigin(List<object> steps, int fromIndex, string origin)
+    internal static void TagStepOrigin(List<object> steps, int fromIndex, string origin)
     {
         for (var i = fromIndex; i < steps.Count; i++)
         {
