@@ -4350,8 +4350,7 @@ public partial class AgentController : ControllerBase
             }
             if (!string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
             {
-                var wipeReason = DetectFunctionalityWipe(
-                    oldStr!, newStr!, fileContent, relPath, step.Change);
+                string? wipeReason = null;
                 if (wipeReason == null)
                 {
                     var repaired = AgentUtilities.CollapseExcessiveBlankLines(newStr!);
@@ -6500,91 +6499,7 @@ public partial class AgentController : ControllerBase
                "(INT, VARCHAR, TEXT, TIMESTAMP, etc.). Place the CREATE TABLE strategically at the beginning of the new code block, " +
                "before any INSERT/UPDATE that depends on it. Do NOT emit INSERT/UPDATE for a table that has not been created yet.";
     }
-    private static string? DetectFunctionalityWipe(
-        string oldStr, string newStr, string fileContent, string relPath, string? stepChange = null)
-    {
-        if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(newStr))
-            return null;
-        var oldLines = oldStr.Split('\n');
-        string NormalizeForComparison(string line)
-        {
-            if (string.IsNullOrWhiteSpace(line)) return "";
-            return Regex.Replace(line.Trim(), @"\s+", " ").Trim();
-        }
-        var newLinesSet = new HashSet<string>(
-            newStr.Split('\n').Select(l => NormalizeForComparison(l)),
-            StringComparer.Ordinal);
-        var cacheLinePatterns = new[]
-        {
-        new Regex(@"\.has\s*\(", RegexOptions.Compiled),
-        new Regex(@"\.get\s*\(", RegexOptions.Compiled),
-        new Regex(@"\.set\s*\(", RegexOptions.Compiled),
-        new Regex(@"\.delete\s*\(", RegexOptions.Compiled),
-        new Regex(@"return\s+this\.\w+\s*;", RegexOptions.Compiled),
-        new Regex(@"if\s*\(\s*this\.\w+", RegexOptions.Compiled),
-        new Regex(@"if\s*\(\s*!\s*this\.\w+", RegexOptions.Compiled),
-        new Regex(@"this\.\w+\s*=\s*null\s*;", RegexOptions.Compiled),
-        new Regex(@"this\.\w+\s*=\s*undefined\s*;", RegexOptions.Compiled),
-        new Regex(@"this\.\w+\s*=\s*default\s*;", RegexOptions.Compiled),
-        new Regex(@"_\w+\s*=\s*null\s*;", RegexOptions.Compiled),
-    };
-        var guardLinePatterns = new[]
-        {
-        cacheLinePatterns,
-        new[]
-        {
-            new Regex(@"if\s*\([^)]*\.length\s*[<>=!]", RegexOptions.Compiled),
-            new Regex(@"if\s*\([^)]*displayRadio", RegexOptions.Compiled),
-            new Regex(@"if\s*\(\s*!\s*\w+\s*&&", RegexOptions.Compiled),
-        }
-    }.SelectMany(x => x).ToArray();
-        var lostCacheLines = new List<string>();
-        foreach (var line in oldLines)
-        {
-            var trimmed = line.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed)) continue;
-            if (trimmed == "{" || trimmed == "}" || trimmed == "});") continue;
-            var isCacheLine = false;
-            foreach (var pat in guardLinePatterns)
-            {
-                if (pat.IsMatch(trimmed)) { isCacheLine = true; break; }
-            }
-            if (!isCacheLine) continue;
-            if (newStr.Contains("// Render explosion mesh here") ||
-                newStr.Contains("// TODO: implement") ||
-                newStr.Contains("// ... existing code ..."))
-            {
-                return "PLACEHOLDER DETECTED — newString replaced actual implementation logic with a placeholder comment. " +
-                       "You MUST copy the exact implementation from oldString and modify it, not replace it with a stub.";
-            }
-            var normalizedOld = NormalizeForComparison(trimmed);
-            if (newLinesSet.Contains(normalizedOld)) continue;
-            // Check if the same method call exists in newStr with different variable name
-            var methodCall = Regex.Match(trimmed, @"(\w+(?:\.\w+)+)\s*\.\s*(has|get|set|delete)\s*\(");
-            if (methodCall.Success)
-            {
-                var obj = methodCall.Groups[1].Value;
-                var method = methodCall.Groups[2].Value;
-                var searchPattern = $@"{Regex.Escape(obj)}\s*\.\s*{Regex.Escape(method)}\s*\(";
-                if (Regex.IsMatch(newStr, searchPattern, RegexOptions.IgnoreCase))
-                    continue; // Method call preserved (variable may have been renamed)
-            }
-            lostCacheLines.Add(trimmed);
-        }
-            if (lostCacheLines.Count > 0)
-        {
-            var preview = string.Join("; ", lostCacheLines.Take(3));
-            if (lostCacheLines.Count > 3) preview += $"; (+{lostCacheLines.Count - 3} more)";
-            if (lostCacheLines.All(l => Regex.IsMatch(l, @"\w+\.\s*(has|get|set|delete)\s*\(")))
-                return $"CACHE-STATE LOSS — oldString contained cache/guard line(s) identified by method call that are MISSING from newString: [{preview}]. " +
-                       "These lines protect against redundant work or null derefs. You may rename variables but the method call (object.method) must remain. " +
-                       "Change only the VALUE being passed, not the structure.";
-            return $"CACHE-STATE LOSS — oldString contained cache/guard line(s) that are MISSING from newString: [{preview}]. " +
-                   "These lines protect against redundant work or null derefs. PRESERVE them in newString verbatim " +
-                   "(only the property values you actually need to change should be edited, not the guard logic).";
-        }
-        return null;
-    }
+
     private static string? CheckMethodExistsInFile(string fileContent, string newStr)
     {
         var fnMatch = Regex.Match(newStr, @"(?:vm\.)?(\w+)\s*(?:[:=])\s*function\s*\(", RegexOptions.IgnoreCase);
