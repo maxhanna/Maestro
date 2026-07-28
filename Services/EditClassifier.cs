@@ -33,10 +33,10 @@ public static class EditClassifier
         var (_, supportsFormatC, _) = AgentUtilities.GetLanguageProfile(ext);
 
         if (IsDeletion(change))           return EditStrategy.DeleteLines;
+        if (IsClassPropertyFill(change))
+            return ext == ".cs" ? EditStrategy.FillClassBody : EditStrategy.AnchoredEdit;
         if (supportsFormatC && IsNewMethodOrEndpoint(change, step.TargetSymbol))
                                            return EditStrategy.InsertMethod;
-        if (ext == ".cs" && IsClassPropertyFill(change))
-                                           return EditStrategy.FillClassBody;
         if (supportsFormatC && IsFullMethodRewrite(change, step.TargetSymbol))
                                            return EditStrategy.ReplaceMethod;
 

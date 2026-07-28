@@ -1579,6 +1579,42 @@ public static class AgentUtilities
         };
         return !specialMarkers.Contains(path);
     }
+    public static bool LooksLikeShellCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return false;
+        var trimmed = command.Trim();
+        if (trimmed.StartsWith("```", StringComparison.Ordinal)) return false;
+        if (Regex.IsMatch(trimmed, @"^\s*(create|add|modify|update|edit|implement|explore|examine|inspect|review|understand|read)\s+(?:a|an|the|basic|template|file|component|method|structure)\b",
+                RegexOptions.IgnoreCase))
+            return false;
+
+        var firstSegment = Regex.Split(trimmed, @"\s*(?:;|&&|\|\|)\s*")
+            .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s))?.Trim() ?? "";
+        if (firstSegment.Length == 0) return false;
+        var firstToken = Regex.Match(firstSegment, @"^(?:&\s*)?(?:\.\\|\.\/)?[A-Za-z0-9_.:\\/\-]+").Value;
+        if (string.IsNullOrWhiteSpace(firstToken)) return false;
+        var exe = Path.GetFileName(firstToken).ToLowerInvariant();
+
+        var knownCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "cd", "dir", "ls", "pwd", "echo", "type", "copy", "xcopy", "robocopy",
+            "dotnet", "npm", "npx", "pnpm", "yarn", "node", "python", "py",
+            "git", "gh", "docker", "docker-compose", "kubectl", "ng", "vite",
+            "tsc", "eslint", "prettier", "jest", "vitest", "playwright",
+            "rg", "grep", "findstr", "curl", "wget", "powershell", "pwsh",
+            "cmd", "msbuild", "nuget", "Invoke-RestMethod", "Invoke-WebRequest",
+            "Get-ChildItem", "Get-Content", "Set-Location", "New-Item", "Remove-Item",
+            "Move-Item", "Copy-Item", "Start-Process"
+        };
+
+        return knownCommands.Contains(exe) ||
+               exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+               exe.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
+               exe.EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
+               exe.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase) ||
+               firstToken.StartsWith(".\\", StringComparison.Ordinal) ||
+               firstToken.StartsWith("./", StringComparison.Ordinal);
+    }
     public static List<string> ExtractJsonBlocks(string text)
     {
         var blocks = new List<string>();
@@ -2893,7 +2929,9 @@ public static class AgentUtilities
     public static string? ExtractTargetSymbolFromChange(string change)
     {
         if (string.IsNullOrWhiteSpace(change)) return null;
-        var m = Regex.Match(change, @"\b(?:class|struct|interface|record)\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
+        var m = Regex.Match(change, @"\b([A-Za-z_]\w*)\s*\(", RegexOptions.IgnoreCase);
+        if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;
+        m = Regex.Match(change, @"\b(?:class|struct|interface|record)\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
         if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;
         m = Regex.Match(change, @"\b([A-Z]\w*(?:DTO|Dto|Model|Request|Response|Controller|Service))\b");
         if (m.Success) return m.Groups[1].Value;

@@ -310,6 +310,58 @@ public class PipelineTests
     }
 
     [Theory]
+    [InlineData("dotnet test", true)]
+    [InlineData("cd maxhanna.client; npx ng g c recipe-menu --skip-tests", true)]
+    [InlineData("Create a basic template structure that shows how we'll implement both components", false)]
+    [InlineData("Explore app-title-bar.component.ts file", false)]
+    public void LooksLikeShellCommand_RejectsPlanningProse(string command, bool expected)
+    {
+        Assert.Equal(expected, AgentUtilities.LooksLikeShellCommand(command));
+    }
+
+    [Fact]
+    public void EditClassifier_TypeScriptPropertyAddition_UsesAnchoredEdit()
+    {
+        var step = new PlanStep
+        {
+            File = "src/app/recipe/recipe.component.ts",
+            Change = "Add isMenuPanelOpen property declaration after the last existing property",
+            TargetSymbol = "isMenuPanelOpen"
+        };
+
+        var result = EditClassifier.Classify(step, fileExists: true, ext: ".ts");
+
+        Assert.Equal(EditStrategy.AnchoredEdit, result);
+    }
+
+    [Fact]
+    public void EditStrategyResolver_InsertMethod_ResolvesAnchorWithoutReplacementIntent()
+    {
+        var source = """
+        export class RecipeComponent {
+          ngOnInit(): void {
+            this.loadRecipes();
+          }
+
+          loadRecipes(): void {
+          }
+        }
+        """;
+        var intent = new EditIntent(EditIntentKind.InsertNearSymbol, "ngOnInit", "method");
+
+        var decision = EditStrategyResolver.Decide(
+            "src/app/recipe/recipe.component.ts",
+            fileExists: true,
+            fileContent: source,
+            changeDescription: "Add showMenuPanel() method after ngOnInit()",
+            intent);
+
+        Assert.Equal(EditStrategy.InsertMethod, decision.Strategy);
+        Assert.Equal("ngOnInit", decision.TargetName);
+        Assert.Contains("ngOnInit", decision.ResolvedOldStr);
+    }
+
+    [Theory]
     [InlineData("move file.txt to sub/file.txt", "file.txt", "sub/file.txt")]
     [InlineData("rename current.cs → renamed.cs", "current.cs", "renamed.cs")]
     public void ExtractTargetPath_HandlesArrowsAndTo(string desc, string current, string expected)

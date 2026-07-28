@@ -1232,13 +1232,13 @@ public partial class AgentController : ControllerBase
                 {
                     newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
                     newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
-                    if (AgentUtilities.IsPlaceholderContent(newCodeStr))
-                    {
-                        await EmitLog(emitSse, "warn",
-                            $"newCode rejected — contains placeholder/generic names ('myNewMethod', 'MyMethod', '// body', etc.). You MUST write real code with the actual method name and body from the task, not templates.", ct: ct);
-                        return (null, null, false, null, false,
-                            $"PLACEHOLDER REJECTED: newCode contains placeholder names like 'myNewMethod' or 'MyMethod'. Write REAL code using the actual symbol name from the task. The method must have the correct name and a real implementation body.", false);
-                    }
+                    // if (AgentUtilities.IsPlaceholderContent(newCodeStr))
+                    // {
+                    //     await EmitLog(emitSse, "warn",
+                    //         $"newCode rejected — contains placeholder/generic names ('myNewMethod', 'MyMethod', '// body', etc.). You MUST write real code with the actual method name and body from the task, not templates.", ct: ct);
+                    //     return (null, null, false, null, false,
+                    //         $"PLACEHOLDER REJECTED: newCode contains placeholder names like 'myNewMethod' or 'MyMethod'. Write REAL code using the actual symbol name from the task. The method must have the correct name and a real implementation body.", false);
+                    // }
                     var hasReplace = jRoot.TryGetProperty("replace", out var rpEl);
                     var replaceSection = hasReplace && rpEl.GetBoolean();
                     if (string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase))
@@ -2765,7 +2765,7 @@ public partial class AgentController : ControllerBase
                 {
                     var content = await System.IO.File.ReadAllTextAsync(sf, Encoding.UTF8, ct);
                     ctx.AppendLine($"### {rel} (deterministic service injection)");
-                    ctx.AppendLine("```typescript");
+                    ctx.AppendLine("```typescript ");
                     ctx.AppendLine(content);
                     ctx.AppendLine("```");
                     ctx.AppendLine();
@@ -3688,7 +3688,8 @@ public partial class AgentController : ControllerBase
         {
             await EmitLog(emitSse, "info",
                 $"  🎯 AST-resolved '{decidedEditStrategy.TargetName}' ({decidedEditStrategy.ResolvedOldStr.Split('\n').Length}L) via EditStrategyResolver", decidedEditStrategy, ct: ct);
-            step.OldString = decidedEditStrategy.ResolvedOldStr;
+            if (decidedEditStrategy.Strategy == EditStrategy.ReplaceMethod)
+                step.OldString = decidedEditStrategy.ResolvedOldStr;
             explorationContext = $"### TARGET FILE: {relPath}\n\n```\n{decidedEditStrategy.ResolvedOldStr}\n```" +
                 (!string.IsNullOrWhiteSpace(explorationContext) ? "\n\n" + explorationContext : "");
         }
@@ -3739,12 +3740,10 @@ public partial class AgentController : ControllerBase
         if (System.IO.File.Exists(fullPath))
             preEditContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
         const int MaxAttempts = 8;
-        var forcedInsert = await TryForcedMethodInsertAsync(step, fullPath, relPath, explorationContext, emitSse, ct);
-        if (forcedInsert.HasValue && !string.IsNullOrWhiteSpace(forcedInsert.Value.newStr))
-        {
-            planOldStr = forcedInsert.Value.oldStr;
-            planNewStr = forcedInsert.Value.newStr;
-        }
+        // TryForcedMethodInsertAsync was removed — it had its own raw-code LLM call that
+        // bypassed FORMAT C entirely, producing unvalidated stitched output.
+        // Method insertions now go through ResolveEditForStep with editStrategy=InsertMethod
+        // which uses FORMAT C insertAfter, validates output, and has full retry/escalation.
         if (System.IO.File.Exists(fullPath))
         {
             var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
@@ -3813,6 +3812,14 @@ public partial class AgentController : ControllerBase
             bool fullFile = false, alreadyDone = false;
             string? fullContent = null;
             bool fromFormatC = false;
+            if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
+            {
+                if (decidedEditStrategy.Strategy == EditStrategy.InsertMethod)
+                {
+                    planOldStr = null;
+                    planNewStr = null;
+                }
+            }
             if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
             {
                 planOldTried = true;
@@ -4134,9 +4141,15 @@ public partial class AgentController : ControllerBase
                     }
                     else
                     {
-                        replaced = false;
-                        newContent = fileContent;
-                        matchError = "FORMAT C oldString not found in file (direct match failed)";
+                        var (safeReplaced, safeContent, safeError, safeSnippet) =
+                            TryReplaceSafe(fileContent, oldStr, newStr ?? string.Empty, step.LineNumber, step.Change);
+                        replaced = safeReplaced;
+                        newContent = safeContent;
+                        matchError = safeReplaced
+                            ? null
+                            : "FORMAT C oldString not found in file (direct match failed)" +
+                              (string.IsNullOrWhiteSpace(safeError) ? "" : $"; safe matcher: {safeError}");
+                        snippet = safeSnippet;
                     }
                 }
                 else if (!string.IsNullOrWhiteSpace(oldStr) && !fromFormatC)
@@ -5106,6 +5119,7 @@ public partial class AgentController : ControllerBase
                             {
                                 File = targetFile,
                                 Change = $"Add implementation of {missingName}() method referenced in {System.IO.Path.GetFileName(relPath)}",
+                                TargetSymbol = missingName,
                                 LineNumber = 0,
                                 OldString = null,
                                 NewString = null,
@@ -7554,11 +7568,49 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var change = stepEl.TryGetProperty("change", out var cEl) ? cEl.GetString() : null;
             var targetSymbol = stepEl.TryGetProperty("targetSymbol", out var tsEl) && tsEl.ValueKind == JsonValueKind.String ? tsEl.GetString() : null;
             var line = stepEl.TryGetProperty("line", out var lEl) && lEl.ValueKind == JsonValueKind.Number ? lEl.GetInt32() : 0;
+            static string? ReadPlannerString(JsonElement el)
+            {
+                if (el.ValueKind == JsonValueKind.String)
+                    return AgentUtilities.UnescapeString(el.GetString() ?? "");
+                if (el.ValueKind == JsonValueKind.Array)
+                {
+                    var lines = new List<string>();
+                    foreach (var item in el.EnumerateArray())
+                        if (item.ValueKind == JsonValueKind.String)
+                            lines.Add(AgentUtilities.UnescapeString(item.GetString() ?? ""));
+                    return lines.Count > 0 ? string.Join("\n", lines) : null;
+                }
+                return null;
+            }
+            var oldString = stepEl.TryGetProperty("oldString", out var osEl) ? ReadPlannerString(osEl) : null;
+            var newString = stepEl.TryGetProperty("newString", out var nsEl) ? ReadPlannerString(nsEl) : null;
             var refFiles = new List<string>();
             if (stepEl.TryGetProperty("referenceFiles", out var rfArr) && rfArr.ValueKind == JsonValueKind.Array)
                 foreach (var rf in rfArr.EnumerateArray())
                     if (rf.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(rf.GetString()))
                         refFiles.Add(rf.GetString()!);
+            var edits = new List<EditPair>();
+            if (stepEl.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var editEl in editsEl.EnumerateArray())
+                {
+                    if (editEl.ValueKind != JsonValueKind.Object) continue;
+                    var editOld = editEl.TryGetProperty("oldString", out var eosEl) ? ReadPlannerString(eosEl) : null;
+                    var editNew = editEl.TryGetProperty("newString", out var ensEl) ? ReadPlannerString(ensEl) : null;
+                    var editLine = editEl.TryGetProperty("line", out var elnEl) && elnEl.ValueKind == JsonValueKind.Number
+                        ? elnEl.GetInt32()
+                        : 0;
+                    if (!string.IsNullOrWhiteSpace(editOld) || editNew != null)
+                    {
+                        edits.Add(new EditPair
+                        {
+                            OldString = editOld ?? "",
+                            NewString = editNew ?? "",
+                            LineNumber = editLine
+                        });
+                    }
+                }
+            }
             if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change))
                 return new IncrementalStepProposal { PlanComplete = false, Thinking = thinking };
             var justification = root.TryGetProperty("justification", out var jEl) ? jEl.GetString() : null;
@@ -7574,7 +7626,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     TargetSymbol = targetSymbol,
                     Priority = 1,
                     LineNumber = line,
-                    ReferenceFiles = refFiles
+                    OldString = oldString,
+                    NewString = newString,
+                    ReferenceFiles = refFiles,
+                    Edits = edits.Count > 0 ? edits : null
                 }
             };
         }
@@ -7607,6 +7662,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return (false, "_create_file step content is too short (" + step.NewString.Trim().Length + " chars) — provide meaningful file content.");
             if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase)))
                 return (false, "A _create_file step is already committed — creating additional new files is likely unnecessary. Target the existing file instead.");
+        }
+        if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
+            !AgentUtilities.LooksLikeShellCommand(step.Change))
+        {
+            return (false, "_command step is not an executable shell command. Use _command only for real terminal commands such as `dotnet test`, `npm install`, or `cd app; npx ng g c name`. Put planning notes in the thinking field, not in a command step.");
+        }
+        if (string.Equals(step.File, "_show", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(step.File, "_display", StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, $"{step.File} is not an actionable planning/edit step. If more context is needed, use _explore for a specific file; otherwise propose the concrete edit step.");
         }
         // Reject after too many edits to the same file+symbol (hallucination loop detection)
         var sameTargetCount = planSoFar.Count(s =>
@@ -7652,9 +7717,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 (p.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
                  p.File.Equals("_command", StringComparison.OrdinalIgnoreCase)) &&
                 (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
-            if (isModifyVerb && !fileExists && !willBeCreatedEarlier)
-                return (false, $"Says '{changeLower.Split(' ')[0]}' but {step.File} does not exist yet and no earlier " +
-                                "step creates it. Add a creation step first, or rephrase as a creation ('Add ...').");
+            // if (isModifyVerb && !fileExists && !willBeCreatedEarlier)
+            //     return (false, $"Says '{changeLower.Split(' ')[0]}' but {step.File} does not exist yet and no earlier " +
+            //                     "step creates it. Add a creation step first, or rephrase as a creation ('Add ...').");
             if (fileExists)
             {
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
@@ -8361,28 +8426,31 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (!hadFailure)
                     {
                         await EmitLog(emitSse, "warn",
-                            $"Step {planSoFar.Count} produced no code changes — removing from plan and halting execution. " +
-                            "A step must actually modify, create, or delete code to count as complete.", ct: ct);
+                            $"Step {planSoFar.Count} produced no code changes — skipping and continuing to next step.", ct: ct);
+                        // Remove the no-op step from planSoFar so the planner can propose something else.
+                        // Do NOT break — a no-op is not a fatal failure; keep planning.
+                        if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                        continue;
                     }
                     else
                     {
                         await EmitLog(emitSse, "warn",
                             $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
                             "so post-execution verification can assess what genuinely remains.", ct: ct);
+                        if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                        await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                            summary: $"Execution halted at step {planSoFar.Count + 1} — step failed", score: 0,
+                            append: false);
+                        if (emitSse)
+                            await SendSse(Response, "plan-halted", new
+                            {
+                                reason = "Step produced an error",
+                                failedStep = stepToRun?.File,
+                                failedChange = stepToRun?.Change,
+                                remainingSteps = 0
+                            }, ct);
+                        break;
                     }
-                    if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
-                    await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
-                        summary: $"Execution halted at step {planSoFar.Count + 1} — no code changes produced", score: 0,
-                        append: false);
-                    if (emitSse)
-                        await SendSse(Response, "plan-halted", new
-                        {
-                            reason = "Step produced no actual code changes",
-                            failedStep = stepToRun?.File,
-                            failedChange = stepToRun?.Change,
-                            remainingSteps = 0
-                        }, ct);
-                    break;
                 }
                 var needsExtraResult = newResults
                     .OfType<Dictionary<string, object?>>()
@@ -8414,6 +8482,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 File = extraFile!,
                                 Change = $"Add {missingSymbol} method — referenced by previous step but not yet implemented. " +
                                          $"Verifier reason: {extraReason}",
+                                TargetSymbol = missingSymbol,
                                 Priority = 1,
                                 LineNumber = 0
                             };
@@ -10587,10 +10656,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ? "Planner declared plan complete — post-execution verification skipped."
             : (string?)null;
         List<string>? verificationIssues = null;
-        if (!planCompleteDeclared)
+
+        // Only run post-execution verification if at least one step actually wrote code.
+        // Running it with zero edits is wasteful and produces misleading repair loops.
+        var anyEditsApplied = allSteps.OfType<Dictionary<string, object?>>().Any(r =>
+            r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+            r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
+
+        if (!planCompleteDeclared && anyEditsApplied)
         {
             (taskComplete, verificationDetails, verificationIssues) =
                  await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
+        }
+        else if (!planCompleteDeclared && !anyEditsApplied)
+        {
+            // No edits at all — skip verification, mark incomplete so the outer loop can retry
+            taskComplete = false;
+            verificationDetails = "No edits were applied — skipping post-execution verification.";
+            await EmitLog(emitSse, "warn", verificationDetails, ct: ct);
         }
         if (!taskComplete)
         {
@@ -10935,7 +11018,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
-            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit")
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                        r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
             .Select(r => r.GetValueOrDefault("path")?.ToString())
             .Where(p => !string.IsNullOrWhiteSpace(p))
             .Select(p => p!)
@@ -10964,6 +11048,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var editResults = allResults
             .OfType<Dictionary<string, object?>>()
             .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                        r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" &&
                         r.TryGetValue("path", out var p) && p?.ToString() != null)
             .GroupBy(r => r["path"]!.ToString()!)
             .ToList();
@@ -11172,7 +11257,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (moreSteps != null && moreSteps.Count > 0)
         {
             var anyEditsDone = allResults.OfType<Dictionary<string, object?>>()
-                .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit");
+                .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit" &&
+                          r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
             if (anyEditsDone)
             {
                 var createSteps = moreSteps.Where(s => "_create_file".Equals(s.File, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -11196,93 +11282,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct, summary: $"Added {moreSteps.Count} step(s)", score: 0);
         }
         return planItems;
-    }
-    private async Task<(string? oldStr, string? newStr, bool fromFormatC)?> TryForcedMethodInsertAsync(
-        PlanStep step, string fullPath, string relPath, string explorationContext,
-        bool emitSse, CancellationToken ct)
-    {
-        var ext = Path.GetExtension(relPath).ToLowerInvariant();
-        var (_, supportsFormatC, _) = AgentUtilities.GetLanguageProfile(ext);
-        if (!supportsFormatC) return null;
-        if (!System.IO.File.Exists(fullPath)) return null;
-        var change = step.Change ?? "";
-        if (!Regex.IsMatch(change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route|function)\b",
-                RegexOptions.IgnoreCase))
-            return null;
-        var anchorMatch = Regex.Match(change,
-            @"\bafter\s+(?:the\s+)?([A-Za-z_]\w*)\s*(?:method|endpoint|\()?", RegexOptions.IgnoreCase);
-        string? anchorName = anchorMatch.Success ? anchorMatch.Groups[1].Value : null;
-        string? anchorBody = null;
-        string? astErr = null;
-        var targetTypeForLang = "method";
-        if (!string.IsNullOrWhiteSpace(anchorName))
-            (anchorBody, astErr) = AstResolveEdit(fullPath, targetTypeForLang, anchorName, returnTail: false);
-        if (anchorBody == null)
-        {
-            var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            var jsTsKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "catch", "if", "for", "while", "do", "switch", "else", "try", "finally",
-                "with", "of", "in", "function", "return", "yield", "await", "class", "new",
-                "this", "super", "typeof", "instanceof", "void", "delete", "import", "export",
-                "default", "from", "as", "extends", "implements", "interface", "throw",
-                "case", "break", "continue", "debugger"
-            };
-            var lastMethodName = ext == ".cs"
-                ? Regex.Matches(sourceText,
-                    @"(?:(?:public|private|protected|internal)\s+)?(?:(?:static|virtual|override|abstract|async)\s+)*\w+(?:<[^>]*>)?\s+(\w+)\s*\(")
-                    .Cast<Match>().LastOrDefault()?.Groups[1].Value
-                : Regex.Matches(sourceText,
-                    @"^\s*(?:(?:export|default|async|static|public|private|protected|get|set|readonly|override|abstract)\s+)*(?:(?:function\s+)|(?:[\w$.]+\.)?)?([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*[^{]+?)?\s*\{",
-                    RegexOptions.Multiline)
-                    .Cast<Match>()
-                    .LastOrDefault(m => !jsTsKeywords.Contains(m.Groups[1].Value))
-                    ?.Groups[1].Value;
-            if (string.IsNullOrWhiteSpace(lastMethodName)) return null;
-            (anchorBody, astErr) = AstResolveEdit(fullPath, targetTypeForLang, lastMethodName, returnTail: false);
-            anchorName = lastMethodName;
-        }
-        if (anchorBody == null)
-        {
-            await EmitLog(emitSse, "info",
-                $"  Forced-insert fast-path: could not resolve anchor ({astErr}) — falling back to normal resolver", ct: ct);
-            return null;
-        }
-        var sysPrompt =
-            "Output ONLY the raw source code for ONE new method/function — nothing else. " +
-            "No JSON, no markdown fences, no explanation, no surrounding class/namespace, no comments, etc. " +
-            "Include the full signature (attributes, access modifier, return type, parameters) and complete body. " +
-            "If the method needs SQL table creation, put a CREATE TABLE IF NOT EXISTS statement as the FIRST " +
-            "statement in the body, before any INSERT/UPDATE/SELECT — never as a separate method.";
-        var userPrompt = new StringBuilder();
-        userPrompt.AppendLine($"FILE: {relPath}");
-        userPrompt.AppendLine($"CHANGE REQUIRED: {change}");
-        userPrompt.AppendLine();
-        userPrompt.AppendLine("EXISTING METHOD THIS WILL BE INSERTED AFTER (for style/pattern reference):");
-        userPrompt.AppendLine("```");
-        userPrompt.AppendLine(anchorBody.Length > 1500 ? anchorBody[..1500] : anchorBody);
-        userPrompt.AppendLine("```");
-        if (!string.IsNullOrWhiteSpace(explorationContext))
-        {
-            userPrompt.AppendLine();
-            userPrompt.AppendLine("RELATED CONTEXT:");
-            userPrompt.AppendLine(explorationContext.Length > 3000 ? explorationContext[..3000] : explorationContext);
-        }
-        var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, userPrompt.ToString(), emitSse, ct,
-            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 1024);
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-        var newCode = raw.Trim();
-        if (newCode.StartsWith("```"))
-        {
-            var m = Regex.Match(newCode, @"```(?:\w+)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-            if (m.Success) newCode = m.Groups[1].Value.Trim();
-        }
-        if (string.IsNullOrWhiteSpace(newCode)) return null;
-        await EmitLog(emitSse, "info",
-            $"  🎯 Forced FORMAT C insert after '{anchorName}' — model only supplied the method body ({newCode.Length} chars)", ct: ct);
-        var indented = await FormatSnippetAsync(anchorBody, newCode, relPath);
-        var newStr = anchorBody + "\n\n" + indented;
-        return (anchorBody, newStr, true);
     }
     private async Task<bool> ClassifyIsBuildRepairPromptAsync(string prompt, CancellationToken ct)
     {
@@ -11426,7 +11425,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (newSteps?.Count > 0)
                     {
                         var anyEditsDone = allResults.OfType<Dictionary<string, object?>>()
-                            .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit");
+                            .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit" &&
+                                      r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
                         if (anyEditsDone)
                         {
                             var createSteps = newSteps.Where(s => "_create_file".Equals(s.File, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -11925,6 +11925,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 {
                                     File = relTsPath2,
                                     Change = $"Implement the missing {funcName}() method referenced in {Path.GetFileName(planFile)}",
+                                    TargetSymbol = funcName,
                                     Priority = item.Priority
                                 });
                             }
