@@ -844,7 +844,7 @@ public static class AgentUtilities
     };
     public static bool IsPlaceholderContent(string newCode)
     {
-        if (string.IsNullOrWhiteSpace(newCode)) return true;
+        if (string.IsNullOrWhiteSpace(newCode)) return false; // empty = deletion, not placeholder
         foreach (var rx in PlaceholderPatterns)
             if (rx.IsMatch(newCode))
                 return true;

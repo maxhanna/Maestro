@@ -3567,7 +3567,7 @@ public partial class AgentController : ControllerBase
         List<string>? attachedFiles = null,
         int replanDepth = 0)
     {
-        var relPath = step.File.Replace('\\', '/');
+        var relPath = step.File.Replace('\\', '/').TrimStart('/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
         bool stepNeedsExtraStep = false;
         string? stepExtraStepReason = null;
@@ -9301,27 +9301,56 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .ToList();
 
             List<string> selected;
+            string? note = null;
+
             if (scored.Count <= 12)
             {
                 selected = scored.Select(x => x.path).ToList();
+                note = await ExtractArchitectureNote(skeleton.Tree, prompt, ct);
             }
             else
             {
                 var topCandidates = scored.Take(60).Select(x => x.path).ToList();
-                var llmSelected = await SelectRelevantFilesWithLlm(prompt, topCandidates, emitSse, ct);
-                selected = scored.Where(s => llmSelected.Contains(s.path, StringComparer.OrdinalIgnoreCase))
-                    .Select(s => s.path).Take(8).ToList();
-                if (selected.Count == 0)
+                var (streamedResponse, streamErr) = await StreamTrimLlm(prompt, topCandidates, ct);
+                if (!string.IsNullOrWhiteSpace(streamedResponse))
+                {
+                    try
+                    {
+                        var cleaned = streamedResponse.Trim();
+                        if (cleaned.StartsWith("```"))
+                        {
+                            var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                            if (m.Success) cleaned = m.Groups[1].Value.Trim();
+                        }
+                        var sIdx = cleaned.IndexOf('{'); var eIdx = cleaned.LastIndexOf('}');
+                        if (sIdx >= 0 && eIdx > sIdx) cleaned = cleaned[sIdx..(eIdx + 1)];
+                        using var doc = JsonDocument.Parse(cleaned);
+                        if (doc.RootElement.TryGetProperty("files", out var filesEl) && filesEl.ValueKind == JsonValueKind.Array)
+                        {
+                            var llmSelected = filesEl.EnumerateArray()
+                                .Select(el => el.GetString()?.Replace('\\', '/') ?? "")
+                                .Where(f => !string.IsNullOrWhiteSpace(f) &&
+                                            topCandidates.Any(c => string.Equals(c, f, StringComparison.OrdinalIgnoreCase)))
+                                .ToList();
+                            selected = scored.Where(s => llmSelected.Contains(s.path, StringComparer.OrdinalIgnoreCase))
+                                .Select(s => s.path).Take(8).ToList();
+                        }
+                        else { selected = scored.Take(6).Select(x => x.path).ToList(); }
+                        if (doc.RootElement.TryGetProperty("architectureNote", out var an))
+                            note = TruncateArchitectureNote(an.GetString());
+                    }
+                    catch { selected = scored.Take(6).Select(x => x.path).ToList(); }
+                }
+                else
+                {
                     selected = scored.Take(6).Select(x => x.path).ToList();
+                }
             }
 
             if (selected.Count == 0)
-            {
                 selected = skeleton.Paths.OrderBy(p => p.Length).Take(8).ToList();
-            }
 
-            var note = await ExtractArchitectureNote(skeleton.Tree, prompt, ct);
-
+            note ??= await ExtractArchitectureNote(skeleton.Tree, prompt, ct);
             var trimmedTree = BuildTrimmedTree(selected);
             return (trimmedTree, note);
         }
@@ -9329,6 +9358,94 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             return ("", "");
         }
+    }
+
+    private async Task<(string raw, string? error)> StreamTrimLlm(
+        string prompt, List<string> candidates, CancellationToken ct)
+    {
+        var system =
+            "You are a project architect reviewing a file tree for a coding agent. " +
+            "Given the user's task and candidate files, select the 3-7 files most relevant to the task and provide a one-sentence architecture note.\n" +
+            "Prefer exact filename/path/symbol matches, neighboring files, and files named in the task. Avoid generated/dependency files.\n" +
+            "Architecture note: mention the platform, testing framework, and any notable conventions. Max 200 characters.\n" +
+            "Output ONLY valid JSON, no markdown: {\"files\": [\"path1\", \"path2\"], \"architectureNote\": \"...\"}";
+        var user = $"Task: {prompt}\n\nCandidates:\n{string.Join("\n", candidates)}\n\nSelect 3-7 files and write the architecture note.";
+        return await StreamLlmThinking(system, user, ct, TimeSpan.FromSeconds(30), 500);
+    }
+
+    private async Task<(string raw, string? error)> StreamLlmThinking(
+        string systemPrompt, string userMessage, CancellationToken ct,
+        TimeSpan? requestTimeout = null, int? maxTokens = null)
+    {
+        var baseUrl = await GetLlamaBaseUrl();
+        var model = await GetLlamaModel();
+        var client = _clientFactory.CreateClient("llama");
+        client.Timeout = _infiniteTimeout;
+        var messages = new object[]
+        {
+            new { role = "system", content = systemPrompt },
+            new { role = "user",   content = userMessage  }
+        };
+        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        using var timeoutCts = new CancellationTokenSource(timeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var cfg = await LoadConfigAsync();
+        var mt = maxTokens ?? cfg.defaultMaxTokens;
+        var reqBody = new
+        {
+            model,
+            messages,
+            stream = true,
+            temperature = 0.05,
+            max_tokens = mt,
+            repeat_penalty = 1.3,
+            repeat_last_n = 256
+        };
+        var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/chat/completions") { Content = httpContent };
+            var resp = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedCts.Token);
+            if (!resp.IsSuccessStatusCode)
+            { var t = await resp.Content.ReadAsStringAsync(ct); return ("", $"HTTP {resp.StatusCode}"); }
+            var stream = await resp.Content.ReadAsStreamAsync(linkedCts.Token);
+            var reader = new StreamReader(stream);
+            var sb = new StringBuilder();
+            while (true)
+            {
+                linkedCts.Token.ThrowIfCancellationRequested();
+                var line = await reader.ReadLineAsync().WaitAsync(linkedCts.Token);
+                if (line == null) break;
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                if (line.Contains("[DONE]")) break;
+                if (!line.StartsWith("data: ")) continue;
+                var data = line[6..].Trim();
+                if (string.IsNullOrWhiteSpace(data)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(data);
+                    if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+                    {
+                        var choice = choices[0];
+                        if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var content))
+                        {
+                            var token = content.GetString();
+                            if (!string.IsNullOrWhiteSpace(token))
+                            {
+                                sb.Append(token);
+                                await SendSse(Response, "token", new { token }, ct);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+            var raw = sb.ToString();
+            if (string.IsNullOrWhiteSpace(raw)) return ("", "Empty LLM response");
+            return (raw, null);
+        }
+        catch (TaskCanceledException) { return ("", "LLM request timed out"); }
+        catch (Exception ex) { return ("", ex.Message); }
     }
 
     private static string BuildTrimmedTree(List<string> selectedFiles)
@@ -9365,7 +9482,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var compact = string.Join("\n", lines);
         var system = "You are a project architect. Given a project file tree and the user's task, write ONE short sentence about the project's architecture that would help a developer new to this codebase. Mention the platform (e.g. Angular/.NET/Python), testing framework, and any notable conventions you observe. Max 200 characters. Output ONLY the sentence, no markdown, no JSON.";
         var user = $"Task: {prompt}\n\nFile tree (first 100 lines):\n{compact}";
-        var (raw, _, err) = await CallLlmRaw(system, user, ct, TimeSpan.FromSeconds(20), maxTokens: 100);
+        var (raw, err) = await StreamLlmThinking(system, user, ct, TimeSpan.FromSeconds(20), 100);
         if (string.IsNullOrWhiteSpace(raw)) return "";
         return TruncateArchitectureNote(raw);
     }
@@ -10019,7 +10136,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     skeletonSection.AppendLine(trimmed);
                     discoveryContext = skeletonSection.ToString() + "\n" + discoveryContext;
                     await EmitLog(emitSse, "info",
-                        $"Skeleton trimmed from {skeleton.Paths.Count} paths to {trimmed.Length} chars; architecture note: {(string.IsNullOrWhiteSpace(note) ? "none" : note)}", ct: ct);
+                        $"Skeleton trimmed from {skeleton.Paths.Count} paths to {trimmed.Length} chars {(string.IsNullOrWhiteSpace(note) ? "" : "— " + note)}", ct: ct);
                 }
                 else
                 {
