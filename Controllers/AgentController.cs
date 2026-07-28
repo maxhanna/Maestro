@@ -539,7 +539,7 @@ public partial class AgentController : ControllerBase
         }
         sb.AppendLine($"FILE: {relPath}");
         sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
-     
+
         if (!string.IsNullOrWhiteSpace(preservationDirective))
         {
             sb.AppendLine();
@@ -561,7 +561,7 @@ public partial class AgentController : ControllerBase
                 "Cross-reference EVERY property access against the type definition in AUTO-ENRICHED CONTEXT before writing newString. " +
                 "If the class definition shows `string? Note { get; set; }` then use `.Note`, not `.Description`. " +
                 "If the class definition shows `string? Type { get; set; }` then use `.Type`, not `.Title`." +
-            "⚠ RULE: Do not add comments inside new code." + 
+            "⚠ RULE: Do not add comments inside new code." +
             "⚠ RULE: When adding pagination, filtering, or controls for a NEW data type (e.g., YouTube results), " +
                 "create a NEW method dedicated to that data type. Do NOT repurpose an existing method that uses different " +
                 "property names (e.g., `currentPage`/`totalPages`) and calls different APIs (`searchUrl`). " +
@@ -980,7 +980,7 @@ public partial class AgentController : ControllerBase
                             sb.AppendLine($"  These lines in the file are SIMILAR to what you wrote:");
                             sb.AppendLine($"  {hint}");
                         }
-                    } 
+                    }
                 }
                 else if (h.error.Contains("FORMAT C failed", StringComparison.OrdinalIgnoreCase) || h.error.Contains("not found in file", StringComparison.OrdinalIgnoreCase))
                 {
@@ -1034,7 +1034,7 @@ public partial class AgentController : ControllerBase
                 sb.AppendLine();
                 break;
         }
- 
+
         if (ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" && !string.IsNullOrWhiteSpace(fileContent))
         {
             var markers = Regex.Matches(fileContent, @"<!--\s*([^>]{3,80}?)\s*-->|<div[^>]*groupDomainTitle[^>]*>\s*([^<]+?)\s*</div>");
@@ -1068,7 +1068,7 @@ public partial class AgentController : ControllerBase
         }
         sb.AppendLine();
         sb.AppendLine("Output the edit now:");
-        if (emitSse){ await SendSse(Response, "edit-resolve", new { }, ct); }
+        if (emitSse) { await SendSse(Response, "edit-resolve", new { }, ct); }
         // editStrategy was classified at the top of this method (after ext is known).
         // Build system prompt from it and fire the LLM call.
         var systemPrompt = BuildEditSystemPrompt(editStrategy);
@@ -4045,7 +4045,7 @@ public partial class AgentController : ControllerBase
                 }
             }
             if (!replaced)
-            { 
+            {
                 if (string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
                 {
                     var oldLinesCount = oldStr!.Split('\n').Length;
@@ -9057,7 +9057,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (hasWebStep) return null;
         return $"Prompt contains \"{hit}\" but plan has no _web_search step.";
     }
-    
+
     private async Task<(string discoveryText, List<object> steps)> RunLightBootstrap(
         List<string> attachedFiles, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
@@ -10285,7 +10285,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                 }
             }
-            
+
             if (plan?.Plan?.Count > 1)
             {
                 plan = await RunPlanCoherenceCheckAsync(
@@ -10462,13 +10462,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     bool hasVerificationIssues = (verificationIssues != null && verificationIssues.Count > 0 && !string.IsNullOrEmpty(verificationIssues[0]));
                     await EmitLog(emitSse, "warn",
                         $"Repair pass {repairIteration}: replanner returned no steps for issue " +
-                        $"\"{
-                            (
-                                hasVerificationIssues 
-                                    ? verificationIssues![0] 
-                                    : verificationDetails
-                            )
-                        }\" — stopping repair loop.", ct: ct);
+                        $"\"{( hasVerificationIssues ? verificationIssues![0] : verificationDetails )}\" — stopping repair loop.", ct: ct);
                     exhaustedWithNoSteps = true;
                     break;
                 }
