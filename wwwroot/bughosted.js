@@ -23,7 +23,26 @@ angular.module('kanbanApp')
                 function buildHeartbeatPayload() {
                     return {
                         clientId: vm.bughostedClientId,
-                        kanbanData: JSON.stringify({ projects: (vm.projects || []).map(function (p) { return { Name: p.Name, Path: p.Path, Description: p.Description, BuildCommands: p.BuildCommands }; }), state: vm.state, agentActive: vm.streamingActive || false, agentPhase: vm.streamingPhase || '', agentThinking: vm.streamingThinking || '', agentSummary: vm.streamingSummary || '', activeCardId: vm.activeCardId || null, activeCardText: vm.activeCardText || '', calendarCards: vm.calCards || [] }),
+                        kanbanData: JSON.stringify(
+                            { 
+                                projects: (vm.projects || []).map(function (p) { 
+                                    return { 
+                                        Name: p.Name, 
+                                        Path: p.Path, 
+                                        Description: p.Description, 
+                                        BuildCommands: p.BuildCommands 
+                                    }; 
+                                }), 
+                                state: vm.state, 
+                                agentActive: vm.streamingActive || false, 
+                                agentPhase: vm.streamingPhase || '',
+                                agentThinking: vm.streamingThinking || '', 
+                                agentSummary: vm.streamingSummary || '', 
+                                activeCardId: vm.activeCardId || null, 
+                                activeCardText: vm.activeCardText || '', 
+                                calendarCards: vm.calCards || [] 
+                            }
+                        ),
                         settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword })
                     };
                 }

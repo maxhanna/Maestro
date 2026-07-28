@@ -455,11 +455,21 @@ public partial class AgentController : ControllerBase
         }
 
         var lines = formatted.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+        var minIndent = int.MaxValue;
+        foreach (var line in lines)
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+            {
+                var indentLen = line.TakeWhile(char.IsWhiteSpace).Count();
+                if (indentLen < minIndent) minIndent = indentLen;
+            }
+        }
+        if (minIndent == int.MaxValue) minIndent = 0;
         for (var i = 0; i < lines.Length; i++)
         {
             if (!string.IsNullOrWhiteSpace(lines[i]))
             {
-                lines[i] = baseIndent + lines[i].TrimStart();
+                lines[i] = baseIndent + (minIndent < lines[i].Length ? lines[i].Substring(minIndent) : "");
             }
         }
         return string.Join("\n", lines);
@@ -1262,7 +1272,7 @@ public partial class AgentController : ControllerBase
                             await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
                             return (null, null, false, null, true, null, false);
                         }
-                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, !replaceSection, true);
+                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, expandToClosingTags: false, true);
                         if (matchedBlock == null)
                         {
                             await EmitLog(emitSse, "warn",
@@ -1292,6 +1302,16 @@ public partial class AgentController : ControllerBase
                             var idx = sourceText.IndexOf(fullStr, StringComparison.Ordinal);
                             if (idx >= 0)
                             {
+                                var tsExt = ext is ".ts" or ".tsx" or ".js" or ".jsx";
+                                if (tsExt && string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var declPattern = $@"(?:async\s+)?(?:private\s+|public\s+|protected\s+)?(?:static\s+)?{Regex.Escape(targetName)}\s*\(";
+                                    if (Regex.IsMatch(newCodeStr, declPattern))
+                                    {
+                                        var replaced = await FormatSnippetAsync(fullStr, newCodeStr, relPath);
+                                        return (fullStr, replaced, false, null, false, null, true);
+                                    }
+                                }
                                 var indented = await FormatSnippetAsync(fullStr, newCodeStr, relPath);
                                 var prefix = sourceText[..(idx + fullStr.Length)];
                                 newStr = prefix + "\n\n" + indented;
@@ -5102,6 +5122,20 @@ public partial class AgentController : ControllerBase
                         }
                     }
                 }
+                if (llmGateDecision == "abandon" && oldStr != null)
+                {
+                    var methodDecls = CountNewMethodsInNewCode(newStr ?? "", oldStr);
+                    if (methodDecls > 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"  🔄 Verifier abandoned but edit adds at least {methodDecls} new method(s) — " +
+                            $"overriding to keep with needsExtraStep=true", ct: ct);
+                        llmGateDecision = "keep";
+                        llmGateScore = Math.Max(llmGateScore, 70);
+                        stepNeedsExtraStep = true;
+                        stepExtraStepReason = "Need to integrate new method(s) with existing code";
+                    }
+                }
                 if (llmGateDecision == "abandon")
                 {
                     var abandonDiffPath = await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
@@ -6363,6 +6397,27 @@ public partial class AgentController : ControllerBase
         return s.Substring(0, headLen) +
                $"\n... [truncated {s.Length - headLen - tailLen} chars] ...\n" +
                (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
+    }
+    private static int CountNewMethodsInNewCode(string newCode, string oldStr)
+    {
+        if (string.IsNullOrWhiteSpace(newCode) || string.IsNullOrWhiteSpace(oldStr)) return 0;
+        var declPattern = new Regex(
+            @"(?:async\s+)?(?:private\s+|public\s+|protected\s+)?(?:static\s+)?(\w+)\s*\([^)]*\)(?:\s*:\s*(?:\w+(?:<[^>]*>)?|Promise<\w+(?:<[^>]*>)?>)\s*)?\s*\{",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        var oldPattern = new Regex(
+            @"(?:(?:public|private|protected|internal)\s+)?(?:(?:static|virtual|override|abstract|sealed|new|partial|async|unsafe)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?)\s+(\w+)\s*\(",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        var newMethods = declPattern.Matches(newCode)
+            .Select(m => m.Groups[1].Value)
+            .Where(n => n.Length > 2)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet();
+        if (newMethods.Count == 0) return 0;
+        var existingMethods = oldPattern.Matches(oldStr)
+            .Select(m => m.Groups[1].Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet();
+        return newMethods.Count(n => !existingMethods.Contains(n));
     }
     private string NormalizeEditIndentation(string content, string appliedNewStr)
     {
@@ -7937,7 +7992,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         };
         return (plan, discoveryContext);
     }
-    private async Task<(AgentPlan plan, List<object> results, string discoveryContext)> RunInterleavedPlanExecutionLoop(
+    private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
         List<string>? attachedFiles = null)
@@ -7945,6 +8000,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var planSoFar = new List<PlanStep>();
         var allResults = new List<object>();
         var rejectionFeedback = new List<string>();
+        var planCompleteDeclared = false;
         var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var thinkingLog = new StringBuilder();
         var regenAttempts = 0;
@@ -7980,6 +8036,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
                 await EmitLog(emitSse, "success",
                     $"Interleaved execution: complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
+                planCompleteDeclared = true;
                 break;
             }
             if (!string.IsNullOrWhiteSpace(proposal.ExploreFile))
@@ -8420,7 +8477,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             Score = 90,
             Plan = planSoFar
         };
-        return (finalPlan, allResults, discoveryContext);
+        return (finalPlan, allResults, discoveryContext, planCompleteDeclared);
     }
     private async Task<string> RefreshFileInDiscoveryContext(
         string relPath, string discoveryContext, string projectRoot, CancellationToken ct)
@@ -9981,6 +10038,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         MetaPlanResult? metaPlan = null;
         var planAlreadyExecuted = false;
+        var planCompleteDeclared = false;
         AgentPlan plan;
         if (metaPlan?.SubPlans?.Count > 0)
         {
@@ -10104,12 +10162,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = discoveryContext.Length, prompt }, ct);
             }
-            var (interleavedPlan, interleavedResults, updatedContext) = await RunInterleavedPlanExecutionLoop(
+            var (interleavedPlan, interleavedResults, updatedContext, interleavedComplete) = await RunInterleavedPlanExecutionLoop(
                 prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles);
             plan = interleavedPlan;
             discoveryContext = updatedContext;
             allSteps.AddRange(interleavedResults);
             planAlreadyExecuted = true;
+            planCompleteDeclared = interleavedComplete;
         }
         if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
             await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
@@ -10275,8 +10334,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return (allSteps, plan ?? new AgentPlan(), false);
             }
         }
-        var (taskComplete, verificationDetails, verificationIssues) =
-             await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
+        var taskComplete = planCompleteDeclared;
+        var verificationDetails = planCompleteDeclared
+            ? "Planner declared plan complete — post-execution verification skipped."
+            : (string?)null;
+        List<string>? verificationIssues = null;
+        if (!planCompleteDeclared)
+        {
+            (taskComplete, verificationDetails, verificationIssues) =
+                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
+        }
         if (!taskComplete)
         {
             var stepTruthCompleted = await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct);
