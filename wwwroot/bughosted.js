@@ -43,7 +43,7 @@ angular.module('kanbanApp')
                                 calendarCards: vm.calCards || [] 
                             }
                         ),
-                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword })
+                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
                     };
                 }
 
@@ -146,6 +146,25 @@ angular.module('kanbanApp')
                         if (cmd.params.llamaUrl !== undefined) vm.llamaUrl = cmd.params.llamaUrl;
                         if (cmd.params.llamaModel !== undefined) vm.llamaModel = cmd.params.llamaModel;
                         if (cmd.params.terminalApprovalMode !== undefined) vm.terminalApprovalMode = cmd.params.terminalApprovalMode;
+                        if (cmd.params.defaultProject !== undefined) vm.defaultProject = cmd.params.defaultProject;
+                        if (cmd.params.showTerminal !== undefined) vm.showTerminal = cmd.params.showTerminal;
+                        if (cmd.params.showAI !== undefined) vm.showAI = cmd.params.showAI;
+                        if (cmd.params.showIDE !== undefined) vm.showIDE = cmd.params.showIDE;
+                        if (cmd.params.showKanban !== undefined) vm.showKanban = cmd.params.showKanban;
+                        if (cmd.params.showCalendar !== undefined) vm.showCalendar = cmd.params.showCalendar;
+                        if (cmd.params.autoQueue !== undefined) vm.autoQueue = cmd.params.autoQueue;
+                        if (cmd.params.prByDefault !== undefined) vm.prByDefault = cmd.params.prByDefault;
+                        if (cmd.params.maxFileContextChars !== undefined) vm.maxFileContextChars = cmd.params.maxFileContextChars;
+                        if (cmd.params.maxFullFileTokens !== undefined) vm.maxFullFileTokens = cmd.params.maxFullFileTokens;
+                        if (cmd.params.maxContextChars !== undefined) vm.maxContextChars = cmd.params.maxContextChars;
+                        if (cmd.params.fileBodyTruncationChars !== undefined) vm.fileBodyTruncationChars = cmd.params.fileBodyTruncationChars;
+                        if (cmd.params.buildOutputTailChars !== undefined) vm.buildOutputTailChars = cmd.params.buildOutputTailChars;
+                        if (cmd.params.defaultMaxTokens !== undefined) vm.defaultMaxTokens = cmd.params.defaultMaxTokens;
+                        if (cmd.params.includeProjectSkeleton !== undefined) vm.includeProjectSkeleton = cmd.params.includeProjectSkeleton;
+                        if (cmd.params.includeEditKnowledge !== undefined) vm.includeEditKnowledge = cmd.params.includeEditKnowledge;
+                        if (cmd.params.approvedTerminalRoots !== undefined) vm.approvedTerminalRoots = cmd.params.approvedTerminalRoots;
+                        if (cmd.params.disallowedTerminalRoots !== undefined) vm.disallowedTerminalRoots = cmd.params.disallowedTerminalRoots;
+                        if (cmd.params.buildCommands !== undefined) vm.buildCommands = cmd.params.buildCommands;
                         vm.saveSettings();
                     }
                     $http.post('/api/bughosted/commands/ack', { clientId: vm.bughostedClientId, commandId: cmd.id, status: 'executed', result: 'ok' });
