@@ -1354,6 +1354,118 @@ public static class AgentUtilities
         }
         return sb.ToString();
     }
+    public static async Task<SkeletonResult> GenerateSkeletonAsync(string projectRoot)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("### PROJECT SKELETON (file/directory layout) ###");
+        sb.AppendLine();
+        var excludeDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "node_modules", "bin", "obj", "dist", ".git", ".vs", ".svn",
+            "packages", "coverage", ".idea", ".vscode", "__pycache__",
+            ".next", ".nuget"
+        };
+        var excludeExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".exe", ".dll", ".pdb", ".so", ".dylib", ".zip", ".tar", ".gz",
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
+            ".woff", ".woff2", ".ttf", ".eot", ".mp3", ".mp4", ".wav",
+            ".o", ".a", ".lib", ".nupkg"
+        };
+        var gitignorePath = System.IO.Path.Combine(projectRoot, ".gitignore");
+        var gitignoreDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var gitignoreExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (System.IO.File.Exists(gitignorePath))
+        {
+            var gitignoreContent = await System.IO.File.ReadAllTextAsync(gitignorePath);
+            foreach (var line in gitignoreContent.Split('\n', '\r'))
+            {
+                var trimmed = line.Trim().Trim('/');
+                if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#') || trimmed.StartsWith('!')) continue;
+                if (trimmed.StartsWith('*') && trimmed.Length > 1)
+                {
+                    var ext = trimmed[1..];
+                    if (ext.Contains('.'))
+                    {
+                        gitignoreExts.Add(ext.ToLowerInvariant());
+                        excludeExtensions.Add(ext.ToLowerInvariant());
+                    }
+                }
+                else if (!trimmed.Contains('/') && !trimmed.Contains('*'))
+                {
+                    gitignoreDirs.Add(trimmed);
+                    excludeDirs.Add(trimmed);
+                }
+                else if (trimmed.Contains('/') && !trimmed.Contains('*'))
+                {
+                    var last = trimmed.Split('/', StringSplitOptions.RemoveEmptyEntries).Last();
+                    gitignoreDirs.Add(last);
+                    excludeDirs.Add(last);
+                }
+            }
+        }
+        var paths = new List<string>();
+        var omittedCount = new MutableInt();
+        await BuildSkeletonTree(sb, paths, projectRoot, "", excludeDirs, excludeExtensions, gitignoreDirs, gitignoreExts, projectRoot, omittedCount);
+        if (omittedCount.Value > 0)
+            sb.AppendLine($"\n({omittedCount.Value} file(s)/dir(s) omitted by .gitignore)");
+        return new SkeletonResult { Tree = sb.ToString(), Paths = paths };
+    }
+    private class MutableInt { public int Value; }
+
+    public class SkeletonResult
+    {
+        public string Tree { get; set; } = "";
+        public List<string> Paths { get; set; } = new();
+    }
+
+    private static async Task BuildSkeletonTree(StringBuilder sb, List<string> paths, string currentDir, string prefix,
+        HashSet<string> excludeDirs, HashSet<string> excludeExtensions,
+        HashSet<string> gitignoreDirs, HashSet<string> gitignoreExts,
+        string projectRoot, MutableInt omittedCount)
+    {
+        var entries = new List<(bool isDir, string name, string fullPath)>();
+        try
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(currentDir))
+            {
+                var name = Path.GetFileName(entry);
+                var isDir = Directory.Exists(entry);
+                var ext = Path.GetExtension(name);
+                if (isDir && excludeDirs.Contains(name))
+                {
+                    if (gitignoreDirs.Contains(name)) omittedCount.Value++;
+                    continue;
+                }
+                if (!isDir && excludeExtensions.Contains(ext))
+                {
+                    if (gitignoreExts.Contains(ext)) omittedCount.Value++;
+                    continue;
+                }
+                entries.Add((isDir, name, entry));
+            }
+        }
+        catch { return; }
+        entries.Sort((a, b) =>
+        {
+            if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+            return string.Compare(a.name, b.name, StringComparison.OrdinalIgnoreCase);
+        });
+        for (var i = 0; i < entries.Count; i++)
+        {
+            var (isDir, name, fullPath) = entries[i];
+            if (!isDir)
+                paths.Add(Path.GetRelativePath(projectRoot, fullPath).Replace('\\', '/'));
+            var isLast = i == entries.Count - 1;
+            var connector = isLast ? "└── " : "├── ";
+            sb.Append(prefix).Append(connector).AppendLine(name);
+            if (isDir)
+            {
+                var childPrefix = prefix + (isLast ? "    " : "│   ");
+                await BuildSkeletonTree(sb, paths, fullPath, childPrefix, excludeDirs, excludeExtensions, gitignoreDirs, gitignoreExts, projectRoot, omittedCount);
+            }
+        }
+    }
     public static string BuildDiffPreview(string? oldStr, string? newStr)
     {
         if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr)) return string.Empty;

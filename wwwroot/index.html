@@ -1043,6 +1043,16 @@
               <input type="range" id="ctx-defaultMaxTokens" ng-model="vm.defaultMaxTokens" min="256" max="16384"
                 step="256" style="width:100%;" />
             </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+              <input type="checkbox" id="ctx-includeProjectSkeleton" ng-model="vm.includeProjectSkeleton" />
+              <label for="ctx-includeProjectSkeleton">Include Project File Skeleton</label>
+              <span class="settings-help" style="margin-left:auto;font-size:11px;">adds project directory tree to discovery context</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+              <input type="checkbox" id="ctx-includeEditKnowledge" ng-model="vm.includeEditKnowledge" />
+              <label for="ctx-includeEditKnowledge">Include Edit Knowledge</label>
+              <span class="settings-help" style="margin-left:auto;font-size:11px;">do/dont/patterns from past edits</span>
+            </div>
             <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the
               agent to handle larger files but consume more tokens.</span>
           </div>

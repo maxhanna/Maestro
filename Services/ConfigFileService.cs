@@ -61,6 +61,10 @@ public class FrontendConfig
     public Dictionary<string, string>? themeColors { get; set; }
     // Enabled agent step types (tools). Empty or null = all enabled.
     public List<string> enabledTools { get; set; } = new();
+    // Include project file/directory skeleton in discovery context
+    public bool includeProjectSkeleton { get; set; } = false;
+    // Include edit knowledge (do/dont/patterns) in discovery context
+    public bool includeEditKnowledge { get; set; } = false;
 }
 
 public class ConfigFileService

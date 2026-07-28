@@ -92,6 +92,8 @@ angular.module('kanbanApp')
                 vm.fileBodyTruncationChars = 8000;
                 vm.buildOutputTailChars = 8000;
                 vm.defaultMaxTokens = 2048;
+                vm.includeProjectSkeleton = false;
+                vm.includeEditKnowledge = false;
                 vm.buildCommands = "";
                 vm.prByDefault = false;
                 vm.themeColors = {};
@@ -188,6 +190,8 @@ angular.module('kanbanApp')
                             vm.fileBodyTruncationChars = typeof cfg.fileBodyTruncationChars === 'number' ? cfg.fileBodyTruncationChars : 8000;
                             vm.buildOutputTailChars = typeof cfg.buildOutputTailChars === 'number' ? cfg.buildOutputTailChars : 8000;
                             vm.defaultMaxTokens = typeof cfg.defaultMaxTokens === 'number' ? cfg.defaultMaxTokens : 2048;
+                            vm.includeProjectSkeleton = cfg.includeProjectSkeleton === true;
+                            vm.includeEditKnowledge = cfg.includeEditKnowledge === true;
 
                             vm.enabledTools = cfg.enabledTools || [];
                             vm.toolList.forEach(function (t) { t.enabled = vm.enabledTools.length === 0 || vm.enabledTools.indexOf(t.key) !== -1; });
@@ -228,6 +232,8 @@ angular.module('kanbanApp')
                         cfg.fileBodyTruncationChars = vm.fileBodyTruncationChars || 8000;
                         cfg.buildOutputTailChars = vm.buildOutputTailChars || 8000;
                         cfg.defaultMaxTokens = vm.defaultMaxTokens || 2048;
+                        cfg.includeProjectSkeleton = vm.includeProjectSkeleton === true;
+                        cfg.includeEditKnowledge = vm.includeEditKnowledge === true;
                         cfg.emailAccounts = vm.emailAccounts.map(function (a) { return { imapServer: a.imapServer, imapPort: a.imapPort, useSsl: a.useSsl, username: a.username, password: a.password, label: a.label }; });
                         cfg.bughostedUrl = vm.bughostedUrl || '';
                         cfg.bughostedUsername = vm.bughostedUsername || '';

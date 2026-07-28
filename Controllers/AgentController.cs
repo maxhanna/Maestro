@@ -9275,6 +9275,108 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         catch { }
         return deterministic.Concat(candidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
     }
+    private async Task<(string trimmedSkeleton, string architectureNote)> TrimSkeletonWithLlm(
+        AgentUtilities.SkeletonResult skeleton, string prompt, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            if (skeleton.Paths.Count == 0) return ("", "");
+
+            var keywords = AgentUtilities.ExtractMeaningfulKeywords(prompt.ToLowerInvariant());
+            var scored = skeleton.Paths
+                .Select(p =>
+                {
+                    var name = Path.GetFileNameWithoutExtension(p);
+                    var score = 0;
+                    foreach (var token in keywords)
+                    {
+                        if (name.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 6;
+                        if (p.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 2;
+                    }
+                    return (path: p, score);
+                })
+                .Where(x => x.score > 0)
+                .OrderByDescending(x => x.score)
+                .ThenBy(x => x.path.Length)
+                .ToList();
+
+            List<string> selected;
+            if (scored.Count <= 12)
+            {
+                selected = scored.Select(x => x.path).ToList();
+            }
+            else
+            {
+                var topCandidates = scored.Take(60).Select(x => x.path).ToList();
+                var llmSelected = await SelectRelevantFilesWithLlm(prompt, topCandidates, emitSse, ct);
+                selected = scored.Where(s => llmSelected.Contains(s.path, StringComparer.OrdinalIgnoreCase))
+                    .Select(s => s.path).Take(8).ToList();
+                if (selected.Count == 0)
+                    selected = scored.Take(6).Select(x => x.path).ToList();
+            }
+
+            if (selected.Count == 0)
+            {
+                selected = skeleton.Paths.OrderBy(p => p.Length).Take(8).ToList();
+            }
+
+            var note = await ExtractArchitectureNote(skeleton.Tree, prompt, ct);
+
+            var trimmedTree = BuildTrimmedTree(selected);
+            return (trimmedTree, note);
+        }
+        catch
+        {
+            return ("", "");
+        }
+    }
+
+    private static string BuildTrimmedTree(List<string> selectedFiles)
+    {
+        var sorted = selectedFiles
+            .Select(f => (path: f, parts: f.Split('/')))
+            .OrderBy(x => x.path)
+            .ToList();
+        var sb = new StringBuilder();
+        sb.AppendLine("### PROJECT SKELETON (relevant files) ###");
+        sb.AppendLine();
+        var shown = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (path, parts) in sorted)
+        {
+            var indent = "";
+            for (var i = 0; i < parts.Length - 1; i++)
+            {
+                var dirPath = string.Join("/", parts.Take(i + 1));
+                if (shown.Add(dirPath))
+                    sb.Append(indent).AppendLine(parts[i] + "/");
+                indent += "  ";
+            }
+            if (shown.Add(path))
+                sb.Append(indent).AppendLine(parts.Last());
+        }
+        return sb.ToString();
+    }
+
+    private async Task<string> ExtractArchitectureNote(string fullTree, string prompt, CancellationToken ct)
+    {
+        var lines = fullTree.Split('\n')
+            .Where(l => !l.Contains("node_modules") && !l.Contains("bin/") && !l.Contains("obj/"))
+            .Take(100);
+        var compact = string.Join("\n", lines);
+        var system = "You are a project architect. Given a project file tree and the user's task, write ONE short sentence about the project's architecture that would help a developer new to this codebase. Mention the platform (e.g. Angular/.NET/Python), testing framework, and any notable conventions you observe. Max 200 characters. Output ONLY the sentence, no markdown, no JSON.";
+        var user = $"Task: {prompt}\n\nFile tree (first 100 lines):\n{compact}";
+        var (raw, _, err) = await CallLlmRaw(system, user, ct, TimeSpan.FromSeconds(20), maxTokens: 100);
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        return TruncateArchitectureNote(raw);
+    }
+    private static string TruncateArchitectureNote(string? note)
+    {
+        if (string.IsNullOrWhiteSpace(note)) return "";
+        note = note.Trim();
+        if (note.Length <= 200) return note;
+        var lastSpace = note.LastIndexOf(' ', 197);
+        return note[..(lastSpace > 0 ? lastSpace : 197)] + "...";
+    }
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> Orchestrate(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
         List<string>? attachedFiles = null, bool skipContextReview = false,
@@ -9877,25 +9979,54 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string? steeringContext = null,
         string? cardId = null)
     {
-        // var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
-        // if (editKnowledge == null)
-        // {
-        //     await _editKnowledge.EnsureExistsAsync(projectRoot, ct);
-        //     editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
-        // }
-        // var editKnowledgeHeader = EditKnowledgeService.FormatForContext(editKnowledge);
-        // if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
-        // {
-        //     await EmitLog(emitSse, "info",
-        //         $"Loaded edit knowledge for project: {editKnowledge!.ProjectName} " +
-        //         $"({editKnowledge.Do.Count} do, {editKnowledge.Dont.Count} dont, " +
-        //         $"{editKnowledge.Patterns.Count} pattern categories, " +
-        //         $"{editKnowledge.RecentFailures.Count} recent failures)", ct: ct);
-        // }
+        var cfg = await LoadConfigAsync();
+        string? editKnowledgeHeader = null;
+        if (cfg.includeEditKnowledge)
+        {
+            var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
+            if (editKnowledge != null)
+            {
+                editKnowledgeHeader = EditKnowledgeService.FormatForContext(editKnowledge);
+                if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Loaded edit knowledge for project: {editKnowledge.ProjectName} " +
+                        $"({editKnowledge.Do.Count} do, {editKnowledge.Dont.Count} dont, " +
+                        $"{editKnowledge.Patterns.Count} pattern categories, " +
+                        $"{editKnowledge.RecentFailures.Count} recent failures)", ct: ct);
+                }
+            }
+        }
         var allSteps = new List<object>();
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         allSteps.AddRange(ds);
+        if (cfg.includeProjectSkeleton)
+        {
+            var skeleton = await AgentUtilities.GenerateSkeletonAsync(projectRoot);
+            if (skeleton.Paths.Count == 0 && string.IsNullOrWhiteSpace(skeleton.Tree))
+            {
+                await EmitLog(emitSse, "info", "Skeleton generation returned nothing, skipping", ct: ct);
+            }
+            else
+            {
+                var (trimmed, note) = await TrimSkeletonWithLlm(skeleton, prompt, emitSse, ct);
+                if (!string.IsNullOrWhiteSpace(trimmed))
+                {
+                    var skeletonSection = new StringBuilder();
+                    if (!string.IsNullOrWhiteSpace(note))
+                        skeletonSection.AppendLine($"### PROJECT ARCHITECTURE NOTE ###\n{note}\n");
+                    skeletonSection.AppendLine(trimmed);
+                    discoveryContext = skeletonSection.ToString() + "\n" + discoveryContext;
+                    await EmitLog(emitSse, "info",
+                        $"Skeleton trimmed from {skeleton.Paths.Count} paths to {trimmed.Length} chars; architecture note: {(string.IsNullOrWhiteSpace(note) ? "none" : note)}", ct: ct);
+                }
+                else
+                {
+                    await EmitLog(emitSse, "info", "Skeleton trimming produced nothing, skipping", ct: ct);
+                }
+            }
+        }
         string? requirementChecklist = await BuildRequirementChecklistAsync(prompt, ct);
         requirementChecklist = requirementChecklist.Trim();
         if (!string.IsNullOrWhiteSpace(requirementChecklist))
@@ -10027,10 +10158,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 ? attachedSteering
                 : $"{steeringContext}\n\n{attachedSteering}";
         }
-        // if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
-        // {
-        //     discoveryContext = editKnowledgeHeader + "\n\n" + discoveryContext;
-        // }
+        if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
+        {
+            discoveryContext = editKnowledgeHeader + "\n\n" + discoveryContext;
+        }
         if (emitSse && !skipContextReview)
         {
             await EmitLog(emitSse, "info", $"Reviewing context from {ds.Count} discovery steps ...", ct: ct);
@@ -12921,6 +13052,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 catch (Exception siEx) { await EmitLog(true, "warn", $"Self-improving error: {siEx.Message}"); }
             }
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             Console.WriteLine($"[AGENT CRASH] {ex.GetType().Name}: {ex.Message}");
