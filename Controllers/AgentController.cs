@@ -5187,7 +5187,7 @@ public partial class AgentController : ControllerBase
                                 : "→ stagnant — try a fundamentally different approach";
                         abandonError += $"\nScore trend: {trend}. Best so far: {bestScore}/100 on attempt {bestAttempt + 1}.";
                     }
-                    history.Add((oldStr!, newStr, abandonError));
+                    history.Add((oldStr!, newStr ?? "", abandonError));
                     _ = Task.Run(async () =>
                     {
                         try
@@ -6388,7 +6388,7 @@ public partial class AgentController : ControllerBase
             return ("error", $"Exception during LLM verify: {ex.Message}", 0, false);
         }
     }
-    private static string TruncateForLlm(string s, int maxChars)
+    private static string TruncateForLlm(string? s, int maxChars)
     {
         if (string.IsNullOrEmpty(s) || s.Length <= maxChars) return s ?? "";
         var headLen = (int)(maxChars * 0.6);
@@ -10347,7 +10347,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!taskComplete)
         {
             var stepTruthCompleted = await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct);
-            if (stepTruthCompleted && verificationIssues.Count == 0)
+            if (stepTruthCompleted && verificationIssues != null && verificationIssues.Count == 0)
             {
                 await EmitLog(emitSse, "warn",
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
@@ -10391,7 +10391,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .Where(s => s.ContainsKey("needsExtraStep"))
                 .Select(s => s["needsExtraStep"])
                 .ToList();
-            if (needsExtraStepResults.Count > 0 && needsExtraStepResults.All(v => v is false) && verificationIssues.Count == 0)
+            if (needsExtraStepResults.Count > 0 && needsExtraStepResults.All(v => v is false) && verificationIssues != null && verificationIssues.Count == 0)
             {
                 var stepCount = needsExtraStepResults.Count;
                 await EmitLog(emitSse, "info",
@@ -10435,7 +10435,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     failureContextForReplan.AppendLine();
                 }
                 var qualityCheckReason = new StringBuilder();
-                if (verificationIssues.Count > 0)
+                if (verificationIssues != null && verificationIssues.Count > 0)
                 {
                     qualityCheckReason.AppendLine($"NEXT ISSUE TO FIX (address ONLY this one): {verificationIssues[0]}");
                     if (verificationIssues.Count > 1)
@@ -10459,9 +10459,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     qualityCheckReason: qualityCheckReason.ToString());
                 if (replanSteps == null || replanSteps.Count == 0)
                 {
+                    bool hasVerificationIssues = (verificationIssues != null && verificationIssues.Count > 0 && !string.IsNullOrEmpty(verificationIssues[0]));
                     await EmitLog(emitSse, "warn",
                         $"Repair pass {repairIteration}: replanner returned no steps for issue " +
-                        $"\"{(verificationIssues.Count > 0 ? verificationIssues[0] : verificationDetails)}\" — stopping repair loop.", ct: ct);
+                        $"\"{
+                            (
+                                hasVerificationIssues 
+                                    ? verificationIssues![0] 
+                                    : verificationDetails
+                            )
+                        }\" — stopping repair loop.", ct: ct);
                     exhaustedWithNoSteps = true;
                     break;
                 }
@@ -10492,7 +10499,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var stepWasAlreadyDone = repairStep != null
                     && repairStep.GetValueOrDefault("status")?.ToString() == "skipped"
                     && repairStep.GetValueOrDefault("reason")?.ToString() == "already done";
-                if (stepWasAlreadyDone && verificationIssues.Count > 0)
+                if (stepWasAlreadyDone && verificationIssues != null && verificationIssues.Count > 0)
                 {
                     var phantom = verificationIssues[0];
                     verificationIssues.RemoveAt(0);
@@ -10560,7 +10567,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 await EmitLog(emitSse, "warn",
                     $"Repair budget exhausted ({MaxPostVerifyRepairIterations} passes) — stopping with remaining issues: " +
-                    $"{string.Join("; ", verificationIssues)}", ct: ct);
+                    $"{string.Join("; ", verificationIssues ?? [])}", ct: ct);
             }
         }
         return (allSteps, plan ?? new AgentPlan(), taskComplete);
