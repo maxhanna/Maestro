@@ -1216,7 +1216,7 @@ public partial class AgentController : ControllerBase
             var hasTargetName = jRoot.TryGetProperty("targetName", out var tnEl);
             var hasFmtNewCode = jRoot.TryGetProperty("newCode", out var ncEl);
             var hasInsertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl);
-            var insertAfter = hasInsertAfter && iaEl.GetBoolean(); 
+            var insertAfter = hasInsertAfter && iaEl.GetBoolean();
             if ((hasTargetType && hasTargetName && hasFmtNewCode) ||
                 (!hasTargetType && hasTargetName && hasFmtNewCode && insertAfter && System.IO.File.Exists(fullPath)))
             {
@@ -1231,7 +1231,7 @@ public partial class AgentController : ControllerBase
                 {
                     newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
                     newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
-                 
+
                     var hasReplace = jRoot.TryGetProperty("replace", out var rpEl);
                     var replaceSection = hasReplace && rpEl.GetBoolean();
                     if (string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase))
@@ -2128,14 +2128,14 @@ public partial class AgentController : ControllerBase
             {
                 var trimOld = string.Join("\n", oldStr.Split('\n').Select(l => l.TrimEnd()));
                 var trimFile = string.Join("\n", content.Split('\n').Select(l => l.TrimEnd()));
-                if (trimFile.Contains(trimOld, StringComparison.Ordinal))
-                    return (PreEditVerdict.Proceed, "");
-                // Try oldString without trailing newline (LLM often adds \n at end)
-                var oldStrTrimmed = oldStr.TrimEnd('\n', '\r');
-                if (!string.IsNullOrWhiteSpace(oldStrTrimmed) && oldStrTrimmed != oldStr &&
-                    content.Contains(oldStrTrimmed, StringComparison.Ordinal))
-                    return (PreEditVerdict.Proceed, "");
-                return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
+                if (!trimFile.Contains(trimOld, StringComparison.Ordinal))
+                {
+                    var fuzzy = AgentUtilities.BuildExactMatchBlock(content, oldStr, step.LineNumber, step.Change);
+                    if (fuzzy == null)
+                    {
+                        return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
+                    }
+                }
             }
         }
         return (PreEditVerdict.Proceed, "");
@@ -7725,7 +7725,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var willBeCreatedEarlier = planSoFar.Any(p =>
                 (p.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
                  p.File.Equals("_command", StringComparison.OrdinalIgnoreCase)) &&
-                (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase)); 
+                (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
             if (!fileExists && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
             {
                 var origPath = step.File;
@@ -8095,7 +8095,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
-            ct.ThrowIfCancellationRequested(); 
+            ct.ThrowIfCancellationRequested();
             if (emitSse)
             {
                 await SendSse(Response, "phase", new { message = $"Planning Step {planSoFar.Count + 1}" }, ct);
@@ -8238,7 +8238,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             consecutiveSlotFailures = 0;
             regenAttempts = 0;
             rejectionFeedback.Clear();
-            var stepToRun = proposal.Step; 
+            var stepToRun = proposal.Step;
             if (stepToRun != null)
             {
                 var dupStep = planSoFar.FirstOrDefault(s =>
@@ -8251,7 +8251,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                      (!string.IsNullOrEmpty(s.NewString) && string.Equals(s.NewString, stepToRun.NewString, StringComparison.Ordinal)) ||
                      (!string.IsNullOrEmpty(s.TargetSymbol) && string.Equals(s.TargetSymbol, stepToRun.TargetSymbol, StringComparison.Ordinal))));
                 if (dupStep != null)
-                { 
+                {
                     await EmitLog(emitSse, "info",
                         $"Plan complete — duplicate step in interleaved execution: [{stepToRun.File}] {stepToRun.Change} — nothing new to add",
                         ct: ct);
@@ -8259,7 +8259,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
             }
             if (stepToRun != null)
-            { 
+            {
                 planSoFar.Add(stepToRun);
                 if (!string.IsNullOrWhiteSpace(proposal.Thinking))
                     thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
@@ -9633,7 +9633,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         _gracefulStop = false;
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
-       
+
         var lower = prompt.ToLowerInvariant();
         var mightBeBuildRepair = lower.Contains("build") || lower.Contains("compile") ||
                                  lower.Contains("error") || lower.Contains("warning");
@@ -9673,14 +9673,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         List<object> allSteps = new();
         AgentPlan? plan = null;
         bool pipelineComplete = true;
-      
+
         var (unifiedSteps, unifiedPlan, unifiedComplete) = await StepResolutionPipeline(prompt, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, skipContextReview: skipContextReview,
                 steeringContext: steeringContext, cardId: cardId);
-            allSteps = unifiedSteps;
-            plan = unifiedPlan;
-            pipelineComplete = unifiedComplete;
-      
+        allSteps = unifiedSteps;
+        plan = unifiedPlan;
+        pipelineComplete = unifiedComplete;
+
         if (_gracefulStop)
         {
             _gracefulStop = false;
@@ -10561,7 +10561,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ? "Planner declared plan complete — post-execution verification skipped."
             : (string?)null;
         List<string>? verificationIssues = null;
- 
+
         var anyEditsApplied = allSteps.OfType<Dictionary<string, object?>>().Any(r =>
             r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
             r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
@@ -10572,7 +10572,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                  await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
         }
         else if (!planCompleteDeclared && !anyEditsApplied)
-        { 
+        {
             taskComplete = false;
             verificationDetails = "No edits were applied — skipping post-execution verification.";
             await EmitLog(emitSse, "warn", verificationDetails, ct: ct);
@@ -10617,7 +10617,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             });
         }
         else
-        { 
+        {
             var needsExtraStepResults = allSteps.OfType<Dictionary<string, object?>>()
                 .Where(s => s.ContainsKey("needsExtraStep"))
                 .Select(s => s["needsExtraStep"])
@@ -10693,7 +10693,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     bool hasVerificationIssues = (verificationIssues != null && verificationIssues.Count > 0 && !string.IsNullOrEmpty(verificationIssues[0]));
                     await EmitLog(emitSse, "warn",
                         $"Repair pass {repairIteration}: replanner returned no steps for issue " +
-                        $"\"{( hasVerificationIssues ? verificationIssues![0] : verificationDetails )}\" — stopping repair loop.", ct: ct);
+                        $"\"{(hasVerificationIssues ? verificationIssues![0] : verificationDetails)}\" — stopping repair loop.", ct: ct);
                     exhaustedWithNoSteps = true;
                     break;
                 }
