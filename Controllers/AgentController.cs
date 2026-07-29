@@ -2135,8 +2135,14 @@ public partial class AgentController : ControllerBase
             {
                 var trimOld = string.Join("\n", oldStr.Split('\n').Select(l => l.TrimEnd()));
                 var trimFile = string.Join("\n", content.Split('\n').Select(l => l.TrimEnd()));
-                if (!trimFile.Contains(trimOld, StringComparison.Ordinal))
-                    return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
+                if (trimFile.Contains(trimOld, StringComparison.Ordinal))
+                    return (PreEditVerdict.Proceed, "");
+                // Try oldString without trailing newline (LLM often adds \n at end)
+                var oldStrTrimmed = oldStr.TrimEnd('\n', '\r');
+                if (!string.IsNullOrWhiteSpace(oldStrTrimmed) && oldStrTrimmed != oldStr &&
+                    content.Contains(oldStrTrimmed, StringComparison.Ordinal))
+                    return (PreEditVerdict.Proceed, "");
+                return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
             }
         }
         return (PreEditVerdict.Proceed, "");
@@ -8293,6 +8299,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 foreach (var r in newResults)
                 {
                     r["planItemIndex"] = globalPlanIdx;
+                    if (emitSse && r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
+                        await SendSse(Response, "step", r, ct);
                 }
                 await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
                 if (singleStepPlan.Plan.Count > 1)
