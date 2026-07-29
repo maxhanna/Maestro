@@ -100,7 +100,7 @@ angular.module('kanbanApp')
                         delete card.agentAnalysis; delete card.agentLog;
 
                         function startAgent() {
-                            vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
+                            vm._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
@@ -283,9 +283,11 @@ angular.module('kanbanApp')
                                                                     if (activeCardC) { activeCardC._cohesion = { file: vm.cohesionFile, issues: angular.copy(vm.cohesionIssues) }; vm.saveCards(); }
                                                                 } else { pushAgentLog(vm, 'info', '🔍 Cohesion: no issues found'); }
                                                                 break;
-                                                            case 'done':
-                                                                vm.sendSystemToast(); vm.streamingActive = false; vm.resumeTerminalPolling(); vm.steeringContext = '';
-                                                                var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
+                                                             case 'done':
+                                                                 if (vm._doneProcessed) { pushAgentLog(vm, 'warn', 'Duplicate done event ignored'); break; }
+                                                                 vm._doneProcessed = true;
+                                                                 vm.sendSystemToast(); vm.streamingActive = false; vm.resumeTerminalPolling(); vm.steeringContext = '';
+                                                                 var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                                                                 var elapsedStr = elapsed > 0 ? (elapsed >= 60000 ? Math.floor(elapsed / 60000) + 'm ' + (elapsed % 60000) / 1000 + 's' : Math.floor(elapsed / 1000) + 's') : '';
 
                                                                 var editsApplied = parsed && parsed.editsApplied;
@@ -322,11 +324,16 @@ angular.module('kanbanApp')
                                                                 function recordBenchmarkScore() {
                                                                     if (!card._benchmark) return;
                                                                     vm.benchmarkRunning = false; vm.benchmarkLevel = null;
-                                                                    var completed = 0, total = card._benchmarkTotalSteps || 0;
-                                                                    if (vm.planItems && vm.planItems.length) { completed = vm.planItems.filter(function (pi) { return pi.done; }).length; if (total === 0) total = vm.planItems.length; }
-                                                                    if (total === 0) total = 1;
+                                                                    var stepsForScoring = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
+                                                                    var editCounts = countEditsFromSteps(stepsForScoring);
+                                                                    var successful = editCounts.successful;
+                                                                    var failed = editCounts.failed;
+                                                                    var totalAttempts = successful + failed;
+                                                                    var points = successful + (totalAttempts > 0 && failed === 0 ? successful : 0);
+                                                                    var scorePercent = totalAttempts > 0 ? Math.round((successful / totalAttempts) * 1000) / 10 : 0;
+                                                                    var status = totalAttempts === 0 ? 'failed' : failed === 0 ? 'completed' : successful > 0 ? 'partial' : 'failed';
                                                                     var bmElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
-                                                                    $http.post('/api/benchmark/save-score', { level: card._benchmarkLevel || 1, stepsCompleted: completed, totalSteps: total, scorePercent: Math.round((completed / total) * 1000) / 10, status: completed === total ? 'completed' : completed > 0 ? 'partial' : 'failed', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: bmElapsed, errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || '' });
+                                                                    $http.post('/api/benchmark/save-score', { level: card._benchmarkLevel || 1, successfulEdits: successful, failedEdits: failed, points: points, scorePercent: scorePercent, status: status, modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: bmElapsed, errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || '' });
                                                                     var bIdx = vm.state.todo.indexOf(card); if (bIdx < 0) bIdx = vm.state.doing.indexOf(card); if (bIdx < 0) bIdx = vm.state.done.indexOf(card);
                                                                     if (bIdx >= 0) { var col = vm.state.todo.indexOf(card) >= 0 ? 'todo' : vm.state.doing.indexOf(card) >= 0 ? 'doing' : 'done'; vm.state[col].splice(bIdx, 1); vm.saveCards(); }
                                                                 }
@@ -395,12 +402,13 @@ angular.module('kanbanApp')
 
                                                                 if (card._benchmark) { 
                                                                     $http.post('/api/benchmark/save-score', { 
-                                                                        level: card._benchmarkLevel 
-                                                                            || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps 
-                                                                            || 1, scorePercent: 0, status: 'error', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) 
-                                                                            || '', durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0, errorReason: parsed ? parsed.message : data 
-                                                                        }
-                                                                    ); 
+                                                                        level: card._benchmarkLevel || 1, 
+                                                                        successfulEdits: 0, failedEdits: 0, points: 0, 
+                                                                        scorePercent: 0, status: 'error', 
+                                                                        modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', 
+                                                                        durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0, 
+                                                                        errorReason: parsed ? parsed.message : data 
+                                                                    }); 
                                                                     var errIdx = vm.state.doing.indexOf(card); 
                                                                     if (errIdx >= 0) { 
                                                                         vm.state.doing.splice(errIdx, 1); 
@@ -627,10 +635,22 @@ angular.module('kanbanApp')
                     $http.get('/api/benchmark/plans').then(function (resp) {
                         var plan = (resp.data || []).find(function (p) { return p.level === level; });
                         if (!plan) return vm.benchmarkRunning = false;
-                        var card = { id: 'benchmark_' + level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', _benchmark: true, _benchmarkLevel: level, _benchmarkTotalSteps: plan.steps.length, ready: true };
+                        var card = { id: 'benchmark_' + level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', _benchmark: true, _benchmarkLevel: level, ready: true };
                         vm.state.todo.push(card); vm.saveCards(); vm.executeAgent(card); vm.closeBenchmarksPanel();
                     });
                 };
+
+                function countEditsFromSteps(steps) {
+                    if (!steps || !steps.length) return { successful: 0, failed: 0 };
+                    var successful = 0, failed = 0;
+                    steps.forEach(function (s) {
+                        if (s.type === 'edit') {
+                            if (s.status === 'done' || s.status === 'applied') successful++;
+                            else if (s.status === 'error' || s.status === 'rejected') failed++;
+                        }
+                    });
+                    return { successful: successful, failed: failed };
+                }
 
                 vm.formatBenchmarkDuration = function (durMs) {
                     if (durMs === null || durMs === undefined) return '';
@@ -644,7 +664,7 @@ angular.module('kanbanApp')
                         Token: vm.bughostedClientId,
                         Date: s.date,
                         Benchmark: String(s.level ?? ''),
-                        Steps: String(s.stepsCompleted ?? '') + "/" + String(s.totalSteps ?? ''),
+                        Steps: String(s.successfulEdits ?? '') + "/" + String((s.successfulEdits || 0) + (s.failedEdits || 0)),
                         Score: String(s.scorePercent ?? '0'),
                         Status: String(s.status ?? ''),
                         Duration: s.durationMs ? String(s.durationMs) : '0',

@@ -201,74 +201,12 @@ public class BenchmarkService
     {
         return new List<BenchmarkPlanDefinition>
         {
-            new BenchmarkPlanDefinition
-            {
-                Level = 1,
-                Name = "Benchmark 1",
-                Description = "Basic file creation and editing",
-                Steps = new List<BenchmarkStep>
-                {
-                    new() { Index = 1, Change = "Create a folder called 'benchmark_test_1' at the project root" },
-                    new() { Index = 2, Change = "Create a file called 'test.md' inside the benchmark_test_1 folder and write 'Hello world' in it" },
-                    new() { Index = 3, Change = "In benchmark_test_1/test.md append 'The capital of France is Paris'" }
-                }
-            },
-            new BenchmarkPlanDefinition
-            {
-                Level = 2,
-                Name = "Benchmark 2",
-                Description = "Simple code generation",
-                Steps = new List<BenchmarkStep>
-                {
-                    new() { Index = 1, Change = "Create a folder called 'benchmark_test_2' at the project root" },
-                    new() { Index = 2, Change = "Create a file called 'hello.py' inside the benchmark_test_2 folder and write a Python script that prints 'Hello, World!' in it" },
-                    new() { Index = 3, Change = "Modify benchmark_test_2/hello.py to ask for the user's name and greet them" },
-                    new() { Index = 4, Change = "Create a JavaScript file 'hello.js' inside the benchmark_test_2 folder that logs 'Hello from JS' to the console" }
-                }
-            },
-            new BenchmarkPlanDefinition
-            {
-                Level = 3,
-                Name = "Benchmark 3",
-                Description = "HTML/CSS layout tasks",
-                Steps = new List<BenchmarkStep>
-                {
-                    new() { Index = 1, Change = "Create a folder called 'benchmark_test_3' at the project root" },
-                    new() { Index = 2, Change =
-                    @"Create 'page.html' in the 'benchmark_test_3' folder with a basic HTML skeleton. 
-                    Add a heading that says 'Benchmark Page' and a paragraph of lorem ipsum text. Link styles.css to page.html. 
-                    Add a centered div with a border, padding, and a shadow. Use styles.css to define the styles. Add a button that changes the paragraph text when clicked (inline script)." },
-                    new() { Index = 3, Change = "Create 'style.css', put it in the 'benchmark_test_3' folder. Give the body element a red background color and style the page.html page elements with CSS." }, 
-                }
-            },
-            new BenchmarkPlanDefinition
-            {
-                Level = 4,
-                Name = "Benchmark 4",
-                Description = "Basic web server",
-                Steps = new List<BenchmarkStep>
-                {
-                    new() { Index = 1, Change = "Create 'server.py' in desktop/benchmark_test that runs a simple HTTP server on port 9999" },
-                    new() { Index = 2, Change = "The server should serve 'index.html' when accessing /" },
-                    new() { Index = 3, Change = "Create index.html with some basic content" },
-                    new() { Index = 4, Change = "Add a /api/hello endpoint that returns JSON: {\"message\": \"Hello\"}" },
-                    new() { Index = 5, Change = "Start the server and verify it responds to a request" }
-                }
-            },
-            new BenchmarkPlanDefinition
-            {
-                Level = 5,
-                Name = "Benchmark 5",
-                Description = "Data structure implementation",
-                Steps = new List<BenchmarkStep>
-                {
-                    new() { Index = 1, Change = "Create 'datastructures.py' in desktop/benchmark_test" },
-                    new() { Index = 2, Change = "Implement a Stack class with push, pop, peek, and is_empty methods" },
-                    new() { Index = 3, Change = "Implement a Queue class with enqueue, dequeue, peek, and is_empty methods" },
-                    new() { Index = 4, Change = "Write unit tests for both classes using Python's unittest module" },
-                    new() { Index = 5, Change = "Run the tests and verify they pass" }
-                }
-            }
+            new() { Level = 0, Name = "Benchmark 0", Description = "Create a folder called 'benchmark_0' at the project root." },
+            new() { Level = 1, Name = "Benchmark 1", Description = "Create a folder called 'benchmark_test_1' at the project root. Create a file called 'test.md' inside it and write 'Hello world'. Then append 'The capital of France is Paris'." },
+            new() { Level = 2, Name = "Benchmark 2", Description = "Create a folder called 'benchmark_test_2' at the project root. Create a Python script 'hello.py' inside it that prints 'Hello, World!', then modify it to ask for the user's name and greet them. Also create a JavaScript file 'hello.js' that logs 'Hello from JS' to the console." },
+            new() { Level = 3, Name = "Benchmark 3", Description = "Create a folder called 'benchmark_test_3'. Build an HTML page 'page.html' with a heading 'Benchmark Page', a lorem ipsum paragraph, and a centered styled div. Create 'style.css' with styles including a red body background. Add a button that changes paragraph text via inline script." },
+            new() { Level = 4, Name = "Benchmark 4", Description = "Create 'server.py' that runs an HTTP server on port 9999 serving 'index.html' at / and a /api/hello JSON endpoint. Create index.html with basic content. Start the server and verify it responds." },
+            new() { Level = 5, Name = "Benchmark 5", Description = "Create 'datastructures.py' with a Stack class (push, pop, peek, is_empty) and a Queue class (enqueue, dequeue, peek, is_empty). Write unit tests using Python's unittest module and run them to verify they pass." }
         };
     }
 }
@@ -288,13 +226,6 @@ public class BenchmarkPlanDefinition
     public int Level { get; set; }
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
-    public List<BenchmarkStep> Steps { get; set; } = new();
-}
-
-public class BenchmarkStep
-{
-    public int Index { get; set; }
-    public string Change { get; set; } = "";
 }
 
 public class BenchmarkScore
@@ -302,8 +233,9 @@ public class BenchmarkScore
     public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     public int Level { get; set; }
-    public int StepsCompleted { get; set; }
-    public int TotalSteps { get; set; }
+    public int SuccessfulEdits { get; set; }
+    public int FailedEdits { get; set; }
+    public int Points { get; set; }
     public double ScorePercent { get; set; }
     public string Status { get; set; } = ""; // "completed", "partial", "failed"
     public SystemInfo? SystemInfo { get; set; }

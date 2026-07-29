@@ -1305,7 +1305,6 @@
                 <div>
                   <strong>{{plan.name}}</strong>
                   <span class="text-sm muted" style="margin-left:8px;">{{plan.description}}</span>
-                  <span class="text-xs muted" style="margin-left:4px;">({{plan.steps.length}} steps)</span>
                 </div>
                 <button ng-click="vm.startBenchmark(plan.level)" class="primary small"
                   ng-disabled="vm.benchmarkRunning">▶ Run</button>
@@ -1330,7 +1329,8 @@
                   <div style="font-weight: bold;">
                     <span style="font-size: small">{{s.timestamp ? (s.timestamp | date:'short') : '—'}}</span> - 
                     {{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}} - 
-                    {{s.stepsCompleted}}/{{s.totalSteps}} - 
+                    {{s.successfulEdits || 0}} ok<span ng-if="s.failedEdits"> / {{s.failedEdits}} fail</span> - 
+                    {{s.points || 0}}pts - 
                     {{s.scorePercent != null ? (s.scorePercent.toFixed(1) + '%') : '—'}} - 
                     {{s.status || '—'}} - 
                     {{vm.formatBenchmarkDuration(s.durationMs)}}
@@ -1368,8 +1368,9 @@
             <tr style="border-bottom:1px solid var(--border);">
               <th style="text-align:left;padding:4px 8px;">Date</th>
               <th style="text-align:left;padding:4px 8px;">Benchmark</th>
-              <th style="text-align:left;padding:4px 8px;">Steps</th>
-              <th style="text-align:left;padding:4px 8px;">Score</th>
+              <th style="text-align:left;padding:4px 8px;">Edits</th>
+              <th style="text-align:left;padding:4px 8px;">Points</th>
+              <th style="text-align:left;padding:4px 8px;">%</th>
               <th style="text-align:left;padding:4px 8px;">Status</th>
               <th style="text-align:left;padding:4px 8px;">Duration</th>
               <th style="text-align:left;padding:4px 8px;">Model</th>
@@ -1381,7 +1382,11 @@
               ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
               <td style="padding:4px 8px;font-size:12px;">{{s.timestamp | date:'short'}}</td>
               <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
-              <td style="padding:4px 8px;">{{s.stepsCompleted}}/{{s.totalSteps}}</td>
+              <td style="padding:4px 8px;font-size:11px;">
+                <span style="color:var(--success);">{{s.successfulEdits || 0}} ok</span>
+                <span ng-if="s.failedEdits" style="color:var(--danger);"> / {{s.failedEdits}} fail</span>
+              </td>
+              <td style="padding:4px 8px;font-weight:700;">{{s.points || 0}}</td>
               <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
               <td style="padding:4px 8px;">{{s.status}}</td>
               <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>

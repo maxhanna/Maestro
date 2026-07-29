@@ -3859,12 +3859,21 @@ public partial class AgentController : ControllerBase
                         var fmtExt = Path.GetExtension(relPath).ToLowerInvariant();
                         if (fmtExt == ".css" || fmtExt == ".scss" || fmtExt == ".less")
                             newStr = LlmCssCleaner.Clean(newStr);
-                        if (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
-                            newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
-                        newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
-                        fromFormatC = true;
-                        await EmitLog(emitSse, "info",
-                            $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
+                        var trimmedNew = newStr.TrimStart();
+                        if (trimmedNew.StartsWith("{") && (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs"))
+                        {
+                            resolveError = "Focused LLM returned body-only code (starts with '{') — need a complete method declaration";
+                            await EmitLog(emitSse, "warn", $"  {resolveError} ({newStr.Length} chars)", ct: ct);
+                        }
+                        else
+                        {
+                            if (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                                newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
+                            newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
+                            fromFormatC = true;
+                            await EmitLog(emitSse, "info",
+                                $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
+                        }
                     }
                 }
                 else
@@ -9573,12 +9582,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         _gracefulStop = false;
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
-        var fastPlan = AgentUtilities.TryDetectSimpleIntent(prompt);
-        if (fastPlan != null)
-        {
-            var steps = await QuickPipeline(prompt, projectRoot, emitSse, fastPlan, ct, cardId: cardId);
-            return (steps, fastPlan, true);
-        }
+       
         var lower = prompt.ToLowerInvariant();
         var mightBeBuildRepair = lower.Contains("build") || lower.Contains("compile") ||
                                  lower.Contains("error") || lower.Contains("warning");
@@ -9597,6 +9601,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "warn", "Possible build repair prompt detected but no build commands provided — skipping repair.", new { prompt, buildCommands }, ct: ct);
             }
         }
+
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
             var resumeSteps = new List<object>();
@@ -9613,6 +9618,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             return (resumeSteps, existingPlan, resumeComplete);
         }
+        
         var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
         await EmitLog(emitSse, "info", $"Router → {pipelineType}", ct: ct);
         bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
