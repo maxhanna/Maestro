@@ -106,10 +106,10 @@ angular.module('kanbanApp')
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
                             vm._agentStartTime = Date.now();
-                            vm.agentTimer = $interval(function () { 
+                            vm.agentTimer = $interval(function () {
                                 if (vm.streamingActive) {
-                                    vm.agentElapsed = (vm._agentStartTime ? Date.now() - vm._agentStartTime : 0); 
-                                } 
+                                    vm.agentElapsed = (vm._agentStartTime ? Date.now() - vm._agentStartTime : 0);
+                                }
                             }, 1000);
 
                             if (!isAutoRestart) {
@@ -190,20 +190,20 @@ angular.module('kanbanApp')
                                                                     if (sp) sp.done = parsed.done;
                                                                 }
                                                                 break;
-                                                             case 'plan':
-                                                                 if (parsed && parsed.items && parsed.items.length) {
-                                                                     var existingState = {};
-                                                                     if (vm.planItems) vm.planItems.forEach(function (pi) { existingState[pi.file + '|' + pi.change] = { done: pi.done, diffs: pi.diffs, _diffApplied: pi._diffApplied, _diffStepStatus: pi._diffStepStatus }; });
-                                                                     vm.planItems = parsed.items.map(function (item, i) {
-                                                                         var file = item.File || item.file || '?';
-                                                                         var change = item.Change || item.change || '';
-                                                                         var key = file + '|' + change;
-                                                                         var prev = existingState[key] || {};
-                                                                         return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '' };
-                                                                     });
-                                                                      vm.verifyDiffs(vm.planItems);
-                                                                      reconcilePlanItems(vm, $scope, $timeout);
-                                                                     if (parsed.thinking) vm.streamingThinking = parsed.thinking;
+                                                            case 'plan':
+                                                                if (parsed && parsed.items && parsed.items.length) {
+                                                                    var existingState = {};
+                                                                    if (vm.planItems) vm.planItems.forEach(function (pi) { existingState[pi.file + '|' + pi.change] = { done: pi.done, diffs: pi.diffs, _diffApplied: pi._diffApplied, _diffStepStatus: pi._diffStepStatus }; });
+                                                                    vm.planItems = parsed.items.map(function (item, i) {
+                                                                        var file = item.File || item.file || '?';
+                                                                        var change = item.Change || item.change || '';
+                                                                        var key = file + '|' + change;
+                                                                        var prev = existingState[key] || {};
+                                                                        return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '' };
+                                                                    });
+                                                                    vm.verifyDiffs(vm.planItems);
+                                                                    reconcilePlanItems(vm, $scope, $timeout);
+                                                                    if (parsed.thinking) vm.streamingThinking = parsed.thinking;
                                                                     if (parsed.summary) vm.streamingSummary = parsed.summary;
                                                                     pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + parsed.items.length + ' steps)', { itemCount: parsed.items.length, score: parsed.score });
 
@@ -226,15 +226,15 @@ angular.module('kanbanApp')
                                                             case 'refresh':
                                                                 if (parsed && parsed.target === 'boarddata' && vm.refreshBoardData) vm.refreshBoardData(parsed);
                                                                 break;
-                                                                case 'step':
-                                                                 if (parsed) {
-                                                                     upsertStreamingStep(vm, parsed, $scope, $timeout);
-                                                                     reconcilePlanItems(vm, $scope, $timeout);
-                                                                     if (parsed.diffs && parsed.diffs.length && parsed.planItemIndex !== undefined && vm.planItems) {
-                                                                         var pi = vm.planItems.find(function (x) { return x.index === parsed.planItemIndex; });
-                                                                         if (pi && (!pi.diffs || pi.diffs.length !== parsed.diffs.length)) { pi.diffs = parsed.diffs; pi._diffStepStatus = parsed.status; }
-                                                                     }
-                                                                     if (parsed.message === 'Cancelled by user' && parsed.planItemIndex !== undefined && vm.planItems) {
+                                                            case 'step':
+                                                                if (parsed) {
+                                                                    upsertStreamingStep(vm, parsed, $scope, $timeout);
+                                                                    reconcilePlanItems(vm, $scope, $timeout);
+                                                                    if (parsed.diffs && parsed.diffs.length && parsed.planItemIndex !== undefined && vm.planItems) {
+                                                                        var pi = vm.planItems.find(function (x) { return x.index === parsed.planItemIndex; });
+                                                                        if (pi && (!pi.diffs || pi.diffs.length !== parsed.diffs.length)) { pi.diffs = parsed.diffs; pi._diffStepStatus = parsed.status; }
+                                                                    }
+                                                                    if (parsed.message === 'Cancelled by user' && parsed.planItemIndex !== undefined && vm.planItems) {
                                                                         var cancelledItem = vm.planItems.find(function (pi) { return pi.index === parsed.planItemIndex; });
                                                                         if (cancelledItem) cancelledItem.cancelled = true;
                                                                     }
@@ -285,11 +285,11 @@ angular.module('kanbanApp')
                                                                     if (activeCardC) { activeCardC._cohesion = { file: vm.cohesionFile, issues: angular.copy(vm.cohesionIssues) }; vm.saveCards(); }
                                                                 } else { pushAgentLog(vm, 'info', '🔍 Cohesion: no issues found'); }
                                                                 break;
-                                                             case 'done':
-                                                                 if (vm._doneProcessed) { pushAgentLog(vm, 'warn', 'Duplicate done event ignored'); break; }
-                                                                 vm._doneProcessed = true;
-                                                                 vm.sendSystemToast(); vm.streamingActive = false; vm.resumeTerminalPolling(); vm.steeringContext = '';
-                                                                 var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
+                                                            case 'done':
+                                                                if (vm._doneProcessed) { pushAgentLog(vm, 'warn', 'Duplicate done event ignored'); break; }
+                                                                vm._doneProcessed = true;
+                                                                vm.sendSystemToast(); vm.streamingActive = false; vm.resumeTerminalPolling(); vm.steeringContext = '';
+                                                                var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                                                                 var elapsedStr = elapsed > 0 ? (elapsed >= 60000 ? Math.floor(elapsed / 60000) + 'm ' + (elapsed % 60000) / 1000 + 's' : Math.floor(elapsed / 1000) + 's') : '';
 
                                                                 var editsApplied = parsed && parsed.editsApplied;
@@ -310,18 +310,18 @@ angular.module('kanbanApp')
                                                                 vm.agentResult = { summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited, steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
                                                                 vm._agentStartTime = null;
-                                                                vm.agentTimer = null; 
+                                                                vm.agentTimer = null;
 
                                                                 var analysis = { summary: finalSummary, thinking: finalThinking, steps: finalSteps, filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
                                                                 if (doIdx !== -1) { vm.state.doing[doIdx].agentAnalysis = analysis; vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog); }
-                                                 
+
                                                                 if (vm._agentStopped || card.id !== vm.activeCardId) { $scope.$applyAsync(); return; }
 
-                                                                 if (vm.planItems && vm.planItems.length) {
-                                                                     var allDone = vm.planItems.every(function (pi) { return pi.done; });
-                                                                     if (!allDone) { incomplete = true; pushAgentLog(vm, 'warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing'); }
-                                                                 }
+                                                                if (vm.planItems && vm.planItems.length) {
+                                                                    var allDone = vm.planItems.every(function (pi) { return pi.done; });
+                                                                    if (!allDone) { incomplete = true; pushAgentLog(vm, 'warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing'); }
+                                                                }
 
                                                                 function recordBenchmarkScore() {
                                                                     if (!card._benchmark) return;
@@ -335,52 +335,74 @@ angular.module('kanbanApp')
                                                                     var scorePercent = totalAttempts > 0 ? Math.round((successful / totalAttempts) * 1000) / 10 : 0;
                                                                     var status = totalAttempts === 0 ? 'failed' : failed === 0 ? 'completed' : successful > 0 ? 'partial' : 'failed';
                                                                     var bmElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
-                                                                     $http.post('/api/benchmark/save-score', { level: card._benchmarkLevel != null ? card._benchmarkLevel : 1, successfulEdits: successful, failedEdits: failed, points: points, scorePercent: scorePercent, status: status, modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: bmElapsed, errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || '' });
-                                                                    var bIdx = vm.state.todo.indexOf(card); if (bIdx < 0) bIdx = vm.state.doing.indexOf(card); if (bIdx < 0) bIdx = vm.state.done.indexOf(card);
-                                                                    if (bIdx >= 0) { var col = vm.state.todo.indexOf(card) >= 0 ? 'todo' : vm.state.doing.indexOf(card) >= 0 ? 'doing' : 'done'; vm.state[col].splice(bIdx, 1); vm.saveCards(); }
+                                                                    $http.post('/api/benchmark/save-score',
+                                                                        {
+                                                                            level: card._benchmarkLevel != null ? card._benchmarkLevel : 1,
+                                                                            successfulEdits: successful,
+                                                                            failedEdits: failed,
+                                                                            points: points,
+                                                                            scorePercent: scorePercent,
+                                                                            status: status,
+                                                                            modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                                                                            durationMs: bmElapsed,
+                                                                            errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || ''
+                                                                        }
+                                                                    );
+                                                                    var bIdx = vm.state.todo.indexOf(card);
+                                                                    if (bIdx < 0) { bIdx = vm.state.doing.indexOf(card); }
+                                                                    if (bIdx < 0) { bIdx = vm.state.done.indexOf(card); }
+                                                                    if (bIdx >= 0) {
+                                                                        var col = vm.state.todo.indexOf(card) >= 0
+                                                                            ? 'todo'
+                                                                            : vm.state.doing.indexOf(card) >= 0
+                                                                                ? 'doing'
+                                                                                : 'done';
+                                                                        vm.state[col].splice(bIdx, 1);
+                                                                        vm.saveCards();
+                                                                    }
                                                                 }
 
                                                                 function finishCard() {
                                                                     vm._agentStartTime = null;
                                                                     vm.agentTimer = null;
                                                                     if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
-                                                                     if (!incomplete) {
-                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
-                                                                         vm.moveCardToDone(card);
-                                                                         $timeout(function () {
-                                                                             if (!vm.autoQueue) return;
-                                                                             var readyTodo = vm.state.todo.filter(function (c) {
-                                                                                 return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
-                                                                             });
-                                                                             if (readyTodo.length) {
-                                                                                 var next = readyTodo[readyTodo.length - 1];
-                                                                                 vm.moveCardToDoing(next.id);
-                                                                                 vm.executeAgent(next);
-                                                                                 return;
-                                                                             }
-                                                                             var siReady = vm.state.selfImproving.filter(function (c) {
-                                                                                 return c.filePath === vm.selectedProject && c.ready && c.selfImproving;
-                                                                             });
-                                                                             if (siReady.length) {
-                                                                                 var nextSi = siReady[siReady.length - 1];
-                                                                                 vm.moveCardToDoing(nextSi.id);
-                                                                                 vm.executeAgent(nextSi);
-                                                                             }
-                                                                         }, 500);
-                                                                         return;
-                                                                     }
-                                                                     if (incomplete && card.id === vm.activeCardId) {
+                                                                    if (!incomplete) {
+                                                                        pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
+                                                                        vm.moveCardToDone(card);
+                                                                        $timeout(function () {
+                                                                            if (!vm.autoQueue) return;
+                                                                            var readyTodo = vm.state.todo.filter(function (c) {
+                                                                                return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
+                                                                            });
+                                                                            if (readyTodo.length) {
+                                                                                var next = readyTodo[readyTodo.length - 1];
+                                                                                vm.moveCardToDoing(next.id);
+                                                                                vm.executeAgent(next);
+                                                                                return;
+                                                                            }
+                                                                            var siReady = vm.state.selfImproving.filter(function (c) {
+                                                                                return c.filePath === vm.selectedProject && c.ready && c.selfImproving;
+                                                                            });
+                                                                            if (siReady.length) {
+                                                                                var nextSi = siReady[siReady.length - 1];
+                                                                                vm.moveCardToDoing(nextSi.id);
+                                                                                vm.executeAgent(nextSi);
+                                                                            }
+                                                                        }, 500);
+                                                                        return;
+                                                                    }
+                                                                    if (incomplete && card.id === vm.activeCardId) {
                                                                         card._agentIteration = (card._agentIteration || 0) + 1; var MAX_ITERATIONS = 5;
                                                                         if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(); return; } }
                                                                         else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
-                                                                     $timeout(function () {
-                                                                         if (!vm.autoQueue) return;
-                                                                         var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
-                                                                         if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
-                                                                         var siReady = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
-                                                                         if (siReady.length) { var nextSi = siReady[siReady.length - 1]; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
-                                                                     }, 500);
+                                                                    $timeout(function () {
+                                                                        if (!vm.autoQueue) return;
+                                                                        var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
+                                                                        if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
+                                                                        var siReady = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
+                                                                        if (siReady.length) { var nextSi = siReady[siReady.length - 1]; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
+                                                                    }, 500);
                                                                 }
 
                                                                 if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {
@@ -393,29 +415,29 @@ angular.module('kanbanApp')
                                                                 } else { if (incomplete) pushAgentLog(vm, 'warn', 'Card kept in Doing — no files were modified'); finishCard(); }
                                                                 break;
                                                             case 'error':
-                                                                vm.streamingActive = false; 
+                                                                vm.streamingActive = false;
                                                                 vm._agentStartTime = null;
-                                                                vm.agentTimer = null; 
-                                                                vm.resumeTerminalPolling(); 
-                                                                pushAgentLog(vm, 'error', parsed ? parsed.message : data); 
+                                                                vm.agentTimer = null;
+                                                                vm.resumeTerminalPolling();
+                                                                pushAgentLog(vm, 'error', parsed ? parsed.message : data);
                                                                 vm.agentResult = { error: parsed ? parsed.message : data };
-                                                                vm.activeCardId = null; 
+                                                                vm.activeCardId = null;
                                                                 vm.activeCardIds = new Set();
 
-                                                                if (card._benchmark) { 
-                                                                    $http.post('/api/benchmark/save-score', { 
-                                                                        level: card._benchmarkLevel != null ? card._benchmarkLevel : 1, 
-                                                                        successfulEdits: 0, failedEdits: 0, points: 0, 
-                                                                        scorePercent: 0, status: 'error', 
-                                                                        modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', 
-                                                                        durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0, 
-                                                                        errorReason: parsed ? parsed.message : data 
-                                                                    }); 
-                                                                    var errIdx = vm.state.doing.indexOf(card); 
-                                                                    if (errIdx >= 0) { 
-                                                                        vm.state.doing.splice(errIdx, 1); 
-                                                                        vm.saveCards(); 
-                                                                    } 
+                                                                if (card._benchmark) {
+                                                                    $http.post('/api/benchmark/save-score', {
+                                                                        level: card._benchmarkLevel != null ? card._benchmarkLevel : 1,
+                                                                        successfulEdits: 0, failedEdits: 0, points: 0,
+                                                                        scorePercent: 0, status: 'error',
+                                                                        modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                                                                        durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0,
+                                                                        errorReason: parsed ? parsed.message : data
+                                                                    });
+                                                                    var errIdx = vm.state.doing.indexOf(card);
+                                                                    if (errIdx >= 0) {
+                                                                        vm.state.doing.splice(errIdx, 1);
+                                                                        vm.saveCards();
+                                                                    }
                                                                 }
                                                                 break;
                                                         }
@@ -445,19 +467,19 @@ angular.module('kanbanApp')
                 };
 
                 vm.stopAgent = function (card) {
-                    vm.agentTimer = null; 
+                    vm.agentTimer = null;
                     vm._agentStartTime = null;
-                    vm.agentElapsed = 0; 
-                    vm._agentStopped = true; 
+                    vm.agentElapsed = 0;
+                    vm._agentStopped = true;
                     if (vm.abortController) { vm.abortController.abort(); }
-                    vm.abortController = new AbortController(); 
-                    vm.streamingActive = false; 
+                    vm.abortController = new AbortController();
+                    vm.streamingActive = false;
                     const message = 'Agent stopped by user.';
-                    vm.agentResult = { warning:  message};
-                    pushAgentLog(vm, 'warn', message); 
+                    vm.agentResult = { warning: message };
+                    pushAgentLog(vm, 'warn', message);
                     vm.showNotification(message);
-                    vm.activeCardId = null; 
-                    vm.activeCardIds = new Set(); 
+                    vm.activeCardId = null;
+                    vm.activeCardIds = new Set();
                     vm.resumeTerminalPolling();
                 };
 
@@ -697,13 +719,13 @@ angular.module('kanbanApp')
                             delete vm._sendingBenchmarkIds[s.id];
                         });
                 };
-                vm.msToDigitalTime = function (ms) { 
+                vm.msToDigitalTime = function (ms) {
                     return new Date(ms).toISOString().slice(11, 19);
                 }
                 vm.fetchBenchmarksFromServer = function () {
-                    if (!vm.bughostedClientId) { 
-                        alert('Not connected to BugHosted. Login first.'); 
-                        return; 
+                    if (!vm.bughostedClientId) {
+                        alert('Not connected to BugHosted. Login first.');
+                        return;
                     }
                     vm.fetchingBenchmarks = true;
                     $http.get('/api/bughosted/benchmarks?token=' + encodeURIComponent(vm.bughostedClientId))
