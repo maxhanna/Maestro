@@ -87,7 +87,6 @@ angular.module('kanbanApp')
                 // Methods
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
                 vm.toggleChatMode = function () { vm.chatMode = vm.chatMode === 'ask' ? 'build' : 'ask'; };
-                vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
                 vm.logFileSizeAndTokens = function (filePath, content) {
                     if (!filePath || !content) return; const fileSize = content.length; const tokenCount = Math.ceil(fileSize / 4);
                     if (vm.addLogEntry) vm.addLogEntry({ type: 'debug', message: `File: ${filePath} | Size: ${fileSize} chars | Tokens: ~${tokenCount}` });

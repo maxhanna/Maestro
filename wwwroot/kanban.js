@@ -14,7 +14,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
   return {
     init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
-
+      vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
       vm.findCardById = function (cardId) {
         if (!cardId || !vm.state) return null;
         try {
