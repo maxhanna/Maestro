@@ -860,18 +860,6 @@ public static class AgentUtilities
         new Regex(@"\bMyProperty\b", RegexOptions.Compiled),
         new Regex(@"\bSomeProperty\b", RegexOptions.Compiled),
     };
-    public static bool IsPlaceholderContent(string newCode)
-    {
-        if (string.IsNullOrWhiteSpace(newCode)) return false; // empty = deletion, not placeholder
-        foreach (var rx in PlaceholderPatterns)
-            if (rx.IsMatch(newCode))
-                return true;
-        var bodyOnly = Regex.Replace(newCode, @"//[^\n]*|/\*.*?\*/", "", RegexOptions.Singleline).Trim();
-        if (string.IsNullOrWhiteSpace(bodyOnly)) return true;
-        if (Regex.IsMatch(newCode, @"\{\s*(//\s*(body|todo|implement|placeholder|your code here)[^}]*)?\s*\}", RegexOptions.IgnoreCase))
-            return true;
-        return false;
-    }
     public static string PostEditCSharpFixup(string content)
     {
         if (string.IsNullOrWhiteSpace(content)) return content;

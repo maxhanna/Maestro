@@ -1216,8 +1216,7 @@ public partial class AgentController : ControllerBase
             var hasTargetName = jRoot.TryGetProperty("targetName", out var tnEl);
             var hasFmtNewCode = jRoot.TryGetProperty("newCode", out var ncEl);
             var hasInsertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl);
-            var insertAfter = hasInsertAfter && iaEl.GetBoolean();
-            // Allow FORMAT C insertAfter without targetType — simple text-based search
+            var insertAfter = hasInsertAfter && iaEl.GetBoolean(); 
             if ((hasTargetType && hasTargetName && hasFmtNewCode) ||
                 (!hasTargetType && hasTargetName && hasFmtNewCode && insertAfter && System.IO.File.Exists(fullPath)))
             {
@@ -1232,13 +1231,7 @@ public partial class AgentController : ControllerBase
                 {
                     newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
                     newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
-                    // if (AgentUtilities.IsPlaceholderContent(newCodeStr))
-                    // {
-                    //     await EmitLog(emitSse, "warn",
-                    //         $"newCode rejected — contains placeholder/generic names ('myNewMethod', 'MyMethod', '// body', etc.). You MUST write real code with the actual method name and body from the task, not templates.", ct: ct);
-                    //     return (null, null, false, null, false,
-                    //         $"PLACEHOLDER REJECTED: newCode contains placeholder names like 'myNewMethod' or 'MyMethod'. Write REAL code using the actual symbol name from the task. The method must have the correct name and a real implementation body.", false);
-                    // }
+                 
                     var hasReplace = jRoot.TryGetProperty("replace", out var rpEl);
                     var replaceSection = hasReplace && rpEl.GetBoolean();
                     if (string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase))
@@ -7675,8 +7668,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return (false, "_create_file step has no file content in newString — provide the full file content or edit an existing file instead.");
             if (step.NewString.Trim().Length < 1)
                 return (false, "_create_file step content is too short (" + step.NewString.Trim().Length + " chars) — provide meaningful file content.");
-            if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase)))
-                return (false, "A _create_file step is already committed — creating additional new files is likely unnecessary. Target the existing file instead.");
+            if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase) &&
+                                   string.Equals(s.Change, step.Change, StringComparison.OrdinalIgnoreCase)))
+                return (false, $"File '{step.Change}' was already created by a prior _create_file step — target the existing file instead.");
         }
         if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
             !AgentUtilities.LooksLikeShellCommand(step.Change))
@@ -7731,10 +7725,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var willBeCreatedEarlier = planSoFar.Any(p =>
                 (p.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
                  p.File.Equals("_command", StringComparison.OrdinalIgnoreCase)) &&
-                (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
-            // if (isModifyVerb && !fileExists && !willBeCreatedEarlier)
-            //     return (false, $"Says '{changeLower.Split(' ')[0]}' but {step.File} does not exist yet and no earlier " +
-            //                     "step creates it. Add a creation step first, or rephrase as a creation ('Add ...').");
+                (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase)); 
+            if (!fileExists && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
+            {
+                var origPath = step.File;
+                step.File = "_create_file";
+                step.Change = origPath;
+                return (true, null);
+            }
             if (fileExists)
             {
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
@@ -8097,7 +8095,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
-            ct.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested(); 
             if (emitSse)
             {
                 await SendSse(Response, "phase", new { message = $"Planning Step {planSoFar.Count + 1}" }, ct);
@@ -8166,9 +8164,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.Step.File != null && planSoFar.Count > 0)
             {
+                // For special markers (_create_file, _create_directory, _command, etc.),
+                // the "File" field is always the marker name — use Change for identity.
+                // Two _create_file steps are only duplicates if they target the exact same path.
+                var isSpecialStep = AgentUtilities.IsSpecialMarker(proposal.Step.File);
                 var duplicateOf = planSoFar.FirstOrDefault(s =>
-                    string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
-                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35);
+                {
+                    if (!string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase))
+                        return false;
+                    if (isSpecialStep)
+                        // Special markers: duplicate only if the Change (=path/command) is identical
+                        return string.Equals(s.Change, proposal.Step.Change, StringComparison.OrdinalIgnoreCase);
+                    // Regular file steps: use token overlap on the change description
+                    return TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35;
+                });
                 if (duplicateOf != null)
                 {
                     rejectionFeedback.Add(
@@ -8196,7 +8205,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .OfType<Dictionary<string, object?>>()
                 .Where(r => r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("type")?.ToString() is "modified")
                 .LastOrDefault();
-            if (lastResult != null && lastResult["needsExtraStep"] is false)
+            if (lastResult != null && lastResult["needsExtraStep"] is false &&
+                string.Equals(lastResult.GetValueOrDefault("path")?.ToString(), proposal.Step.File, StringComparison.OrdinalIgnoreCase))
             {
                 var lastPath = lastResult.GetValueOrDefault("path")?.ToString() ?? "";
                 var lastChange = lastResult.GetValueOrDefault("change")?.ToString() ?? "";
@@ -8228,24 +8238,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             consecutiveSlotFailures = 0;
             regenAttempts = 0;
             rejectionFeedback.Clear();
-            var stepToRun = proposal.Step;
-            if (stepToRun != null && planSoFar.Any(s =>
-                s.File != "_noop" &&
-                string.Equals(s.File, stepToRun.File, StringComparison.OrdinalIgnoreCase) &&
-                (string.Equals(s.Change, stepToRun.Change, StringComparison.Ordinal) ||
-                 (s.Change?.Length > 10 && stepToRun.Change?.Length > 10 &&
-                  (s.Change.Contains(stepToRun.Change) || stepToRun.Change.Contains(s.Change)))) &&
-                ((!string.IsNullOrEmpty(s.OldString) && string.Equals(s.OldString, stepToRun.OldString, StringComparison.Ordinal)) ||
-                 (!string.IsNullOrEmpty(s.NewString) && string.Equals(s.NewString, stepToRun.NewString, StringComparison.Ordinal)) ||
-                 (!string.IsNullOrEmpty(s.TargetSymbol) && string.Equals(s.TargetSymbol, stepToRun.TargetSymbol, StringComparison.Ordinal)))))
-            {
-                await EmitLog(emitSse, "info",
-                    $"Plan complete — duplicate step in interleaved execution: [{stepToRun.File}] {stepToRun.Change} — nothing new to add",
-                    ct: ct);
-                break;
-            }
+            var stepToRun = proposal.Step; 
             if (stepToRun != null)
             {
+                var dupStep = planSoFar.FirstOrDefault(s =>
+                    s.File != "_noop" &&
+                    string.Equals(s.File, stepToRun.File, StringComparison.OrdinalIgnoreCase) &&
+                    (string.Equals(s.Change, stepToRun.Change, StringComparison.Ordinal) ||
+                     (s.Change?.Length > 10 && stepToRun.Change?.Length > 10 &&
+                      (s.Change.Contains(stepToRun.Change) || stepToRun.Change.Contains(s.Change)))) &&
+                    ((!string.IsNullOrEmpty(s.OldString) && string.Equals(s.OldString, stepToRun.OldString, StringComparison.Ordinal)) ||
+                     (!string.IsNullOrEmpty(s.NewString) && string.Equals(s.NewString, stepToRun.NewString, StringComparison.Ordinal)) ||
+                     (!string.IsNullOrEmpty(s.TargetSymbol) && string.Equals(s.TargetSymbol, stepToRun.TargetSymbol, StringComparison.Ordinal))));
+                if (dupStep != null)
+                { 
+                    await EmitLog(emitSse, "info",
+                        $"Plan complete — duplicate step in interleaved execution: [{stepToRun.File}] {stepToRun.Change} — nothing new to add",
+                        ct: ct);
+                    break;
+                }
+            }
+            if (stepToRun != null)
+            { 
                 planSoFar.Add(stepToRun);
                 if (!string.IsNullOrWhiteSpace(proposal.Thinking))
                     thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
@@ -8295,6 +8309,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
                 var stepSucceeded = newResults.Any(r => r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
+                await EmitLog(emitSse, "info",
+                    $"DIAG: After ExecutePlan — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}, newResults.Count={newResults.Count}",
+                    ct: ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
                 {
@@ -8399,6 +8416,37 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 foreach (var touched in touchedPaths)
                     discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+
+                // After each step, inject a live directory listing for any directories that were
+                // touched. This prevents the planner from hallucinating that a file was created
+                // when it wasn't — it can see exactly what exists on disk.
+                var affectedDirs = touchedPaths
+                    .Select(p => Path.GetDirectoryName(p?.Replace('/', Path.DirectorySeparatorChar) ?? ""))
+                    .Where(d => !string.IsNullOrWhiteSpace(d))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                foreach (var dir in affectedDirs)
+                {
+                    var fullDir = Path.GetFullPath(Path.Combine(projectRoot, dir!));
+                    if (!Directory.Exists(fullDir)) continue;
+                    var files = Directory.GetFiles(fullDir)
+                        .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
+                        .OrderBy(f => f)
+                        .ToList();
+                    if (files.Count == 0) continue;
+                    var inventoryKey = $"### FILES IN {dir!.Replace('\\', '/')} (current state on disk) ###";
+                    // Remove stale entry if present, then append fresh one
+                    var staleIdx = discoveryContext.IndexOf(inventoryKey, StringComparison.Ordinal);
+                    if (staleIdx >= 0)
+                    {
+                        var staleEnd = discoveryContext.IndexOf("\n### ", staleIdx + inventoryKey.Length, StringComparison.Ordinal);
+                        discoveryContext = staleEnd >= 0
+                            ? discoveryContext[..staleIdx] + discoveryContext[staleEnd..]
+                            : discoveryContext[..staleIdx];
+                    }
+                    discoveryContext += $"\n{inventoryKey}\n" +
+                        string.Join("\n", files.Select(f => $"  - {f}")) + "\n";
+                }
                 if (stepDiffs.Count > 0)
                 {
                     var diffSection = "\n### CHANGES FROM PREVIOUS STEP ###\n" +
@@ -10513,9 +10561,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ? "Planner declared plan complete — post-execution verification skipped."
             : (string?)null;
         List<string>? verificationIssues = null;
-
-        // Only run post-execution verification if at least one step actually wrote code.
-        // Running it with zero edits is wasteful and produces misleading repair loops.
+ 
         var anyEditsApplied = allSteps.OfType<Dictionary<string, object?>>().Any(r =>
             r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
             r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
@@ -10526,8 +10572,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                  await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
         }
         else if (!planCompleteDeclared && !anyEditsApplied)
-        {
-            // No edits at all — skip verification, mark incomplete so the outer loop can retry
+        { 
             taskComplete = false;
             verificationDetails = "No edits were applied — skipping post-execution verification.";
             await EmitLog(emitSse, "warn", verificationDetails, ct: ct);
@@ -10572,9 +10617,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             });
         }
         else
-        {
-            // If every step has needsExtraStep=false AND verifier gave no concrete issues,
-            // step-level verification is sufficient — trust it and override a vague rejection.
+        { 
             var needsExtraStepResults = allSteps.OfType<Dictionary<string, object?>>()
                 .Where(s => s.ContainsKey("needsExtraStep"))
                 .Select(s => s["needsExtraStep"])

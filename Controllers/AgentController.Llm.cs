@@ -159,9 +159,8 @@ partial class AgentController
             }
             if (topLevelOpens > 1)
             {
-                return (raw, null,
-                    $"Multiple JSON objects detected ({topLevelOpens}) in single response — " +
-                    "model is emitting multiple attempts. Use a stronger model or lower temperature.");
+                // Model emitted multiple JSON objects — extract only the first
+                raw = AgentUtilities.ExtractFirstJsonObject(raw);
             }
             var parsed2 = ParseAgentResponse(raw);
             return (raw, parsed2, parsed2 == null ? "JSON parse failed" : null);

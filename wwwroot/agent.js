@@ -639,7 +639,7 @@ angular.module('kanbanApp')
                         if (!plan) return vm.benchmarkRunning = false;
                         var card = { id: 'benchmark_' + level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', _benchmark: true, _benchmarkLevel: level, ready: true };
                         vm.state.todo.push(card); vm.saveCards(); vm.executeAgent(card); vm.closeBenchmarksPanel();
-                    });
+                    }).catch(function () { vm.benchmarkRunning = false; });
                 };
 
                 function countEditsFromSteps(steps) {
@@ -720,7 +720,7 @@ angular.module('kanbanApp')
                 };
                 vm.saveSystemInfo = function () { $http.post('/api/benchmark/system-info', vm.systemInfoCustom).then(function () { vm.systemInfoSaved = true; $timeout(function () { vm.systemInfoSaved = false; }, 2000); }); };
                 vm.resetSystemInfo = function () { vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: '' }; vm.saveSystemInfo(); };
-                vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); }); };
+                vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); }).catch(function () { }); };
             }
         };
     }]);

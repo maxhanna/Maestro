@@ -608,8 +608,12 @@
               class="{{vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : 'success'}} small"
               title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
-            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'doing')" class="small" title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled while active' : 'Deletes the card.'}}"
-              style="color:#e5c07b;" ng-disabled="vm.streamingActive && vm.activeCardId === card.id">
+            <button ng-if="card._benchmark" 
+              ng-click="vm.deleteCard(card.id, 'doing')"
+              class="small {{ vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : ''}}" 
+              title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled while active' : 'Deletes the card.'}}"
+              style="color:#e5c07b;"
+              ng-disabled="vm.streamingActive && vm.activeCardId === card.id">
               🗑 Done & Delete
             </button>
             <button ng-click="vm.stopAgent(card)" class="small"
