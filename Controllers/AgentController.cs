@@ -7667,7 +7667,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             if (string.IsNullOrWhiteSpace(step.NewString))
                 return (false, "_create_file step has no file content in newString — provide the full file content or edit an existing file instead.");
-            if (step.NewString.Trim().Length < 20)
+            if (step.NewString.Trim().Length < 1)
                 return (false, "_create_file step content is too short (" + step.NewString.Trim().Length + " chars) — provide meaningful file content.");
             if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase)))
                 return (false, "A _create_file step is already committed — creating additional new files is likely unnecessary. Target the existing file instead.");
@@ -8290,15 +8290,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
                 var stepSucceeded = newResults.Any(r => r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
                 var globalPlanIdx = planSoFar.Count - 1;
-                if (globalPlanIdx > 0)
+                foreach (var r in newResults)
                 {
-                    foreach (var r in newResults)
-                    {
-                        if (r.ContainsKey("planItemIndex"))
-                            r["planItemIndex"] = globalPlanIdx;
-                    }
-                    await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
+                    r["planItemIndex"] = globalPlanIdx;
                 }
+                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
                 if (singleStepPlan.Plan.Count > 1)
                 {
                     var chainIntact = true;
@@ -8355,11 +8351,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             var synthResults = allResults.Skip(synthBefore).OfType<Dictionary<string, object?>>().ToList();
                             foreach (var r in synthResults)
                             {
-                                if (r.ContainsKey("planItemIndex"))
-                                    r["planItemIndex"] = synthGlobalIdx;
+                                r["planItemIndex"] = synthGlobalIdx;
                             }
-                            await PersistBoardDataPlanStepAsync(cardId, synthGlobalIdx, emitSse, ct);
                         }
+                        await PersistBoardDataPlanStepAsync(cardId, synthGlobalIdx, emitSse, ct);
                         if (synthPlan.Plan.Count > 1)
                             anyNestedGeneration = true;
                         if (synthStep!.File != null)
@@ -9618,180 +9613,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             return (resumeSteps, existingPlan, resumeComplete);
         }
-        
-        var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
-        await EmitLog(emitSse, "info", $"Router → {pipelineType}", ct: ct);
-        bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
-        bool mentionsCodeFiles = Regex.IsMatch(prompt, @"\.(cs|ts|tsx|js|jsx|html|css|scss|java|go|py|rb|php|md|json|yaml|yml)\b", RegexOptions.IgnoreCase) ||
-                                 prompt.Contains("component", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("service", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("controller", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("directive", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("module", StringComparison.OrdinalIgnoreCase);
-        bool mentionsCodeLogic = prompt.Contains("upload list", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("list changes", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("pre-mark", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("button", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("click", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("event", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("function", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("method", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("variable", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("array", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("callback", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("search box", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("input field", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("map", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("globe", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("rotate", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("select", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("dropdown", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("modal", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("popup", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("ui", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("frontend", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("style", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("layout", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("render", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("display", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("faq", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("expand on", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("readme", StringComparison.OrdinalIgnoreCase) ||
-                                prompt.Contains("section", StringComparison.OrdinalIgnoreCase);
-        bool hasAttachedFiles = attachedFiles != null && attachedFiles.Count > 0;
-        if ((hasCodeInPrompt || mentionsCodeFiles || mentionsCodeLogic || hasAttachedFiles) && pipelineType != PipelineType.CodeEdit)
-        {
-            await EmitLog(emitSse, "info", $"Code files, components, UI logic, or attached files detected — forcing CodeEdit pipeline", ct: ct);
-            pipelineType = PipelineType.CodeEdit;
-        }
-        PipelineType? chainedNext = null;
-        List<(PipelineType Pipeline, string Summary)>? stages = null;
-        if (!hasCodeInPrompt && !mentionsCodeFiles && !mentionsCodeLogic && !hasAttachedFiles)
-        {
-            var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: running shell/terminal commands, downloading files via URL, file system operations OUTSIDE the codebase logic.\n- UnifiedPipeline (CodeEdit): modifying, adding, or refactoring source code in the project (e.g., .cs, .ts, .html, .css files). This includes implementing upload logic, modifying components, or changing API calls.\n\nIs this routing correct? \n- If the task mentions modifying or creating code in specific files (like 'upload.component.ts' or 'file.service.ts'), it MUST be UnifiedPipeline.\n- If the task asks to 'create a method', 'add a variable', or 'change logic', it MUST be UnifiedPipeline.\n- DO NOT route to CommandExecution just because the task mentions 'uploading files', 'fetch data', or 'files' — if the upload/fetch logic is being implemented in code, it's UnifiedPipeline.\n- Only suggest chaining if the task EXPLICITLY requires running terminal scripts, downloading files from URLs, or querying a database BEFORE code can be edited.\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
-            var (vRaw, _, vErr) = await CallLlmRaw(
-                "You verify task routing. Output only JSON.",
-                verifyPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
-            if (!string.IsNullOrWhiteSpace(vRaw))
-            {
-                var vClean = vRaw.Trim();
-                if (vClean.StartsWith("```")) { var m = Regex.Match(vClean, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) vClean = m.Groups[1].Value.Trim(); }
-                try
-                {
-                    using var vDoc = JsonDocument.Parse(vClean, new JsonDocumentOptions { AllowTrailingCommas = true });
-                    var vRoot = vDoc.RootElement;
-                    var decision = vRoot.TryGetProperty("decision", out var d) ? d.GetString() : null;
-                    if (decision == "override" && vRoot.TryGetProperty("pipeline", out var ov))
-                    {
-                        var overridePipeline = ov.GetString();
-                        pipelineType = overridePipeline?.ToLowerInvariant() switch
-                        {
-                            "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
-                            "commandexecution" or "command" => PipelineType.CommandExecution,
-                            _ => pipelineType
-                        };
-                        if (pipelineType != (AgentUtilities.ClassifyTask(prompt).Type))
-                            await EmitLog(emitSse, "info", $"LLM override → {pipelineType}", ct: ct);
-                    }
-                    else if (decision == "chain" && vRoot.TryGetProperty("stages", out var stArr) && stArr.ValueKind == JsonValueKind.Array)
-                    {
-                        stages = new List<(PipelineType, string)>();
-                        foreach (var st in stArr.EnumerateArray())
-                        {
-                            var stP = st.TryGetProperty("pipeline", out var sp) ? sp.GetString() : null;
-                            var stSum = st.TryGetProperty("summary", out var ss) ? ss.GetString() : "";
-                            PipelineType? parsed = stP?.ToLowerInvariant() switch
-                            {
-                                "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
-                                "commandexecution" or "command" => PipelineType.CommandExecution,
-                                _ => null
-                            };
-                            if (parsed.HasValue) stages.Add((parsed.Value, stSum ?? ""));
-                        }
-                        if (stages.Count >= 2)
-                        {
-                            pipelineType = stages[0].Pipeline;
-                            chainedNext = stages[1].Pipeline;
-                            await EmitLog(emitSse, "info", $"LLM chain: {stages[0].Pipeline} → {stages[1].Pipeline}", ct: ct);
-                        }
-                    }
-                }
-                catch { }
-            }
-        }
+
         List<object> allSteps = new();
         AgentPlan? plan = null;
         bool pipelineComplete = true;
-        if (pipelineType == PipelineType.CommandExecution)
-        {
-            var result = await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct,
-                steeringContext: steeringContext, cardId: cardId);
-            allSteps = result.steps;
-            plan = result.plan;
-            if (chainedNext == PipelineType.CodeEdit)
-            {
-                var createdFiles = new List<string>();
-                if (plan?.Plan?.Count > 0)
-                {
-                    foreach (var p in plan.Plan)
-                    {
-                        if (string.IsNullOrWhiteSpace(p.File) || p.File.StartsWith("_")) continue;
-                        var resolved = System.IO.File.Exists(p.File)
-                            ? p.File
-                            : System.IO.File.Exists(Path.GetFullPath(Path.Combine(projectRoot, p.File.Replace('/', Path.DirectorySeparatorChar))))
-                                ? Path.GetFullPath(Path.Combine(projectRoot, p.File.Replace('/', Path.DirectorySeparatorChar)))
-                                : null;
-                        if (resolved != null) createdFiles.Add(resolved);
-                    }
-                }
-                foreach (var s in allSteps.OfType<Dictionary<string, object?>>())
-                {
-                    var cmd = s.GetValueOrDefault("command")?.ToString() ?? "";
-                    if (string.IsNullOrWhiteSpace(cmd)) continue;
-                    var pathMatch = Regex.Match(cmd, @"(?:Set-Content|Out-File|>)\s+['""]?([\w./\\:-]+\.\w+)['""]?");
-                    if (pathMatch.Success)
-                    {
-                        var fp = pathMatch.Groups[1].Value;
-                        if (!createdFiles.Contains(fp) && (System.IO.File.Exists(fp) || System.IO.File.Exists(Path.Combine(projectRoot, fp))))
-                            createdFiles.Add(System.IO.File.Exists(fp) ? fp : Path.GetFullPath(Path.Combine(projectRoot, fp)));
-                    }
-                }
-                if (createdFiles.Count > 0)
-                {
-                    await EmitLog(emitSse, "info", $"Chaining: {createdFiles.Count} file(s) from CommandExecution → UnifiedPipeline", ct: ct);
-                    await AttachFilesToCardAsync(cardId, createdFiles, emitSse, ct);
-                    var combinedAttachments = (attachedFiles ?? new List<string>())
-                        .Concat(createdFiles)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-                    var chainResult = await UnifiedPipeline(prompt, projectRoot, emitSse, ct,
-                        attachedFiles: combinedAttachments, skipContextReview: skipContextReview,
-                        steeringContext: $"Previous stage created files: {string.Join(", ", createdFiles)}. Task: {prompt}",
-                        cardId: cardId);
-                    allSteps.AddRange(chainResult.steps);
-                    plan = chainResult.plan ?? plan;
-                    pipelineComplete = chainResult.complete;
-                }
-            }
-        }
-        else
-        {
-            var (unifiedSteps, unifiedPlan, unifiedComplete) = await UnifiedPipeline(prompt, projectRoot, emitSse, ct,
+      
+        var (unifiedSteps, unifiedPlan, unifiedComplete) = await StepResolutionPipeline(prompt, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, skipContextReview: skipContextReview,
                 steeringContext: steeringContext, cardId: cardId);
             allSteps = unifiedSteps;
             plan = unifiedPlan;
             pipelineComplete = unifiedComplete;
-        }
+      
         if (_gracefulStop)
         {
             _gracefulStop = false;
             return (allSteps, plan, false);
         }
+
         bool complete = pipelineComplete;
         var hasFatalStepErrors = allSteps.OfType<Dictionary<string, object?>>()
-            .Any(s => s.TryGetValue("status", out var st) &&
-                      st?.ToString() == "error");
+            .Any(s => s.TryGetValue("status", out var status) && s.TryGetValue("type", out var type)
+                && status?.ToString() == "error" && type?.ToString() != "list");
         if (hasFatalStepErrors)
         {
             complete = false;
@@ -10164,7 +10007,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return deduped;
     }
-    private async Task<(List<object> steps, AgentPlan plan, bool complete)> UnifiedPipeline(
+    private async Task<(List<object> steps, AgentPlan plan, bool complete)> StepResolutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         bool skipContextReview = false,
@@ -12612,7 +12455,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         baseInstructions.AppendLine($"Project: {projectRoot}");
         baseInstructions.AppendLine("CRITICAL: Each cmd runs in a separate PowerShell session — state does NOT persist between commands. If you read data in one cmd and need it in the next, save to a temp file: Get-Content ... | Set-Content _temp_step1.txt");
         baseInstructions.AppendLine("If this task's results will feed into a subsequent code-editing step, save output files INSIDE the project directory (use a temp path like \"_temp_data.json\") so the next pipeline can read them. The file will be attached to the card automatically.");
-        baseInstructions.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
+        baseInstructions.AppendLine("For files: New-Item -ItemType File -Path \"<path>\" -Force  (NOT mkdir)");
+        baseInstructions.AppendLine("For folders: New-Item -ItemType Directory -Path \"<path>\" -Force");
         baseInstructions.AppendLine("NEVER use cd/Set-Location — use absolute paths");
         baseInstructions.AppendLine("Inspect before acting: for repository questions use fast file commands first. Prefer `rg --files` to enumerate files, `rg -n \"pattern\" <path>` to search text, and `Get-Content -TotalCount/-Tail` for bounded reads. If `rg` is unavailable, use PowerShell equivalents.");
         baseInstructions.AppendLine("Keep outputs small and useful. Limit broad searches, exclude bin/obj/node_modules/.git/dist, and save large raw outputs to a project temp file instead of dumping them into the conversation.");

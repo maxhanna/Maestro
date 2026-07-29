@@ -312,6 +312,7 @@ partial class AgentController
         }
         else
         {
+            if (enabled == null || enabled.Contains("_create_directory")) markers.Add("_create_directory");
             if (enabled == null || enabled.Contains("_create_file")) markers.Add("_create_file");
             if (enabled == null || enabled.Contains("_command")) markers.Add("_command");
             if (enabled == null || enabled.Contains("_web_search")) markers.Add("_web_search");
@@ -343,8 +344,12 @@ partial class AgentController
             sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext\",\n");
         else
             sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: ").Append(markerStr).Append("\",\n");
-        sb.Append("    \"change\": \"precise, atomic description including the exact method/function name being changed (e.g., getTimedGreetingMessage, renderCards, constructor)\",\n");
+        sb.Append("    \"change\": \"for edit steps: precise, atomic description including the exact method/function name. ");
+        sb.Append("For markers: the path (_create_directory/_create_file/_delete_file), command (_command/_git), ");
+        sb.Append("query (_web_search), or URL (_web_fetch) — not a description.\",\n");
         sb.Append("    \"targetSymbol\": \"getTimedGreetingMessage\",\n");
+        sb.Append("    \"oldString\": \"exact text to replace (for edit steps on existing files)\",\n");
+        sb.Append("    \"newString\": \"replacement content (for _create_file and edit steps)\",\n");
         sb.Append("    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n");
         sb.Append("  },\n");
         sb.Append("  \"justification\": \"why this step must happen NOW relative to steps already committed ");
@@ -395,14 +400,27 @@ partial class AgentController
         sb.Append("   Read the discovery context more carefully and fix the references.\n");
         if (stepMode != "command")
         {
-            sb.Append("10. Each edit step MUST include the \"targetSymbol\" field with the exact function/method/property/selector name being edited (e.g., \"getTimedGreetingMessage\", \"toolBtn\", \"_timer\").\n");
+            sb.Append("10. Each edit step MUST include the \"targetSymbol\" field with the exact function/method/property/selector name being edited (e.g., \"getTimedGreetingMessage\", \"toolBtn\", \"_timer\"). ");
+            sb.Append("   For non-code files (.md, .txt, .json, .yaml, .css, etc.) that have no functions, set targetSymbol to empty string \"\". ");
+            sb.Append("   Do NOT invent fake symbol names like \"_append_text\" or \"_add_content\".\n");
             sb.Append("11. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n");
-            sb.Append("12. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. ");
-            sb.Append("   Never add a _create_file step after code edits have already been proposed — at that point it is too late.\n");
-            sb.Append("13. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), ");
+            sb.Append("12. _create_directory steps MUST come BEFORE _create_file or code-editing steps that depend on the directory. ");
+            sb.Append("   Put just the RELATIVE folder path in \"change\" (e.g. \"benchmark_test_1\"), not a description. ");
+            sb.Append("   _create_file creates files (path in change, content in newString). ");
+            sb.Append("   _create_directory creates folders (path in change, no newString). ");
+            sb.Append("   Use _create_directory for folder-only tasks. Do NOT use _git or _command for folder creation.\n");
+            sb.Append("13. _create_file steps: put the RELATIVE file path in \"change\" (e.g. \"benchmark_test_1/test.md\"), ");
+            sb.Append("   and the FULL file content in \"newString\". ");
+            sb.Append("   Do NOT put a description like 'Create test.md file...' in change — use just the path. ");
+            sb.Append("   _create_file steps MUST come BEFORE any code-editing steps.\n");
+            sb.Append("14. To edit an EXISTING file: use the RELATIVE file path as \"file\" (e.g. \"benchmark_test_1/test.md\"), ");
+            sb.Append("   NOT a marker. Include \"oldString\" (the exact text to replace) and \"newString\" (the replacement) ");
+            sb.Append("   directly in the step JSON. Do NOT prefix the path with \"_edit/\". ");
+            sb.Append("   Do NOT use _command with echo/sed for file edits — use oldString/newString instead.\n");
+            sb.Append("15. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), ");
             sb.Append("   you MUST examine ALL attached files in discovery context to find where that original message or behavior ");
             sb.Append("   originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n");
-            sb.Append("14. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description ");
+            sb.Append("16. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description ");
             sb.Append("   (e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n");
         }
         else
@@ -554,8 +572,9 @@ partial class AgentController
     private static readonly Dictionary<string, string> AllTools = new()
     {
         ["_explore"] = "\"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.",
-        ["_command"] = "\"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_file instead.",
-        ["_create_file"] = "\"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.",
+        ["_command"] = "\"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_directory or _create_file instead.",
+        ["_create_directory"] = "\"_create_directory\"   — Create a folder/directory. Put the RELATIVE folder path in \"change\" (e.g. \"benchmark_test_1\"), not a description. Leave everything else empty. Deep/nested paths are created automatically. Do NOT use mkdir.",
+        ["_create_file"] = "\"_create_file\"        — Create a new file: put the RELATIVE file path in \"change\", put the FULL file content in \"newString\", leave \"oldString\" empty. The file path should be just the path (e.g. \"benchmark_test_1/test.md\"), not a description. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.",
         ["_web_search"] = "\"_web_search\"         — Search the web; put the query in \"change\"",
         ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
         ["_git"] = "\"_git\"                — Git operation (commit/pull/push/branch/revert)",

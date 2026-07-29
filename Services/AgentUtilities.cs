@@ -119,6 +119,8 @@ public static class AgentUtilities
             cmdScore += 80;
         if (Regex.IsMatch(lower, @"\b(create\s+(a\s+)?(new\s+)?file)\b"))
             cmdScore += 60;
+        if (Regex.IsMatch(lower, @"\b(create|make)\s+(a\s+)?(new\s+)?(folder|directory)\b"))
+            cmdScore += 70;
         if (Regex.IsMatch(lower, @"\b(put|place|write|save|download)\s+(a\s+)?(file|data|content|result)\s+(on|to|at|in)\s+(the\s+)?(desktop|downloads|documents|home)\b"))
             cmdScore += 80;
         if (Regex.IsMatch(lower, @"\b(what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree|logs?|journal|stdout|stderr|console|output|terminal|logs|process|service)\b"))
@@ -272,6 +274,22 @@ public static class AgentUtilities
                 Plan = new List<PlanStep>
                 {
                     new() { File = "_git", Change = "revert all changes", Priority = 1 }
+                }
+            };
+        }
+        var folderMatch = Regex.Match(p,
+            @"\b(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory)\s+(?:called\s+|named\s+)?['""]?([\w./\\-]+)['""]?",
+            RegexOptions.IgnoreCase);
+        if (folderMatch.Success)
+        {
+            var folderPath = folderMatch.Groups[1].Value.Replace('\\', '/').Trim('/', ' ', '"', '\'');
+            return new AgentPlan
+            {
+                Thinking = $"Direct folder creation detected: {folderPath}",
+                Summary = $"Create folder {folderPath}",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_create_directory", Change = folderPath, Priority = 1 }
                 }
             };
         }
@@ -1269,6 +1287,7 @@ public static class AgentUtilities
         file.Equals("_ping", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_package_install", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_create_directory", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_command", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
@@ -1573,9 +1592,9 @@ public static class AgentUtilities
         if (Path.IsPathRooted(path)) return false;
         var specialMarkers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "_git", "_ping", "_show", "_display", "_create_file", "_package_install",
-            "_command", "_web_search", "_web_fetch", "_explore", "_rename", "_rename_file",
-            "_move_file", "_delete_file", "_continue"
+            "_git", "_ping", "_show", "_display", "_create_file", "_create_directory",
+            "_package_install", "_command", "_web_search", "_web_fetch", "_explore",
+            "_rename", "_rename_file", "_move_file", "_delete_file", "_continue"
         };
         return !specialMarkers.Contains(path);
     }

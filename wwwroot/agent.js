@@ -27,7 +27,7 @@ angular.module('kanbanApp')
 
         function refreshFilesEditedFromSteps(vm) {
             var seen = {};
-            vm.streamingFilesEdited = vm.streamingSteps.filter(function (s) { return (s.type === 'edit' || s.type === 'rename') && s.status === 'done' && s.path; }).filter(function (s) { var already = seen[s.path]; seen[s.path] = true; return !already; }).map(function (s) { var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved }; if (s.type === 'rename') info.editAction = 'renamed → ' + (s.toPath || ''); return info; });
+            vm.streamingFilesEdited = vm.streamingSteps.filter(function (s) { return (s.type === 'edit' || s.type === 'create' || s.type === 'rename') && s.status === 'done' && s.path; }).filter(function (s) { var already = seen[s.path]; seen[s.path] = true; return !already; }).map(function (s) { var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved }; if (s.type === 'rename') info.editAction = 'renamed → ' + (s.toPath || ''); else if (s.type === 'create') info.editAction = 'created'; return info; });
         }
 
         function reconcilePlanItems(vm, $scope, $timeout) {
@@ -38,7 +38,8 @@ angular.module('kanbanApp')
                 var doneSteps = vm.streamingSteps.filter(function (s) {
                     if (s.status !== 'done' && s.status !== 'skipped' && s.status !== 'error') return false;
                     if (s.planItemIndex !== undefined && s.planItemIndex !== null) return s.planItemIndex === item.index;
-                    return (s.type === 'edit' || s.type === 'rename') && s.path && item.file && s.path.replace(/\\/g, '/').toLowerCase() === item.file.toLowerCase();
+                    if (s.type === 'command' && item.file && item.file.startsWith('_')) return true;
+                    return (s.type === 'edit' || s.type === 'create' || s.type === 'rename') && s.path && item.file && s.path.replace(/\\/g, '/').toLowerCase() === item.file.toLowerCase();
                 });
                 if (doneSteps.length > 0) { item.done = true; changed = true; }
             });
@@ -200,7 +201,8 @@ angular.module('kanbanApp')
                                                                          var prev = existingState[key] || {};
                                                                          return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '' };
                                                                      });
-                                                                     vm.verifyDiffs(vm.planItems);
+                                                                      vm.verifyDiffs(vm.planItems);
+                                                                      reconcilePlanItems(vm, $scope, $timeout);
                                                                      if (parsed.thinking) vm.streamingThinking = parsed.thinking;
                                                                     if (parsed.summary) vm.streamingSummary = parsed.summary;
                                                                     pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + parsed.items.length + ' steps)', { itemCount: parsed.items.length, score: parsed.score });
@@ -644,8 +646,8 @@ angular.module('kanbanApp')
                     if (!steps || !steps.length) return { successful: 0, failed: 0 };
                     var successful = 0, failed = 0;
                     steps.forEach(function (s) {
-                        if (s.type === 'edit') {
-                            if (s.status === 'done' || s.status === 'applied') successful++;
+                        if (s.type === 'edit' || s.type === 'create' || s.type === 'rename') {
+                            if (s.status === 'done' || s.status === 'applied' || s.status === 'created') successful++;
                             else if (s.status === 'error' || s.status === 'rejected') failed++;
                         }
                     });
@@ -659,6 +661,9 @@ angular.module('kanbanApp')
                 }
 
                 vm.sendBenchmarkToServer = function (s) {
+                    if (!s || !s.id || vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]) return;
+                    vm._sendingBenchmarkIds = vm._sendingBenchmarkIds || {};
+                    vm._sendingBenchmarkIds[s.id] = true;
                     var benchmarkDto = {
                         ClientId: vm.bughostedClientId,
                         Token: vm.bughostedClientId,
@@ -687,6 +692,9 @@ angular.module('kanbanApp')
                             } else {
                                 alert('Failed to send benchmark due to an unknown error.');
                             }
+                        })
+                        .finally(function () {
+                            delete vm._sendingBenchmarkIds[s.id];
                         });
                 };
                 vm.msToDigitalTime = function (ms) { 

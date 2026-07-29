@@ -1291,7 +1291,7 @@
 
   <!-- BENCHMARKS PANEL -->
   <div class="popup-overlay" ng-if="vm.showBenchmarksPanel" ng-click="vm.closeBenchmarksPanel()">
-    <div class="popup-panel" style="max-width:600px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel" style="max-width:80vw;max-width:80dvw;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>📊 Benchmarks</strong>
         <button ng-click="vm.closeBenchmarksPanel()">✕</button>
@@ -1306,7 +1306,7 @@
                   <strong>{{plan.name}}</strong>
                   <span class="text-sm muted" style="margin-left:8px;">{{plan.description}}</span>
                 </div>
-                <button ng-click="vm.startBenchmark(plan.level)" class="primary small"
+                <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
                   ng-disabled="vm.benchmarkRunning">▶ Run</button>
               </div>
             </div>
@@ -1380,7 +1380,7 @@
           <tbody>
             <tr ng-repeat="s in vm.benchmarkScores" style="border-bottom:1px solid var(--border);cursor:pointer;"
               ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
-              <td style="padding:4px 8px;font-size:12px;">{{s.timestamp | date:'short'}}</td>
+              <td style="padding:4px 8px;font-size:12px;" title="{{s.timestamp | date:'short'}}">{{s.timestamp | date:'short'}}</td>
               <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
               <td style="padding:4px 8px;font-size:11px;">
                 <span style="color:var(--success);">{{s.successfulEdits || 0}} ok</span>
@@ -1390,12 +1390,12 @@
               <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
               <td style="padding:4px 8px;">{{s.status}}</td>
               <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>
-              <td style="padding:4px 8px;font-size:11px;" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}
+              <td style="padding:4px 8px;font-size:11px;max-width:20%" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}
               </td>
               <td style="padding:4px 8px;">
                 <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"
                   style="color:var(--danger);font-size:11px;" title="Delete">✕</button>
-                <button class="btn btn-small" ng-click="vm.sendBenchmarkToServer(s)">Send</button>
+                <button class="btn btn-small" ng-click="vm.sendBenchmarkToServer(s)" ng-disabled="vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]">{{vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id] ? 'Sending...' : 'Send'}}</button>
               </td>
             </tr>
           </tbody>
