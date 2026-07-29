@@ -333,7 +333,7 @@ angular.module('kanbanApp')
                                                                     var scorePercent = totalAttempts > 0 ? Math.round((successful / totalAttempts) * 1000) / 10 : 0;
                                                                     var status = totalAttempts === 0 ? 'failed' : failed === 0 ? 'completed' : successful > 0 ? 'partial' : 'failed';
                                                                     var bmElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
-                                                                    $http.post('/api/benchmark/save-score', { level: card._benchmarkLevel || 1, successfulEdits: successful, failedEdits: failed, points: points, scorePercent: scorePercent, status: status, modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: bmElapsed, errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || '' });
+                                                                     $http.post('/api/benchmark/save-score', { level: card._benchmarkLevel != null ? card._benchmarkLevel : 1, successfulEdits: successful, failedEdits: failed, points: points, scorePercent: scorePercent, status: status, modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: bmElapsed, errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || '' });
                                                                     var bIdx = vm.state.todo.indexOf(card); if (bIdx < 0) bIdx = vm.state.doing.indexOf(card); if (bIdx < 0) bIdx = vm.state.done.indexOf(card);
                                                                     if (bIdx >= 0) { var col = vm.state.todo.indexOf(card) >= 0 ? 'todo' : vm.state.doing.indexOf(card) >= 0 ? 'doing' : 'done'; vm.state[col].splice(bIdx, 1); vm.saveCards(); }
                                                                 }
@@ -402,7 +402,7 @@ angular.module('kanbanApp')
 
                                                                 if (card._benchmark) { 
                                                                     $http.post('/api/benchmark/save-score', { 
-                                                                        level: card._benchmarkLevel || 1, 
+                                                                        level: card._benchmarkLevel != null ? card._benchmarkLevel : 1, 
                                                                         successfulEdits: 0, failedEdits: 0, points: 0, 
                                                                         scorePercent: 0, status: 'error', 
                                                                         modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', 
