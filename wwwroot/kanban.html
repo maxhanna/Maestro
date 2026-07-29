@@ -670,8 +670,8 @@
             <button 
               ng-if="card._benchmark" 
               ng-click="vm.deleteCard(card.id, 'doing')"
-              class="small {{ vm.isCardActive(card.id) ? 'ghost' : '' }}"
-              ng-style="{{ vm.isCardActive(card.id) ? '' : 'color:#e5c07b;' }}" 
+              class="small {{ vm.isCardActive(card.id) ? 'ghost' : '' }}"  
+              ng-style="{'color': vm.isCardActive(card.id) ? '' : '#e5c07b;' }" 
               title="{{ vm.isCardActive(card.id) ? 'Disabled while active' : 'Deletes the card.' }}"
               ng-disabled="vm.isCardActive(card.id)">
               🗑 Done & Delete
