@@ -10566,7 +10566,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
             r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
 
-        if (!planCompleteDeclared && anyEditsApplied)
+        if (anyEditsApplied)
         {
             (taskComplete, verificationDetails, verificationIssues) =
                  await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);

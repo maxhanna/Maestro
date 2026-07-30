@@ -394,8 +394,8 @@ partial class AgentController
             sb.Append("6. A tool step should be followed by whatever edit step consumes its output. ");
             sb.Append("   If running a build/command is needed before edits can begin, propose the tool step now.\n");
         }
-        sb.Append("8. Prefer FEWER, more complete steps. If the whole task is one coherent step, propose that one step, ");
-        sb.Append("   then declare planComplete=true on the next turn.\n");
+        sb.Append("8. Only declare planComplete=true when EVERY requirement in the original task has been addressed. ");
+        sb.Append("   Check each requirement one by one against your PLAN SO FAR before stopping.\n");
         sb.Append("9. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake. ");
         sb.Append("   Read the discovery context more carefully and fix the references.\n");
         if (stepMode != "command")
