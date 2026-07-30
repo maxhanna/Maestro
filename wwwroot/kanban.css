@@ -254,6 +254,17 @@ body.dragging-active .card:hover {
     color: var(--error);
 }
 
+.card .attachments .attachment .open-in-ide {
+    opacity: 0.4;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.card .attachments .attachment .open-in-ide:hover {
+    opacity: 1;
+    color: var(--accent);
+}
+
 
 .card .card-actions {
     display: flex;

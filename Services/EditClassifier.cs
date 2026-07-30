@@ -29,7 +29,7 @@ public static class EditClassifier
         if (HtmlDomEditor.IsHtmlDomFile(step.File))
             return ClassifyHtml(step.Change ?? "");
 
-        var change = (step.Change ?? "").ToLowerInvariant();
+        var change = (step.Change ?? "").ToLowerInvariant().Replace('_', ' ');
         var (_, supportsFormatC, _) = AgentUtilities.GetLanguageProfile(ext);
 
         if (IsDeletion(change))           return EditStrategy.DeleteLines;
@@ -49,7 +49,7 @@ public static class EditClassifier
     /// </summary>
     public static EditIntent ClassifyIntent(PlanStep step, string ext)
     {
-        var change = (step.Change ?? "").ToLowerInvariant();
+        var change = (step.Change ?? "").ToLowerInvariant().Replace('_', ' ');
 
         if (IsDeletion(change))
             return new EditIntent(EditIntentKind.DeleteContent, null, null);

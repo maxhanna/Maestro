@@ -522,6 +522,18 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         vm.saveCards();
       };
 
+      vm.openInIde = function (filePath) {
+        if (vm.useVSCodeInsteadOfIDE) {
+          var fullPath = (vm.selectedProject || '') + '/' + filePath;
+          $http.post('/api/config/open-in-vscode', { filePath: fullPath }).then(function () {}, function (err) {
+            console.error('Failed to open in VS Code', err);
+          });
+          return;
+        }
+        vm.showIDE = true;
+        if (vm.openFile) vm.openFile(filePath);
+      };
+
       vm.editCardText = function (card) {
         var newText = $window.prompt('Edit task:', card.text);
         if (newText !== null && newText !== card.text) {

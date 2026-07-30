@@ -206,11 +206,6 @@
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showTerminal" /> Show Terminal
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
               <input type="checkbox" ng-model="vm.showCalendar" /> Show Calendar
             </label>
           </div>
@@ -978,6 +973,14 @@
               <input type="checkbox" ng-model="vm.showIDE" /> Show IDE
             </label>
           </div>
+          <details style="margin-left:16px;margin-top:4px;">
+            <summary style="font-size:0.85em;color:var(--muted);cursor:pointer;">IDE Options</summary>
+            <div class="form-row" style="padding:4px 0 4px 16px;">
+              <label>
+                <input type="checkbox" ng-model="vm.useVSCodeInsteadOfIDE" /> Open attachments in VS Code instead
+              </label>
+            </div>
+          </details>
           <div class="form-row">
             <label>
               <input type="checkbox" ng-model="vm.prByDefault" /> PR enabled by default

@@ -65,6 +65,8 @@ public class FrontendConfig
     public bool includeProjectSkeleton { get; set; } = false;
     // Include edit knowledge (do/dont/patterns) in discovery context
     public bool includeEditKnowledge { get; set; } = false;
+    // Open attachment files in VS Code instead of the built-in IDE
+    public bool useVSCodeInsteadOfIDE { get; set; } = false;
 }
 
 public class ConfigFileService

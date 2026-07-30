@@ -538,6 +538,10 @@
     bottom: 0; right: 0;
     width: 14px; height: 14px;
     cursor: nwse-resize;
+    background: var(--brand-gradient);
+}
+.ide-resize-se:active {
+    box-shadow: 1px 1px 1px var(--brand-gradient);
 }
 
 .ide-textarea {

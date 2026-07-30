@@ -223,6 +223,9 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f.path || f}}">{{f.path || f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
               <span class="remove"
                 ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
             </div>
@@ -503,6 +506,9 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
             </div>
           </div>
           <!-- Live agent output on Doing cards -->
@@ -833,6 +839,9 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
             </div>
           </div>
           <!-- Agent analysis shown on Done cards -->
@@ -984,6 +993,9 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
               <span class="remove"
                 ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
             </div>

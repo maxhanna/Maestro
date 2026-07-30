@@ -1017,7 +1017,8 @@ public partial class AgentController : ControllerBase
             var escalationLevel = EscalationStateMachine.Level(history.Count - 1);
             EscalationStateMachine.AppendEscalationDirective(
                 sb, escalationLevel, editStrategy, ext,
-                fileContent ?? "", step.Change ?? "", 0);
+                fileContent ?? "", step.Change ?? "", 0,
+                cfg5.maxFullFileTokens * 4);
         }
         sb.AppendLine();
         // ── Final per-strategy instruction reminder ───────────────────────────────
@@ -1190,6 +1191,12 @@ public partial class AgentController : ControllerBase
                         "Set targetType=\"method\", targetName to an EXISTING method name (e.g. the last method in the class), " +
                         "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body. " +
                         "Do NOT return alreadyDone either — ONLY FORMAT C with insertAfter:true will be accepted.", false);
+                }
+                if (fileExists && fileContent.Length > cfg5.maxFullFileTokens * 4)
+                {
+                    return (null, null, false, null, false,
+                        $"fullFile rejected — file is {fileContent.Length} chars, exceeding the maxFullFileTokens limit ({cfg5.maxFullFileTokens * 4}). " +
+                        "Use a targeted oldString/newString edit instead. Pick a unique 1-3 line anchor near the change point.", false);
                 }
                 string? body = null;
                 if (ffVal.ValueKind == JsonValueKind.String)

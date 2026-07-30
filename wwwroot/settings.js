@@ -77,6 +77,7 @@ angular.module('kanbanApp')
                 vm.defaultProject = '';
                 vm.settingsDefaultProject = '';
                 vm.autoQueue = true;
+                vm.useVSCodeInsteadOfIDE = false;
 
                 // Terminal/Config settings
                 vm.llamaUrl = 'http://localhost:8080';
@@ -176,6 +177,7 @@ angular.module('kanbanApp')
                             if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
                             if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
                             if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
+                            if (typeof cfg.useVSCodeInsteadOfIDE === 'boolean') vm.useVSCodeInsteadOfIDE = cfg.useVSCodeInsteadOfIDE;
                             if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
                             vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
                             vm.llamaModel = cfg.llamaModel || "medgemma:4b";
@@ -234,6 +236,7 @@ angular.module('kanbanApp')
                         cfg.defaultMaxTokens = vm.defaultMaxTokens || 2048;
                         cfg.includeProjectSkeleton = vm.includeProjectSkeleton === true;
                         cfg.includeEditKnowledge = vm.includeEditKnowledge === true;
+                        cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
                         cfg.emailAccounts = vm.emailAccounts.map(function (a) { return { imapServer: a.imapServer, imapPort: a.imapPort, useSsl: a.useSsl, username: a.username, password: a.password, label: a.label }; });
                         cfg.bughostedUrl = vm.bughostedUrl || '';
                         cfg.bughostedUsername = vm.bughostedUsername || '';

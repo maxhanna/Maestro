@@ -1059,7 +1059,8 @@ public static class EscalationStateMachine
         string fileExt,
         string fileContent,
         string stepChange,
-        int stepLineNumber)
+        int stepLineNumber,
+        int maxFullFileChars = 16000)
     {
         sb.AppendLine("⚠ ESCALATION DIRECTIVE — your previous attempt(s) failed. You MUST change approach:");
         sb.AppendLine("  ⚠ CRITICAL: NEVER use placeholder method names like 'myNewMethod', 'MyMethod', 'SomeMethod',");
@@ -1110,15 +1111,27 @@ public static class EscalationStateMachine
                     sb.AppendLine("    to the COMPLETE new method including [HttpPost] attribute, signature, and body.");
                     sb.AppendLine("  • Do NOT use fullFile and do NOT return alreadyDone — both will be rejected.");
                 }
-                // Everything else: full-file replacement
+                // Everything else: full-file replacement (blocked for large files)
                 else
                 {
-                    sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
-                    sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
-                    sb.AppendLine("  • Output a JSON object with this exact shape:");
-                    sb.AppendLine("    { \"fullFile\": [\"...entire file content with your changes applied...\"] }");
-                    sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
-                    sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+                    if (fileContent.Length > maxFullFileChars)
+                    {
+                        sb.AppendLine("  STRATEGY: PRECISE_ANCHOR — fullFile is BLOCKED because this file is too large.");
+                        sb.AppendLine("  • The file is " + fileContent.Length + " chars (max " + maxFullFileChars + ") — fullFile would exceed the token limit.");
+                        sb.AppendLine("  • Pick a SINGLE unique line (≥20 chars, appears once in the file) as oldString.");
+                        sb.AppendLine("  • Use that one line VERBATIM as your entire oldString, and include it unchanged");
+                        sb.AppendLine("    at the start of newString with your changes added around it.");
+                        sb.AppendLine("  • Do NOT reproduce large blocks — the system cannot accept them.");
+                    }
+                    else
+                    {
+                        sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
+                        sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
+                        sb.AppendLine("  • Output a JSON object with this exact shape:");
+                        sb.AppendLine("    { \"fullFile\": [\"...entire file content with your changes applied...\"] }");
+                        sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
+                        sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+                    }
                 }
                 break;
         }
