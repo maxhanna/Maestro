@@ -3601,38 +3601,51 @@ public static class AgentUtilities
         }
         return (false, fileContent, "oldString not found verbatim in file", null);
     }
-    public static List<string> ExtractAllJsonObjects(string text)
+    public static List<string> ExtractAllJsonObjects(string raw)
     {
-        var result = new List<string>();
-        if (string.IsNullOrWhiteSpace(text)) return result;
-        var start = text.IndexOf('{');
-        while (start >= 0)
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(raw)) return results;
+        var cleaned = raw.Trim();
+        if (cleaned.StartsWith("```"))
         {
+            var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            else
+            {
+                cleaned = cleaned.TrimStart('`');
+                var firstNl = cleaned.IndexOf('\n');
+                if (firstNl >= 0) cleaned = cleaned[(firstNl + 1)..];
+                if (cleaned.EndsWith("```")) cleaned = cleaned[..^3];
+            }
+        }
+        var searchFrom = 0;
+        while (true)
+        {
+            var fb = cleaned.IndexOf('{', searchFrom);
+            if (fb < 0) break;
             var depth = 0;
             var inString = false;
             var escape = false;
-            for (var i = start; i < text.Length; i++)
+            var end = -1;
+            for (var i = fb; i < cleaned.Length; i++)
             {
-                var c = text[i];
+                var c = cleaned[i];
                 if (escape) { escape = false; continue; }
-                if (c == '\\' && inString) { escape = true; continue; }
-                if (c == '"') { inString = !inString; continue; }
+                if (c == '\\') { escape = true; continue; }
+                if (c == '"') inString = !inString;
                 if (inString) continue;
                 if (c == '{') depth++;
                 else if (c == '}')
                 {
                     depth--;
-                    if (depth == 0)
-                    {
-                        result.Add(text.Substring(start, i - start + 1));
-                        start = text.IndexOf('{', i + 1);
-                        break;
-                    }
+                    if (depth == 0) { end = i; break; }
                 }
             }
-            if (depth > 0) break; // Truncated JSON
+            if (end < 0) { results.Add(cleaned.Substring(fb)); break; }
+            results.Add(cleaned.Substring(fb, end - fb + 1));
+            searchFrom = end + 1;
         }
-        return result;
+        return results;
     }
     public static string ExtractMethodBodiesByKeywords(string content, string taskDesc)
     {
@@ -3791,6 +3804,59 @@ public static class AgentUtilities
             }
         }
         return cleaned.Substring(fb);
+    }
+    public static string ExtractJsonObjectWithKeys(string raw, HashSet<string> requiredKeys)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "{}";
+        var cleaned = raw.Trim();
+        if (cleaned.StartsWith("```"))
+        {
+            var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            else
+            {
+                cleaned = cleaned.TrimStart('`');
+                var firstNl = cleaned.IndexOf('\n');
+                if (firstNl >= 0) cleaned = cleaned[(firstNl + 1)..];
+                if (cleaned.EndsWith("```")) cleaned = cleaned[..^3];
+            }
+        }
+        var searchFrom = 0;
+        while (true)
+        {
+            var fb = cleaned.IndexOf('{', searchFrom);
+            if (fb < 0) return "{}";
+            var depth = 0;
+            var inString = false;
+            var escape = false;
+            var end = -1;
+            for (var i = fb; i < cleaned.Length; i++)
+            {
+                var c = cleaned[i];
+                if (escape) { escape = false; continue; }
+                if (c == '\\') { escape = true; continue; }
+                if (c == '"') inString = !inString;
+                if (inString) continue;
+                if (c == '{') depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0) { end = i; break; }
+                }
+            }
+            if (end < 0) return cleaned.Substring(fb);
+            var candidate = cleaned.Substring(fb, end - fb + 1);
+            try
+            {
+                using var doc = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
+                foreach (var key in requiredKeys)
+                {
+                    if (doc.RootElement.TryGetProperty(key, out _)) return candidate;
+                }
+            }
+            catch { }
+            searchFrom = end + 1;
+        }
     }
     public static string FixAngularAttributeCasing(string content)
     {

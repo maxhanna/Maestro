@@ -7545,7 +7545,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         try
         {
-            var cleaned = ExtractFirstJsonObject(raw);
+            var cleaned = AgentUtilities.ExtractJsonObjectWithKeys(raw, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "step", "planComplete", "exploreFile" });
             using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
             var root = doc.RootElement;
             var complete = root.TryGetProperty("planComplete", out var pc) && pc.ValueKind == JsonValueKind.True;
@@ -7622,29 +7622,77 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change))
                 return new IncrementalStepProposal { PlanComplete = false, Thinking = thinking };
             var justification = root.TryGetProperty("justification", out var jEl) ? jEl.GetString() : null;
+            var primaryStep = ParseStepFromJson(file, change, targetSymbol, line, oldString, newString, refFiles, edits);
+            var additionalSteps = new List<PlanStep>();
+            var allObjects = AgentUtilities.ExtractAllJsonObjects(raw);
+            var foundPrimary = false;
+            foreach (var objStr in allObjects)
+            {
+                if (!foundPrimary)
+                {
+                    if (string.Equals(objStr, cleaned, StringComparison.Ordinal)) { foundPrimary = true; }
+                    continue;
+                }
+                try
+                {
+                    using var extraDoc = JsonDocument.Parse(objStr, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    if (!extraDoc.RootElement.TryGetProperty("step", out var extraStepEl) || extraStepEl.ValueKind != JsonValueKind.Object) continue;
+                    var extraFile = extraStepEl.TryGetProperty("file", out var efEl) ? efEl.GetString() : null;
+                    var extraChange = extraStepEl.TryGetProperty("change", out var ecEl) ? ecEl.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(extraFile) || string.IsNullOrWhiteSpace(extraChange)) continue;
+                    var extraTargetSymbol = extraStepEl.TryGetProperty("targetSymbol", out var etsEl) && etsEl.ValueKind == JsonValueKind.String ? etsEl.GetString() : null;
+                    var extraLine = extraStepEl.TryGetProperty("line", out var elEl) && elEl.ValueKind == JsonValueKind.Number ? elEl.GetInt32() : 0;
+                    var extraOld = extraStepEl.TryGetProperty("oldString", out var eosEl2) ? ReadPlannerString(eosEl2) : null;
+                    var extraNew = extraStepEl.TryGetProperty("newString", out var ensEl2) ? ReadPlannerString(ensEl2) : null;
+                    var extraRefFiles = new List<string>();
+                    if (extraStepEl.TryGetProperty("referenceFiles", out var erfArr) && erfArr.ValueKind == JsonValueKind.Array)
+                        foreach (var rf in erfArr.EnumerateArray())
+                            if (rf.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(rf.GetString()))
+                                extraRefFiles.Add(rf.GetString()!);
+                    var extraEdits = new List<EditPair>();
+                    if (extraStepEl.TryGetProperty("edits", out var eeditsEl) && eeditsEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var editEl in eeditsEl.EnumerateArray())
+                        {
+                            if (editEl.ValueKind != JsonValueKind.Object) continue;
+                            var eo = editEl.TryGetProperty("oldString", out var eosEl3) ? ReadPlannerString(eosEl3) : null;
+                            var en = editEl.TryGetProperty("newString", out var ensEl3) ? ReadPlannerString(ensEl3) : null;
+                            if (!string.IsNullOrWhiteSpace(eo) || en != null)
+                                extraEdits.Add(new EditPair { OldString = eo ?? "", NewString = en ?? "" });
+                        }
+                    }
+                    additionalSteps.Add(ParseStepFromJson(extraFile, extraChange, extraTargetSymbol, extraLine, extraOld, extraNew, extraRefFiles, extraEdits));
+                }
+                catch { }
+            }
             return new IncrementalStepProposal
             {
                 PlanComplete = false,
                 Thinking = thinking,
                 CompletionReason = justification,
-                Step = new PlanStep
-                {
-                    File = file!.Replace('\\', '/'),
-                    Change = change!,
-                    TargetSymbol = targetSymbol,
-                    Priority = 1,
-                    LineNumber = line,
-                    OldString = oldString,
-                    NewString = newString,
-                    ReferenceFiles = refFiles,
-                    Edits = edits.Count > 0 ? edits : null
-                }
+                Step = primaryStep,
+                AdditionalSteps = additionalSteps.Count > 0 ? additionalSteps : null
             };
         }
         catch (JsonException)
         {
             return null;
         }
+    }
+    private static PlanStep ParseStepFromJson(string file, string change, string? targetSymbol, int line, string? oldString, string? newString, List<string> refFiles, List<EditPair> edits)
+    {
+        return new PlanStep
+        {
+            File = file.Replace('\\', '/'),
+            Change = change,
+            TargetSymbol = targetSymbol,
+            Priority = 1,
+            LineNumber = line,
+            OldString = oldString,
+            NewString = newString,
+            ReferenceFiles = refFiles,
+            Edits = edits.Count > 0 ? edits : null
+        };
     }
     private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
         PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
@@ -8093,12 +8141,78 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 incremental = true
             }, ct);
         }
+        var pendingSteps = new Queue<PlanStep>();
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
             ct.ThrowIfCancellationRequested();
-            if (emitSse)
+            if (emitSse && pendingSteps.Count == 0)
             {
                 await SendSse(Response, "phase", new { message = $"Planning Step {planSoFar.Count + 1}" }, ct);
+            }
+            if (pendingSteps.Count > 0)
+            {
+                var queuedStep = pendingSteps.Dequeue();
+                planSoFar.Add(queuedStep);
+                if (!string.IsNullOrWhiteSpace(queuedStep.Change))
+                    thinkingLog.AppendLine($"Step {planSoFar.Count}: {queuedStep.Change}");
+                await EmitLog(emitSse, "info",
+                    $"▶ Executing queued step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "plan", new
+                    {
+                        thinking = thinkingLog.ToString(),
+                        summary = $"Executed {planSoFar.Count - 1} step(s) — running queued step {planSoFar.Count}",
+                        items = planSoFar.Select((s, idx) => new
+                        {
+                            File = s.File,
+                            Change = s.Change,
+                            Line = s.LineNumber,
+                            OldString = s.OldString,
+                            NewString = s.NewString,
+                            done = idx < planSoFar.Count - 1
+                        }).ToList(),
+                        incremental = true
+                    }, ct);
+                await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                    summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
+                var singleStepPlan = new AgentPlan { Plan = new List<PlanStep> { queuedStep }, Summary = queuedStep.Change, Score = 90 };
+                var beforeCount = allResults.Count;
+                var preEditContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (queuedStep.File != null && !AgentUtilities.IsSpecialMarker(queuedStep.File))
+                {
+                    var fp = Path.GetFullPath(Path.Combine(projectRoot, (queuedStep.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
+                    if (System.IO.File.Exists(fp)) preEditContents[queuedStep.File!] = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                }
+                try
+                {
+                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
+                        steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                        replanBudget: new[] { 0 });
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    await EmitLog(emitSse, "error",
+                        $"⛔ Interleaved execution halted — queued step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                    if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                    await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                        summary: $"Execution halted at queued step {planSoFar.Count + 1} — exception: {ex.Message}", score: 0,
+                        append: false);
+                    break;
+                }
+                var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
+                var stepSucceeded = newResults.Any(r => r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
+                await EmitLog(emitSse, "info",
+                    $"DIAG: After queued step — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}", ct: ct);
+                var globalPlanIdx = planSoFar.Count - 1;
+                foreach (var r in newResults)
+                {
+                    r["planItemIndex"] = globalPlanIdx;
+                    if (emitSse && r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
+                        await SendSse(Response, "step", r, ct);
+                }
+                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
+                if (!stepSucceeded) { break; }
+                continue;
             }
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
             if (proposal == null)
@@ -8238,6 +8352,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             consecutiveSlotFailures = 0;
             regenAttempts = 0;
             rejectionFeedback.Clear();
+            if (proposal.AdditionalSteps?.Count > 0)
+            {
+                foreach (var extraStep in proposal.AdditionalSteps)
+                {
+                    if (!planSoFar.Any(s => string.Equals(s.File, extraStep.File, StringComparison.OrdinalIgnoreCase) &&
+                                            TokenOverlap(s.Change ?? "", extraStep.Change ?? "") > 0.35))
+                    {
+                        pendingSteps.Enqueue(extraStep);
+                        await EmitLog(emitSse, "info",
+                            $"Queued additional step for later: [{extraStep.File}] {extraStep.Change}", ct: ct);
+                    }
+                }
+            }
             var stepToRun = proposal.Step;
             if (stepToRun != null)
             {
@@ -8860,6 +8987,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         public string? Thinking { get; set; }
         public string? ExploreFile { get; set; }
         public PlanStep? Step { get; set; }
+        public List<PlanStep>? AdditionalSteps { get; set; }
     }
     private sealed class IncrementalSubPlanProposal
     {
