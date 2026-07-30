@@ -13,6 +13,9 @@ public class AgentRequest
     public bool IsDecomposing { get; set; }
     public string? CardId { get; set; }
     public bool CreateTests { get; set; }
+    public bool IsBenchmark { get; set; }
+    public string? BenchmarkProjectRoot { get; set; }
+    public string? BuildCommands { get; set; }
 
     /// <summary>True when this card is a benchmark "test card". When set, the
     /// orchestrator emits a TestRunResult ("test_result" SSE event) scoring how

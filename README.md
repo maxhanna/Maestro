@@ -9,6 +9,9 @@ Download EXE: https://Bughosted.com/assets/Weaver.exe
 
 Source code: https://github.com/maxhanna/Weaver
 
+Discord:
+https://discord.gg/YQWkD6ZQDx
+
  
     :++++.  .+++-   -+++=   -++++%%++%   **%%&&%:   %=+*&#--%%-++&+. =#++++===:  :+++++++-          
     :@::=░: %=:.░% -&:.-▓&  #:......:█*  *:@::.░▒ .=&@+..%▒+.&&...░▓ #.......%▓= +*......-*+-       
@@ -25,7 +28,7 @@ Source code: https://github.com/maxhanna/Weaver
 ## Requirements
 
 - .NET 10 SDK (or compatible runtime)
-- llama.cpp server / Ollama 
+- OpenAI endpoint / llama.cpp server / Ollama 
 
 ## Run
 
@@ -136,7 +139,8 @@ Weaver supports syntax highlighting and editing for:
 
 ## 🧨 Why Developers Love Weaver
 - One prompt → entire project updated  
-- Atomic, safe, reviewable diffs  
+- Atomic, safe, reviewable diffs
+- Review all terminal commands before they run, create a command approval list or approve all by default.
 - Full IDE + Git + Kanban + Calendar in one app  
 - Local, fast, private  
 - Works with any project structure  
@@ -175,3 +179,5 @@ Publish command : dotnet publish -c Release -r win-x64 --self-contained true /p:
 Testing command : dotnet test tests\Weaver.UnitTests\Weaver.UnitTests.csproj
 
 ![Agentic loop](https://venturebeat.com/_next/image?url=https%3A%2F%2Fimages.ctfassets.net%2Fjdtwqhzvc2n1%2F5gWXRttHvteZMEGgygXVuz%2F3fa3112800b8d8f6e153fa0957a78f22%2Fautonomous_optimization.png%3Fw%3D1000%26q%3D100&w=3840&q=75)
+
+Since: May 21st, 2026

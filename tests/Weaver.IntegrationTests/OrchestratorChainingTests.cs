@@ -12,9 +12,9 @@ namespace Weaver.IntegrationTests;
 /// Proves the noReplan + plan-merge fix (AgentController.cs ~line 8700) holds inside a
 /// real Orchestrate() run: real routing, a real CommandExecutionPipeline loop driving a
 /// real TerminalService against real files on disk, and a real chaining decision — with
-/// only the LLM (via FakeLlmHandler) and UnifiedPipeline's own internals (via
+/// only the LLM (via FakeLlmHandler) and StepResolutionPipeline's own internals (via
 /// TestableAgentController's override) substituted. See the "Orchestrator chaining test
-/// harness" scoping discussion for why UnifiedPipeline itself is stubbed rather than
+/// harness" scoping discussion for why StepResolutionPipeline itself is stubbed rather than
 /// driven for real.
 /// </summary>
 public class OrchestratorChainingTests : IDisposable
@@ -49,7 +49,7 @@ public class OrchestratorChainingTests : IDisposable
     public async Task Orchestrate_ChainedCommandExecutionToCodeEdit_TagsChainedStepsReplanAndMergesPlanCounts()
     {
         // ── Script the only two real LLM calls this scenario makes: the routing-verify
-        //    call, then CommandExecutionPipeline's plan -> cmd -> done loop. UnifiedPipeline
+        //    call, then CommandExecutionPipeline's plan -> cmd -> done loop. StepResolutionPipeline
         //    itself is stubbed below, so it makes none.
         var routingVerifyResponse =
             """{"decision":"chain","stages":[{"pipeline":"CommandExecution","summary":"run export command"},{"pipeline":"UnifiedPipeline","summary":"update summary file"}]}""";
@@ -73,9 +73,10 @@ public class OrchestratorChainingTests : IDisposable
         var emailService = new EmailService(_configFile);
         var boardData = new BoardDataService(
             Path.Combine(_scratchDir, "board.json"), NullLogger<BoardDataService>.Instance);
+        var push = new PushNotificationService(_scratchDir);
 
         var controller = new TestableAgentController(
-            httpClientFactory, config, env, _terminal, fileHints, _configFile, emailService, boardData);
+            httpClientFactory, config, env, _terminal, fileHints, _configFile, emailService, boardData, push);
 
         // Skip the real TCP connectivity probe entirely — it's orthogonal to what this
         // test verifies and would otherwise spawn an extra shell process per run and
@@ -85,7 +86,7 @@ public class OrchestratorChainingTests : IDisposable
             .GetField("_nextConnectivityCheck", BindingFlags.NonPublic | BindingFlags.Static)!
             .SetValue(null, DateTime.UtcNow.AddMinutes(5));
 
-        controller.UnifiedPipelineStub = (prompt, projectRoot, attachedFiles) =>
+        controller.StepResolutionPipelineStub = (prompt, projectRoot, attachedFiles) =>
         {
             // Prove the chained stage actually receives what stage 1 produced.
             Assert.NotNull(attachedFiles);
@@ -103,7 +104,7 @@ public class OrchestratorChainingTests : IDisposable
             {
                 Plan = new List<PlanStep> { new() { File = "scratch_result.txt", Change = "append stage-2 content" } }
             };
-            return (steps, plan);
+            return (steps, plan, true);
         };
 
         var (allSteps, plan, complete) = await controller.Orchestrate(

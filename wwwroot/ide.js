@@ -53,7 +53,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       function startFileChangePolling() {
         if (_pollInterval) return;
         _pollInterval = $interval(function () {
-          if (!vm.ide.openTabs || vm.ide.openTabs.length === 0) return;
+          if (vm.shuttingDown || !vm.ide.openTabs || vm.ide.openTabs.length === 0) return;
           vm.ide.openTabs.forEach(function (tab) {
             if (!tab.path || !tab.lastModified) return;
             $http.get('/api/editor/check-modified', {
@@ -247,7 +247,8 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         '.go': 'text/x-go', '.rs': 'text/x-rust', '.swift': 'text/x-swift',
         '.md': 'text/x-markdown', '.yaml': 'text/x-yaml', '.yml': 'text/x-yaml',
         '.sh': 'text/x-sh', '.bash': 'text/x-sh', '.ps1': 'text/x-sh',
-        '.kt': 'text/x-kotlin', '.kts': 'text/x-kotlin'
+        '.kt': 'text/x-kotlin', '.kts': 'text/x-kotlin',
+        '.diff': 'text/x-diff', '.patch': 'text/x-diff'
       };
       function detectMode(path) {
         if (!path) return null;
@@ -522,6 +523,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         stopFileChangePolling();
         vm.showIDE = false;
       };
+      vm.stopIdePolling = stopFileChangePolling;
 
       // ── Search ─────────────────────────────────────────────────────────
       vm.openSearch = function () {

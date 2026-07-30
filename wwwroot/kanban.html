@@ -21,7 +21,7 @@
       ✅ ({{vm.cardsForProject('done').length}})
     </button>
     <button class="close-button" ng-click="vm.showKanban = false; vm.saveSettings()" style="margin-left:4px;">✕</button>
-    </div>
+  </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
     <!-- TODO column -->
@@ -41,7 +41,7 @@
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
           <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2"
+            <textarea ng-model="card.text" ng-change="vm.saveCardText(card)" rows="2"
               ng-click="vm.todoTextAreaClicked($event)"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
             <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
@@ -50,6 +50,39 @@
               ng-show="vm.voiceSupported">🎤</button>
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
+
+          <!-- META-PLAN BLOCK -->
+          <div class="card-meta-plan"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
+            <div class="meta-plan-header"
+              style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
+              <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">🧠
+                Meta-Plan:
+                {{card._metaPlan.summary}}</span>
+              <span class="text-xs"
+                style="margin: 0 4px; opacity:0.6; flex-shrink: 0;">({{card._metaPlan.complexity}}/10)</span>
+              <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
+                style="font-size:10px; padding: 0 4px; line-height: 1.2; flex-shrink: 0; background: none; border: none; color: var(--accent); cursor: pointer;"
+                title="Clear meta-plan and restart">🗑</button>
+            </div>
+            <div class="meta-plan-items">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}"
+                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
+                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                  <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
+                  <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
+                  <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
+                    <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
             <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
               <span class="text-xs"
@@ -60,14 +93,16 @@
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
                 ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                title="{{item.done ? '✅' : '⬜'}} {{item.metaGroup ? item.metaGroup + ' — ' : ''}}{{item.file}}:{{item.line}} {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
                   style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' :
                   '⬜'}}</span>
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span class="plan-item-file">{{item.file}}</span>
+                      <span ng-if="item.metaGroup" class="plan-item-metagroup"
+                        title="Sub-plan group">{{item.metaGroup}}</span>
+                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
                     </div>
 
@@ -80,32 +115,106 @@
                       ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                       style="cursor:pointer;opacity:0.5;flex-shrink:0;" title="Remove this step">✕</span>
                   </div>
+                  <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:10px;">
+                    <span ng-repeat="d in item.diffs" style="display:block;margin:1px 0;">
+                      <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)" title="Click to preview diff">
+                        <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                        <span
+                          ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                          && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                        <code style="font-size:9px;opacity:0.8;">{{d.split('/').pop()}}</code>
+                      </span>
+                      <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)"
+                        ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                        ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="font-size:8px;padding:0 3px;">Apply</button>
+                      <span
+                        ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="color:var(--green);font-size:9px;">✓</span>
+                      <button ng-click="vm.deleteDiff(d, item, $event)"
+                        ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                        ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="font-size:8px;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                      <button ng-click="vm.openDiffInIde(d, item, $event)"
+                        ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="font-size:8px;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
+                      <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting"
+                        style="color:#e06c75;font-size:9px;">deleting…</span>
+                      <div ng-if="item._previews && item._previews[d] && item._previews[d].show"
+                        style="margin-top:2px;padding:2px 4px;background:var(--bg2);border-radius:3px;max-height:120px;overflow-y:auto;font-family:monospace;font-size:9px;white-space:pre-wrap;word-break:break-all;">
+                        <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                      </div>
+                      <div ng-if="item._previews && item._previews[d] && item._previews[d].error"
+                        style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
+                    </span>
+                  </div>
                   <div ng-if="item._showDetail" class="plan-item-detail"
                     style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
                     <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
                       item.oldString.slice(0,200) + '…' : item.oldString}}</div>
                     <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
                       item.newString.slice(0,200) + '…' : item.newString}}</div>
+                    <div ng-if="item.diffs && item.diffs.length"><strong>DIFFS:</strong>
+                      <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
+                        <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)">
+                          <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                          <span
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                            && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <code>{{d.split('/').pop()}}</code>
+                        </span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)"
+                          ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;">Apply</button>
+                        <span
+                          ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="color:var(--green);">✓</span>
+                        <button ng-click="vm.deleteDiff(d, item, $event)"
+                          ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <button ng-click="vm.openDiffInIde(d, item, $event)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                        <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting"
+                          style="color:#e06c75;font-size:9px;">deleting…</span>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].show"
+                          style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:10px;white-space:pre-wrap;word-break:break-all;">
+                          <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                        </div>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].error"
+                          style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
+          <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
+            style="border-left-color: #ff6432;">
+            <div class="plan-header" style="color:#ff6432;">🔍 Cohesion{{card._cohesion.file ? ' (' +
+              card._cohesion.file + ')' : ''}}</div>
+            <div class="plan-items-list">
+              <div ng-repeat="issue in card._cohesion.issues track by $index" class="plan-item-row"
+                style="background: rgba(255, 100, 50, 0.06); border-left: 2px solid #ff6432; border-radius: 2px; padding: 2px 6px; margin-bottom: 2px;">
+                <span style="color:#ff6432;flex-shrink:0;">⚠</span>
+                <span class="plan-item-change">{{issue}}</span>
+              </div>
+            </div>
+          </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
-            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
             </label>
-            <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Self-improving card — queued when agent is idle">
               <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
             </label>
-            <!-- <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
-              title="Decomposing card — will automatically decompose into smaller tasks. Use for big tasks.">
-              <input type="checkbox" ng-model="card.isDecomposing" /> DECOMPOSE
-            </label> -->
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create tests for the code changes">
               <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
@@ -114,6 +223,9 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f.path || f}}">{{f.path || f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
               <span class="remove"
                 ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
             </div>
@@ -126,8 +238,8 @@
               Run'}}</button>
             <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
               title="Split into smaller tasks">✂ Split</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
-              Delete</button>
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card"
+              ng-if="!card._benchmark || vm.activeCardId === card.id">✕ Delete</button>
           </div>
           <!-- Previous analysis on returned Todo cards -->
           <div class="card-analysis previous-analysis" ng-if="card.agentAnalysis">
@@ -141,13 +253,19 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> —
+                          {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>
@@ -195,24 +313,57 @@
           </div>
           <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
 
-          <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
-            <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
+          <!-- META-PLAN BLOCK -->
+          <div class="card-meta-plan"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
+            <div class="meta-plan-header"
+              style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
+              <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">🧠
+                Meta-Plan:
+                {{card._metaPlan.summary}}</span>
               <span class="text-xs"
-                style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+                style="margin: 0 4px; opacity:0.6; flex-shrink: 0;">({{card._metaPlan.complexity}}/10)</span>
+              <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
+                style="font-size:10px; padding: 0 4px; line-height: 1.2; flex-shrink: 0; background: none; border: none; color: var(--accent); cursor: pointer;"
+                title="Clear meta-plan and restart">🗑</button>
+            </div>
+            <div class="meta-plan-items">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}"
+                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
+                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                  <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
+                  <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
+                  <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
+                    <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-plan"
+            ng-if="(card._plan && card._plan.items && card._plan.items.length) || (vm.isCardActive(card.id) && vm.streamingSteps.length)">
+            <div class="plan-header">📋 Plan{{card._plan && card._plan.summary ? ': ' + card._plan.summary : ''}}
+              <span class="text-xs" style="margin-left:4px;opacity:0.6;"
+                ng-if="card._plan && card._plan.items">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
               <button ng-click="vm.clearPlan(card); $event.stopPropagation();" class="small ghost"
                 style="float:right;font-size:10px;" title="Delete entire plan and start fresh">🗑</button>
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
                 ng-class="{'plan-done': item.done, 'plan-cancelled': item.cancelled, 'plan-pending': !item.done && !item.cancelled}"
-                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
                   style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' :
                   item.cancelled ? '⏭' : '⬜'}}</span>
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
                     </div>
                     <span ng-if="item.oldString || item.newString"
@@ -220,7 +371,7 @@
                       style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
                       {{item._showDetail ? '▲' : '▼'}}
                     </span>
-                    <span ng-if="vm.streamingActive && vm.activeCardId === card.id && !item.done && !item.cancelled"
+                    <span ng-if="vm.isCardActive(card.id) && !item.done && !item.cancelled"
                       ng-click="vm.cancelPlanStep(card, item.index); $event.stopPropagation();"
                       style="cursor:pointer;opacity:0.6;color:#e06c75;font-size:11px;flex-shrink:0;"
                       title="Cancel this step">⏹</span>
@@ -228,21 +379,125 @@
                       ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                       style="cursor:pointer;opacity:0.5;flex-shrink:0;" title="Remove this step">✕</span>
                   </div>
+                  <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:10px;">
+                    <span ng-repeat="d in item.diffs" style="display:block;margin:1px 0;">
+                      <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)" title="Click to preview diff">
+                        <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                        <span
+                          ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                          && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                        <code style="font-size:9px;opacity:0.8;">{{d.split('/').pop()}}</code>
+                      </span>
+                      <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)"
+                        ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                        ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="font-size:8px;padding:0 3px;">Apply</button>
+                      <span
+                        ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="color:var(--green);font-size:9px;">✓</span>
+                      <button ng-click="vm.deleteDiff(d, item, $event)"
+                        ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                        ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="font-size:8px;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                      <button ng-click="vm.openDiffInIde(d, item, $event)"
+                        ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                        style="font-size:8px;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
+                      <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting"
+                        style="color:#e06c75;font-size:9px;">deleting…</span>
+                      <div ng-if="item._previews && item._previews[d] && item._previews[d].show"
+                        style="margin-top:2px;padding:2px 4px;background:var(--bg2);border-radius:3px;max-height:120px;overflow-y:auto;font-family:monospace;font-size:9px;white-space:pre-wrap;word-break:break-all;">
+                        <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                      </div>
+                      <div ng-if="item._previews && item._previews[d] && item._previews[d].error"
+                        style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
+                    </span>
+                  </div>
                   <div ng-if="item._showDetail" class="plan-item-detail"
                     style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
                     <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
                       item.oldString.slice(0,200) + '…' : item.oldString}}</div>
                     <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
                       item.newString.slice(0,200) + '…' : item.newString}}</div>
+                    <div ng-if="item.diffs && item.diffs.length"><strong>DIFFS:</strong>
+                      <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
+                        <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)">
+                          <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                          <span
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                            && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <code>{{d.split('/').pop()}}</code>
+                        </span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)"
+                          ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;">Apply</button>
+                        <span
+                          ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="color:var(--green);">✓</span>
+                        <button ng-click="vm.deleteDiff(d, item, $event)"
+                          ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <button ng-click="vm.openDiffInIde(d, item, $event)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                        <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting"
+                          style="color:#e06c75;font-size:9px;">deleting…</span>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].show"
+                          style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:10px;white-space:pre-wrap;word-break:break-all;">
+                          <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                        </div>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].error"
+                          style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div ng-repeat="s in vm.streamingSteps track by s.index"
+                ng-if="vm.isCardActive(card.id) && (s.type==='plan' || s.type==='explore')" class="plan-item-row"
+                ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
+                <span class="plan-item-icon">
+                  {{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}
+                </span>
+                <div class="plan-item-body" style="flex:1;min-width:0;">
+                  <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                    <div class="plan-item-text">
+                      <span class="plan-item-file">{{s.path || s.file || '?'}}<span
+                          ng-if="s.line">:{{s.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{s.description || s.change ||
+                        ''}}</span>
+                    </div>
+                  </div>
+                  <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail"
+                    style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                    {{s.thinking}}
+                  </div>
+                  <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
+                    style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;font-size:10px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
+                    {{s.error}}
                   </div>
                 </div>
               </div>
             </div>
           </div>
 
+          <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
+            style="border-left-color: #ff6432;">
+            <div class="plan-header" style="color:#ff6432;">🔍 Cohesion{{card._cohesion.file ? ' (' +
+              card._cohesion.file + ')' : ''}}</div>
+            <div class="plan-items-list">
+              <div ng-repeat="issue in card._cohesion.issues track by $index" class="plan-item-row"
+                style="background: rgba(255, 100, 50, 0.06); border-left: 2px solid #ff6432; border-radius: 2px; padding: 2px 6px; margin-bottom: 2px;">
+                <span style="color:#ff6432;flex-shrink:0;">⚠</span>
+                <span class="plan-item-change">{{issue}}</span>
+              </div>
+            </div>
+          </div>
+
           <div class="card-tags">
+            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
-            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
               SELF-IMPROVING</span>
             <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch"
@@ -251,11 +506,14 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
             </div>
           </div>
           <!-- Live agent output on Doing cards -->
-          <div class="card-analysis" ng-if="vm.streamingActive && vm.activeCardId === card.id">
-            <details>
+          <div class="card-analysis" ng-if="vm.isCardActive(card.id)">
+            <details ng-attr-open="{{vm.streamingActive ? 'open' : undefined}}">
               <summary>🤖 Running…</summary>
               <div class="analysis-phase" ng-if="vm.streamingPhase">
                 <strong>Phase:</strong> {{vm.streamingPhase}}
@@ -268,13 +526,19 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> —
+                          {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>
@@ -334,9 +598,14 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> —
+                          {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
@@ -349,8 +618,7 @@
                           </div>
                           <div class="diff-wrapper">
                             <div class="diff-col diff-col-old">
-                              <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-old"
                                   ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                   <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
@@ -359,8 +627,7 @@
                               </div>
                             </div>
                             <div class="diff-col diff-col-new">
-                              <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-new"
                                   ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                   <span class="diff-lineno">{{line.newLineNum + 1}}</span>
@@ -376,6 +643,7 @@
                       </div>
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>
@@ -386,12 +654,13 @@
                   <pre>{{card.agentAnalysis.thinking}}</pre>
                   <div class="plan-items-list"
                     ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length"
-                    title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                    title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
-                      <span class="plan-item-file">{{item.file}}</span>
+                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                        '⬜'}}</span>
+                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
                   </div>
@@ -400,16 +669,24 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-click="vm.moveCard(card.id,'doing','done')"
-              class="{{vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : 'success'}} small"
-              title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled While Active' : 'Mark as Done'}}"
-              ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
-            <button ng-click="vm.stopAgent(card)" class="small"
-              ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
+            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'doing','done')"
+              class="{{vm.isCardActive(card.id) ? 'ghost' : 'success'}} small"
+              title="{{vm.isCardActive(card.id) ? 'Disabled While Active' : 'Mark as Done'}}"
+              ng-disabled="vm.isCardActive(card.id)">✔ Done</button>
+            <button 
+              ng-if="card._benchmark" 
+              ng-click="vm.deleteCard(card.id, 'doing')"
+              class="small {{ vm.isCardActive(card.id) ? 'ghost' : '' }}"  
+              ng-style="{'color': vm.isCardActive(card.id) ? '' : '#e5c07b' }" 
+              title="{{ vm.isCardActive(card.id) ? 'Disabled while active' : 'Deletes the card.' }}"
+              ng-disabled="vm.isCardActive(card.id)">
+              🗑 Done & Delete
+            </button>
+            <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.isCardActive(card.id)">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost"
               title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}"
-              ng-disabled="vm.activeCardId === card.id">✕
+              ng-disabled="vm.activeCardId === card.id" ng-if="!card._benchmark || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>
@@ -438,6 +715,38 @@
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
 
+          <!-- META-PLAN BLOCK -->
+          <div class="card-meta-plan"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
+            <div class="meta-plan-header"
+              style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
+              <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">🧠
+                Meta-Plan:
+                {{card._metaPlan.summary}}</span>
+              <span class="text-xs"
+                style="margin: 0 4px; opacity:0.6; flex-shrink: 0;">({{card._metaPlan.complexity}}/10)</span>
+              <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
+                style="font-size:10px; padding: 0 4px; line-height: 1.2; flex-shrink: 0; background: none; border: none; color: var(--accent); cursor: pointer;"
+                title="Clear meta-plan and restart">🗑</button>
+            </div>
+            <div class="meta-plan-items">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}"
+                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
+                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                  <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
+                  <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
+                  <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
+                    <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
             <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
               <span class="text-xs"
@@ -446,12 +755,12 @@
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
                 ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                 <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
                     </div>
                     <span ng-if="item.oldString || item.newString"
@@ -466,14 +775,60 @@
                       item.oldString.slice(0,200) + '…' : item.oldString}}</div>
                     <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
                       item.newString.slice(0,200) + '…' : item.newString}}</div>
+                    <div ng-if="item.diffs && item.diffs.length"><strong>DIFFS:</strong>
+                      <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
+                        <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)">
+                          <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                          <span
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                            && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <code>{{d.split('/').pop()}}</code>
+                        </span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)"
+                          ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;">Apply</button>
+                        <span
+                          ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="color:var(--green);">✓</span>
+                        <button ng-click="vm.deleteDiff(d, item, $event)"
+                          ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <button ng-click="vm.openDiffInIde(d, item, $event)"
+                          ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                          style="font-size:9px;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                        <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting"
+                          style="color:#e06c75;font-size:9px;">deleting…</span>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].show"
+                          style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:10px;white-space:pre-wrap;word-break:break-all;">
+                          <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                        </div>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].error"
+                          style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
 
+          <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
+            style="border-left-color: #ff6432;">
+            <div class="plan-header" style="color:#ff6432;">🔍 Cohesion{{card._cohesion.file ? ' (' +
+              card._cohesion.file + ')' : ''}}</div>
+            <div class="plan-items-list">
+              <div ng-repeat="issue in card._cohesion.issues track by $index" class="plan-item-row"
+                style="background: rgba(255, 100, 50, 0.06); border-left: 2px solid #ff6432; border-radius: 2px; padding: 2px 6px; margin-bottom: 2px;">
+                <span style="color:#ff6432;flex-shrink:0;">⚠</span>
+                <span class="plan-item-change">{{issue}}</span>
+              </div>
+            </div>
+          </div>
+
           <div class="card-tags">
-            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
               title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
@@ -484,6 +839,9 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
             </div>
           </div>
           <!-- Agent analysis shown on Done cards -->
@@ -524,9 +882,14 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> —
+                          {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
@@ -539,8 +902,7 @@
                           </div>
                           <div class="diff-wrapper">
                             <div class="diff-col diff-col-old">
-                              <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-old"
                                   ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                   <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
@@ -549,8 +911,7 @@
                               </div>
                             </div>
                             <div class="diff-col diff-col-new">
-                              <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-new"
                                   ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                   <span class="diff-lineno">{{line.newLineNum + 1}}</span>
@@ -566,6 +927,7 @@
                       </div>
                       <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>
@@ -578,10 +940,10 @@
                     ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                         '⬜'}}</span>
-                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
                   </div>
@@ -590,9 +952,13 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
+            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'done','todo')" class="small">←
+              Reopen</button>
+            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'done')" class="small"
+              style="color:#e5c07b;">🗑 Delete</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card"
+              ng-if="!card._benchmark || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>
@@ -616,8 +982,8 @@
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
           <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
-              placeholder="Self-improving task..."></textarea>
+            <textarea ng-model="card.text" ng-change="vm.saveCardText(card)" rows="2"
+              ng-click="$event.stopPropagation()" placeholder="Self-improving task..."></textarea>
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
           <div class="card-tags">
@@ -627,6 +993,9 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="open-in-ide"
+                ng-click="vm.openInIde(f.path || f); $event.stopPropagation()"
+                title="Open in IDE">📄</span>
               <span class="remove"
                 ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
             </div>
@@ -659,6 +1028,7 @@
       <h3>
         <span class="col-header">🗄 Archived <span
             class="col-badge">{{vm.cardsForProject('archived').length}}</span></span>
+        <button class="small ghost" ng-click="vm.clearAllArchivedCards()" title="Delete all archived cards">🗑️</button>
         <button class="small ghost" ng-click="vm.showArchived = false" title="Close archived view">✕</button>
       </h3>
       <div class="cards" id="col-archived" ng-class="{empty: vm.cardsForProject('archived').length===0}">

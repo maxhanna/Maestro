@@ -18,3 +18,15 @@ public class ApplyEditsRequest
     public List<EditAction> Edits { get; set; } = new();
     public List<CommandAction> Commands { get; set; } = new();
 }
+
+public class ApplyDiffRequest
+{
+    public string Project { get; set; } = "";
+    public string DiffPath { get; set; } = "";
+}
+
+public class VerifyDiffsRequest
+{
+    public string Project { get; set; } = "";
+    public List<string> DiffPaths { get; set; } = new();
+}

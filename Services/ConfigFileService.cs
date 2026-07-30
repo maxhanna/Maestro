@@ -9,6 +9,7 @@ public class ProjectDto
     public string Name { get; set; } = "";
     public string Path { get; set; } = "";
     public string Description { get; set; } = "";
+    public string BuildCommands { get; set; } = "";
 }
 
 public class EmailAccountConfig
@@ -33,6 +34,7 @@ public class FrontendConfig
     public bool prByDefault { get; set; } = false;
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";
+    public string llamaModel { get; set; } = "medgemma:4b";
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
     public List<string> disallowedTerminalRoots { get; set; } = new();
@@ -55,6 +57,16 @@ public class FrontendConfig
     public string? bughostedUsername { get; set; }
     public string? bughostedPassword { get; set; }
     public bool bughostedHeartbeatEnabled { get; set; } = false;
+    // CSS theme overrides — keyed by variable name (e.g. "--bg"), value is the color
+    public Dictionary<string, string>? themeColors { get; set; }
+    // Enabled agent step types (tools). Empty or null = all enabled.
+    public List<string> enabledTools { get; set; } = new();
+    // Include project file/directory skeleton in discovery context
+    public bool includeProjectSkeleton { get; set; } = false;
+    // Include edit knowledge (do/dont/patterns) in discovery context
+    public bool includeEditKnowledge { get; set; } = false;
+    // Open attachment files in VS Code instead of the built-in IDE
+    public bool useVSCodeInsteadOfIDE { get; set; } = false;
 }
 
 public class ConfigFileService
@@ -121,6 +133,7 @@ public class ConfigFileService
         foreach (var acct in cfg.emailAccounts)
             acct.password = EncryptPassword(acct.password);
         cfg.emailPassword = EncryptPassword(cfg.emailPassword);
+        cfg.bughostedUsername = EncryptPassword(cfg.bughostedUsername);
         cfg.bughostedPassword = EncryptPassword(cfg.bughostedPassword);
     }
 
@@ -129,6 +142,7 @@ public class ConfigFileService
         foreach (var acct in cfg.emailAccounts)
             acct.password = DecryptPassword(acct.password);
         cfg.emailPassword = DecryptPassword(cfg.emailPassword);
+        cfg.bughostedUsername = DecryptPassword(cfg.bughostedUsername);
         cfg.bughostedPassword = DecryptPassword(cfg.bughostedPassword);
     }
 

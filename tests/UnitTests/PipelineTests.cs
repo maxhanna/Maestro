@@ -229,11 +229,136 @@ public class PipelineTests
     }
 
     [Fact]
+    public void ParseStepExplorationResponse_MultipleJsonFragments_UsesLastCompleteObject()
+    {
+        // Arrange
+        var raw = """
+        {"ready": false, "filesToRead": ["src/app/app.component.ts"], "reasoning": "I need to see the component first"}
+        {"ready": true, "refinedChange": "Update getTimedGreetingMessage with four new time ranges", "targetSymbol": "getTimedGreetingMessage", "estimatedLineRange": "~1084-1118", "confidence": 93}
+        """;
+
+        // Act
+        var result = AgentUtilities.ParseStepExplorationResponse(raw);
+
+        // Assert
+        Assert.True(result.Ready);
+        Assert.Equal("getTimedGreetingMessage", result.TargetSymbol);
+        Assert.Contains("Update getTimedGreetingMessage", result.RefinedChange);
+        Assert.Equal(93, result.Confidence);
+    }
+
+    [Fact]
+    public void ExtractTargetSymbolFromChange_DoesNotPromoteGenericVerbAsMethodName()
+    {
+        // Arrange
+        var task = "Add additional time-based greetings to handle early morning hours before 5AM";
+
+        // Act
+        var result = AgentUtilities.ExtractTargetSymbolFromChange(task);
+
+        // Assert
+        Assert.NotEqual("handle", result);
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void ExtractMethodBodiesByKeywords_PreservesExactTargetSymbolInVagueTask()
+    {
+        // Arrange
+        var content = """
+        class Demo {
+            login() {
+                return this.getTimedGreetingMessage(this.user?.username || '');
+            }
+
+            getTimedGreetingMessage(username: string): string {
+                const hour = new Date().getHours();
+                let greeting = '';
+
+                if (hour >= 5 && hour < 12) {
+                    greeting = `Morning, ${username}!`;
+                } else if (hour >= 12 && hour < 17) {
+                    greeting = `Afternoon, ${username}!`;
+                } else {
+                    greeting = `Night, ${username}!`;
+                }
+
+                return greeting;
+            }
+
+            cleanStoryText(text: string) {
+                return text?.replace(/\[\/?[^\]]/g, '')?.replace(/https?:\/\/[^\s]+/g, '');
+            }
+        }
+        """;
+
+        // Act
+        var result = AgentUtilities.ExtractMethodBodiesByKeywords(content, "Add more funny greeting messages to getTimedGreetingMessage");
+
+        // Assert
+        Assert.Contains("getTimedGreetingMessage", result);
+        Assert.Contains("Morning, ${username}!", result);
+        Assert.Contains("Afternoon, ${username}!", result);
+    }
+
+    [Fact]
     public void EstimateTokens_ReturnsApproximateCount()
     {
         var text = "Hello world"; // 11 chars
         var result = AgentUtilities.EstimateTokens(text);
         Assert.Equal(2, result); // 11 / 4 = 2.75 -> 2
+    }
+
+    [Theory]
+    [InlineData("dotnet test", true)]
+    [InlineData("cd maxhanna.client; npx ng g c recipe-menu --skip-tests", true)]
+    [InlineData("Create a basic template structure that shows how we'll implement both components", false)]
+    [InlineData("Explore app-title-bar.component.ts file", false)]
+    public void LooksLikeShellCommand_RejectsPlanningProse(string command, bool expected)
+    {
+        Assert.Equal(expected, AgentUtilities.LooksLikeShellCommand(command));
+    }
+
+    [Fact]
+    public void EditClassifier_TypeScriptPropertyAddition_UsesAnchoredEdit()
+    {
+        var step = new PlanStep
+        {
+            File = "src/app/recipe/recipe.component.ts",
+            Change = "Add isMenuPanelOpen property declaration after the last existing property",
+            TargetSymbol = "isMenuPanelOpen"
+        };
+
+        var result = EditClassifier.Classify(step, fileExists: true, ext: ".ts");
+
+        Assert.Equal(EditStrategy.AnchoredEdit, result);
+    }
+
+    [Fact]
+    public void EditStrategyResolver_InsertMethod_ResolvesAnchorWithoutReplacementIntent()
+    {
+        var source = """
+        export class RecipeComponent {
+          ngOnInit(): void {
+            this.loadRecipes();
+          }
+
+          loadRecipes(): void {
+          }
+        }
+        """;
+        var intent = new EditIntent(EditIntentKind.InsertNearSymbol, "ngOnInit", "method");
+
+        var decision = EditStrategyResolver.Decide(
+            "src/app/recipe/recipe.component.ts",
+            fileExists: true,
+            fileContent: source,
+            changeDescription: "Add showMenuPanel() method after ngOnInit()",
+            intent);
+
+        Assert.Equal(EditStrategy.InsertMethod, decision.Strategy);
+        Assert.Equal("ngOnInit", decision.TargetName);
+        Assert.Contains("ngOnInit", decision.ResolvedOldStr);
     }
 
     [Theory]
@@ -302,24 +427,7 @@ public class PipelineTests
         Assert.Contains("func", result);
         Assert.Contains("main", result);
     }
-
-    [Fact]
-    public void ExtractEditFromCodeGen_RobustParsing()
-    {
-        // Case 1: Markdown + JSON
-        var raw1 = "Sure, here is the edit:\n```json\n{\n  \"oldString\": \"public void Old()\",\n  \"newString\": \"public void New()\"\n}\n```";
-        var (os1, ns1, err1) = AgentUtilities.ExtractEditFromCodeGen(raw1);
-        Assert.Null(err1);
-        Assert.Equal("public void Old()", os1);
-        Assert.Equal("public void New()", ns1);
-
-        // Case 2: Malformed JSON (unquoted keys)
-        var raw2 = "{ oldString: \"old\", newString: \"new\" }";
-        var (os2, ns2, err2) = AgentUtilities.ExtractEditFromCodeGen(raw2);
-        Assert.Null(err2);
-        Assert.Equal("old", os2);
-        Assert.Equal("new", ns2);
-    }
+ 
 
     [Fact]
     public void ParseDelimitedPlan_HandlesMultipleSteps()

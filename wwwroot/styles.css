@@ -387,6 +387,7 @@ header h1 {
 }
 
 .settings-header {
+	cursor: pointer;
 	font-weight: 700;
 	margin: 16px 0 8px 0;
 	padding: 8px 0;
@@ -396,7 +397,6 @@ header h1 {
 	color: var(--accent);
 }
 
-/* FAQ Section */
 .faq-section {
 	margin-top: 24px;
 }
@@ -1147,7 +1147,6 @@ h1 .brand-e:hover::before {
 	gap: 8px;
 	padding: 8px 12px;
 	border-radius: 12px;
-	background: var(--brand-gradient);
 	color: #012;
 	font-weight: 700;
 	font-size: 16px;
@@ -1712,6 +1711,9 @@ h3 .small.ghost:hover {
 	cursor: pointer;
 	color: var(--muted);
 	font-size: 12px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 .agent-streaming-thinking pre {
@@ -1752,6 +1754,15 @@ h3 .small.ghost:hover {
 	font-size: 11px;
 	color: #80cbc4;
 	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.agent-streaming-tokens summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 .resolve-stream-section {
@@ -2430,6 +2441,47 @@ h3 .small.ghost:hover {
 	overflow: auto;
 }
 
+.diff-list {
+	margin-top: 8px;
+	padding: 6px;
+	background: var(--bg-secondary, #1a1a2e);
+	border-radius: 4px;
+}
+
+.diff-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 4px 0;
+	padding: 4px;
+}
+
+.diff-path {
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	flex: 1;
+}
+
+.diff-apply-btn {
+	padding: 2px 10px;
+	font-size: 11px;
+	cursor: pointer;
+	background: var(--accent, #4a9eff);
+	color: #fff;
+	border: none;
+	border-radius: 3px;
+}
+
+.diff-apply-btn:hover {
+	opacity: 0.85;
+}
+
+.diff-applied {
+	color: var(--success, #4caf50);
+	font-size: 11px;
+}
+
 .agent-steps .snippet-hint {
 	font-size: 10px;
 	opacity: 0.7;
@@ -2876,6 +2928,68 @@ h3 .small.ghost:hover {
 	width: 100%;
 }
 
+/* ── Update progress panel (Discord panel) ── */
+.update-stage {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+	font-size: 13px;
+}
+
+.update-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: #06b6d4;
+	flex-shrink: 0;
+	animation: update-pulse 1.2s ease-in-out infinite;
+}
+
+.update-stage-label {
+	font-weight: 500;
+}
+
+.update-progress-bar-track {
+	height: 6px;
+	background: rgba(255, 255, 255, 0.1);
+	border-radius: 3px;
+	overflow: hidden;
+	margin-bottom: 4px;
+}
+
+.update-progress-bar-fill {
+	height: 100%;
+	background: linear-gradient(90deg, #06b6d4, #7c3aed);
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+.update-progress-text {
+	font-size: 11px;
+	color: var(--muted);
+}
+
+.update-restart-note {
+	font-size: 11px;
+	color: var(--muted);
+	font-style: italic;
+}
+
+@keyframes update-pulse {
+
+	0%,
+	100% {
+		opacity: 1;
+		transform: scale(1);
+	}
+
+	50% {
+		opacity: 0.5;
+		transform: scale(0.85);
+	}
+}
+
 .file-picker-nav {
 	display: flex;
 	align-items: center;
@@ -3050,10 +3164,72 @@ h3 .small.ghost:hover {
 	}
 }
 
-.activeCardTextReview { 
+.activeCardTextReview {
 	white-space: break-spaces;
 	margin: 8px 0 0 0;
 	font-size: 12px;
 	max-height: 50vh;
 	overflow: auto;
+}
+
+#weaver-toast-container {
+	position: fixed;
+	top: 24px;
+	right: 24px;
+	z-index: 99999;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	pointer-events: none;
+}
+
+.weaver-toast {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	background: var(--surface);
+	color: var(--text);
+	padding: 14px 18px 14px 14px;
+	border-radius: 10px;
+	box-shadow: var(--brand-shadow), 0 0 30px rgba(0, 0, 0, 0.5);
+	font-size: 14px;
+	line-height: 1.4;
+	min-width: 280px;
+	max-width: 380px;
+	opacity: 0;
+	transform: translateX(calc(100% + 48px)) scale(0.96);
+	transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
+	border-left: 3px solid var(--accent);
+	pointer-events: auto;
+}
+
+.weaver-toast .toast-icon {
+	width: 28px;
+	height: 28px;
+	border-radius: 6px;
+	flex-shrink: 0;
+}
+
+.weaver-toast .toast-text {
+	flex: 1;
+}
+
+.weaver-toast.show {
+	opacity: 1;
+	transform: translateX(0) scale(1);
+}
+
+.weaver-toast.hide {
+	opacity: 0;
+	transform: translateX(calc(100% + 48px)) scale(0.96);
+	transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+.nowrap {
+	white-space: nowrap;
+}
+.textOverflow {
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	overflow: hidden;
 }

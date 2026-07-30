@@ -4,19 +4,32 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
   function loadCards() {
-    // Return a default state immediately; actual persisted state will be
-    // loaded asynchronously after the controller initializes.
     return { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
   }
 
   var _cardsCache = {};
   var _cardsVersion = 0;
+  var _saveCardTextTimer = null;
 
   return {
     init: function (vm, $scope) {
-      // Start with an immediate default state, then replace with persisted
-      // state loaded from the server when available.
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
+      vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
+      vm.findCardById = function (cardId) {
+        if (!cardId || !vm.state) return null;
+        try {
+          var cols = ['todo', 'doing', 'done', 'selfImproving'];
+          for (var c = 0; c < cols.length; c++) {
+            var cards = vm.state[cols[c]] || [];
+            for (var i = 0; i < cards.length; i++) {
+              if (cards[i].id === cardId) return cards[i];
+            }
+          }
+        } catch (e) {
+          console.log("findCardById error", e);
+        }
+        return null;
+      };
 
       function loadBoardData() {
         $http.get('/api/boarddata/load').then(function (resp) {
@@ -27,6 +40,26 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             }
             if (data && (data.todo || data.doing || data.done || data.archived || data.selfImproving)) {
               vm.state = data;
+
+              if (vm.activeCardId && vm.planItems && vm.planItems.length) {
+                var activeCard = findCardById(vm.activeCardId);
+                if (activeCard) {
+                  var serverItems = (activeCard._plan && activeCard._plan.items)
+                    ? activeCard._plan.items : [];
+                  if (serverItems.length < vm.planItems.length) {
+                    var restoredItems = angular.copy(vm.planItems);
+                    serverItems.forEach(function (si) {
+                      var match = restoredItems.find(function (ri) { return ri.index === si.index; });
+                      if (match && si.done) match.done = true;
+                    });
+                    activeCard._plan = {
+                      items: restoredItems,
+                      summary: vm.streamingSummary || (activeCard._plan ? activeCard._plan.summary : ''),
+                      score: (activeCard._plan ? activeCard._plan.score : 0)
+                    };
+                  }
+                }
+              }
             }
           } catch (e) {
             console.warn('Failed to parse boarddata from server, using default state');
@@ -36,6 +69,17 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       }
 
       loadBoardData();
+
+      vm.clearMetaPlan = function (card) {
+        if (!card) return;
+        if (!$window.confirm('Clear meta-plan for this card? This will remove the sub-plan tracking and allow a clean restart.')) return;
+        delete card._metaPlan;
+        // Also clear the regular plan if it exists
+        delete card._plan;
+        vm.planItems = [];
+        vm.saveCards();
+      };
+
       vm.refreshBoardData = function (detail) {
         loadBoardData();
         if (detail && detail.target === 'boarddata') {
@@ -146,6 +190,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         vm.saveCards();
       };
 
+      vm.clearAllArchivedCards = function () {
+        if (!$window.confirm('Delete all archived cards?')) return;
+        vm.state.archived = [];
+        vm.saveCards();
+      };
+
       vm.archiveAllDone = function () {
         if (!vm.state.done.length) return;
         if (!$window.confirm('Archive all done tasks?')) return;
@@ -253,6 +303,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         vm.deleteCardConfirm = null;
       };
 
+      vm.deleteCard = function (id, col) {
+        col = col || 'todo';
+        var idx = vm.state[col].findIndex(function (c) { return c.id === id; });
+        if (idx !== -1) {
+          vm.state[col].splice(idx, 1);
+          vm.saveCards();
+        }
+      };
+
       vm.onSelfImprovingToggle = function (card) {
         if (card.selfImproving) {
           var idx = vm.state.todo.findIndex(function (c) { return c.id === card.id; });
@@ -281,7 +340,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.toggleCardReady = function (card) {
         try {
           card.ready = !card.ready;
-          if (card.ready && vm.activeCardIds.size === 0) {
+          if (card.ready && !vm.streamingActive) {
             vm.startCard(card);
           }
         }
@@ -463,6 +522,18 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         vm.saveCards();
       };
 
+      vm.openInIde = function (filePath) {
+        if (vm.useVSCodeInsteadOfIDE) {
+          var fullPath = (vm.selectedProject || '') + '/' + filePath;
+          $http.post('/api/config/open-in-vscode', { filePath: fullPath }).then(function () {}, function (err) {
+            console.error('Failed to open in VS Code', err);
+          });
+          return;
+        }
+        vm.showIDE = true;
+        if (vm.openFile) vm.openFile(filePath);
+      };
+
       vm.editCardText = function (card) {
         var newText = $window.prompt('Edit task:', card.text);
         if (newText !== null && newText !== card.text) {
@@ -472,8 +543,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       };
 
       vm.saveCardText = function (card) {
-        console.log("saving card text");
-        vm.saveCards();
+        // Debounce the save so it only fires 500ms after the user stops typing
+        if (_saveCardTextTimer) { $timeout.cancel(_saveCardTextTimer); }
+        _saveCardTextTimer = $timeout(function () {
+          console.log("saving card text");
+          vm.saveCards();
+        }, 500);
       };
 
       vm.todoTextAreaClicked = function (event) {
@@ -565,9 +640,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
       vm.moveCardToDone = function (card) {
         var cardId = card.id || card._id;
-        targetCol = card.selfImproving ? 'selfImproving' : 'done';
+        var targetCol = card.selfImproving ? 'selfImproving' : 'done';
         console.log("Moving card to " + targetCol);
         var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
+        if (idx === -1) {
+          idx = vm.state.doing.findIndex(function (c) { return (c.id || c._id) == cardId; });
+        }
         if (idx === -1) {
           console.log("ERROR: Could not find card in doing column");
           return;
@@ -575,7 +653,11 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         var moved = vm.state.doing.splice(idx, 1)[0];
         if (moved) {
           console.log("Found card in doing, moving to " + targetCol);
-          vm.state[targetCol].push(moved);
+          if (targetCol === 'selfImproving') {
+            vm.state[targetCol].unshift(moved);
+          } else {
+            vm.state[targetCol].push(moved);
+          }
           console.log("card added to " + targetCol + " setting active card to null");
           vm.activeCardId = null;
           if (!vm.activeCardIds) vm.activeCardIds = new Set();
