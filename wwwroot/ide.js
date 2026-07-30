@@ -269,10 +269,21 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
           vm._editor = null;
         }
+        var savedTheme = vm.ideTheme || 'weaver-dark';
+        if (savedTheme !== 'weaver-dark') {
+          var linkId = 'cm-ide-theme';
+          if (!document.getElementById(linkId)) {
+            var link = document.createElement('link');
+            link.id = linkId;
+            link.rel = 'stylesheet';
+            link.href = 'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/theme/' + savedTheme + '.min.css';
+            document.head.appendChild(link);
+          }
+        }
         vm._editor = CodeMirror(container, {
           value: vm.ide.currentTab ? vm.ide.currentTab.content : '',
           mode: detectMode(vm.ide.currentFile),
-          theme: 'weaver-dark',
+          theme: savedTheme,
           lineNumbers: true,
           indentUnit: 2,
           tabSize: 2,

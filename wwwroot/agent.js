@@ -7,7 +7,7 @@ angular.module('kanbanApp')
 
         function normalizeStepStatus(status) {
             if (status === 'written' || status === 'ok' || status === 'created' || status === 'modified') return 'done';
-            if (status === 'proposing' || status === 'rejected' || status === 'exploring') return status;
+            if (status === 'proposing' || status === 'rejected' || status === 'exploring' || status === 'failed') return status;
             return status || 'pending';
         }
         function normalizeStep(step) { if (!step) return step; step.status = normalizeStepStatus(step.status); return step; }
@@ -307,9 +307,7 @@ angular.module('kanbanApp')
                                                                 else refreshFilesEditedFromSteps(vm);
 
                                                                 vm.agentResult = { summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited, steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
-                                                                vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
-                                                                vm._agentStartTime = null;
-                                                                vm.agentTimer = null;
+                                                                 vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
 
                                                                 var analysis = { summary: finalSummary, thinking: finalThinking, steps: finalSteps, filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
@@ -362,9 +360,9 @@ angular.module('kanbanApp')
                                                                 }
 
                                                                 function finishCard() {
+                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); vm._agentStartTime = null; vm.agentTimer = null; return; }
                                                                     vm._agentStartTime = null;
                                                                     vm.agentTimer = null;
-                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
                                                                     if (!incomplete) {
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
@@ -667,9 +665,9 @@ angular.module('kanbanApp')
                     if (!steps || !steps.length) return { successful: 0, failed: 0 };
                     var successful = 0, failed = 0;
                     steps.forEach(function (s) {
-                        if (s.type === 'edit' || s.type === 'create' || s.type === 'rename') {
+                        if (s.type === 'edit' || s.type === 'create' || s.type === 'rename' || s.type === 'plan_step') {
                             if (s.status === 'done' || s.status === 'applied' || s.status === 'created') successful++;
-                            else if (s.status === 'error' || s.status === 'rejected') failed++;
+                            else if (s.status === 'error' || s.status === 'rejected' || s.status === 'failed') failed++;
                         }
                     });
                     return { successful: successful, failed: failed };

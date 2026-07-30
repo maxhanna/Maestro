@@ -27,6 +27,7 @@ public partial class AgentController : ControllerBase
     private readonly BoardDataService _boardData;
     private readonly EditKnowledgeService _editKnowledge;
     private readonly PushNotificationService _push;
+    private readonly DatabaseService _db;
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
     private async Task<FrontendConfig> LoadConfigAsync()
@@ -49,14 +50,13 @@ public partial class AgentController : ControllerBase
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
         ConfigFileService configFile, EmailService emailService, BoardDataService boardData,
-        PushNotificationService push)
+        PushNotificationService push, DatabaseService db)
     {
         _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
-        _boardData = boardData; _push = push;
-        var weaverDataDir = Path.Combine(_env.ContentRootPath, "data");
+        _boardData = boardData; _push = push; _db = db;
         _editKnowledge = new EditKnowledgeService(
-            weaverDataDir,
+            db,
             llmCaller: async (sys, usr, ct) =>
             {
                 var (raw, _, err) = await CallLlmRawStreaming(sys, usr, false, ct,
@@ -7544,7 +7544,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var cfg = await LoadConfigAsync();
         var sys = BuildIncrementalStepSystemPrompt(stepMode, cfg.enabledTools);
         var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback);
-        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 700);
+        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 2000);
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Incremental step proposal returned empty: {err}", ct: ct);
@@ -8144,7 +8144,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 thinking = "",
                 summary = "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far",
-                items = Array.Empty<PlanStep>(),
+                items = new[] { new { File = "_planning", Change = "Waiting for proposal…", Line = 0, OldString = "", NewString = "", done = false } },
                 incremental = true
             }, ct);
         }
@@ -8152,7 +8152,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
             ct.ThrowIfCancellationRequested();
-            if (emitSse && pendingSteps.Count == 0)
+            if (emitSse && pendingSteps.Count == 0 && !planCompleteDeclared)
             {
                 await SendSse(Response, "phase", new { message = $"Planning Step {planSoFar.Count + 1}" }, ct);
             }
@@ -8232,7 +8232,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (proposal.PlanComplete)
             {
                 if (emitSse)
+                {
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
+                    await SendSse(Response, "plan", new
+                    {
+                        thinking = thinkingLog.ToString(),
+                        summary = $"Plan complete — {planSoFar.Count} step(s) executed",
+                        items = planSoFar.Select((s, idx) => new
+                        {
+                            File = s.File, Change = s.Change, Line = s.LineNumber,
+                            OldString = s.OldString, NewString = s.NewString,
+                            done = true
+                        }).ToList(),
+                        incremental = true
+                    }, ct);
+                }
                 await EmitLog(emitSse, "success",
                     $"Interleaved execution: complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
                 planCompleteDeclared = true;
@@ -8336,6 +8350,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     "not a continuation or cleanup of already-completed work. If the task is done, return planComplete=true.";
                 skipLlm = false; // force LLM validation
             }
+            if (emitSse)
+                await EmitLog(true, "info", $"Pre-validate plan event: planSoFar.Count={planSoFar.Count}, step.File={proposal.Step.File}", ct: ct);
+            var proposedPlanItems = planSoFar.Select((s, idx) => new
+            {
+                File = s.File, Change = s.Change, Line = s.LineNumber,
+                OldString = s.OldString, NewString = s.NewString,
+                done = true
+            }).Concat(new[]
+            {
+                new
+                {
+                    File = proposal.Step.File, Change = proposal.Step.Change,
+                    Line = proposal.Step.LineNumber,
+                    OldString = proposal.Step.OldString, NewString = proposal.Step.NewString,
+                    done = false
+                }
+            }).ToList();
+            if (emitSse)
+            {
+                await EmitLog(true, "info", $"Sending plan event with {proposedPlanItems.Count} item(s)", ct: ct);
+                await SendSse(Response, "plan", new
+                {
+                    thinking = thinkingLog.ToString(),
+                    summary = $"Proposing step {planSoFar.Count + 1}",
+                    items = proposedPlanItems,
+                    incremental = true
+                }, ct);
+            }
             var (valid, reason) = await ValidateIncrementalStepAsync(
                 proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
                 skipLlm: skipLlm, lastStepCompletionNote: completionNote);
@@ -8344,6 +8386,23 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "warn",
                     $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
                 rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                if (emitSse && planSoFar.Count > 0)
+                {
+                    var planSummary = $"Step {planSoFar.Count + 1} rejected — {reason}";
+                    thinkingLog.AppendLine($"\n[{planSummary}]");
+                    await SendSse(Response, "plan", new
+                    {
+                        thinking = thinkingLog.ToString(),
+                        summary = planSummary,
+                        items = planSoFar.Select((s, idx) => new
+                        {
+                            File = s.File, Change = s.Change, Line = s.LineNumber,
+                            OldString = s.OldString, NewString = s.NewString,
+                            done = true
+                        }).ToList(),
+                        incremental = true
+                    }, ct);
+                }
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
                 {
                     consecutiveSlotFailures++;
@@ -10701,12 +10760,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
             r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
 
-        if (anyEditsApplied)
+        if (anyEditsApplied || planCompleteDeclared)
         {
             (taskComplete, verificationDetails, verificationIssues) =
                  await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
         }
-        else if (!planCompleteDeclared && !anyEditsApplied)
+        else
         {
             taskComplete = false;
             verificationDetails = "No edits were applied — skipping post-execution verification.";
@@ -13803,6 +13862,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         if (AgentUtilities.NormalizeLineEndings(newContent) == AgentUtilities.NormalizeLineEndings(content))
         { result["status"] = "skipped"; result["path"] = step.Path; return; }
+        var autoFixExt = Path.GetExtension(targetPath)?.ToLowerInvariant();
+        if (autoFixExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+        {
+            var fixedContent = AstCodeEditorService.AutoFixSyntaxErrors(newContent, autoFixExt);
+            if (fixedContent != newContent)
+            {
+                newContent = fixedContent;
+                result["autoFixed"] = true;
+            }
+        }
         var normOld = AgentUtilities.NormalizeLineEndings(content);
         var normNew = AgentUtilities.NormalizeLineEndings(newContent);
         var minLen = Math.Min(normOld.Length, normNew.Length);
@@ -14856,13 +14925,12 @@ done = build OK; command = run this to fix; ask_user = need input";
         string prompt, string projectRoot, List<object> allSteps,
         AgentPlan? plan, bool complete, bool editsApplied)
     {
-        var filePath = Path.Combine(projectRoot, "data/improvementdata.json");
         List<JsonElement> features = new();
-        if (System.IO.File.Exists(filePath))
+        var ex = _db.GetImprovementData(projectRoot);
+        if (!string.IsNullOrWhiteSpace(ex))
         {
             try
             {
-                var ex = await System.IO.File.ReadAllTextAsync(filePath);
                 var root = JsonSerializer.Deserialize<JsonElement>(ex);
                 if (root.TryGetProperty("features", out var feats) && feats.ValueKind == JsonValueKind.Array)
                     features = feats.EnumerateArray().ToList();
@@ -14897,9 +14965,7 @@ done = build OK; command = run this to fix; ask_user = need input";
         else features.Add(JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(featureEntry)));
         var output = new Dictionary<string, object?> { ["features"] = features.Select(f => JsonSerializer.Deserialize<Dictionary<string, object?>>(f.GetRawText())).ToList() };
         var json = JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true });
-        var dir = Path.GetDirectoryName(filePath);
-        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-        await System.IO.File.WriteAllTextAsync(filePath, json);
+        _db.SetImprovementData(projectRoot, json);
         await EmitLog(true, "info", $"Self-improving data written for: {prompt}");
     }
     private async Task PersistMetaPlanToCardAsync(string? cardId, MetaPlanResult metaPlan, bool emitSse, CancellationToken ct)

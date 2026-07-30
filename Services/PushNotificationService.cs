@@ -5,14 +5,14 @@ namespace Weaver.Services;
 
 public class PushNotificationService
 {
-    private readonly string _keysPath;
+    private readonly DatabaseService _db;
     private VapidDetails? _vapid;
     private PushSubscription? _subscription;
     private static readonly object _lock = new();
 
-    public PushNotificationService(string basePath)
+    public PushNotificationService(DatabaseService db)
     {
-        _keysPath = Path.Combine(basePath, "data", "vapid-keys.json");
+        _db = db;
         EnsureVapidKeys();
     }
 
@@ -45,11 +45,9 @@ public class PushNotificationService
     {
         try
         {
-            var dir = Path.GetDirectoryName(_keysPath);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            if (File.Exists(_keysPath))
+            var json = _db.GetVapidKeys();
+            if (!string.IsNullOrEmpty(json))
             {
-                var json = File.ReadAllText(_keysPath);
                 var keys = JsonSerializer.Deserialize<VapidKeyStore>(json);
                 if (keys != null && !string.IsNullOrEmpty(keys.PublicKey) && !string.IsNullOrEmpty(keys.PrivateKey))
                 {
@@ -59,7 +57,7 @@ public class PushNotificationService
             }
             var newKeys = VapidHelper.GenerateVapidKeys();
             var store = new VapidKeyStore { PublicKey = newKeys.PublicKey, PrivateKey = newKeys.PrivateKey };
-            File.WriteAllText(_keysPath, JsonSerializer.Serialize(store));
+            _db.SetVapidKeys(JsonSerializer.Serialize(store));
             _vapid = newKeys;
         }
         catch

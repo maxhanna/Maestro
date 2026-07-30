@@ -2,6 +2,76 @@ using TreeSitter;
 namespace Weaver.Services;
 public static class AstCodeEditorService
 {
+    private static readonly HashSet<string> JsLikeLanguages = new(StringComparer.OrdinalIgnoreCase)
+        { "JavaScript", "TypeScript", "TSX" };
+
+    /// <summary>
+    /// After an edit is applied to a .ts/.js file, parse with Tree-sitter and
+    /// insert missing tokens (commas, semicolons) that the parser expected.
+    /// Re-parses in a loop until clean or no more fixable errors.
+    /// </summary>
+    public static string AutoFixSyntaxErrors(string content, string fileExtension)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+        if (!LanguageMap.TryGetValue(fileExtension, out var langName)) return content;
+        if (!JsLikeLanguages.Contains(langName)) return content;
+
+        for (var iter = 0; iter < 10; iter++)
+        {
+            Language language;
+            Parser parser;
+            Tree tree;
+            try
+            {
+                language = new Language(langName);
+                parser = new Parser(language);
+                tree = parser.Parse(content);
+            }
+            catch
+            {
+                return content;
+            }
+            using (language) using (parser) using (tree)
+            {
+                if (tree == null || !tree.RootNode.HasError) return content;
+
+                var missingNodes = new List<(string Type, int Pos)>();
+                CollectMissingNodes(tree.RootNode, missingNodes);
+                if (missingNodes.Count == 0) return content;
+
+                missingNodes.Sort((a, b) => b.Pos.CompareTo(a.Pos));
+                var changed = false;
+                foreach (var (type, pos) in missingNodes)
+                {
+                    var insert = type switch
+                    {
+                        "," => ",",
+                        ";" => ";",
+                        _ => null
+                    };
+                    if (insert == null) continue;
+                    if (pos >= 0 && pos <= content.Length)
+                    {
+                        content = content.Insert(pos, insert);
+                        changed = true;
+                    }
+                }
+                if (!changed) return content;
+            }
+        }
+        return content;
+    }
+
+    private static void CollectMissingNodes(Node node, List<(string Type, int Pos)> results)
+    {
+        if (node.IsMissing)
+            results.Add((node.Type, node.EndIndex));
+        if (node.Children != null)
+        {
+            foreach (var child in node.Children)
+                CollectMissingNodes(child, results);
+        }
+    }
     // Maps file extension -> TreeSitter grammar name (for new Language(name))
     private static readonly Dictionary<string, string> LanguageMap = new(StringComparer.OrdinalIgnoreCase)
     {

@@ -99,6 +99,19 @@ angular.module('kanbanApp')
                 vm.prByDefault = false;
                 vm.themeColors = {};
                 vm.presetThemeList = Object.keys(PRESET_THEMES);
+                vm.ideTheme = 'weaver-dark';
+                vm.ideThemeList = [
+                    { name: 'Default (Weaver Dark)', value: 'weaver-dark' },
+                    { name: 'Monokai', value: 'monokai' },
+                    { name: 'Dracula', value: 'dracula' },
+                    { name: 'Material', value: 'material' },
+                    { name: 'Darcula', value: 'darcula' },
+                    { name: 'Seti', value: 'seti' },
+                    { name: 'Tomorrow Night Eighties', value: 'tomorrow-night-eighties' },
+                    { name: 'Ambiance', value: 'ambiance' },
+                    { name: 'Eclipse (light)', value: 'eclipse' },
+                    { name: 'Neo (light)', value: 'neo' }
+                ];
 
                 // UI Panels
                 vm.showProjectOptions = false;
@@ -178,6 +191,7 @@ angular.module('kanbanApp')
                             if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
                             if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
                             if (typeof cfg.useVSCodeInsteadOfIDE === 'boolean') vm.useVSCodeInsteadOfIDE = cfg.useVSCodeInsteadOfIDE;
+                            if (typeof cfg.ideTheme === 'string') vm.ideTheme = cfg.ideTheme;
                             if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
                             vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
                             vm.llamaModel = cfg.llamaModel || "medgemma:4b";
@@ -237,6 +251,7 @@ angular.module('kanbanApp')
                         cfg.includeProjectSkeleton = vm.includeProjectSkeleton === true;
                         cfg.includeEditKnowledge = vm.includeEditKnowledge === true;
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
+                        cfg.ideTheme = vm.ideTheme || 'weaver-dark';
                         cfg.emailAccounts = vm.emailAccounts.map(function (a) { return { imapServer: a.imapServer, imapPort: a.imapPort, useSsl: a.useSsl, username: a.username, password: a.password, label: a.label }; });
                         cfg.bughostedUrl = vm.bughostedUrl || '';
                         cfg.bughostedUsername = vm.bughostedUsername || '';
@@ -413,18 +428,48 @@ angular.module('kanbanApp')
                     });
                     var backdrop = document.getElementById('backdrop'); if (backdrop) backdrop.style.display = 'block';
                 };
+                var _themeSaveDebounce = null;
+                vm.applyThemeColors = function (el, colors) {
+                    applyTheme(el, colors);
+                    if (_themeSaveDebounce) $timeout.cancel(_themeSaveDebounce);
+                    _themeSaveDebounce = $timeout(function () {
+                        vm.saveSettings(true);
+                        _themeSaveDebounce = null;
+                    }, 800, false);
+                };
                 vm.resetThemeColors = function () {
-                vm.themeColors = {};
+                    vm.themeColors = {};
                     Object.keys(DEFAULT_THEME).forEach(function (k) { vm.themeColors[k] = DEFAULT_THEME[k]; });
                     applyTheme(null, vm.themeColors);
+                    vm.saveSettings(true);
                 };
                 vm.applyPresetTheme = function (name) {
                     var preset = PRESET_THEMES[name];
                     if (!preset) return;
                     Object.keys(preset).forEach(function (k) { vm.themeColors[k] = preset[k]; });
                     applyTheme(null, vm.themeColors);
+                    vm.saveSettings(true);
+                };
+                vm.applyIdeTheme = function (name) {
+                    if (!name) name = 'weaver-dark';
+                    vm.ideTheme = name;
+                    var linkId = 'cm-ide-theme';
+                    var existing = document.getElementById(linkId);
+                    if (existing) existing.parentNode.removeChild(existing);
+                    if (name !== 'weaver-dark') {
+                        var link = document.createElement('link');
+                        link.id = linkId;
+                        link.rel = 'stylesheet';
+                        link.href = 'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/theme/' + name + '.min.css';
+                        document.head.appendChild(link);
+                    }
+                    if (vm._editor) {
+                        vm._editor.setOption('theme', name);
+                    }
+                    vm.saveSettings(true);
                 };
                 vm.closeSettingsPanel = function (event) {
+                    if (_themeSaveDebounce) { $timeout.cancel(_themeSaveDebounce); _themeSaveDebounce = null; }
                     if (event && event.target.tagName === 'INPUT') return;
                     if (event) event.stopPropagation();
                     vm.showSettingsPanel = false;

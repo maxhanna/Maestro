@@ -38,16 +38,13 @@ public class FrontendConfig
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
     public List<string> disallowedTerminalRoots { get; set; } = new();
-    // Context size limits (tunable via settings panel)
     public int maxFileContextChars { get; set; } = 24000;
     public int maxFullFileTokens { get; set; } = 4096;
     public int maxContextChars { get; set; } = 22000;
     public int fileBodyTruncationChars { get; set; } = 8000;
     public int buildOutputTailChars { get; set; } = 8000;
     public int defaultMaxTokens { get; set; } = 2048;
-    // Multiple email accounts
     public List<EmailAccountConfig> emailAccounts { get; set; } = new();
-    // Legacy single-account fields (kept for backward compat with existing configs)
     public string? emailImapServer { get; set; }
     public int emailImapPort { get; set; } = 993;
     public bool emailUseSsl { get; set; } = true;
@@ -57,39 +54,27 @@ public class FrontendConfig
     public string? bughostedUsername { get; set; }
     public string? bughostedPassword { get; set; }
     public bool bughostedHeartbeatEnabled { get; set; } = false;
-    // CSS theme overrides — keyed by variable name (e.g. "--bg"), value is the color
     public Dictionary<string, string>? themeColors { get; set; }
-    // Enabled agent step types (tools). Empty or null = all enabled.
     public List<string> enabledTools { get; set; } = new();
-    // Include project file/directory skeleton in discovery context
     public bool includeProjectSkeleton { get; set; } = false;
-    // Include edit knowledge (do/dont/patterns) in discovery context
     public bool includeEditKnowledge { get; set; } = false;
-    // Open attachment files in VS Code instead of the built-in IDE
     public bool useVSCodeInsteadOfIDE { get; set; } = false;
 }
 
 public class ConfigFileService
 {
-    private readonly string _configPath;
+    private readonly DatabaseService _db;
     private const string EncryptedPrefix = "DPAPI_B64:";
+    private const string ConfigKey = "config";
 
-    public string ConfigPath => _configPath;
-
-    public ConfigFileService(IWebHostEnvironment env)
+    public ConfigFileService(DatabaseService db)
     {
-        _configPath = Path.Combine(env.ContentRootPath, "weaverconfig.json");
+        _db = db;
     }
 
-    /// <summary>
-    /// Encrypts a password string using Windows DPAPI (CurrentUser scope).
-    /// Returns the encrypted value as base64 with a prefix marker.
-    /// If input is null/empty or already encrypted, returns as-is.
-    /// </summary>
     private static string? EncryptPassword(string? plaintext)
     {
         if (string.IsNullOrEmpty(plaintext)) return plaintext;
-        // Don't double-encrypt
         if (plaintext.StartsWith(EncryptedPrefix, StringComparison.Ordinal)) return plaintext;
         if (!OperatingSystem.IsWindows())
             return plaintext;
@@ -102,7 +87,6 @@ public class ConfigFileService
         }
         catch
         {
-            // If DPAPI fails, store as plaintext fallback
             return plaintext;
         }
     }
@@ -123,7 +107,6 @@ public class ConfigFileService
         }
         catch
         {
-            // If decryption fails, return as-is (might be corrupted or different user)
             return encrypted;
         }
     }
@@ -148,7 +131,8 @@ public class ConfigFileService
 
     public async Task EnsureConfigAsync()
     {
-        if (System.IO.File.Exists(_configPath)) return;
+        var existing = _db.GetValue("weaver_config", ConfigKey);
+        if (existing != null) return;
         await WriteConfigAsync(new FrontendConfig());
     }
 
@@ -158,10 +142,11 @@ public class ConfigFileService
         FrontendConfig cfg;
         try
         {
-            var text = await System.IO.File.ReadAllTextAsync(_configPath);
-            cfg = JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
+            var text = _db.GetValue("weaver_config", ConfigKey);
+            cfg = string.IsNullOrWhiteSpace(text)
+                ? new FrontendConfig()
+                : JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
 
-            // Migration: populate emailAccounts from legacy single-account fields
             if (cfg.emailAccounts.Count == 0 &&
                 !string.IsNullOrWhiteSpace(cfg.emailUsername))
             {
@@ -180,16 +165,13 @@ public class ConfigFileService
         {
             cfg = new FrontendConfig();
         }
-        // Always decrypt passwords after loading
         DecryptAccountPasswords(cfg);
         return cfg;
     }
 
     public async Task WriteConfigAsync(FrontendConfig cfg)
     {
-        // Encrypt passwords before persisting to disk
         EncryptAccountPasswords(cfg);
-        // Sync legacy single-account fields from first email account for backward compat
         if (cfg.emailAccounts.Count > 0)
         {
             var first = cfg.emailAccounts[0];
@@ -207,13 +189,8 @@ public class ConfigFileService
         }
 
         var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
-
-        // Restore plaintext passwords in memory for the caller
         DecryptAccountPasswords(cfg);
 
-        var tmp = _configPath + ".tmp";
-        await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8);
-        System.IO.File.Copy(tmp, _configPath, true);
-        System.IO.File.Delete(tmp);
+        _db.SetValue("weaver_config", ConfigKey, json);
     }
 }

@@ -344,11 +344,11 @@ partial class AgentController
             sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext\",\n");
         else
             sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: ").Append(markerStr).Append("\",\n");
-        sb.Append("    \"change\": \"for edit steps: precise, atomic description including the exact method/function name. ");
-        sb.Append("For markers: the path (_create_directory/_create_file/_delete_file), command (_command/_git), ");
+        sb.Append("    \"change\": \"SHORT natural-language description — e.g. 'Add ElementRef import' or 'Add escape key handler in ngOnInit'. ");
+        sb.Append("NEVER put code here. For markers: the path (_create_directory/_create_file/_delete_file), command (_command/_git), ");
         sb.Append("query (_web_search), or URL (_web_fetch) — not a description.\",\n");
         sb.Append("    \"targetSymbol\": \"getTimedGreetingMessage\",\n");
-        sb.Append("    \"oldString\": \"exact text to replace (for edit steps on existing files)\",\n");
+        sb.Append("    \"oldString\": \"EXACT text to replace — KEEP THIS SHORT (1-3 lines MAX). See RULE 17 below.\",\n");
         sb.Append("    \"newString\": \"replacement content (for _create_file and edit steps)\",\n");
         sb.Append("    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n");
         sb.Append("  },\n");
@@ -422,6 +422,14 @@ partial class AgentController
             sb.Append("   originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n");
             sb.Append("16. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description ");
             sb.Append("   (e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n");
+            sb.Append("17. oldString PRECISION RULE (CRITICAL): oldString MUST be 1-3 lines of text — NEVER the entire method/function body. ");
+            sb.Append("   When inserting code into an existing method, pick the SINGLE most unique anchor line in the target region ");
+            sb.Append("   (e.g. `this.loadRecipes()` or `super.ngOnInit()`). Use that ONE line as oldString, and in newString ");
+            sb.Append("   include that line UNCHANGED followed by your new lines. Example:\n");
+            sb.Append("     oldString: \"  await this.loadRecipes();\"\n");
+            sb.Append("     newString: \"  await this.loadRecipes();\\n  this.registerEscapeHandler();\"\n");
+            sb.Append("   When adding a new method, find the last method in the file and use its closing `}` as the anchor to insert after.\n");
+            sb.Append("   Never include more than 3 lines in oldString. If the target has no single unique line, add an identifying comment first.\n");
         }
         else
         {

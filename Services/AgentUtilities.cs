@@ -3641,7 +3641,7 @@ public static class AgentUtilities
                     if (depth == 0) { end = i; break; }
                 }
             }
-            if (end < 0) { results.Add(cleaned.Substring(fb)); break; }
+            if (end < 0) break;
             results.Add(cleaned.Substring(fb, end - fb + 1));
             searchFrom = end + 1;
         }
@@ -3844,7 +3844,7 @@ public static class AgentUtilities
                     if (depth == 0) { end = i; break; }
                 }
             }
-            if (end < 0) return cleaned.Substring(fb);
+            if (end < 0) return "{}";
             var candidate = cleaned.Substring(fb, end - fb + 1);
             try
             {

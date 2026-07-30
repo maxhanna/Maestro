@@ -10,11 +10,10 @@ public class BenchmarkController : ControllerBase
     private readonly BenchmarkService _benchmark;
     private readonly IWebHostEnvironment _env;
 
-    public BenchmarkController(IWebHostEnvironment env)
+    public BenchmarkController(IWebHostEnvironment env, DatabaseService db)
     {
         _env = env;
-        var weaverDataDir = Path.Combine(_env.ContentRootPath, "data");
-        _benchmark = new BenchmarkService(weaverDataDir);
+        _benchmark = new BenchmarkService(db);
     }
 
     [HttpGet("scores")]

@@ -6,13 +6,11 @@ namespace Weaver.Services;
 
 public class BenchmarkService
 {
-    private readonly string _scoresPath;
-    private readonly string _systemInfoPath;
+    private readonly DatabaseService _db;
 
-    public BenchmarkService(string weaverDataDir)
+    public BenchmarkService(DatabaseService db)
     {
-        _scoresPath = Path.Combine(weaverDataDir, "benchmark_scores.json");
-        _systemInfoPath = Path.Combine(weaverDataDir, "system_info.json");
+        _db = db;
     }
 
     public static SystemInfo DetectSystemInfo()
@@ -98,12 +96,10 @@ public class BenchmarkService
     {
         try
         {
-            if (!System.IO.File.Exists(_scoresPath))
+            var json = _db.GetValue("weaver_config", "benchmark_scores_json");
+            if (string.IsNullOrWhiteSpace(json))
                 return new List<BenchmarkScore>();
-            var raw = System.IO.File.ReadAllText(_scoresPath, Encoding.UTF8);
-            if (string.IsNullOrWhiteSpace(raw))
-                return new List<BenchmarkScore>();
-            return JsonSerializer.Deserialize<List<BenchmarkScore>>(raw, new JsonSerializerOptions
+            return JsonSerializer.Deserialize<List<BenchmarkScore>>(json, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             }) ?? new List<BenchmarkScore>();
@@ -118,12 +114,10 @@ public class BenchmarkService
     {
         try
         {
-            if (!System.IO.File.Exists(_systemInfoPath))
+            var json = _db.GetSystemInfo();
+            if (string.IsNullOrWhiteSpace(json))
                 return null;
-            var raw = System.IO.File.ReadAllText(_systemInfoPath, Encoding.UTF8);
-            if (string.IsNullOrWhiteSpace(raw))
-                return null;
-            return JsonSerializer.Deserialize<CustomSystemInfo>(raw, new JsonSerializerOptions
+            return JsonSerializer.Deserialize<CustomSystemInfo>(json, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
@@ -136,14 +130,11 @@ public class BenchmarkService
 
     public void SaveCustomSystemInfo(CustomSystemInfo info)
     {
-        var dir = Path.GetDirectoryName(_systemInfoPath);
-        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
         var json = JsonSerializer.Serialize(info, new JsonSerializerOptions
         {
             WriteIndented = true
         });
-        System.IO.File.WriteAllText(_systemInfoPath, json, Encoding.UTF8);
+        _db.SetSystemInfo(json);
     }
 
     public SystemInfo ResolveSystemInfo(CustomSystemInfo? overrides)
@@ -181,14 +172,11 @@ public class BenchmarkService
 
     private void WriteScores(List<BenchmarkScore> scores)
     {
-        var dir = Path.GetDirectoryName(_scoresPath);
-        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
         var json = JsonSerializer.Serialize(scores, new JsonSerializerOptions
         {
             WriteIndented = true
         });
-        System.IO.File.WriteAllText(_scoresPath, json, Encoding.UTF8);
+        _db.SetValue("weaver_config", "benchmark_scores_json", json);
     }
 
     public static BenchmarkPlanDefinition GetPlanForDifficulty(int level)
