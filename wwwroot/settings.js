@@ -113,6 +113,9 @@ angular.module('kanbanApp')
                     { name: 'Neo (light)', value: 'neo' }
                 ];
 
+                // Settings tab state
+                vm.settingsTab = 'appearance';
+
                 // UI Panels
                 vm.showProjectOptions = false;
                 vm.showEditProjectsPanel = false;
@@ -224,6 +227,10 @@ angular.module('kanbanApp')
                             vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
                             vm.themeColors = mergeTheme(cfg.themeColors);
                             applyTheme(null, vm.themeColors);
+                            // Auto-load file picker if IDE sidebar is already open
+                            if (vm.ide && vm.ide.showSidebar && vm.loadFilePickerEntries) {
+                                $timeout(function () { vm.loadFilePickerEntries(); }, 100);
+                            }
                         } catch (e) { console.log("Loading config error", e); }
                     }, function () {
                         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);

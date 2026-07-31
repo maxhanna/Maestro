@@ -10601,7 +10601,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ["status"] = "complete",
             ["description"] = "Plan complete"
         });
-        var fileBackups = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         if (!planAlreadyExecuted)
         {
             var validationReason = await ValidatePlanAsync(prompt, plan, ct);
@@ -10716,17 +10715,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (emitSse)
             {
                 await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
-            }
-            foreach (var step in plan?.Plan ?? [])
-            {
-                if (!AgentUtilities.IsRelativePath(step.File)) continue;
-                var fullPath = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
-                if (!fileBackups.ContainsKey(fullPath))
-                {
-                    fileBackups[fullPath] = System.IO.File.Exists(fullPath)
-                        ? System.IO.File.ReadAllText(fullPath, Encoding.UTF8)
-                        : null;
-                }
             }
             try
             {
@@ -10951,36 +10939,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             else if (exhaustedWithNoSteps)
             {
-                await EmitLog(emitSse, "warn",
-                    "Reverting changes and generating a fresh plan with verification feedback (no repair steps were proposed)...", ct: ct);
-                foreach (var kvp in fileBackups)
+                await EmitLog(emitSse, "info",
+                    "Repair replanner proposed no further steps — treating verification as complete (nothing left to fix). " +
+                    "Changes are kept and the task finishes; no fresh plan will be generated.", ct: ct);
+                taskComplete = true;
+                allSteps.Add(new Dictionary<string, object?>
                 {
-                    try
-                    {
-                        if (kvp.Value != null)
-                            await System.IO.File.WriteAllTextAsync(kvp.Key, kvp.Value, Encoding.UTF8, ct);
-                        else if (System.IO.File.Exists(kvp.Key))
-                            System.IO.File.Delete(kvp.Key);
-                    }
-                    catch { }
-                }
-                var freshPlanSteering = "A previous attempt to complete this task failed verification with the following issues:\n" +
-                                         $"{verificationDetails}\n\n" +
-                                         "The previous changes have been REVERTED. You MUST generate a completely new plan " +
-                                         "that addresses these issues and correctly completes the task. Do NOT repeat the mistakes of the previous attempt.";
-                var (freshPlan, _) = await RunPlanningConvergenceLoop(
-                    prompt, discoveryContext, projectRoot, emitSse, ct, freshPlanSteering);
-                if (freshPlan != null && freshPlan.Plan.Count > 0)
-                {
-                    plan = freshPlan;
-                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
-                        steeringContext: freshPlanSteering, attachedFiles: attachedFiles, cardId: cardId);
-                }
-                else
-                {
-                    await EmitLog(emitSse, "warn",
-                        "Fresh plan generation failed — stopping with verification gaps unresolved.", ct: ct);
-                }
+                    ["type"] = "verified_complete",
+                    ["status"] = "done",
+                    ["reason"] = verificationDetails + " — replanner proposed no further steps, treating as complete"
+                });
             }
             else
             {

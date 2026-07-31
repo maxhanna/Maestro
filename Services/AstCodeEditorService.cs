@@ -20,7 +20,7 @@ public static class AstCodeEditorService
         {
             Language language;
             Parser parser;
-            Tree tree;
+            Tree? tree;
             try
             {
                 language = new Language(langName);

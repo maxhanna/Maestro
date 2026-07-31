@@ -59,6 +59,7 @@ public class FrontendConfig
     public bool includeProjectSkeleton { get; set; } = false;
     public bool includeEditKnowledge { get; set; } = false;
     public bool useVSCodeInsteadOfIDE { get; set; } = false;
+    public string ideTheme { get; set; } = "weaver-dark";
 }
 
 public class ConfigFileService

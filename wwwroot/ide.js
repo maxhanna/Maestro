@@ -13,6 +13,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         filePickerPath: '',
         filePickerEntries: [],
         filePickerError: '',
+        filePickerLoading: false,
         searchFilter: '',
         lastSavedContent: null,
         pendingFileListing: null,
@@ -111,8 +112,14 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
 
       vm.openFileBrowser = function() {
         vm.toggleSidebar();
-        if (vm.ide.filePickerEntries.length === 0) {
+        // Always reload when opening — fixes empty directory on startup
+        if (vm.selectedProject) {
           vm.loadFilePickerEntries();
+        } else {
+          // selectedProject not loaded yet — retry after a short delay
+          $timeout(function() {
+            if (vm.selectedProject) vm.loadFilePickerEntries();
+          }, 500);
         }
       };
 
@@ -126,13 +133,16 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           params.recursive = true;
         }
         console.log('loadFilePickerEntries', params);
+        vm.ide.filePickerLoading = true;
         $http.get('/api/editor/list', { params: params }).then(function(resp) {
           console.log('loadFilePickerEntries response', resp.data);
           vm.ide.filePickerEntries = (resp.data && resp.data.entries) || [];
           vm.ide.filePickerError = '';
+          vm.ide.filePickerLoading = false;
         }, function(err) {
           console.log('loadFilePickerEntries error', err);
           vm.ide.filePickerError = (err.data && typeof err.data === 'string' ? err.data : (err.statusText || 'Failed to load files'));
+          vm.ide.filePickerLoading = false;
         });
       };
 
@@ -151,11 +161,22 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm.loadFilePickerEntries();
       };
 
+      // Navigate file explorer to show a file's parent directory if sidebar is open
+      function _navigateExplorerToFile(path) {
+        if (!vm.ide.showSidebar) return;
+        var dir = path.split('/').slice(0, -1).join('/');
+        if (vm.ide.filePickerPath !== dir) {
+          vm.ide.filePickerPath = dir;
+          vm.loadFilePickerEntries();
+        }
+      }
+
       vm.openFile = function(path) {
         vm.ide.sharedEditorActive = false;
         var existing = vm.findTab(path);
         if (existing) {
           vm.switchTab(path);
+          _navigateExplorerToFile(path);
           return;
         }
         var displayName = path.split('/').pop() || path;
@@ -178,6 +199,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm.ide.currentFile = path;
         vm.ide.currentTab = tab;
         vm.loadFileContent(path, tab);
+        _navigateExplorerToFile(path);
       };
 
       vm.findTab = function(path) {

@@ -201,22 +201,22 @@
             Benchmarks</button>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showIDE" /> Show IDE
+              <input type="checkbox" ng-model="vm.showIDE" ng-change="vm.saveSettings(true)" /> Show IDE
             </label>
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showCalendar" /> Show Calendar
+              <input type="checkbox" ng-model="vm.showCalendar" ng-change="vm.saveSettings(true)" /> Show Calendar
             </label>
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showAI" /> Show AI Chat
+              <input type="checkbox" ng-model="vm.showAI" ng-change="vm.saveSettings(true)" /> Show AI Chat
             </label>
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban
+              <input type="checkbox" ng-model="vm.showKanban" ng-change="vm.saveSettings(true)" /> Show Kanban
             </label>
           </div>
         </div>
@@ -931,371 +931,353 @@
 
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()">
-    <div class="popup-panel settings-panel" style="max-width:480px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel settings-panel" style="max-width:580px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>⚙ Settings</strong>
         <button ng-click="vm.closeSettingsPanel()">✕</button>
       </div>
+
+      <!-- Tab navigation -->
+      <div class="settings-tabs" style="display:flex;border-bottom:1px solid rgba(255,255,255,0.1);overflow-x:auto;gap:0;flex-shrink:0;">
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'appearance'}"
+          ng-click="vm.settingsTab = 'appearance'">🎨 Appearance</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'agent'}"
+          ng-click="vm.settingsTab = 'agent'">🤖 Agent</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'panels'}"
+          ng-click="vm.settingsTab = 'panels'">🖥 Panels</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'integrations'}"
+          ng-click="vm.settingsTab = 'integrations'">🔗 Integrations</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'security'}"
+          ng-click="vm.settingsTab = 'security'">🛡 Security</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'files'}"
+          ng-click="vm.settingsTab = 'files'">📁 Files</button>
+      </div>
+
       <div class="popup-body">
 
-        <details>
-          <summary class="settings-header">Auto-queue</summary>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes
-            </label>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">IDE CSS Theme</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
-            <div style="display:flex;flex-wrap:wrap;gap:4px;">
-              <button ng-repeat="t in vm.ideThemeList" ng-click="vm.applyIdeTheme(t.value)"
-                ng-class="{'active': vm.ideTheme === t.value}" class="theme-btn"
-                style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
-                {{t.name}}
-              </button>
-            </div>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Panels</summary>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showCalendar" /> Show Calendar view
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showIDE" /> Show IDE
-            </label>
-          </div>
-          <details style="margin-left:16px;margin-top:4px;">
-            <summary style="font-size:0.85em;color:var(--muted);cursor:pointer;">IDE Options</summary>
-            <div class="form-row" style="padding:4px 0 4px 16px;">
-              <label>
-                <input type="checkbox" ng-model="vm.useVSCodeInsteadOfIDE" /> Open attachments in VS Code instead
-              </label>
-            </div>
-          </details>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.prByDefault" /> PR enabled by default
-            </label>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">OpenAI/llama.cpp/Ollama Endpoint Url</summary>
-          <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
-          <div style="margin-top:6px;">
-            <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model Name</label>
-            <input id="settings-llama-model" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" />
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Context Size Limits</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;gap:6px;padding:8px 0;">
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-maxFileContextChars">Max File Context Chars</label>
-                <span>{{vm.maxFileContextChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-maxFileContextChars" ng-model="vm.maxFileContextChars" min="4000" max="64000"
-                step="1000" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-maxFullFileTokens">Max Full File Tokens</label>
-                <span>{{vm.maxFullFileTokens | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-maxFullFileTokens" ng-model="vm.maxFullFileTokens" min="512" max="16384"
-                step="512" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-maxContextChars">Max Context Chars</label>
-                <span>{{vm.maxContextChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-maxContextChars" ng-model="vm.maxContextChars" min="4000" max="64000"
-                step="1000" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-fileBodyTruncation">File Body Truncation Chars</label>
-                <span>{{vm.fileBodyTruncationChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-fileBodyTruncation" ng-model="vm.fileBodyTruncationChars" min="1000"
-                max="32000" step="500" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-buildOutputTail">Build Output Tail Chars</label>
-                <span>{{vm.buildOutputTailChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-buildOutputTail" ng-model="vm.buildOutputTailChars" min="1000" max="32000"
-                step="500" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-defaultMaxTokens">Default Max Tokens</label>
-                <span>{{vm.defaultMaxTokens | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-defaultMaxTokens" ng-model="vm.defaultMaxTokens" min="256" max="16384"
-                step="256" style="width:100%;" />
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
-              <input type="checkbox" id="ctx-includeProjectSkeleton" ng-model="vm.includeProjectSkeleton" />
-              <label for="ctx-includeProjectSkeleton">Include Project File Skeleton</label>
-              <span class="settings-help" style="margin-left:auto;font-size:11px;">adds project directory tree to discovery context</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
-              <input type="checkbox" id="ctx-includeEditKnowledge" ng-model="vm.includeEditKnowledge" />
-              <label for="ctx-includeEditKnowledge">Include Edit Knowledge</label>
-              <span class="settings-help" style="margin-left:auto;font-size:11px;">do/dont/patterns from past edits</span>
-            </div>
-            <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the
-              agent to handle larger files but consume more tokens.</span>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">CSS Theme</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-              <div><label style="font-size:12px;">Background (--bg)</label>
-                <input type="color" ng-model="vm.themeColors['--bg']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Surface (--surface)</label>
-                <input type="color" ng-model="vm.themeColors['--surface']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Panel (--panel)</label>
-                <input type="color" ng-model="vm.themeColors['--panel']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Text (--text)</label>
-                <input type="color" ng-model="vm.themeColors['--text']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Muted (--muted)</label>
-                <input type="color" ng-model="vm.themeColors['--muted']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Accent (--accent)</label>
-                <input type="color" ng-model="vm.themeColors['--accent']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Accent 2 (--accent-2)</label>
-                <input type="color" ng-model="vm.themeColors['--accent-2']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Success (--success)</label>
-                <input type="color" ng-model="vm.themeColors['--success']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Warning (--warning)</label>
-                <input type="color" ng-model="vm.themeColors['--warning']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Error (--error)</label>
-                <input type="color" ng-model="vm.themeColors['--error']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-            </div>
-            <button ng-click="vm.resetThemeColors()" style="margin-top:4px;padding:4px 12px;font-size:12px;">Reset to defaults</button>
-            <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
-              <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">Quick Themes</div>
+        <!-- ===== TAB: Appearance ===== -->
+        <div ng-show="vm.settingsTab === 'appearance'">
+          <details open>
+            <summary class="settings-header">IDE CSS Theme (CodeMirror)</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
               <div style="display:flex;flex-wrap:wrap;gap:4px;">
-                <button ng-repeat="name in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
+                <button ng-repeat="t in vm.ideThemeList" ng-click="vm.applyIdeTheme(t.value)"
+                  ng-class="{'active': vm.ideTheme === t.value}" class="theme-btn"
                   style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
-                  {{name}}
+                  {{t.name}}
                 </button>
               </div>
             </div>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Email (IMAP)</summary>
-          <div class="form-row"
-            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;gap:12px;">
-            <div ng-repeat="acct in vm.emailAccounts track by $index"
-              style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                <span style="font-size:13px;font-weight:600;color:var(--text);">Account {{$index + 1}}</span>
-                <button ng-click="vm.removeEmailAccount($index)"
-                  style="background:none;border:none;color:#ff5252;cursor:pointer;font-size:13px;">✕ Remove</button>
-              </div>
-              <div style="display:flex;gap:8px;margin-bottom:6px;">
-                <input ng-model="acct.label" placeholder="Label (e.g., Gmail, Work)" style="flex:1;" />
-              </div>
-              <div style="display:flex;gap:8px;margin-bottom:6px;">
-                <input ng-model="acct.imapServer" placeholder="imap.example.com" style="flex:1;"
-                  ng-change="vm.checkEmailServer($index)" />
-                <input ng-model="acct.imapPort" type="number" placeholder="993" style="width:80px;" />
-              </div>
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                <input ng-model="acct.username" placeholder="Email username" style="flex:1;" />
-                <input ng-model="acct.password" type="password" placeholder="Password" style="flex:1;" />
-              </div>
-              <div style="display:flex;align-items:center;gap:12px;">
-                <label style="font-size:12px;">
-                  <input type="checkbox" ng-model="acct.useSsl" /> Use SSL
-                </label>
-                <button ng-click="vm.testEmailConnection($index)" ng-disabled="acct.testing"
-                  style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);">
-                  Test Connection</button>
-                <span ng-if="acct.testResult" style="font-size:12px;"
-                  ng-class="acct.testResult.success ? 'success-text' : 'error-text'">{{acct.testResult.message}}</span>
-              </div>
-              <div ng-if="acct.showAppPasswordInstructions" class="app-password-instructions" style="margin-top:8px;">
-                <span class="settings-help">If you have 2FA enabled, you'll need an app password instead of your regular
-                  password.</span>
-                <div class="app-password-steps">
-                  <p ng-if="acct.showAppPasswordInstructions === 'google'">For <strong>Google</strong> accounts:</p>
-                  <p ng-if="acct.showAppPasswordInstructions === 'microsoft'">For <strong>Outlook/Hotmail</strong>
-                    accounts:</p>
-                  <ol>
-                    <li ng-if="acct.showAppPasswordInstructions === 'google'">Go to <a
-                        href="https://myaccount.google.com/apppasswords" target="_blank">Google App Passwords</a></li>
-                    <li ng-if="acct.showAppPasswordInstructions === 'microsoft'">Go to <a
-                        href="https://account.live.com/password/apppasswords" target="_blank">Microsoft App
-                        Passwords</a></li>
-                    <li>Generate a new app password</li>
-                    <li>Copy and paste it into the Password field above</li>
-                  </ol>
+          </details>
+          <details open>
+            <summary class="settings-header">Overall CSS Theme</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <div><label style="font-size:12px;">Background (--bg)</label>
+                  <input type="color" ng-model="vm.themeColors['--bg']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Surface (--surface)</label>
+                  <input type="color" ng-model="vm.themeColors['--surface']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Panel (--panel)</label>
+                  <input type="color" ng-model="vm.themeColors['--panel']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Text (--text)</label>
+                  <input type="color" ng-model="vm.themeColors['--text']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Muted (--muted)</label>
+                  <input type="color" ng-model="vm.themeColors['--muted']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Accent (--accent)</label>
+                  <input type="color" ng-model="vm.themeColors['--accent']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Accent 2 (--accent-2)</label>
+                  <input type="color" ng-model="vm.themeColors['--accent-2']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Success (--success)</label>
+                  <input type="color" ng-model="vm.themeColors['--success']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Warning (--warning)</label>
+                  <input type="color" ng-model="vm.themeColors['--warning']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+                </div>
+                <div><label style="font-size:12px;">Error (--error)</label>
+                  <input type="color" ng-model="vm.themeColors['--error']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
                 </div>
               </div>
-            </div>
-            <button ng-click="vm.addEmailAccount()"
-              style="padding:6px 16px;font-size:13px;background:var(--surface2);border:1px dashed var(--border);border-radius:8px;cursor:pointer;color:var(--accent);width:100%;">+
-              Add Email Account</button>
-            <span class="settings-help">Configure one or more IMAP accounts so the agent can read your email.</span>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
-          <div class="form-row"
-            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-              <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
-              <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
-            </div>
-            <label style="font-size:12px;">
-              <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" /> Enable heartbeat (keep dashboard in
-              sync)
-            </label>
-            <span class="settings-help">
-              When enabled, Weaver will send heartbeats and kanban data to bughosted.com.
-              You can send commands from the dashboard to execute locally.
-              <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
-              <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
-              <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
-              <span ng-if="vm.bughostedTesting" style="color:#ff9800;"> Testing…</span>
-              <span ng-if="vm.bughostedTestResult === 'ok'" style="color:#4caf50;"> Test OK</span>
-              <span ng-if="vm.bughostedTestResult === 'fail'" style="color:#f44336;"> Test failed:
-                {{vm.bughostedTestError}}</span>
-            </span>
-            <div style="display:flex;gap:6px;margin-top:6px;">
-              <button ng-click="vm.bughostedTestConnection()" ng-disabled="vm.bughostedTesting || !vm.bughostedUsername"
-                style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);">
-                Test Connection</button>
-              <button ng-click="vm.bughostedForceReconnect()"
-                style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);">
-                ↻ Reconnect</button>
-            </div>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Terminal Approval</summary>
-          <div>
-            <div>
-              <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
-                <option value="approveEach">Approve every command</option>
-                <option value="approveRoot">Approve command roots</option>
-                <option value="approveAll">Approve all commands</option>
-              </select>
-            </div>
-            <div class="form-row" style="display:flex;flex-direction:column;">
-              <div>
-                <label for="settings-approved-roots" class="settings-header">Approved Roots</label>
-                <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText"
-                  placeholder="git, dotnet, rg, npm" />
-              </div>
-              <div>
-                <label for="settings-disallowed-roots" class="settings-header">Disallowed Roots</label>
-                <input id="settings-disallowed-roots" ng-model="vm.disallowedTerminalRootsText"
-                  placeholder="git, dotnet, rg, npm" />
-              </div>
-              <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
-            </div>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Agent Tools</summary>
-          <div>
-            <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
-              Uncheck to remove a tool from the agent's available step types.
-            </div>
-            <div class="form-row" ng-repeat="tool in vm.toolList">
-              <label style="display:flex;align-items:center;gap:6px;">
-                <input type="checkbox" ng-model="tool.enabled" />
-                <span ng-bind="tool.label"></span>
-              </label>
-            </div>
-          </div>
-        </details>
-        <div class="form-row" style="display: flex; flex-direction: column;">
-          <details>
-            <summary
-              style="cursor:pointer;font-weight:700;font-size:1.1em;text-transform:uppercase;letter-spacing:0.5px;color:var(--accent);padding:8px 0;">
-              File Hints
-            </summary>
-            <div style="margin-top:8px;">
-              <span style="font-size:12px;color:var(--muted);margin-bottom:8px;display:block;">
-                Map keywords to files so the agent knows where to look.
-              </span>
-              <details ng-repeat="project in vm.projects track by project.Name" style="margin-bottom:8px;">
-                <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
-                <div ng-repeat="hint in vm.getProjectHints($index) track by $index"
-                  style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
-                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                    <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
-                    <input ng-model="hint.keywords" placeholder="comma-separated keywords"
-                      style="flex:1;padding:4px 8px;font-size:12px;" />
-                  </div>
-                  <div style="margin-left:4px;">
-                    <span style="font-size:12px;color:var(--muted);">Files:</span>
-                    <div ng-repeat="file in hint.files track by $index"
-                      style="display:flex;align-items:center;gap:4px;margin:4px 0;">
-                      <input ng-model="hint.files[$index]" placeholder="file path"
-                        style="flex:1;padding:3px 6px;font-size:12px;" />
-                      <button ng-click="vm.removeFileFromHint($parent.$parent.$index, $parent.$index, $index)"
-                        title="Remove file" style="padding:2px 6px;font-size:11px;">✕</button>
-                    </div>
-                    <button ng-click="vm.addFileToHint($parent.$index, $index)"
-                      style="padding:2px 8px;font-size:11px;margin-top:2px;">+
-                      File</button>
-                  </div>
-                  <div style="display:flex;justify-content:flex-end;margin-top:6px;">
-                    <button ng-click="vm.removeHint($parent.$index, $index)"
-                      style="padding:2px 8px;font-size:11px;color:var(--error);">✕
-                      Remove</button>
-                  </div>
+              <button ng-click="vm.resetThemeColors()" style="margin-top:4px;padding:4px 12px;font-size:12px;">Reset to defaults</button>
+              <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
+                <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">Quick Themes</div>
+                <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                  <button ng-repeat="name in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
+                    style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
+                    {{name}}
+                  </button>
                 </div>
-                <button ng-click="vm.addHint($index)" style="padding:4px 10px;font-size:12px;margin-top:4px;">+ Add
-                  Keyword
-                  Mapping</button>
-              </details>
-              <button class="small primary" ng-click="vm.saveFileHints()" style="margin-top:8px;">Save File
-                Hints</button>
+              </div>
             </div>
           </details>
         </div>
+
+        <!-- ===== TAB: Agent ===== -->
+        <div ng-show="vm.settingsTab === 'agent'">
+          <details>
+            <summary class="settings-header">LLM Endpoint</summary>
+            <div style="padding:8px 0;">
+              <label for="settings-llama" style="font-size:0.85em;color:var(--muted);">URL</label>
+              <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width:100%;margin-top:2px;" />
+              <div style="margin-top:6px;">
+                <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model Name</label>
+                <input id="settings-llama-model" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" />
+              </div>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">Context Size Limits</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;gap:6px;padding:8px 0;">
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-maxFileContextChars">Max File Context Chars</label>
+                  <span>{{vm.maxFileContextChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-maxFileContextChars" ng-model="vm.maxFileContextChars" min="4000" max="64000" step="1000" style="width:100%;" />
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-maxFullFileTokens">Max Full File Tokens</label>
+                  <span>{{vm.maxFullFileTokens | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-maxFullFileTokens" ng-model="vm.maxFullFileTokens" min="512" max="16384" step="512" style="width:100%;" />
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-maxContextChars">Max Context Chars</label>
+                  <span>{{vm.maxContextChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-maxContextChars" ng-model="vm.maxContextChars" min="4000" max="64000" step="1000" style="width:100%;" />
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-fileBodyTruncation">File Body Truncation Chars</label>
+                  <span>{{vm.fileBodyTruncationChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-fileBodyTruncation" ng-model="vm.fileBodyTruncationChars" min="1000" max="32000" step="500" style="width:100%;" />
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-buildOutputTail">Build Output Tail Chars</label>
+                  <span>{{vm.buildOutputTailChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-buildOutputTail" ng-model="vm.buildOutputTailChars" min="1000" max="32000" step="500" style="width:100%;" />
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-defaultMaxTokens">Default Max Tokens</label>
+                  <span>{{vm.defaultMaxTokens | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-defaultMaxTokens" ng-model="vm.defaultMaxTokens" min="256" max="16384" step="256" style="width:100%;" />
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-includeProjectSkeleton" ng-model="vm.includeProjectSkeleton" />
+                <label for="ctx-includeProjectSkeleton">Include Project File Skeleton</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">adds project directory tree to discovery context</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-includeEditKnowledge" ng-model="vm.includeEditKnowledge" />
+                <label for="ctx-includeEditKnowledge">Include Edit Knowledge</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">do/dont/patterns from past edits</span>
+              </div>
+              <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the agent to handle larger files but consume more tokens.</span>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">Agent Tools</summary>
+            <div style="padding:8px 0;">
+              <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+                Uncheck to remove a tool from the agent's available step types.
+              </div>
+              <div class="form-row" ng-repeat="tool in vm.toolList" style="display:flex;align-items:center;gap:6px;padding:4px 0;">
+                <input type="checkbox" ng-model="tool.enabled" id="tool-{{$index}}" />
+                <label for="tool-{{$index}}" ng-bind="tool.label" style="flex:1;"></label>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- ===== TAB: Panels ===== -->
+        <div ng-show="vm.settingsTab === 'panels'">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px 0;">
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showAI" />
+              <span>🤖 Ask AI</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showTerminal" />
+              <span>💻 Terminal</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showKanban" />
+              <span>📋 Kanban Board</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showCalendar" />
+              <span>📅 Calendar</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showIDE" />
+              <span>📝 IDE</span>
+            </label>
+          </div>
+          <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+            <details>
+              <summary class="settings-header">Panel Options</summary>
+              <div style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
+                <label style="display:flex;align-items:center;gap:8px;">
+                  <input type="checkbox" ng-model="vm.useVSCodeInsteadOfIDE" />
+                  Open attachments in VS Code instead
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;">
+                  <input type="checkbox" ng-model="vm.prByDefault" />
+                  PR enabled by default
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;">
+                  <input type="checkbox" ng-model="vm.autoQueue" />
+                  Auto-queue: process next Todo card when one completes
+                </label>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <!-- ===== TAB: Integrations ===== -->
+        <div ng-show="vm.settingsTab === 'integrations'">
+          <details>
+            <summary class="settings-header">Email (IMAP)</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:12px;">
+              <div ng-repeat="acct in vm.emailAccounts track by $index"
+                style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                  <span style="font-size:13px;font-weight:600;">Account {{$index + 1}}</span>
+                  <button ng-click="vm.removeEmailAccount($index)" style="background:none;border:none;color:#ff5252;cursor:pointer;font-size:13px;">✕ Remove</button>
+                </div>
+                <div style="display:flex;gap:8px;margin-bottom:6px;">
+                  <input ng-model="acct.label" placeholder="Label (e.g., Gmail, Work)" style="flex:1;" />
+                </div>
+                <div style="display:flex;gap:8px;margin-bottom:6px;">
+                  <input ng-model="acct.imapServer" placeholder="imap.example.com" style="flex:1;" ng-change="vm.checkEmailServer($index)" />
+                  <input ng-model="acct.imapPort" type="number" placeholder="993" style="width:80px;" />
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                  <input ng-model="acct.username" placeholder="Email username" style="flex:1;" />
+                  <input ng-model="acct.password" type="password" placeholder="Password" style="flex:1;" />
+                </div>
+                <div style="display:flex;align-items:center;gap:12px;">
+                  <label style="font-size:12px;"><input type="checkbox" ng-model="acct.useSsl" /> Use SSL</label>
+                  <button ng-click="vm.testEmailConnection($index)" ng-disabled="acct.testing" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;">Test Connection</button>
+                  <span ng-if="acct.testResult" style="font-size:12px;" ng-class="acct.testResult.success ? 'success-text' : 'error-text'">{{acct.testResult.message}}</span>
+                </div>
+                <div ng-if="acct.showAppPasswordInstructions" class="app-password-instructions" style="margin-top:8px;">
+                  <span class="settings-help">If you have 2FA enabled, you'll need an app password instead of your regular password.</span>
+                  <div class="app-password-steps">
+                    <p ng-if="acct.showAppPasswordInstructions === 'google'">For <strong>Google</strong> accounts:</p>
+                    <p ng-if="acct.showAppPasswordInstructions === 'microsoft'">For <strong>Outlook/Hotmail</strong> accounts:</p>
+                    <ol>
+                      <li ng-if="acct.showAppPasswordInstructions === 'google'">Go to <a href="https://myaccount.google.com/apppasswords" target="_blank">Google App Passwords</a></li>
+                      <li ng-if="acct.showAppPasswordInstructions === 'microsoft'">Go to <a href="https://account.live.com/password/apppasswords" target="_blank">Microsoft App Passwords</a></li>
+                      <li>Generate a new app password</li>
+                      <li>Copy and paste it into the Password field above</li>
+                    </ol>
+                  </div>
+                </div>
+              </div>
+              <button ng-click="vm.addEmailAccount()" style="padding:6px 16px;font-size:13px;background:var(--surface2);border:1px dashed var(--border);border-radius:8px;cursor:pointer;width:100%;">+ Add Email Account</button>
+              <span class="settings-help">Configure one or more IMAP accounts so the agent can read your email.</span>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:8px;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
+                <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
+              </div>
+              <label style="font-size:12px;display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" />
+                Enable heartbeat (keep dashboard in sync)
+              </label>
+              <span class="settings-help">
+                When enabled, Weaver will send heartbeats and kanban data to bughosted.com.
+                You can send commands from the dashboard to execute locally.
+                <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
+                <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
+                <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
+                <span ng-if="vm.bughostedTesting" style="color:#ff9800;"> Testing…</span>
+                <span ng-if="vm.bughostedTestResult === 'ok'" style="color:#4caf50;"> Test OK</span>
+                <span ng-if="vm.bughostedTestResult === 'fail'" style="color:#f44336;"> Test failed: {{vm.bughostedTestError}}</span>
+              </span>
+              <div style="display:flex;gap:6px;">
+                <button ng-click="vm.bughostedTestConnection()" ng-disabled="vm.bughostedTesting || !vm.bughostedUsername" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;">Test Connection</button>
+                <button ng-click="vm.bughostedForceReconnect()" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;">↻ Reconnect</button>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- ===== TAB: Security ===== -->
+        <div ng-show="vm.settingsTab === 'security'">
+          <details>
+            <summary class="settings-header">Terminal Approval</summary>
+            <div style="padding:8px 0;">
+              <div style="margin-bottom:8px;">
+                <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode" style="width:100%;">
+                  <option value="approveEach">Approve every command</option>
+                  <option value="approveRoot">Approve command roots</option>
+                  <option value="approveAll">Approve all commands</option>
+                </select>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <div>
+                  <label for="settings-approved-roots" style="font-size:12px;color:var(--muted);">Approved Roots</label>
+                  <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText" placeholder="git, dotnet, rg, npm" style="width:100%;" />
+                </div>
+                <div>
+                  <label for="settings-disallowed-roots" style="font-size:12px;color:var(--muted);">Disallowed Roots</label>
+                  <input id="settings-disallowed-roots" ng-model="vm.disallowedTerminalRootsText" placeholder="git, dotnet, rg, npm" style="width:100%;" />
+                </div>
+                <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- ===== TAB: Files ===== -->
+        <div ng-show="vm.settingsTab === 'files'">
+          <span style="font-size:12px;color:var(--muted);margin-bottom:8px;display:block;">
+            Map keywords to files so the agent knows where to look.
+          </span>
+          <details ng-repeat="project in vm.projects track by project.Name" style="margin-bottom:8px;">
+            <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
+            <div ng-repeat="hint in vm.getProjectHints($index) track by $index" style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
+                <input ng-model="hint.keywords" placeholder="comma-separated keywords" style="flex:1;padding:4px 8px;font-size:12px;" />
+              </div>
+              <div style="margin-left:4px;">
+                <span style="font-size:12px;color:var(--muted);">Files:</span>
+                <div ng-repeat="file in hint.files track by $index" style="display:flex;align-items:center;gap:4px;margin:4px 0;">
+                  <input ng-model="hint.files[$index]" placeholder="file path" style="flex:1;padding:3px 6px;font-size:12px;" />
+                  <button ng-click="vm.removeFileFromHint($parent.$parent.$index, $parent.$index, $index)" title="Remove file" style="padding:2px 6px;font-size:11px;">✕</button>
+                </div>
+                <button ng-click="vm.addFileToHint($parent.$index, $index)" style="padding:2px 8px;font-size:11px;margin-top:2px;">+ File</button>
+              </div>
+              <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+                <button ng-click="vm.removeHint($parent.$index, $index)" style="padding:2px 8px;font-size:11px;color:var(--error);">✕ Remove</button>
+              </div>
+            </div>
+            <button ng-click="vm.addHint($index)" style="padding:4px 10px;font-size:12px;margin-top:4px;">+ Add Keyword Mapping</button>
+          </details>
+          <button class="small primary" ng-click="vm.saveFileHints()" style="margin-top:8px;">Save File Hints</button>
+        </div>
+
       </div>
       <div class="popup-footer">
         <button ng-click="vm.saveSettings()" class="primary">Save</button>

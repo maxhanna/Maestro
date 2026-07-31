@@ -3119,3 +3119,24 @@ h3 .small.ghost:hover {
 	white-space: nowrap;
 	overflow: hidden;
 }
+/* === Settings panel tab navigation === */
+.settings-tab {
+  padding: 8px 14px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.settings-tab:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+.settings-tab.active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
