@@ -246,6 +246,43 @@ public class BenchmarkService
         System.IO.File.WriteAllText(_testResultsPath, json, Encoding.UTF8);
     }
 
+    /// <summary>
+    /// Formatter commands this machine can run out of the box. Paths are absolute
+    /// because FormattingGate executes with WorkingDirectory set to the benchmark
+    /// sandbox, not the Weaver install — a repo-relative path would resolve against the
+    /// wrong directory and the gate would fail every file it was handed.
+    ///
+    /// prettier is vendored under .formatter/ and version-pinned; it is invoked through
+    /// node rather than npm's .bin shim, which on Windows is an extensionless shell
+    /// script that Process.Start cannot execute with UseShellExecute=false. ruff is
+    /// invoked as a Python module for the same reason — its console script is not
+    /// guaranteed to be on PATH.
+    /// </summary>
+    public static Dictionary<string, string> DefaultFormatterCommands(string contentRoot)
+    {
+        var prettier = Path.Combine(contentRoot, ".formatter", "node_modules", "prettier", "bin", "prettier.cjs");
+        var prettierCmd = $"node \"{prettier}\" --check {{file}}";
+        var commands = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["py"] = "python -m ruff format --check {file}",
+            ["cs"] = "dotnet format --verify-no-changes --include {file}"
+        };
+        if (System.IO.File.Exists(prettier))
+            foreach (var ext in new[] { "js", "mjs", "cjs", "ts", "json", "css", "scss", "html", "md", "yml", "yaml" })
+                commands[ext] = prettierCmd;
+        return commands;
+    }
+
+    /// <summary>Machine overrides win per-extension; anything unset falls back to the defaults.</summary>
+    public static Dictionary<string, string> ResolveFormatterCommands(CustomSystemInfo? overrides, string contentRoot)
+    {
+        var resolved = DefaultFormatterCommands(contentRoot);
+        if (overrides?.FormatterCommands == null) return resolved;
+        foreach (var (ext, command) in overrides.FormatterCommands)
+            resolved[ext.TrimStart('.')] = command;
+        return resolved;
+    }
+
     public static BenchmarkPlanDefinition GetPlanForDifficulty(int level)
     {
         var plans = GetBenchmarkPlans();
@@ -276,6 +313,15 @@ public class CustomSystemInfo
     public string? Gpu { get; set; }
     public string? BenchmarkProjectRoot { get; set; }
     public string? Model { get; set; }
+
+    /// <summary>
+    /// File extension (no dot) to check-mode formatter command, used by the
+    /// formattingClean gate. "{file}" is substituted with the edited file's path.
+    /// Machine-local on purpose: absolute tool paths and pinned versions belong to the
+    /// machine, not to a card that other machines will run. Null falls back to
+    /// <see cref="BenchmarkService.DefaultFormatterCommands"/>.
+    /// </summary>
+    public Dictionary<string, string>? FormatterCommands { get; set; }
 }
 
 public class BenchmarkPlanDefinition

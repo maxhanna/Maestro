@@ -19,22 +19,41 @@ public static class FormattingGate
     const string FilePlaceholder = "{file}";
 
     /// <summary>
-    /// Returns null when unmeasured (no formatting config, "none" mode, or none of the
-    /// edited files have a configured command) — an unmeasured gate counts as not-perfect,
-    /// per the benchmark contract, so this is distinct from a passing check.
+    /// Returns null when unmeasured (no formatting config, "none" mode, this machine has
+    /// no command for an extension the card requires, or none of the edited files have a
+    /// configured command) — an unmeasured gate counts as not-perfect, per the benchmark
+    /// contract, so this is distinct from a passing check.
+    ///
+    /// <paramref name="machineCommands"/> is the extension-to-command map for the machine
+    /// running the card, resolved by BenchmarkService.ResolveFormatterCommands.
     /// </summary>
-    public static async Task<bool?> CheckAsync(string projectRoot, IReadOnlyList<string> editedPaths, BenchmarkFormatting? config)
+    public static async Task<bool?> CheckAsync(
+        string projectRoot,
+        IReadOnlyList<string> editedPaths,
+        BenchmarkFormatting? config,
+        IReadOnlyDictionary<string, string>? machineCommands)
     {
         if (config == null || string.Equals(config.Mode, "none", StringComparison.OrdinalIgnoreCase))
             return null;
-        if (config.Commands.Count == 0 || editedPaths.Count == 0)
+        if (machineCommands == null || machineCommands.Count == 0 || editedPaths.Count == 0)
             return null;
+
+        // A card can name the extensions it expects to be checked. If this machine has no
+        // command for one of them the run is unmeasured, not clean — otherwise a card
+        // requiring .py checks would quietly pass on a machine that only knows .js.
+        foreach (var required in config.Extensions)
+        {
+            var ext = required.TrimStart('.');
+            if (string.IsNullOrWhiteSpace(ext)) continue;
+            if (!machineCommands.TryGetValue(ext, out var cmd) || string.IsNullOrWhiteSpace(cmd))
+                return null;
+        }
 
         var checkedAny = false;
         foreach (var relPath in editedPaths)
         {
             var ext = Path.GetExtension(relPath).TrimStart('.').ToLowerInvariant();
-            if (string.IsNullOrEmpty(ext) || !config.Commands.TryGetValue(ext, out var commandTemplate) ||
+            if (string.IsNullOrEmpty(ext) || !machineCommands.TryGetValue(ext, out var commandTemplate) ||
                 string.IsNullOrWhiteSpace(commandTemplate))
                 continue;
 

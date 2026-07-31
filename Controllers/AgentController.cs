@@ -13426,7 +13426,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     weaverVersion: WeaverVersion.Read(projectRoot, Directory.GetCurrentDirectory()),
                     projectRoot: projectRoot,
                     benchmark: req.Benchmark,
-                    model: new ModelInfo { Name = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b" });
+                    model: new ModelInfo { Name = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b" },
+                    // Formatter commands are machine-local (absolute tool paths, pinned
+                    // versions), so they are resolved here rather than carried on the card.
+                    formatterCommands: BenchmarkService.ResolveFormatterCommands(
+                        _benchmark.LoadCustomSystemInfo(), _env.ContentRootPath));
 
                 await SendSse(Response, "test_result", testResult);
                 await EmitLog(true, "info",

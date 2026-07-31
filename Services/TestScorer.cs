@@ -43,7 +43,8 @@ public static class TestScorer
         EnvironmentMetadata machine,
         string weaverVersion,
         BenchmarkManifest? benchmark = null,
-        ModelInfo? model = null)
+        ModelInfo? model = null,
+        string? projectRoot = null)
     {
         var dicts = steps.OfType<Dictionary<string, object?>>().ToList();
 
@@ -106,8 +107,14 @@ public static class TestScorer
             ? plannedSteps == expected && stepsPassed == expected
             : (bool?)null;
 
+        // allowedPaths are authored project-relative ("benchmark_0/**"), but step paths
+        // arrive in either form — FormattingGate has to handle both too (it tests
+        // Path.IsPathRooted before combining). An absolute path never matches a relative
+        // glob, so without this a legitimate file would fail the gate. Files genuinely
+        // outside the project root relativize to a "..\" prefix, which correctly matches
+        // nothing.
         var structurePreserved = benchmark?.AllowedPaths is { Count: > 0 } allowed
-            ? filesEdited.All(f => allowed.Any(pattern => GlobMatch(f, pattern)))
+            ? filesEdited.All(f => allowed.Any(pattern => GlobMatch(ToProjectRelative(f, projectRoot), pattern)))
             : (bool?)null;
 
         var successfulEdits = stepResults.Count(d =>
@@ -180,12 +187,26 @@ public static class TestScorer
         string weaverVersion,
         string projectRoot,
         BenchmarkManifest? benchmark = null,
-        ModelInfo? model = null)
+        ModelInfo? model = null,
+        IReadOnlyDictionary<string, string>? formatterCommands = null)
     {
-        var result = Score(testName, cardId, steps, plan, complete, filesEdited, machine, weaverVersion, benchmark, model);
-        result.Gates.FormattingClean = await FormattingGate.CheckAsync(projectRoot, filesEdited, benchmark?.Formatting);
+        var result = Score(testName, cardId, steps, plan, complete, filesEdited, machine, weaverVersion, benchmark, model, projectRoot);
+        result.Gates.FormattingClean = await FormattingGate.CheckAsync(projectRoot, filesEdited, benchmark?.Formatting, formatterCommands);
         result.PerfectPass = result.Passed && result.Gates.AllTrue;
         return result;
+    }
+
+    /// <summary>
+    /// Normalizes an edited-file path to project-relative so it can be matched against
+    /// the card's authored globs. Left untouched when already relative or when no root
+    /// is known.
+    /// </summary>
+    static string ToProjectRelative(string path, string? projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(projectRoot) || string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path))
+            return path;
+        try { return Path.GetRelativePath(projectRoot, path); }
+        catch { return path; }
     }
 
     /// <summary>Matches a project-relative path against a glob pattern supporting `*` and `**`.</summary>
@@ -195,9 +216,9 @@ public static class TestScorer
         var normalizedPattern = pattern.Replace('\\', '/').TrimStart('/');
 
         var regexPattern = "^" + Regex.Escape(normalizedPattern)
-            .Replace(@"\*\*", "")
+            .Replace(@"\*\*", "\u0001")
             .Replace(@"\*", "[^/]*")
-            .Replace("", ".*")
+            .Replace("\u0001", ".*")
             + "$";
         return Regex.IsMatch(normalizedPath, regexPattern, RegexOptions.IgnoreCase);
     }

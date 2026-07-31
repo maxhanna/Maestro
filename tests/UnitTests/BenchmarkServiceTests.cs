@@ -179,6 +179,48 @@ public class BenchmarkServiceTests : IDisposable
     }
 
     [Fact]
+    public void DefaultFormatterCommands_UseAbsoluteToolPaths()
+    {
+        // FormattingGate runs with WorkingDirectory set to the benchmark sandbox, not the
+        // Weaver install, so a repo-relative tool path would resolve against the wrong
+        // directory and fail every file. Commands must therefore be self-locating.
+        var commands = BenchmarkService.DefaultFormatterCommands(@"C:\weaver-install");
+
+        Assert.NotEmpty(commands);
+        foreach (var (ext, command) in commands)
+        {
+            Assert.Contains("{file}", command);
+            // The tool is either resolved from PATH (python/dotnet) or given absolutely;
+            // what must never appear is a path relative to the Weaver install.
+            Assert.DoesNotContain("./.formatter", command);
+            Assert.DoesNotContain(".formatter/node_modules", command.Replace('\\', '/').Replace("C:/weaver-install/", ""));
+        }
+    }
+
+    [Fact]
+    public void ResolveFormatterCommands_MachineOverrideWinsPerExtension()
+    {
+        var overrides = new CustomSystemInfo
+        {
+            FormatterCommands = new Dictionary<string, string> { ["py"] = "my-formatter {file}" }
+        };
+
+        var resolved = BenchmarkService.ResolveFormatterCommands(overrides, @"C:\weaver-install");
+
+        Assert.Equal("my-formatter {file}", resolved["py"]);
+        // Unrelated defaults survive rather than being replaced wholesale.
+        Assert.True(resolved.ContainsKey("cs"));
+    }
+
+    [Fact]
+    public void ResolveFormatterCommands_NoOverrides_FallsBackToDefaults()
+    {
+        var resolved = BenchmarkService.ResolveFormatterCommands(null, @"C:\weaver-install");
+
+        Assert.Equal(BenchmarkService.DefaultFormatterCommands(@"C:\weaver-install").Count, resolved.Count);
+    }
+
+    [Fact]
     public void TestRunResult_GeneratesDistinctIds()
     {
         // Ids are the delete key — a collision would delete someone else's run.

@@ -72,6 +72,82 @@ public class TestScorerTests
         Assert.Equal("completed", r.Status);
     }
 
+    static TestRunResult ScoreWithAllowedPaths(string[] allowedPaths, params string[] filesEdited) =>
+        TestScorer.Score("struct", "card1",
+            new List<object> { Step("edit", "done") }, PlanOf(1), complete: true,
+            filesEdited: filesEdited,
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { AllowedPaths = allowedPaths.ToList() });
+
+    [Fact]
+    public void StructurePreserved_EveryFileInsideAllowedPaths_IsTrue()
+    {
+        var r = ScoreWithAllowedPaths(
+            new[] { "benchmark_0/**" },
+            "benchmark_0/notes.txt", "benchmark_0/nested/deep/file.cs");
+
+        Assert.True(r.Gates.StructurePreserved);
+    }
+
+    [Fact]
+    public void StructurePreserved_FileOutsideAllowedPaths_IsFalse()
+    {
+        // The point of the gate: the agent wrote somewhere its card never sanctioned.
+        var r = ScoreWithAllowedPaths(
+            new[] { "benchmark_0/**" },
+            "benchmark_0/ok.txt", "src/Program.cs");
+
+        Assert.False(r.Gates.StructurePreserved);
+    }
+
+    [Fact]
+    public void StructurePreserved_AbsolutePathsInsideProjectRoot_AreMatchedAgainstRelativeGlobs()
+    {
+        // Step paths reach the scorer absolute as often as relative (FormattingGate tests
+        // Path.IsPathRooted for the same reason). allowedPaths are authored relative, so
+        // without normalisation these legitimate files would fail the gate.
+        var root = Path.Combine(Path.GetTempPath(), "weaver-sandbox");
+        var r = TestScorer.Score("struct", "card1",
+            new List<object> { Step("edit", "done") }, PlanOf(1), complete: true,
+            filesEdited: new[]
+            {
+                Path.Combine(root, "benchmark_0", "notes.txt"),
+                Path.Combine(root, "benchmark_0", "nested", "deep.cs"),
+            },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { AllowedPaths = new List<string> { "benchmark_0/**" } },
+            projectRoot: root);
+
+        Assert.True(r.Gates.StructurePreserved);
+    }
+
+    [Fact]
+    public void StructurePreserved_AbsolutePathEscapingProjectRoot_IsFalse()
+    {
+        // The escape this gate exists to catch. Relativising yields a "..\" prefix, which
+        // matches no card-authored glob.
+        var root = Path.Combine(Path.GetTempPath(), "weaver-sandbox");
+        var r = TestScorer.Score("struct", "card1",
+            new List<object> { Step("edit", "done") }, PlanOf(1), complete: true,
+            filesEdited: new[] { Path.Combine(Path.GetTempPath(), "elsewhere", "stolen.txt") },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { AllowedPaths = new List<string> { "benchmark_0/**" } },
+            projectRoot: root);
+
+        Assert.False(r.Gates.StructurePreserved);
+    }
+
+    [Fact]
+    public void StructurePreserved_SingleStarDoesNotCrossDirectoryBoundary()
+    {
+        // "*" must stay within one segment, otherwise an allowedPaths of "bm/*" would
+        // silently sanction the entire subtree and the gate would wave through exactly
+        // the escapes it exists to catch.
+        var r = ScoreWithAllowedPaths(new[] { "bm/*" }, "bm/nested/file.txt");
+
+        Assert.False(r.Gates.StructurePreserved);
+    }
+
     [Fact]
     public void Score_NoEditStepsAtAll_ReportsZeroPointsNotDivideByZero()
     {

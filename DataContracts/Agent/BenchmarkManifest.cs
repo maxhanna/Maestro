@@ -26,12 +26,24 @@ public class BenchmarkManifest
     public int? PresetLevel { get; set; }
 }
 
-/// <summary>Formatting oracle configuration for the <c>formattingClean</c> gate.</summary>
+/// <summary>
+/// Formatting oracle configuration for the <c>formattingClean</c> gate.
+///
+/// Declares *what* to check, never *how*. The command per extension is machine-local
+/// config (see CustomSystemInfo.FormatterCommands), because a card travels to other
+/// machines via the BugHosted leaderboard and cannot carry one machine's tool paths.
+/// Keeping resolution local also lets each machine pin its own formatter versions,
+/// which is what makes a perfect-pass rate comparable across the leaderboard.
+/// </summary>
 public class BenchmarkFormatting
 {
-    /// <summary>"formatter" (run a check command per extension), "golden" (diff against a fixture — not yet implemented), or "none".</summary>
+    /// <summary>"formatter" (run this machine's check command per extension), "golden" (diff against a fixture — not yet implemented), or "none".</summary>
     public string Mode { get; set; } = "none";
 
-    /// <summary>File extension (no dot, e.g. "cs") to check-mode formatter command. "{file}" is replaced with the full path.</summary>
-    public Dictionary<string, string> Commands { get; set; } = new();
+    /// <summary>
+    /// Extensions (no dot, e.g. "py") this card requires to be checkable. If the running
+    /// machine has no command for one of them the gate reports null — unmeasured — rather
+    /// than passing on the strength of the extensions it could check.
+    /// </summary>
+    public List<string> Extensions { get; set; } = new();
 }
