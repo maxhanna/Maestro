@@ -56,6 +56,15 @@ public static class FormattingGate
             var tokens = Tokenize(commandTemplate);
             if (tokens.Count == 0) return false;
 
+            // Project-aware formatters (dotnet format --include, eslint, etc.) filter
+            // against paths relative to the project/working directory — an absolute path
+            // silently matches nothing. Verified empirically: `dotnet format
+            // --verify-no-changes --include <absolute path>` exits 0 (false "clean") even
+            // for a badly formatted file, while the same call with a relative path
+            // correctly exits non-zero. WorkingDirectory is set to workingDirectory below,
+            // so a path relative to it is what every configured command actually needs.
+            var relativePath = Path.GetRelativePath(workingDirectory, fullPath);
+
             var psi = new ProcessStartInfo
             {
                 FileName = tokens[0],
@@ -66,7 +75,7 @@ public static class FormattingGate
                 CreateNoWindow = true
             };
             for (var i = 1; i < tokens.Count; i++)
-                psi.ArgumentList.Add(tokens[i] == FilePlaceholder ? fullPath : tokens[i]);
+                psi.ArgumentList.Add(tokens[i] == FilePlaceholder ? relativePath : tokens[i]);
 
             using var proc = Process.Start(psi);
             if (proc == null) return false;

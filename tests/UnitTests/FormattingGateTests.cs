@@ -95,4 +95,75 @@ public class FormattingGateTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    // Every card in the repo (docs example, both Phase 5 seed cards) configures
+    // `dotnet format --verify-no-changes --include {file}` as its formatting oracle.
+    // dotnet format's --include filters against paths RELATIVE to the project it's
+    // formatting — substituting an absolute path there silently matches zero files,
+    // so --verify-no-changes trivially "passes" even a badly formatted file. These
+    // tests exercise the real command (not a synthetic cmd.exe stand-in) to catch
+    // that regression directly, matching the empirical repro used to find the bug.
+    [Fact]
+    public async Task CheckAsync_DotnetFormatOnBadlyFormattedFile_ReturnsFalse()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver-fmt-real-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "FmtTest.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+            File.WriteAllText(Path.Combine(dir, "Bad.cs"),
+                "namespace FmtTest;\npublic class Bad\n{\n        public int Add(int a,int b){\n    return a+b;\n        }\n}\n");
+
+            var result = await FormattingGate.CheckAsync(dir, new[] { "Bad.cs" },
+                new BenchmarkFormatting { Mode = "formatter", Commands = new() { ["cs"] = "dotnet format --verify-no-changes --include {file}" } });
+
+            Assert.False(result);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task CheckAsync_DotnetFormatOnWellFormattedFile_ReturnsTrue()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver-fmt-real-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "FmtTest.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+            File.WriteAllText(Path.Combine(dir, "Good.cs"),
+                "namespace FmtTest;\n\npublic class Good\n{\n    public int Add(int a, int b)\n    {\n        return a + b;\n    }\n}\n");
+
+            var result = await FormattingGate.CheckAsync(dir, new[] { "Good.cs" },
+                new BenchmarkFormatting { Mode = "formatter", Commands = new() { ["cs"] = "dotnet format --verify-no-changes --include {file}" } });
+
+            Assert.True(result);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task CheckAsync_DotnetFormatOnNestedFile_UsesRelativePathAndDetectsBadFormatting()
+    {
+        // Regression coverage for the specific failure mode found: an absolute {file}
+        // substitution matches nothing even when the file is in a subdirectory (the
+        // shape both Phase 5 seed cards actually create files in — tests/**, todocli/**).
+        var dir = Path.Combine(Path.GetTempPath(), "weaver-fmt-real-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "FmtTest.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+            Directory.CreateDirectory(Path.Combine(dir, "tests"));
+            File.WriteAllText(Path.Combine(dir, "tests", "Bad.cs"),
+                "namespace FmtTest;\npublic class Bad\n{\n        public int Add(int a,int b){\n    return a+b;\n        }\n}\n");
+
+            var result = await FormattingGate.CheckAsync(dir, new[] { "tests/Bad.cs" },
+                new BenchmarkFormatting { Mode = "formatter", Commands = new() { ["cs"] = "dotnet format --verify-no-changes --include {file}" } });
+
+            Assert.False(result);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }
