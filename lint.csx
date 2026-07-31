@@ -2,6 +2,7 @@
 
 using System;
 using System.IO;
+using System.Text.RegularExpressions;
 using Jint;
 
 // 1. Gather all files matching the glob pattern
@@ -14,7 +15,6 @@ if (!Directory.Exists(searchFolder))
 
 string[] jsFiles = Directory.GetFiles(searchFolder, "*.js", SearchOption.AllDirectories);
 bool hasErrors = false;
-var engine = new Engine();
 
 Console.WriteLine($"Starting pure C# JavaScript linting pass on {jsFiles.Length} files...");
 
@@ -23,14 +23,23 @@ foreach (var filePath in jsFiles)
     try
     {
         string jsContent = File.ReadAllText(filePath);
-        
-        // Native C# interpreter parsing pass — use unique key per file
-        engine.Modules.Add(Path.GetFileNameWithoutExtension(filePath), jsContent);
+
+        // PrepareScript parses without executing. Engine.Modules.Add was used here
+        // before, but that only registers the source text — Jint defers parsing until
+        // a module is actually imported, so syntax errors were never surfaced and this
+        // pass silently accepted every file.
+        Engine.PrepareScript(jsContent, filePath);
     }
     catch (Exception ex)
     {
-        // Formats errors cleanly so they display natively in the IDE build output console
-        Console.Error.WriteLine($"{filePath}(1,1): error JS0001: JavaScript Lint/Syntax Error: {ex.Message}");
+        // Jint ends the message with "(<source>:line:column)" — the source is the full
+        // file path, which itself contains colons on Windows, so anchor on the trailing
+        // digit pair. Pulling it out makes the error line clickable in the IDE build
+        // output instead of always pointing at line 1.
+        var pos = Regex.Match(ex.Message, @"(\d+):(\d+)\)");
+        var line = pos.Success ? pos.Groups[1].Value : "1";
+        var col = pos.Success ? pos.Groups[2].Value : "1";
+        Console.Error.WriteLine($"{filePath}({line},{col}): error JS0001: JavaScript Lint/Syntax Error: {ex.Message.Split('\n')[0]}");
         hasErrors = true;
     }
 }

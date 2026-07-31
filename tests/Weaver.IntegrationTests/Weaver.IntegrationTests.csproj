@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- Matches Weaver.csproj — see the note in Weaver.UnitTests.csproj re: MSB3270. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <!--
       This project drives real Orchestrate()/CommandExecutionPipeline() calls: a real
       shell process via TerminalService, real file I/O against a scratch project
@@ -18,9 +20,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <!-- Keep in step with Weaver.UnitTests — see the note there on why this must track
+         the Visual Studio major version for Test Explorer discovery to work. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>

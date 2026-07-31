@@ -5,12 +5,20 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- Matches Weaver.csproj. Without it this project compiles as MSIL and then
+         references an AMD64 Weaver.dll, which raises MSB3270. The RID is accurate
+         either way — the code under test shells out to PowerShell and reads WMI. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <!-- Must track the Visual Studio major version (18.x for VS 2026), not just be
+         "new enough". Test Explorer runs tests in its own host and silently discovers
+         nothing when the Test SDK predates the target framework — 17.11 shipped before
+         net10.0 existed, so tests showed up under `dotnet test` but never in the IDE. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>

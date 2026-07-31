@@ -4,16 +4,35 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationIcon>WeaverIcon.ico</ApplicationIcon>
-  </PropertyGroup> 
+    <!-- Applied while MSBuild expands its default globs, so tests\** is never walked
+         at all. The <Content Remove> below only drops items after the glob has already
+         enumerated them, which still costs a full crawl of every test project's bin\
+         and obj\ (~194k files). Excluding here is what actually keeps builds fast. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <!-- Shipping settings, not build settings. Left unconditional these apply to every
+       `dotnet build` too, so each Debug build materialised the whole .NET runtime into
+       bin\. The RuntimeIdentifier above stays global so the output path keeps its
+       win-x64 segment (launchSettings and tooling reference it) — only the runtime
+       copy and single-file packing move to publish. -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
 
   <ItemGroup>
     <Compile Remove="tests\**" />
     <EmbeddedResource Remove="tests\**" />
     <None Remove="tests\**" />
+    <!-- The Web SDK globs tests\** into Content, which copies it to the output dir.
+         That drags every test project's own bin\ and obj\ (each holding a full
+         self-contained runtime copy) into bin\Debug\net10.0\win-x64\tests\, and it
+         compounds on every build. Without this Remove, that one folder reached
+         192k files / 6.7 GB and dominated build time. -->
+    <Content Remove="tests\**" />
   </ItemGroup>
 
   <ItemGroup>
@@ -36,10 +55,29 @@
     <PackageReference Include="WebPush" Version="1.0.13" />
   </ItemGroup>
 
-  <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild">
+  <ItemGroup>
+    <JsLintInput Include="wwwroot\**\*.js" />
+    <JsLintInput Include="lint.csx" />
+  </ItemGroup>
+
+  <!-- Inputs/Outputs let MSBuild skip this entirely when no .js file (nor the lint
+       script itself) has changed since the last run — the stamp file below is the
+       recorded output it compares timestamps against. -->
+  <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild"
+          Inputs="@(JsLintInput)"
+          Outputs="$(IntermediateOutputPath)jslint.stamp">
+    <!-- dotnet-script is a global tool, installed once per machine. Checking it's on
+         PATH first avoids the "dotnet tool install" global-tool check (a NuGet
+         round-trip) on every single build once it's already present. -->
+    <Exec Command="dotnet-script --version" ContinueOnError="true" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="DotnetScriptCheckExitCode" />
+    </Exec>
+    <Message Importance="high" Text="Installing dotnet-script..." Condition="'$(DotnetScriptCheckExitCode)' != '0'" />
+    <Exec Command="dotnet tool install --global dotnet-script" ContinueOnError="true" StandardOutputImportance="low" Condition="'$(DotnetScriptCheckExitCode)' != '0'" />
     <Message Importance="high" Text="Preparing C# Script Environment for JS evaluation..." />
-    <Exec Command="dotnet tool install --global dotnet-script" ContinueOnError="true" StandardOutputImportance="low" />
     <Exec Command="dotnet-script lint.csx" ContinueOnError="false" />
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Touch Files="$(IntermediateOutputPath)jslint.stamp" AlwaysCreate="true" />
   </Target>
 
 </Project>
