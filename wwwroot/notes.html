@@ -1,0 +1,28 @@
+<div class="notes-panel">
+  <div class="ide-panel-header" ng-mousedown="vm.startNotesDrag($event)">
+    <span class="ide-drag-handle" title="Drag to reposition">⠿</span>
+    <span class="ide-panel-title">📝 Notes</span>
+    <div class="ide-panel-controls">
+      <select ng-model="vm.notesProject" ng-options="p.Path as p.Name for p in vm.projects"
+        ng-change="vm.loadNotes()"
+        style="background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; font-size: 11px; padding: 2px 4px; max-width: 150px;">
+      </select>
+      <button class="ide-panel-btn" ng-click="vm.saveNotes()" ng-disabled="!vm.notesDirty" title="Save Notes">💾</button>
+      <button class="ide-panel-btn" ng-click="vm.closeNotes()" title="Close Notes">✕</button>
+    </div>
+  </div>
+  <div class="notes-panel-body">
+    <textarea class="notes-textarea"
+      ng-model="vm.notesContent"
+      ng-change="vm.notesDirty = true"
+      placeholder="Write your project notes here...&#10;&#10;These notes are saved per project and persist across sessions."
+      spellcheck="true"></textarea>
+    <div class="notes-status-bar">
+      <span ng-if="vm.notesLoading">⏳ Loading...</span>
+      <span ng-if="vm.notesLastSaved && !vm.notesDirty">✓ Saved {{vm.notesLastSaved | date:'shortTime'}}</span>
+      <span ng-if="vm.notesDirty" style="color: var(--warning);">● Unsaved changes</span>
+      <span ng-if="vm.notesError" style="color: var(--error);">{{vm.notesError}}</span>
+      <span style="margin-left: auto; opacity: 0.5; font-size: 10px;">Project: {{vm.notesProject}}</span>
+    </div>
+  </div>
+</div>

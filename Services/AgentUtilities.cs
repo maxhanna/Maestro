@@ -3521,7 +3521,7 @@ public static class AgentUtilities
                 "Provide a non-empty, specific anchor.", null);
         }
         var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
-        var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+        var normOld = AgentUtilities.NormalizeLineEndings(oldStr).TrimEnd('\r');
         var matches = new List<int>();
         var searchPos = 0;
         var maxIterations = normFile.Length + 2;

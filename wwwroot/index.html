@@ -219,6 +219,11 @@
               <input type="checkbox" ng-model="vm.showKanban" ng-change="vm.saveSettings(true)" /> Show Kanban
             </label>
           </div>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showNotes" ng-change="vm.saveSettings(true)" /> Show Notes
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -715,6 +720,15 @@
       <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startResize('s', $event)"></div>
       <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startResize('se', $event)"></div>
     </div>
+
+    <!-- FLOATING NOTES PANEL -->
+    <div class="notes-floating-panel" ng-if="vm.showNotes"
+      ng-style="{left: vm.notes.left + 'px', top: vm.notes.top + 'px', width: vm.notes.width + 'px', height: vm.notes.height + 'px'}">
+      <div ng-include="'notes.html'" style="height: 100%; width: 100%; background: var(--bg);"></div>
+      <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startNotesResize('e', $event)"></div>
+      <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startNotesResize('s', $event)"></div>
+      <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startNotesResize('se', $event)"></div>
+    </div>
   </main>
 
   <!-- FILE PICKER MODAL -->
@@ -1086,6 +1100,18 @@
                 <label for="ctx-includeEditKnowledge">Include Edit Knowledge</label>
                 <span class="settings-help" style="margin-left:auto;font-size:11px;">do/dont/patterns from past edits</span>
               </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-extendThinking" ng-model="vm.extendThinking" />
+                <label for="ctx-extendThinking">Extending Thinking</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">verbose per-step reasoning; carries thinking across steps</span>
+              </div>
+              <div ng-if="vm.extendThinking">
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-thinkingMaxTokens">Thinking Max Tokens</label>
+                  <span>{{vm.thinkingMaxTokens | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-thinkingMaxTokens" ng-model="vm.thinkingMaxTokens" min="256" max="16384" step="256" style="width:100%;" />
+              </div>
               <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the agent to handle larger files but consume more tokens.</span>
             </div>
           </details>
@@ -1295,6 +1321,11 @@
       </div>
       <div class="popup-body">
         <div style="margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <strong style="font-size:13px;">Plans</strong>
+            <button ng-click="vm.startBenchmarkAll()" class="primary small nowrap"
+              ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Benchmark All</button>
+          </div>
           <div ng-if="vm.benchmarkPlans.length > 0">
             <div ng-repeat="plan in vm.benchmarkPlans"
               style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:4px;">
@@ -1304,12 +1335,26 @@
                   <span class="text-sm muted" style="margin-left:8px;">{{plan.description}}</span>
                 </div>
                 <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
-                  ng-disabled="vm.benchmarkRunning">▶ Run</button>
+                  ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run</button>
               </div>
             </div>
           </div>
           <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark
-            {{vm.benchmarkLevel}} running...</div>
+            {{vm.benchmarkLevelName(vm.benchmarkLevel)}} running...
+            <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>
+          </div>
+        </div>
+        <!-- Final Benchmark Score (benchmark-all) -->
+        <div ng-if="vm.benchmarkAllResult" style="margin-bottom:16px;padding:10px;border:1px solid var(--border);border-radius:4px;">
+          <strong style="font-size:13px;">Final Benchmark Score</strong>
+          <div style="margin-top:6px;font-size:12px;line-height:1.7;">
+            <div>Reached <strong>{{vm.benchmarkAllResult.completedLevels}}</strong> of <strong>{{vm.benchmarkPlans.length}}</strong> benchmarks</div>
+            <div ng-if="vm.benchmarkAllResult.failedLevel !== null">
+              <span style="color:var(--danger);">Stopped at {{vm.benchmarkLevelName(vm.benchmarkAllResult.failedLevel)}} — error steps detected</span>
+            </div>
+            <div ng-if="vm.benchmarkAllResult.failedLevel === null" style="color:var(--success);">All benchmarks completed — passed</div>
+            <div>Total: <strong>{{vm.benchmarkAllResult.totalSuccessful}}</strong> ok / <strong>{{vm.benchmarkAllResult.totalFailed}}</strong> fail — <strong>{{vm.benchmarkAllResult.totalPoints}}</strong> pts</div>
+          </div>
         </div>
         <!-- Server Benchmarks (fetched) -->
         <div ng-if="vm.serverBenchmarks.length > 0" style="margin-bottom:16px;">
@@ -1567,6 +1612,7 @@
   <script src="/agent.js"></script>
   <script src="/voice-input.js"></script>
   <script src="/ide.js"></script>
+  <script src="/notes.js"></script>
   <script>
     (function () {
       if (!('serviceWorker' in navigator)) return;

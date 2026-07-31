@@ -46,6 +46,8 @@ public partial class AgentController : ControllerBase
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
     private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
     private static readonly ConcurrentDictionary<string, HashSet<int>> _cancelledSteps = new();
+    private static readonly ConcurrentDictionary<string, StringBuilder> _stepThinkingStore = new();
+    private static readonly ConcurrentDictionary<string, int> _complexityScores = new();
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
@@ -1299,7 +1301,10 @@ public partial class AgentController : ControllerBase
                         var (fullStr, astErr) = AstResolveEdit(fullPath, targetType!, targetName, returnTail: false);
                         if (fullStr != null)
                         {
-                            var idx = sourceText.IndexOf(fullStr, StringComparison.Ordinal);
+                            var searchText = sourceText.Contains("\r\n")
+                                ? sourceText.Replace("\r\n", "\n")
+                                : sourceText;
+                            var idx = searchText.IndexOf(fullStr, StringComparison.Ordinal);
                             if (idx >= 0)
                             {
                                 var tsExt = ext is ".ts" or ".tsx" or ".js" or ".jsx";
@@ -1326,6 +1331,7 @@ public partial class AgentController : ControllerBase
                             var lineStart = sourceText.LastIndexOf('\n', idx2) + 1;
                             var lineEnd = sourceText.IndexOf('\n', idx2);
                             if (lineEnd < 0) lineEnd = sourceText.Length;
+                            if (lineEnd > 0 && sourceText[lineEnd - 1] == '\r') lineEnd--;
                             var fullLine = sourceText[lineStart..lineEnd];
                             var indented = await FormatSnippetAsync(fullLine, newCodeStr, relPath);
                             var prefix = sourceText[..lineEnd];
@@ -3571,7 +3577,8 @@ public partial class AgentController : ControllerBase
         int planItemIndex = -1,
         string? cardId = null,
         List<string>? attachedFiles = null,
-        int replanDepth = 0)
+        int replanDepth = 0,
+        Func<string, Task>? onActivity = null)
     {
         var relPath = step.File.Replace('\\', '/').TrimStart('/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -3620,7 +3627,7 @@ public partial class AgentController : ControllerBase
         var filteredEditKnowledge = EditKnowledgeService.FormatForContext(
             editKnowledge, fileExt, step.Change ?? prompt ?? "");
         await EmitLog(emitSse, "info",
-            $"▶ Resolving: {relPath} — {step.Change}", new { prompt, plan, stepIndex, allResults }, ct: ct);
+            $"▶ Resolving Edits: {relPath} — {step.Change}", new { prompt, plan, stepIndex, allResults }, ct: ct);
         if (emitSse)
             await SendSse(Response, "step", new
             {
@@ -4146,7 +4153,7 @@ public partial class AgentController : ControllerBase
                 else if (fromFormatC && !string.IsNullOrEmpty(oldStr))
                 {
                     var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
-                    var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+                    var normOld = AgentUtilities.NormalizeLineEndings(oldStr).TrimEnd('\r');
                     var idx = normFile.IndexOf(normOld, StringComparison.Ordinal);
                     if (idx >= 0)
                     {
@@ -5008,6 +5015,10 @@ public partial class AgentController : ControllerBase
         AfterSelfHeal:
             if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent))
             {
+                if (onActivity != null)
+                {
+                    try { await onActivity("verifying"); } catch { }
+                }
                 const int VerificationRounds = 3;
                 var decisions = new List<string>();
                 var reasons = new List<string>();
@@ -5488,7 +5499,7 @@ public partial class AgentController : ControllerBase
                         replanStep, projectRoot, emitSse, ct,
                         replanResults, replanStepIndex,
                         prompt, plan, planItemIndex, cardId, attachedFiles,
-                        replanDepth + 1);
+                        replanDepth + 1, onActivity);
                 }
                 catch (StepFatalException)
                 { }
@@ -7688,9 +7699,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
     private static PlanStep ParseStepFromJson(string file, string change, string? targetSymbol, int line, string? oldString, string? newString, List<string> refFiles, List<EditPair> edits)
     {
+        var normFile = file.Replace('\\', '/');
+        if (normFile.StartsWith("_edit/", StringComparison.OrdinalIgnoreCase))
+            normFile = normFile["_edit/".Length..];
         return new PlanStep
         {
-            File = file.Replace('\\', '/'),
+            File = normFile,
             Change = change,
             TargetSymbol = targetSymbol,
             Priority = 1,
@@ -7726,6 +7740,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase) &&
                                    string.Equals(s.Change, step.Change, StringComparison.OrdinalIgnoreCase)))
                 return (false, $"File '{step.Change}' was already created by a prior _create_file step — target the existing file instead.");
+            var createPathMatch = Regex.Match(step.Change, @"([\w\-/\\]+\.\w{1,10})");
+            if (createPathMatch.Success)
+            {
+                var createCandidate = createPathMatch.Groups[1].Value.Replace('\\', '/');
+                var createFileName = Path.GetFileName(createCandidate);
+                var existingFile = AgentUtilities.FindSimilarFiles(createCandidate, projectRoot)
+                    .FirstOrDefault(f => Path.GetFileName(f).Equals(createFileName, StringComparison.OrdinalIgnoreCase));
+                if (existingFile != null)
+                {
+                    var createFullPath = Path.GetFullPath(Path.Combine(projectRoot, createCandidate.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!System.IO.File.Exists(createFullPath))
+                        return (false, $"File '{createFileName}' ALREADY EXISTS at '{existingFile}' — do NOT create it. " +
+                                        "Target the existing file path in a normal edit step instead.");
+                }
+            }
         }
         if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
             !AgentUtilities.LooksLikeShellCommand(step.Change))
@@ -7781,12 +7810,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 (p.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
                  p.File.Equals("_command", StringComparison.OrdinalIgnoreCase)) &&
                 (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
-            if (!fileExists && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
+            if (!fileExists)
             {
-                var origPath = step.File;
-                step.File = "_create_file";
-                step.Change = origPath;
-                return (true, null);
+                var similarExisting = AgentUtilities.FindSimilarFiles(step.File, projectRoot)
+                    .FirstOrDefault(f => Path.GetFileName(f).Equals(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
+                if (similarExisting != null)
+                    return (false, $"Path '{step.File}' does not exist. A file with the same name ALREADY EXISTS at '{similarExisting}' — retarget this step to that path (do not create a duplicate).");
+                if (!string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
+                {
+                    var origPath = step.File;
+                    step.File = "_create_file";
+                    step.Change = origPath;
+                    return (true, null);
+                }
             }
             if (fileExists)
             {
@@ -8125,6 +8161,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         };
         return (plan, discoveryContext);
     }
+    private async Task SendPlanActivityEventAsync(
+        StringBuilder thinkingLog, List<PlanStep> planSoFar, bool emitSse,
+        string activityFile, string activityChange, string summary, int? runningIndex, CancellationToken ct)
+    {
+        if (!emitSse) return;
+        var stepItems = planSoFar.Select((s, idx) => new
+        {
+            File = s.File,
+            Change = s.Change,
+            Line = s.LineNumber,
+            OldString = s.OldString,
+            NewString = s.NewString,
+            done = runningIndex == null || idx < runningIndex.Value
+        });
+        var items = stepItems.Concat(new[]
+        {
+            new { File = activityFile, Change = activityChange, Line = 0, OldString = "", NewString = "", done = true }
+        }).ToList();
+        await SendSse(Response, "plan", new
+        {
+            thinking = thinkingLog.ToString(),
+            summary = summary,
+            items = items,
+            incremental = true,
+            live = true
+        }, ct);
+    }
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
@@ -8149,6 +8212,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }, ct);
         }
         var pendingSteps = new Queue<PlanStep>();
+        Func<string, Task>? planActivity = null;
+        if (emitSse)
+        {
+            planActivity = async phase =>
+            {
+                var stepNum = planSoFar.Count;
+                if (stepNum == 0) return;
+                var isVerifying = phase == "verifying";
+                var label = isVerifying
+                    ? $"Verifying Step {stepNum}…"
+                    : $"Thinking about Step {stepNum}…";
+                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                    isVerifying ? "_verifying" : "_executing", label,
+                    $"Executed {stepNum - 1} step(s) — {label}", stepNum - 1, ct);
+            };
+        }
+        if (emitSse)
+        {
+            await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                "_planning", "Waiting for proposal…",
+                "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far", null, ct);
+        }
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
             ct.ThrowIfCancellationRequested();
@@ -8163,23 +8248,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (!string.IsNullOrWhiteSpace(queuedStep.Change))
                     thinkingLog.AppendLine($"Step {planSoFar.Count}: {queuedStep.Change}");
                 await EmitLog(emitSse, "info",
-                    $"▶ Executing queued step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}", ct: ct);
-                if (emitSse)
-                    await SendSse(Response, "plan", new
-                    {
-                        thinking = thinkingLog.ToString(),
-                        summary = $"Executed {planSoFar.Count - 1} step(s) — running queued step {planSoFar.Count}",
-                        items = planSoFar.Select((s, idx) => new
-                        {
-                            File = s.File,
-                            Change = s.Change,
-                            Line = s.LineNumber,
-                            OldString = s.OldString,
-                            NewString = s.NewString,
-                            done = idx < planSoFar.Count - 1
-                        }).ToList(),
-                        incremental = true
-                    }, ct);
+                    $"▶ Thinking about Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}", ct: ct);
+                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                    "_executing", $"Thinking about Step {planSoFar.Count} — {queuedStep.Change}",
+                    $"Completed {planSoFar.Count - 1} step(s) — thinking about Step {planSoFar.Count}",
+                    planSoFar.Count - 1, ct);
                 await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                     summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
                 var singleStepPlan = new AgentPlan { Plan = new List<PlanStep> { queuedStep }, Summary = queuedStep.Change, Score = 90 };
@@ -8194,7 +8267,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                        replanBudget: new[] { 0 });
+                        replanBudget: new[] { 0 }, onActivity: planActivity);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -8220,6 +8293,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
                 if (!stepSucceeded) { break; }
                 continue;
+            }
+            if (emitSse && !planCompleteDeclared)
+            {
+                var planningText = planSoFar.Count == 0
+                    ? "Waiting for proposal…"
+                    : $"Planning step {planSoFar.Count + 1} — verifying step {planSoFar.Count}…";
+                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                    "_planning", planningText,
+                    $"Planning step {planSoFar.Count + 1}…", null, ct);
             }
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
             if (proposal == null)
@@ -8274,6 +8356,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         continue;
                     }
                     await EmitLog(emitSse, "info", $"Interleaved execution: exploring {proposal.ExploreFile}", ct: ct);
+                    await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                        "_exploring", $"Exploring {proposal.ExploreFile}…",
+                        $"Exploring {proposal.ExploreFile}…", null, ct);
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct);
@@ -8457,23 +8542,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (!string.IsNullOrWhiteSpace(proposal.Thinking))
                     thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
                 await EmitLog(emitSse, "info",
-                    $"▶ Executing atomic step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
-                if (emitSse)
-                    await SendSse(Response, "plan", new
-                    {
-                        thinking = thinkingLog.ToString(),
-                        summary = $"Executed {planSoFar.Count - 1} step(s) — running step {planSoFar.Count}",
-                        items = planSoFar.Select((s, idx) => new
-                        {
-                            File = s.File,
-                            Change = s.Change,
-                            Line = s.LineNumber,
-                            OldString = s.OldString,
-                            NewString = s.NewString,
-                            done = idx < planSoFar.Count - 1
-                        }).ToList(),
-                        incremental = true
-                    }, ct);
+                    $"▶ Thinking about Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
+                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                    "_executing", $"Thinking about Step {planSoFar.Count} — {stepToRun.Change}",
+                    $"Completed {planSoFar.Count - 1} step(s) — thinking about Step {planSoFar.Count}",
+                    planSoFar.Count - 1, ct);
                 await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                     summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
                 var singleStepPlan = new AgentPlan { Plan = new List<PlanStep> { stepToRun }, Summary = stepToRun.Change, Score = 90 };
@@ -8488,7 +8561,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                        replanBudget: new[] { 0 });
+                        replanBudget: new[] { 0 }, onActivity: planActivity);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -8521,24 +8594,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         var synthStep = singleStepPlan.Plan[si]!;
                         planSoFar.Add(synthStep);
-                        await EmitLog(emitSse, "info",
-                            $"▶ Executing auto-generated follow-up step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
-                        if (emitSse)
-                            await SendSse(Response, "plan", new
-                            {
-                                thinking = thinkingLog.ToString(),
-                                summary = $"Executed {planSoFar.Count - 1} step(s) — running auto step {planSoFar.Count}",
-                                items = planSoFar.Select((s, idx) => new
-                                {
-                                    File = s.File,
-                                    Change = s.Change,
-                                    Line = s.LineNumber,
-                                    OldString = s.OldString,
-                                    NewString = s.NewString,
-                                    done = idx < planSoFar.Count - 1
-                                }).ToList(),
-                                incremental = true
-                            }, ct);
+                await EmitLog(emitSse, "info",
+                    $"▶ Resolving Edits for Step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
+                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                    "_executing", $"Resolving Edits for Step {planSoFar.Count} — {synthStep.Change}",
+                    $"Completed {planSoFar.Count - 1} step(s) — resolving edits for Step {planSoFar.Count}",
+                    planSoFar.Count - 1, ct);
                         await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                             summary: $"Interleaved execution — {planSoFar.Count} step(s) so far (incl. auto)", score: 90);
                         var synthPlan = new AgentPlan
@@ -8553,7 +8614,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
                                 steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                                replanBudget: new[] { 0 });
+                                replanBudget: new[] { 0 }, onActivity: planActivity);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
@@ -8748,14 +8809,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 await EmitLog(emitSse, "info",
                                     $"⚡ Verifier flagged needsExtraStep — auto-proposing next step WITHOUT planner LLM: " +
                                     $"[{autoStep.File}] {missingSymbol}()", ct: ct);
-                                if (emitSse)
-                                    await SendSse(Response, "plan", new
-                                    {
-                                        thinking = thinkingLog.ToString(),
-                                        summary = $"Executed {planSoFar.Count - 1} step(s) — auto-step {planSoFar.Count} from verifier",
-                                        items = planSoFar,
-                                        incremental = true
-                                    }, ct);
+                                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                                    "_executing", $"Resolving Edits for Step {planSoFar.Count} — {autoStep.Change}",
+                                    $"Completed {planSoFar.Count - 1} step(s) — resolving edits for Step {planSoFar.Count} from verifier",
+                                    planSoFar.Count - 1, ct);
                                 await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                                     summary: $"Interleaved execution — {planSoFar.Count} step(s)", score: 90);
                                 var autoPlan = new AgentPlan
@@ -8769,7 +8826,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 {
                                     await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
                                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                                        replanBudget: new[] { 0 });
+                                        replanBudget: new[] { 0 }, onActivity: planActivity);
                                 }
                                 catch (Exception ex) when (ex is not OperationCanceledException)
                                 {
@@ -10286,6 +10343,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         allSteps.AddRange(ds);
+
+        // Quick complexity assessment for thinking token budgeting (if extendThinking is enabled)
+        if (cfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+        {
+            try
+            {
+                await AssessComplexityAsync(prompt, cardId, ct);
+            }
+            catch { /* non-critical — fall back to full thinking tokens */ }
+        }
+
         if (cfg.includeProjectSkeleton)
         {
             var skeleton = await AgentUtilities.GenerateSkeletonAsync(projectRoot);
@@ -11407,12 +11475,249 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var normalized = parts.OrderBy(x => x);
         return file.Replace('\\', '/') + "::" + string.Join("|", normalized);
     }
+    private static bool ShouldExtendThinkForStep(string planFile)
+    {
+        if (string.IsNullOrWhiteSpace(planFile)) return false;
+        var lower = planFile.Trim().ToLowerInvariant();
+        return lower is not ("_done" or "_continue" or "_checkpoint" or "_show" or "_display" or "_ping");
+    }
+    private static string TruncateForLog(string? s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var clean = Regex.Replace(s, @"\s+", " ").Trim();
+        return clean.Length <= max ? clean : clean[..max] + "…";
+    }
+
+    /// <summary>
+    /// Maps a complexity score (0-100) to a token cap for thinking output.
+    /// Higher complexity = more thinking tokens allowed. The maxAllowed parameter
+    /// from user config acts as the absolute ceiling.
+    /// </summary>
+    private static int GetThinkingTokenCap(int complexityScore, int maxAllowed)
+    {
+        int cap;
+        if (complexityScore <= 10)
+            cap = 500;
+        else if (complexityScore <= 20)
+            cap = Math.Max(1000, (int)(maxAllowed * 0.10));
+        else if (complexityScore <= 35)
+            cap = Math.Max(1000, (int)(maxAllowed * 0.15));
+        else if (complexityScore <= 50)
+            cap = Math.Max(1200, (int)(maxAllowed * 0.22));
+        else if (complexityScore <= 65)
+            cap = Math.Max(1500, (int)(maxAllowed * 0.30));
+        else if (complexityScore <= 80)
+            cap = Math.Max(2000, (int)(maxAllowed * 0.45));
+        else if (complexityScore <= 90)
+            cap = Math.Max(2500, (int)(maxAllowed * 0.65));
+        else
+            cap = maxAllowed;
+        return Math.Clamp(cap, 256, maxAllowed);
+    }
+
+    /// <summary>
+    /// Quick LLM call to assess task complexity (0-100). Only called when extendThinking is enabled.
+    /// Returns null if the call fails — caller should fall back to full thinking tokens.
+    /// </summary>
+    private async Task<int?> AssessComplexityAsync(string prompt, string? cardId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId)) return null;
+        if (_complexityScores.TryGetValue(cardId, out var cached)) return cached;
+
+        try
+        {
+            var system = "You are a task complexity assessor. Given a coding task description, rate its complexity " +
+                "from 0 to 100 where:\n" +
+                "0-10: Trivial -- a one-line change, a typo fix, adding a simple comment.\n" +
+                "10-25: Simple -- adding a small property or field, changing a constant.\n" +
+                "25-45: Moderate -- adding a method, modifying a few lines in one file.\n" +
+                "45-65: Complex -- multi-file changes, new class/component, API endpoint.\n" +
+                "65-85: Very complex -- architectural changes, database migrations, new subsystems.\n" +
+                "85-100: Extremely complex -- full feature implementation, system-wide refactoring.\n\n" +
+                "Output ONLY a single integer between 0 and 100. No explanation, no markdown.";
+
+            var user = $"Rate the complexity of this coding task:\n\n{prompt}";
+
+            var (raw, error) = await CallLlmRawText(system, user, false, ct,
+                requestTimeout: TimeSpan.FromSeconds(15), maxTokens: 10);
+
+            if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            if (int.TryParse(raw.Trim(), out var score))
+            {
+                score = Math.Clamp(score, 0, 100);
+                _complexityScores[cardId] = score;
+                return score;
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+    private static string CapThinking(string raw)
+    {
+        var t = raw.Trim();
+        t = Regex.Replace(t, @"^```[a-zA-Z]*\s*", "");
+        t = Regex.Replace(t, @"\s*```$", "");
+        const int max = 8000;
+        return t.Length <= max ? t : t[..max] + "\n…[truncated]…";
+    }
+    private async Task<string?> ExtendThinkingAsync(
+        string? cardId, int stepIndex, PlanStep step, string projectRoot,
+        bool emitSse, CancellationToken ct,
+        bool postVerification = false, string? editSummary = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(cardId)) return null;
+            var log = _stepThinkingStore.GetOrAdd(cardId, _ => new StringBuilder());
+            string previous;
+            lock (log) { previous = log.ToString(); }
+            const int prevMax = 14000;
+            if (previous.Length > prevMax)
+                previous = "…[earlier thinking truncated]…\n" + previous[^prevMax..];
+
+            var file = step.File ?? "";
+            var isVirtual = file.StartsWith('_');
+            string? fileContent = null;
+            if (!isVirtual && !string.IsNullOrWhiteSpace(file) && System.IO.File.Exists(
+                    Path.GetFullPath(Path.Combine(projectRoot, file.Replace('/', Path.DirectorySeparatorChar)))))
+            {
+                try
+                {
+                    fileContent = await System.IO.File.ReadAllTextAsync(
+                        Path.GetFullPath(Path.Combine(projectRoot, file.Replace('/', Path.DirectorySeparatorChar))),
+                        Encoding.UTF8, ct);
+                }
+                catch { }
+                if (fileContent != null && fileContent.Length > 6000)
+                    fileContent = fileContent[..6000] + "\n…[file truncated]…";
+            }
+
+            string system, user, header;
+            if (!postVerification)
+            {
+                header = $"EXTENDED THINKING — STEP {stepIndex + 1}";
+                system = "You are the deep-reasoning engine of an autonomous coding agent. Before a plan step executes, " +
+                    "you produce EXTENDED, VERBOSE thinking in plain prose. Your thinking becomes the working memory that " +
+                    "later steps read, so be concrete, factual and actionable. You may be as long as you need — this is a " +
+                    "thinking scratchpad, not user-facing output.\n" +
+                    "Rules:\n" +
+                    "- Write in first person, like a senior engineer talking to themselves while working.\n" +
+                    "- Read PREVIOUS STEPS' THINKING carefully. If any earlier step deferred a task, flagged a risk, or " +
+                    "described something that affects THIS step, address it explicitly.\n" +
+                    "- Ground every claim in the CURRENT FILE CONTENT shown below. Quote real identifiers, method names and " +
+                    "what you actually observe. Never assume code exists that is not shown.\n" +
+                    "- Think about: exactly what must change in this step, what could go wrong (missing imports, type errors, " +
+                    "breaking call sites, CRLF line endings, brace imbalance, duplicate anchors), and what the next step will need to know.\n" +
+                    "- End with a short 'VERIFY:' list — 2 to 4 concrete checks to perform after applying the change.\n" +
+                    "- Output ONLY the thinking prose. No JSON, no markdown fences, no code blocks, no headings like 'Thinking:'.";
+                var sb = new StringBuilder();
+                sb.AppendLine("Produce your extended thinking for the step about to execute.");
+                sb.AppendLine();
+                sb.AppendLine("### PREVIOUS STEPS' THINKING ###");
+                sb.AppendLine(string.IsNullOrWhiteSpace(previous) ? "(none yet — this is the first step)" : previous);
+                sb.AppendLine();
+                sb.AppendLine("### CURRENT STEP ###");
+                sb.AppendLine($"step {stepIndex + 1}, file: {file}");
+                sb.AppendLine($"change: {step.Change}");
+                if (!string.IsNullOrWhiteSpace(step.TargetSymbol))
+                    sb.AppendLine($"targetSymbol: {step.TargetSymbol}");
+                if (step.LineNumber > 0)
+                    sb.AppendLine($"lineNumber: {step.LineNumber}");
+                sb.AppendLine();
+                sb.AppendLine("### CURRENT FILE CONTENT ###");
+                sb.AppendLine(fileContent ?? (isVirtual ? "(virtual step — no file)" : "(file does not exist yet — this step may create it)"));
+                user = sb.ToString();
+            }
+            else
+            {
+                header = $"VERIFICATION THINKING — AFTER STEP {stepIndex + 1}";
+                system = "You are the verification engine of an autonomous coding agent. A plan step just executed. " +
+                    "Read the PREVIOUS STEPS' THINKING and the CURRENT FILE CONTENT, then produce VERBOSE verification " +
+                    "thinking in plain prose. This thinking is appended to the run's working memory for later steps.\n" +
+                    "Rules:\n" +
+                    "- Write in first person, like a senior engineer reviewing their own just-applied edit.\n" +
+                    "- Check: did the change land exactly as intended? Is anything broken — unbalanced braces, missing or " +
+                    "duplicated code, wrong indentation, leftover references, broken call sites?\n" +
+                    "- Compare against what earlier steps' thinking expected from this step. Note anything promised but not delivered.\n" +
+                    "- End with a short 'NEXT STEP NOTE:' section — 1 to 3 concrete facts the next step must know.\n" +
+                    "- Output ONLY the thinking prose. No JSON, no markdown fences, no code blocks.";
+                var sb = new StringBuilder();
+                sb.AppendLine("Produce your verification thinking for the step that just executed.");
+                sb.AppendLine();
+                sb.AppendLine("### STEP JUST EXECUTED ###");
+                sb.AppendLine($"step {stepIndex + 1}, file: {file}");
+                sb.AppendLine($"change: {step.Change}");
+                if (!string.IsNullOrWhiteSpace(editSummary))
+                    sb.AppendLine($"edit applied: {editSummary}");
+                sb.AppendLine();
+                sb.AppendLine("### PREVIOUS STEPS' THINKING ###");
+                sb.AppendLine(string.IsNullOrWhiteSpace(previous) ? "(none)" : previous);
+                sb.AppendLine();
+                sb.AppendLine("### CURRENT FILE CONTENT ###");
+                sb.AppendLine(fileContent ?? "(file missing or not a real file)");
+                user = sb.ToString();
+            }
+
+            var (raw, error) = await CallLlmRawText(system, user, emitSse, ct,
+                requestTimeout: _infiniteTimeout,
+                maxTokens: GetThinkingTokenCap(
+                    _complexityScores.TryGetValue(cardId ?? "", out var cs) ? cs : 100,
+                    Math.Clamp((await LoadConfigAsync()).thinkingMaxTokens, 256, 16384)));
+            if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn",
+                    $"{(postVerification ? "Verification" : "Extended")} thinking skipped for step {stepIndex + 1}: {error ?? "empty response"}",
+                    ct: ct);
+                return null;
+            }
+            var cleaned = CapThinking(raw);
+            if (cleaned.Length < 20)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"{(postVerification ? "Verification" : "Extended")} thinking produced no usable text for step {stepIndex + 1}",
+                    ct: ct);
+                return null;
+            }
+            if (emitSse)
+                await SendSse(Response, "step-thinking", new
+                {
+                    text = cleaned,
+                    stepIndex,
+                    description = step.Change,
+                    phase = postVerification ? "verify" : "think"
+                }, ct);
+            await EmitLog(emitSse, "info",
+                $"🧠 {(postVerification ? "Post-step verification" : "Extended thinking")} — step {stepIndex + 1}: {TruncateForLog(step.Change, 90)} ({cleaned.Length} chars)",
+                ct: ct);
+            lock (log)
+            {
+                log.AppendLine();
+                log.AppendLine($"### {header} ###");
+                log.AppendLine(cleaned);
+            }
+            return cleaned;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn",
+                $"{(postVerification ? "Verification" : "Extended")} thinking error for step {stepIndex + 1}: {ex.Message}",
+                ct: ct);
+            return null;
+        }
+    }
     private async Task ExecutePlan(
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
         string? steeringContext = null, List<string>? attachedFiles = null,
         HashSet<int>? completedStepIndices = null, string? cardId = null,
-        int[]? replanBudget = null)
+        int[]? replanBudget = null,
+        Func<string, Task>? onActivity = null)
     {
         var stepIndex = 0;
         var planItems = plan.Plan.ToList();
@@ -11426,6 +11731,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         for (var itemIdx = 0; itemIdx < planItems.Count; itemIdx++)
         {
             ct.ThrowIfCancellationRequested();
+            if (onActivity != null)
+            {
+                try { await onActivity("executing"); } catch { }
+            }
             var item = planItems[itemIdx];
             if (completedStepIndices.Contains(itemIdx))
             {
@@ -11467,6 +11776,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             var planFile = item.File;
             var changeDesc = item.Change;
+            if (ShouldExtendThinkForStep(planFile))
+            {
+                var thinkCfg = await LoadConfigAsync();
+                if (thinkCfg.extendThinking)
+                {
+                    try
+                    {
+                        await ExtendThinkingAsync(cardId, itemIdx, item, projectRoot, emitSse, ct);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        await EmitLog(emitSse, "warn", $"Extended thinking skipped: {ex.Message}", ct: ct);
+                    }
+                }
+            }
             if (planFile.Equals("_done", StringComparison.OrdinalIgnoreCase))
             {
                 await EmitLog(emitSse, "success", $"Task self-reported complete: {changeDesc}", ct: ct);
@@ -11647,6 +11972,44 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var contentToWrite = item.NewString ?? "";
                 try
                 {
+                    if (System.IO.File.Exists(newFileFullPath))
+                    {
+                        await EmitLog(emitSse, "error", $"Cannot create {newFileRelPath} — file already exists at that exact path. Convert this step to an edit of the existing file.", ct: ct);
+                        var existResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex,
+                            ["type"] = "create",
+                            ["status"] = "error",
+                            ["path"] = newFileRelPath,
+                            ["error"] = "File already exists — convert to an edit step",
+                            ["planItemIndex"] = itemIdx
+                        };
+                        if (emitSse) await SendSse(Response, "step", existResult, ct);
+                        allResults.Add(existResult);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        stepIndex++;
+                        continue;
+                    }
+                    var similarExistingFile = AgentUtilities.FindSimilarFiles(newFileRelPath, projectRoot)
+                        .FirstOrDefault(f => Path.GetFileName(f).Equals(Path.GetFileName(newFileRelPath), StringComparison.OrdinalIgnoreCase));
+                    if (similarExistingFile != null)
+                    {
+                        await EmitLog(emitSse, "error", $"Cannot create {newFileRelPath} — a file with the same name ALREADY EXISTS at '{similarExistingFile}'. Retarget to the existing file.", ct: ct);
+                        var dupResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex,
+                            ["type"] = "create",
+                            ["status"] = "error",
+                            ["path"] = newFileRelPath,
+                            ["error"] = $"Same-named file exists at {similarExistingFile} — retarget",
+                            ["planItemIndex"] = itemIdx
+                        };
+                        if (emitSse) await SendSse(Response, "step", dupResult, ct);
+                        allResults.Add(dupResult);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        stepIndex++;
+                        continue;
+                    }
                     Directory.CreateDirectory(Path.GetDirectoryName(newFileFullPath)!);
                     await System.IO.File.WriteAllTextAsync(newFileFullPath, contentToWrite, Encoding.UTF8, ct);
                     await EmitLog(emitSse, "success", $"Created {newFileRelPath} ({contentToWrite.Length} chars)", ct: ct);
@@ -11662,6 +12025,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (emitSse) await SendSse(Response, "step", createResult, ct);
                     allResults.Add(createResult);
                     await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                    var createCfg = await LoadConfigAsync();
+                    if (createCfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+                    {
+                        try
+                        {
+                            await ExtendThinkingAsync(cardId, itemIdx, item, projectRoot, emitSse, ct,
+                                postVerification: true,
+                                editSummary: $"created {newFileRelPath} ({contentToWrite.Length} chars)");
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex)
+                        {
+                            await EmitLog(emitSse, "warn", $"Post-step verification skipped: {ex.Message}", ct: ct);
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -11823,7 +12201,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     stepIndex = await ResolveAndApplyEdit(
                         item, projectRoot, emitSse, ct, allResults, stepIndex,
                         prompt: prompt, plan: plan, planItemIndex: itemIdx,
-                        cardId: cardId, attachedFiles: attachedFiles);
+                        cardId: cardId, attachedFiles: attachedFiles,
+                        onActivity: onActivity);
                     if (stepSig != null &&
                         (allResults.Count > prevCount &&
                          allResults[^1] is Dictionary<string, object?> lastResult &&
@@ -12087,6 +12466,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 planFile, currentContent, projectRoot, emitSse, ct);
                             await PersistCohesionToCardAsync(
                                 cardId, planFile, cohesionIssues, emitSse, ct);
+                        }
+                        var verifyCfg = await LoadConfigAsync();
+                        if (verifyCfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+                        {
+                            try
+                            {
+                                await ExtendThinkingAsync(cardId, itemIdx, item, projectRoot, emitSse, ct,
+                                    postVerification: true,
+                                    editSummary: TruncateForLog(appliedNewStr, 240));
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception ex)
+                            {
+                                await EmitLog(emitSse, "warn", $"Post-step verification skipped: {ex.Message}", ct: ct);
+                            }
                         }
                     }
                 }
@@ -13245,7 +13639,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             keepaliveCts.Cancel(); try { await keepaliveTask; } catch { }
             if (!string.IsNullOrWhiteSpace(req.CardId))
+            {
                 _cancelledSteps.TryRemove(req.CardId, out _);
+                _stepThinkingStore.TryRemove(req.CardId, out _);
+            }
         }
     }
     [HttpGet("questions/pending")]
@@ -13780,6 +14177,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         Dictionary<string, string>? contentCache = null)
     {
         var rawPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
+        if (rawPath.StartsWith("_edit" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            rawPath = rawPath[6..];
         var isAbs = rawPath.Contains(":\\") || rawPath.StartsWith('/') || rawPath.StartsWith('\\');
         var targetPath = isAbs ? Path.GetFullPath(rawPath) : Path.GetFullPath(Path.Combine(projectRoot, rawPath));
         if (!isAbs && !AgentUtilities.IsPathUnderRoot(targetPath, projectRoot))
@@ -14262,7 +14661,9 @@ Respond with JSON only:
         if (CodeFormatterService.CanFormat(relPath))
         {
             var before = fullContent;
-            fullContent = await CodeFormatterService.FormatAsync(relPath, fullContent, ct);
+            var jsLike = fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs";
+            if (!jsLike)
+                fullContent = await CodeFormatterService.FormatAsync(relPath, fullContent, ct);
             if (fullContent != before)
                 await EmitLog(emitSse, "info",
                     $"Formatted full file in {relPath} via CodeFormatterService", ct: ct);

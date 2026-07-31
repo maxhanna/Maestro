@@ -31,6 +31,7 @@ public class FrontendConfig
     public bool showIDE { get; set; } = true;
     public bool showKanban { get; set; } = true;
     public bool showCalendar { get; set; } = false;
+    public bool showNotes { get; set; } = false;
     public bool prByDefault { get; set; } = false;
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";
@@ -58,6 +59,8 @@ public class FrontendConfig
     public List<string> enabledTools { get; set; } = new();
     public bool includeProjectSkeleton { get; set; } = false;
     public bool includeEditKnowledge { get; set; } = false;
+    public bool extendThinking { get; set; } = true;
+    public int thinkingMaxTokens { get; set; } = 4096;
     public bool useVSCodeInsteadOfIDE { get; set; } = false;
     public string ideTheme { get; set; } = "weaver-dark";
 }

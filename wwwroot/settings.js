@@ -193,6 +193,9 @@ angular.module('kanbanApp')
                             if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
                             if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
                             if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
+                            if (typeof cfg.showCalendar === 'boolean') vm.showCalendar = cfg.showCalendar;
+                            if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
+                            if (typeof cfg.showNotes === 'boolean') vm.showNotes = cfg.showNotes;
                             if (typeof cfg.useVSCodeInsteadOfIDE === 'boolean') vm.useVSCodeInsteadOfIDE = cfg.useVSCodeInsteadOfIDE;
                             if (typeof cfg.ideTheme === 'string') vm.ideTheme = cfg.ideTheme;
                             if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
@@ -211,6 +214,8 @@ angular.module('kanbanApp')
                             vm.defaultMaxTokens = typeof cfg.defaultMaxTokens === 'number' ? cfg.defaultMaxTokens : 2048;
                             vm.includeProjectSkeleton = cfg.includeProjectSkeleton === true;
                             vm.includeEditKnowledge = cfg.includeEditKnowledge === true;
+                            vm.extendThinking = cfg.extendThinking !== false;
+                            vm.thinkingMaxTokens = typeof cfg.thinkingMaxTokens === 'number' ? cfg.thinkingMaxTokens : 4096;
 
                             vm.enabledTools = cfg.enabledTools || [];
                             vm.toolList.forEach(function (t) { t.enabled = vm.enabledTools.length === 0 || vm.enabledTools.indexOf(t.key) !== -1; });
@@ -257,6 +262,9 @@ angular.module('kanbanApp')
                         cfg.defaultMaxTokens = vm.defaultMaxTokens || 2048;
                         cfg.includeProjectSkeleton = vm.includeProjectSkeleton === true;
                         cfg.includeEditKnowledge = vm.includeEditKnowledge === true;
+                        cfg.extendThinking = vm.extendThinking === true;
+                        cfg.thinkingMaxTokens = vm.thinkingMaxTokens || 4096;
+                        cfg.showNotes = vm.showNotes === true;
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
                         cfg.ideTheme = vm.ideTheme || 'weaver-dark';
                         cfg.emailAccounts = vm.emailAccounts.map(function (a) { return { imapServer: a.imapServer, imapPort: a.imapPort, useSsl: a.useSsl, username: a.username, password: a.password, label: a.label }; });
@@ -332,7 +340,20 @@ angular.module('kanbanApp')
 
                 vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
                 vm.closeOptionsOnBlur = function (event) { $timeout(function () { vm.showProjectOptions = false; $timeout(function () { vm.saveSettings(true); }, 300); }, 300); };
-                vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); };
+                vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); vm.loadNotes(); };
+                vm.loadNotes = function () {
+                    $http.get('/api/notes', { params: { project: vm.selectedProject } }).then(function (resp) {
+                        vm.notesContent = (resp.data && resp.data.content) || '';
+                        vm.notesDirty = false;
+                    }, function () { vm.notesContent = vm.notesContent || ''; vm.notesDirty = false; });
+                };
+                vm.saveNotes = function () {
+                    if (!vm.selectedProject) return;
+                    $http.post('/api/notes', { project: vm.selectedProject, content: vm.notesContent || '' }).then(function () {
+                        vm.notesDirty = false;
+                        pushAgentLog && pushAgentLog(vm, 'log', '📝 Notes saved for ' + vm.selectedProject);
+                    }, function (err) { $window.alert('Failed to save notes: ' + (err.data || err.statusText || err)); });
+                };
                 vm.openEditProjectsPanel = function () { vm.newProjectName = ''; vm.newProjectPath = ''; vm.newProjectDescription = ''; vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.projects.forEach(function (p) { p._origPath = p.Path; }); vm.showEditProjectsPanel = true; };
                 vm.closeEditProjectsPanel = function () { vm.saveSettings(true); vm.showEditProjectsPanel = false; };
                 vm.addProjectFromPanel = function () {

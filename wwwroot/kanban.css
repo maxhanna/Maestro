@@ -384,6 +384,14 @@ body.dragging-active .card:hover {
     color: #fbbf24;
 }
 
+.log-entry.think {
+    color: #7dd3fc;
+}
+
+.log-entry.think summary {
+    color: #7dd3fc;
+}
+
 .log-entry-body {
     padding: 2px 0 2px 12px;
 }

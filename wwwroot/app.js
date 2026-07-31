@@ -8,11 +8,11 @@ angular.module('kanbanApp', [])
   })
   .controller('MainCtrl', [
     '$http', '$interval', '$window', '$scope', '$timeout',
-    'KanbanMixin', 'CalendarMixin', 'IDEMixin',
+    'KanbanMixin', 'CalendarMixin', 'IDEMixin', 'NotesMixin',
     'SettingsMixin', 'BugHostedMixin', 'TerminalMixin',
     'AgentMixin', 'FilePickerMixin',
     function ($http, $interval, $window, $scope, $timeout,
-      KanbanMixin, CalendarMixin, IDEMixin,
+      KanbanMixin, CalendarMixin, IDEMixin, NotesMixin,
       SettingsMixin, BugHostedMixin, TerminalMixin,
       AgentMixin, FilePickerMixin) {
 
@@ -131,6 +131,7 @@ angular.module('kanbanApp', [])
       KanbanMixin.init(vm, $scope);
       CalendarMixin.init(vm, $scope);
       IDEMixin.init(vm, $scope);
+      NotesMixin.init(vm, $scope);
       TerminalMixin.init(vm, $scope);
       FilePickerMixin.init(vm, $scope);
       AgentMixin.init(vm, $scope);
