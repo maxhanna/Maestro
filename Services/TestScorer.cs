@@ -20,6 +20,14 @@ public static class TestScorer
     static readonly HashSet<string> PassedStatuses =
         new(StringComparer.OrdinalIgnoreCase) { "done", "created", "modified" };
 
+    // Step types counted by the edit-outcome scorer (mirrors agent.js's countEditsFromSteps).
+    static readonly HashSet<string> EditStepTypes =
+        new(StringComparer.OrdinalIgnoreCase) { "edit", "create", "rename" };
+    static readonly HashSet<string> EditSuccessStatuses =
+        new(StringComparer.OrdinalIgnoreCase) { "done", "applied", "created" };
+    static readonly HashSet<string> EditFailureStatuses =
+        new(StringComparer.OrdinalIgnoreCase) { "error", "rejected" };
+
     // Step dict "origin" values that disqualify the noReplan gate.
     static readonly HashSet<string> NonPlanOrigins =
         new(StringComparer.OrdinalIgnoreCase) { "replan", "repair" };
@@ -102,6 +110,20 @@ public static class TestScorer
             ? filesEdited.All(f => allowed.Any(pattern => GlobMatch(f, pattern)))
             : (bool?)null;
 
+        var successfulEdits = stepResults.Count(d =>
+            EditStepTypes.Contains(Str(d, "type") ?? "") && EditSuccessStatuses.Contains(Str(d, "status") ?? ""));
+        var failedEdits = stepResults.Count(d =>
+            EditStepTypes.Contains(Str(d, "type") ?? "") && EditFailureStatuses.Contains(Str(d, "status") ?? ""));
+        var totalEditAttempts = successfulEdits + failedEdits;
+        // Rewards a clean run: successful edits count double when nothing failed.
+        var points = successfulEdits + (totalEditAttempts > 0 && failedEdits == 0 ? successfulEdits : 0);
+        var editScorePercent = totalEditAttempts > 0
+            ? Math.Round(100.0 * successfulEdits / totalEditAttempts, 1)
+            : 0;
+        var editStatus = totalEditAttempts == 0 ? "failed"
+            : failedEdits == 0 ? "completed"
+            : successfulEdits > 0 ? "partial" : "failed";
+
         var gates = new TestGateResults
         {
             // Every "command" step type is routed through TerminalService's approval
@@ -126,6 +148,11 @@ public static class TestScorer
             FailureReason = failureReason,
             CodeFile = codeFile,
             WrittenTests = writtenTests,
+            SuccessfulEdits = successfulEdits,
+            FailedEdits = failedEdits,
+            Points = points,
+            EditScorePercent = editScorePercent,
+            Status = editStatus,
             Machine = machine,
             WeaverVersion = weaverVersion,
             RunAt = DateTimeOffset.UtcNow,

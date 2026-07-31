@@ -27,6 +27,7 @@ public partial class AgentController : ControllerBase
     private readonly BoardDataService _boardData;
     private readonly EditKnowledgeService _editKnowledge;
     private readonly PushNotificationService _push;
+    private readonly BenchmarkService _benchmark;
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
     private async Task<FrontendConfig> LoadConfigAsync()
@@ -55,6 +56,7 @@ public partial class AgentController : ControllerBase
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
         _boardData = boardData; _push = push;
         var weaverDataDir = Path.Combine(_env.ContentRootPath, "data");
+        _benchmark = new BenchmarkService(weaverDataDir);
         _editKnowledge = new EditKnowledgeService(
             weaverDataDir,
             llmCaller: async (sys, usr, ct) =>
@@ -1017,7 +1019,7 @@ public partial class AgentController : ControllerBase
             var escalationLevel = EscalationStateMachine.Level(history.Count - 1);
             EscalationStateMachine.AppendEscalationDirective(
                 sb, escalationLevel, editStrategy, ext,
-                fileContent ?? "", step.Change ?? "", 0,
+                fileContent, step.Change ?? "", 0,
                 cfg5.maxFullFileTokens * 4);
         }
         sb.AppendLine();
@@ -1136,12 +1138,12 @@ public partial class AgentController : ControllerBase
             var jRoot = jDoc.RootElement;
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
             {
-                var (verdict, _) = PreEditValidation(fileContent ?? "", step);
+                var (verdict, _) = PreEditValidation(fileContent, step);
                 if (verdict == PreEditVerdict.AlreadyDone)
                 {
                     return (null, null, false, null, true, null, false);
                 }
-                var contentLower = (fileContent ?? "").ToLowerInvariant();
+                var contentLower = fileContent.ToLowerInvariant();
                 var stopWords = new HashSet<string> {
                     "the", "and", "for", "with", "that", "this", "from", "into", "file",
                     "method", "function", "code", "step", "create", "modify", "update",
@@ -8926,7 +8928,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await PersistMetaPlanToCardAsync(cardId, result, emitSse, ct);
         return result;
     }
-    private async Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isBenchmark)> LoadPlanFromBoardDataAsync(string? cardId)
+    // internal so tests can assert the board-data JSON contract directly: the frontend
+    // writes card.benchmark = { presetLevel: N } and this must detect it. It previously
+    // read a differently-named card._benchmark flag, and a mismatch here fails silently
+    // — the card just loses its sandbox and ephemeral cleanup.
+    internal async Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isLadderPreset)> LoadPlanFromBoardDataAsync(string? cardId)
     {
         if (string.IsNullOrWhiteSpace(cardId))
             return (null, null, false);
@@ -8946,7 +8952,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
                         continue;
-                    var isBenchmark = cardObj["_benchmark"]?.GetValue<bool>() ?? false;
+                    var isLadderPreset = cardObj["benchmark"] is JsonObject cardBenchmark
+                        && cardBenchmark["presetLevel"] != null;
                     if (cardObj["_plan"] is not JsonObject planObj)
                         continue;
                     var itemsArr = planObj["items"] as JsonArray;
@@ -8971,13 +8978,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var done = si["done"]?.GetValue<bool>() ?? false;
                         if (done) completed.Add(idx);
                     }
-                    if (steps.Count == 0) return (null, null, isBenchmark);
+                    if (steps.Count == 0) return (null, null, isLadderPreset);
                     var plan = new AgentPlan
                     {
                         Summary = planObj["summary"]?.GetValue<string>() ?? "",
                         Plan = steps
                     };
-                    return (plan, completed.Count > 0 ? completed : null, isBenchmark);
+                    return (plan, completed.Count > 0 ? completed : null, isLadderPreset);
                 }
             }
         }
@@ -13369,19 +13376,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(true, "info", "Agent started", new { projectRoot, task = req.Prompt });
             AgentPlan? existingPlan = null;
             HashSet<int>? completedIndices = null;
-            bool isBenchmark = req.IsBenchmark;
+            bool isLadderPreset = req.Benchmark?.PresetLevel != null;
             if (!string.IsNullOrWhiteSpace(req.CardId))
             {
-                var (loadedPlan, loadedCompleted, loadedBenchmark) = await LoadPlanFromBoardDataAsync(req.CardId);
+                var (loadedPlan, loadedCompleted, loadedLadderPreset) = await LoadPlanFromBoardDataAsync(req.CardId);
                 existingPlan = loadedPlan;
                 completedIndices = loadedCompleted;
-                if (loadedBenchmark) isBenchmark = true;
+                if (loadedLadderPreset) isLadderPreset = true;
             }
-            if (isBenchmark)
+            if (isLadderPreset)
             {
-                projectRoot = !string.IsNullOrWhiteSpace(req.BenchmarkProjectRoot)
-                    ? Path.GetFullPath(req.BenchmarkProjectRoot)
-                    : AgentUtilities.GetBenchmarkSandboxPath();
+                projectRoot = AgentUtilities.GetBenchmarkSandboxPath();
                 await EmitLog(true, "info", "Benchmark sandbox active", new { sandbox = projectRoot });
                 await SendSse(Response, "phase", new { phase = "sandbox", sandbox = projectRoot }, ct: Response.HttpContext.RequestAborted);
             }
@@ -13428,9 +13433,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     $"📊 Test '{testResult.TestName}': score {testResult.Score} " +
                     $"({testResult.StepsPassed}/{testResult.TotalSteps} steps, " +
                     $"{(testResult.Passed ? "PASS" : "FAIL")})");
+
+                // Local history always gets written — offline-friendly, no BugHosted
+                // dependency. Sharing to the BugHosted leaderboard is opt-in and stays
+                // client-driven (POST /api/bughosted/addbenchmark), since that call needs
+                // the user's logged-in BugHosted session, which lives in BughostedController.
+                try { _benchmark.SaveTestResult(testResult); }
+                catch (Exception saveEx) { await EmitLog(true, "warn", "Failed to save local test result: " + saveEx.Message); }
             }
 
-            if (isBenchmark)
+            if (isLadderPreset)
             {
                 var anyStepsAttempted = allSteps.OfType<Dictionary<string, object?>>()
                     .Any(s => s.TryGetValue("type", out var t) &&

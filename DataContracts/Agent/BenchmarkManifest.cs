@@ -18,6 +18,12 @@ public class BenchmarkManifest
 
     /// <summary>Repeat count for determinism measurement (Phase 4a leaderboard aggregates a rate).</summary>
     public int Runs { get; set; } = 1;
+
+    /// <summary>When set, this card is a canned benchmark-ladder run (see
+    /// BenchmarkService.GetBenchmarkPlans()) rather than a hand-authored test card.
+    /// The orchestrator resolves the prompt/sandbox from this level instead of the
+    /// card's own text.</summary>
+    public int? PresetLevel { get; set; }
 }
 
 /// <summary>Formatting oracle configuration for the <c>formattingClean</c> gate.</summary>

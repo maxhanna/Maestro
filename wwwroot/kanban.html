@@ -29,6 +29,8 @@
       <h3>
         <span class="col-header">📋 To Do <span class="col-badge">{{vm.cardsForProject('todo').length}}</span></span>
         <button class="small ghost" ng-click="vm.addCard('todo')" title="Add card">＋</button>
+        <button class="small ghost" ng-click="vm.loadSampleCards()"
+          title="Add the starter and advanced benchmark test cards">🧪 Samples</button>
       </h3>
       <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}"
         ondragover="event.preventDefault()">
@@ -206,7 +208,7 @@
           </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
-            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+            <span class="card-tag tag-bench" ng-if="vm.isLadderCard(card)" style="color:#e5c07b;font-weight:700;" title="Benchmark-ladder preset run">LADDER</span>
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
@@ -218,6 +220,14 @@
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create tests for the code changes">
               <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
+            </label>
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
+              title="Test/benchmark card — scores how far the agent gets through this card's steps and reports to the Test Score Card. Distinct from the TEST toggle above, which auto-creates unit tests for the code change.">
+              <input type="checkbox" ng-model="card.isTest" ng-change="vm.saveCardText(card)" /> SCORE
+            </label>
+            <label class="card-tag pr-toggle" ng-if="card.isTest" ng-click="$event.stopPropagation()"
+              title="Upload this run's score to the shared BugHosted leaderboard once it finishes. Off by default — local history is always saved regardless.">
+              <input type="checkbox" ng-model="card.shareToBugHosted" ng-change="vm.saveCardText(card)" /> SHARE
             </label>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
@@ -239,7 +249,7 @@
             <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
               title="Split into smaller tasks">✂ Split</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card"
-              ng-if="!card._benchmark || vm.activeCardId === card.id">✕ Delete</button>
+              ng-if="!vm.isLadderCard(card) || vm.activeCardId === card.id">✕ Delete</button>
           </div>
           <!-- Previous analysis on returned Todo cards -->
           <div class="card-analysis previous-analysis" ng-if="card.agentAnalysis">
@@ -496,7 +506,7 @@
           </div>
 
           <div class="card-tags">
-            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+            <span class="card-tag tag-bench" ng-if="vm.isLadderCard(card)" style="color:#e5c07b;font-weight:700;" title="Benchmark-ladder preset run">LADDER</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
             <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
               SELF-IMPROVING</span>
@@ -669,12 +679,12 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'doing','done')"
+            <button ng-if="!vm.isLadderCard(card)" ng-click="vm.moveCard(card.id,'doing','done')"
               class="{{vm.isCardActive(card.id) ? 'ghost' : 'success'}} small"
               title="{{vm.isCardActive(card.id) ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.isCardActive(card.id)">✔ Done</button>
             <button 
-              ng-if="card._benchmark" 
+              ng-if="vm.isLadderCard(card)" 
               ng-click="vm.deleteCard(card.id, 'doing')"
               class="small {{ vm.isCardActive(card.id) ? 'ghost' : '' }}"  
               ng-style="{'color': vm.isCardActive(card.id) ? '' : '#e5c07b' }" 
@@ -686,7 +696,7 @@
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost"
               title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}"
-              ng-disabled="vm.activeCardId === card.id" ng-if="!card._benchmark || vm.activeCardId === card.id">✕
+              ng-disabled="vm.activeCardId === card.id" ng-if="!vm.isLadderCard(card) || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>
@@ -828,7 +838,7 @@
           </div>
 
           <div class="card-tags">
-            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+            <span class="card-tag tag-bench" ng-if="vm.isLadderCard(card)" style="color:#e5c07b;font-weight:700;" title="Benchmark-ladder preset run">LADDER</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
               title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
@@ -952,13 +962,13 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'done','todo')" class="small">←
+            <button ng-if="!vm.isLadderCard(card)" ng-click="vm.moveCard(card.id,'done','todo')" class="small">←
               Reopen</button>
-            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'done')" class="small"
+            <button ng-if="vm.isLadderCard(card)" ng-click="vm.deleteCard(card.id, 'done')" class="small"
               style="color:#e5c07b;">🗑 Delete</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card"
-              ng-if="!card._benchmark || vm.activeCardId === card.id">✕
+              ng-if="!vm.isLadderCard(card) || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>

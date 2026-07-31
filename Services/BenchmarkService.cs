@@ -1,6 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using Weaver;
 
 namespace Weaver.Services;
 
@@ -8,11 +9,16 @@ public class BenchmarkService
 {
     private readonly string _scoresPath;
     private readonly string _systemInfoPath;
+    private readonly string _testResultsPath;
 
     public BenchmarkService(string weaverDataDir)
     {
         _scoresPath = Path.Combine(weaverDataDir, "benchmark_scores.json");
         _systemInfoPath = Path.Combine(weaverDataDir, "system_info.json");
+        // Separate from the legacy benchmark_scores.json (points/percent/status only) —
+        // this stores the full TestRunResult (gates, machine detail, edit + progress
+        // scores) shared by both hand-authored test cards and the benchmark ladder.
+        _testResultsPath = Path.Combine(weaverDataDir, "test_results.json");
     }
 
     public static SystemInfo DetectSystemInfo()
@@ -189,6 +195,55 @@ public class BenchmarkService
             WriteIndented = true
         });
         System.IO.File.WriteAllText(_scoresPath, json, Encoding.UTF8);
+    }
+
+    public List<TestRunResult> LoadTestResults()
+    {
+        try
+        {
+            if (!System.IO.File.Exists(_testResultsPath))
+                return new List<TestRunResult>();
+            var raw = System.IO.File.ReadAllText(_testResultsPath, Encoding.UTF8);
+            if (string.IsNullOrWhiteSpace(raw))
+                return new List<TestRunResult>();
+            return JsonSerializer.Deserialize<List<TestRunResult>>(raw, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            }) ?? new List<TestRunResult>();
+        }
+        catch
+        {
+            return new List<TestRunResult>();
+        }
+    }
+
+    public void SaveTestResult(TestRunResult result)
+    {
+        var results = LoadTestResults();
+        results.Add(result);
+        WriteTestResults(results);
+    }
+
+    public bool DeleteTestResult(string id)
+    {
+        var results = LoadTestResults();
+        var removed = results.RemoveAll(r => r.Id == id);
+        if (removed == 0)
+            return false;
+        WriteTestResults(results);
+        return true;
+    }
+
+    private void WriteTestResults(List<TestRunResult> results)
+    {
+        var dir = Path.GetDirectoryName(_testResultsPath);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+        var json = JsonSerializer.Serialize(results, new JsonSerializerOptions
+        {
+            WriteIndented = true
+        });
+        System.IO.File.WriteAllText(_testResultsPath, json, Encoding.UTF8);
     }
 
     public static BenchmarkPlanDefinition GetPlanForDifficulty(int level)

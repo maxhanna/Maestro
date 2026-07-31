@@ -28,6 +28,22 @@ public class TestRunResult
     /// <summary>Files that look like test files the agent wrote.</summary>
     public List<string> WrittenTests { get; set; } = new();
 
+    /// <summary>Short id for local history rows (leaderboard/delete lookups).</summary>
+    public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
+
+    /// <summary>Successful edit/create/rename steps. Absorbed from the client-side
+    /// benchmark-ladder scorer so both entry points share one server-computed number.</summary>
+    public int SuccessfulEdits { get; set; }
+    /// <summary>Failed/rejected edit/create/rename steps.</summary>
+    public int FailedEdits { get; set; }
+    /// <summary>successful + (successful again, if zero failures) — rewards a clean run.</summary>
+    public int Points { get; set; }
+    /// <summary>0-100, successful / (successful + failed) edit attempts. Distinct from
+    /// <see cref="Score"/>, which measures plan-step progress rather than edit outcomes.</summary>
+    public double EditScorePercent { get; set; }
+    /// <summary>"completed" | "partial" | "failed" — coarse status for a leaderboard row.</summary>
+    public string Status { get; set; } = "";
+
     public EnvironmentMetadata Machine { get; set; } = new();
     public string WeaverVersion { get; set; } = "";
 

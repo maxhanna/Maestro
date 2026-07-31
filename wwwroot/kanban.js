@@ -15,6 +15,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
     init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
       vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
+      // Ephemeral benchmark-ladder run (vm.startBenchmark) — created, scored, then
+      // removed automatically, so it skips the normal move/delete card affordances
+      // that a persistent hand-authored isTest card keeps.
+      vm.isLadderCard = function (card) { return !!(card && card.benchmark && card.benchmark.presetLevel != null); }
       vm.findCardById = function (cardId) {
         if (!cardId || !vm.state) return null;
         try {
@@ -162,7 +166,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           attached: [],
           autoPr: vm.prByDefault !== false,
           selfImproving: false,
-          createTests: false
+          createTests: false,
+          isTest: false
         });
         vm.saveCards();
         $timeout(function () {
@@ -173,6 +178,65 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             if (textarea) textarea.focus();
           }
         }, 0);
+      };
+
+      // Phase 5 seed benchmark cards — see docs/test-benchmark-bughosted-contract.md.
+      // Self-contained (no dependency on the host project's existing code) so they
+      // can run against any project; each ships a `benchmark` manifest so all five
+      // perfect-pass gates are measurable.
+      var SAMPLE_TEST_CARDS = [
+        {
+          testName: 'starter-create-tests-md',
+          text: 'Create a `tests.md` file at the project root listing 3 test cases for a simple Calculator: Add, Subtract, and Divide-by-zero-throws. Then create `tests/Calculator.cs` with a minimal Calculator class implementing Add(int,int), Subtract(int,int), and Divide(int,int) (throwing DivideByZeroException when dividing by zero). Finally create `tests/CalculatorTests.cs` with xUnit tests covering all 3 cases listed in tests.md.',
+          benchmark: {
+            expectedSteps: 3,
+            allowedPaths: ['tests.md', 'tests/**'],
+            formatting: { mode: 'formatter', commands: { cs: 'dotnet format --verify-no-changes --include {file}' } },
+            runs: 1
+          }
+        },
+        {
+          testName: 'advanced-scaffold-from-readme',
+          text: 'Scaffold a small project from this README spec:\n\n# TodoCLI\nA command-line todo list manager.\n\n## Files to create\n- `todocli/TodoItem.cs` — a record with Id (int), Text (string), Done (bool)\n- `todocli/TodoStore.cs` — an in-memory List<TodoItem> with Add/List/Complete/Remove methods, persisted to `todocli/todos.json` on each change\n- `todocli/Program.cs` — a console entry point that parses `add <text>` / `list` / `done <id>` / `remove <id>` from args and calls TodoStore\n- `todocli/README.md` — usage instructions for the 4 commands above\n\nCreate exactly these 4 files implementing the spec above.',
+          benchmark: {
+            expectedSteps: 4,
+            allowedPaths: ['todocli/**'],
+            formatting: { mode: 'formatter', commands: { cs: 'dotnet format --verify-no-changes --include {file}' } },
+            runs: 1
+          }
+        }
+      ];
+
+      vm.loadSampleCards = function () {
+        var existingNames = []
+          .concat(vm.state.todo || [], vm.state.doing || [], vm.state.done || [])
+          .map(function (c) { return c.testName; });
+
+        var added = 0;
+        SAMPLE_TEST_CARDS.forEach(function (s) {
+          if (existingNames.indexOf(s.testName) !== -1) return;
+          vm.state.todo.push({
+            id: uid(),
+            text: s.text,
+            filePath: vm.selectedProject,
+            createdAt: new Date().toISOString(),
+            priority: 'medium',
+            attached: [],
+            autoPr: false,
+            selfImproving: false,
+            createTests: false,
+            isTest: true,
+            testName: s.testName,
+            benchmark: s.benchmark
+          });
+          added++;
+        });
+
+        if (added > 0) {
+          vm.saveCards();
+        } else if (vm.pushAgentLog) {
+          vm.pushAgentLog('info', 'Sample benchmark cards are already on this board');
+        }
       };
 
       vm.clearDoneCards = function () {

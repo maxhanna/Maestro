@@ -78,4 +78,24 @@ public class BenchmarkController : ControllerBase
             return NotFound(new { message = "Score not found" });
         return Ok(new { message = "Score deleted" });
     }
+
+    /// <summary>Local history for both hand-authored test cards and benchmark-ladder
+    /// runs — the unified TestRunResult shape (score, gates, edit points, machine).</summary>
+    [HttpGet("test-results")]
+    public IActionResult GetTestResults()
+    {
+        var results = _benchmark.LoadTestResults();
+        return Ok(results.OrderByDescending(r => r.RunAt).ToList());
+    }
+
+    [HttpDelete("test-results/{id}")]
+    public IActionResult DeleteTestResult(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return BadRequest("Missing test result id");
+        var deleted = _benchmark.DeleteTestResult(id);
+        if (!deleted)
+            return NotFound(new { message = "Test result not found" });
+        return Ok(new { message = "Test result deleted" });
+    }
 }

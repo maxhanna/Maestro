@@ -122,7 +122,7 @@ angular.module('kanbanApp')
                             pushAgentLog(vm, 'info', isAutoRestart ? 'Agent restarting (' + (card._agentIteration || 0) + '/5)' : 'Agent started', { project: proj, task: card.text });
                             vm.activeCardText = card.text; vm._agentStartTime = Date.now();
                             var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-                            var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, buildCommands: vm.getProjectBuildCommands(proj) || null, isTest: card.isTest || false, testName: card.testName || card.text, benchmark: card.benchmark || null };
+                            var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, buildCommands: vm.getProjectBuildCommands(proj) || null, isTest: card.isTest || false, testName: card.testName || card.text, benchmark: card.benchmark || null, shareToBugHosted: card.shareToBugHosted || false };
 
                             vm.moveCardToDoing(card.id); vm.activeCardId = card.id; vm.activeCardIds.add(card.id);
                             var localAbortController = vm.abortController;
@@ -332,31 +332,19 @@ angular.module('kanbanApp')
                                                                     if (!allDone) { incomplete = true; pushAgentLog(vm, 'warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing'); }
                                                                 }
 
-                                                                function recordBenchmarkScore() {
-                                                                    if (!card._benchmark) return;
-                                                                    vm.benchmarkRunning = false; vm.benchmarkLevel = null;
-                                                                    var stepsForScoring = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
-                                                                    var editCounts = countEditsFromSteps(stepsForScoring);
-                                                                    var successful = editCounts.successful;
-                                                                    var failed = editCounts.failed;
-                                                                    var totalAttempts = successful + failed;
-                                                                    var points = successful + (totalAttempts > 0 && failed === 0 ? successful : 0);
-                                                                    var scorePercent = totalAttempts > 0 ? Math.round((successful / totalAttempts) * 1000) / 10 : 0;
-                                                                    var status = totalAttempts === 0 ? 'failed' : failed === 0 ? 'completed' : successful > 0 ? 'partial' : 'failed';
-                                                                    var bmElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
-                                                                    $http.post('/api/benchmark/save-score',
-                                                                        {
-                                                                            level: card._benchmarkLevel != null ? card._benchmarkLevel : 1,
-                                                                            successfulEdits: successful,
-                                                                            failedEdits: failed,
-                                                                            points: points,
-                                                                            scorePercent: scorePercent,
-                                                                            status: status,
-                                                                            modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
-                                                                            durationMs: bmElapsed,
-                                                                            errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || ''
-                                                                        }
-                                                                    );
+                                                                // The server (TestScorer) is the only scorer now — this just reacts to
+                                                                // the test_result SSE event already captured in vm.streamingTestResult,
+                                                                // instead of re-deriving points/percent/status from the step list here.
+                                                                var testIsLadderPreset = !!(card.benchmark && card.benchmark.presetLevel != null);
+                                                                function finalizeTestCard() {
+                                                                    if (!card.isTest) return;
+                                                                    if (testIsLadderPreset) { vm.benchmarkRunning = false; vm.benchmarkLevel = null; }
+
+                                                                    if (card.shareToBugHosted && vm.streamingTestResult) {
+                                                                        vm.sendTestResultToServer(vm.streamingTestResult);
+                                                                    }
+
+                                                                    if (!testIsLadderPreset) return;
                                                                     var bIdx = vm.state.todo.indexOf(card);
                                                                     if (bIdx < 0) { bIdx = vm.state.doing.indexOf(card); }
                                                                     if (bIdx < 0) { bIdx = vm.state.done.indexOf(card); }
@@ -374,7 +362,7 @@ angular.module('kanbanApp')
                                                                 function finishCard() {
                                                                     vm._agentStartTime = null;
                                                                     vm.agentTimer = null;
-                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
+                                                                    if (card.isTest && !incomplete) { finalizeTestCard(); if (testIsLadderPreset) return; }
                                                                     if (!incomplete) {
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
@@ -402,7 +390,7 @@ angular.module('kanbanApp')
                                                                     }
                                                                     if (incomplete && card.id === vm.activeCardId) {
                                                                         card._agentIteration = (card._agentIteration || 0) + 1; var MAX_ITERATIONS = 5;
-                                                                        if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(); return; } }
+                                                                        if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card.isTest) { finalizeTestCard(); if (testIsLadderPreset) return; } }
                                                                         else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
                                                                     $timeout(function () {
@@ -433,15 +421,11 @@ angular.module('kanbanApp')
                                                                 vm.activeCardId = null;
                                                                 vm.activeCardIds = new Set();
 
-                                                                if (card._benchmark) {
-                                                                    $http.post('/api/benchmark/save-score', {
-                                                                        level: card._benchmarkLevel != null ? card._benchmarkLevel : 1,
-                                                                        successfulEdits: 0, failedEdits: 0, points: 0,
-                                                                        scorePercent: 0, status: 'error',
-                                                                        modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
-                                                                        durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0,
-                                                                        errorReason: parsed ? parsed.message : data
-                                                                    });
+                                                                // A stream/connection-level error means the server never reached
+                                                                // TestScorer, so there's no TestRunResult to save — just clear the
+                                                                // ephemeral ladder-preset card so it doesn't linger on the board.
+                                                                if (card.isTest && card.benchmark && card.benchmark.presetLevel != null) {
+                                                                    vm.benchmarkRunning = false; vm.benchmarkLevel = null;
                                                                     var errIdx = vm.state.doing.indexOf(card);
                                                                     if (errIdx >= 0) {
                                                                         vm.state.doing.splice(errIdx, 1);
@@ -661,29 +645,20 @@ angular.module('kanbanApp')
                     });
                 };
 
-                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
+                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/test-results').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
+                // A ladder run is just an isTest card whose BenchmarkManifest carries a
+                // presetLevel — same execution/scoring path as a hand-authored test card,
+                // ephemeral only because finalizeTestCard() removes it once scored.
                 vm.startBenchmark = function (level) {
                     if (vm.benchmarkRunning || vm.streamingActive) return; vm.benchmarkRunning = true; vm.benchmarkLevel = level;
                     $http.get('/api/benchmark/plans').then(function (resp) {
                         var plan = (resp.data || []).find(function (p) { return p.level === level; });
                         if (!plan) return vm.benchmarkRunning = false;
-                        var card = { id: 'benchmark_' + level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', _benchmark: true, _benchmarkLevel: level, ready: true };
+                        var card = { id: 'benchmark_' + level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', isTest: true, testName: plan.name, benchmark: { presetLevel: level }, ready: true };
                         vm.state.todo.push(card); vm.saveCards(); vm.executeAgent(card); vm.closeBenchmarksPanel();
                     }).catch(function () { vm.benchmarkRunning = false; });
                 };
-
-                function countEditsFromSteps(steps) {
-                    if (!steps || !steps.length) return { successful: 0, failed: 0 };
-                    var successful = 0, failed = 0;
-                    steps.forEach(function (s) {
-                        if (s.type === 'edit' || s.type === 'create' || s.type === 'rename') {
-                            if (s.status === 'done' || s.status === 'applied' || s.status === 'created') successful++;
-                            else if (s.status === 'error' || s.status === 'rejected') failed++;
-                        }
-                    });
-                    return { successful: successful, failed: failed };
-                }
 
                 vm.formatBenchmarkDuration = function (durMs) {
                     if (durMs === null || durMs === undefined) return '';
@@ -691,41 +666,43 @@ angular.module('kanbanApp')
                     return (hours > 0 ? hours + 'h ' : '') + (minutes > 0 ? minutes + 'm ' : '') + seconds + 's';
                 }
 
-                vm.sendBenchmarkToServer = function (s) {
-                    if (!s || !s.id || vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]) return;
+                // Shares a TestRunResult (from the unified local store, or straight off
+                // vm.streamingTestResult right after a run) to the BugHosted leaderboard.
+                // Opt-in only — called automatically from finalizeTestCard() when a card
+                // has shareToBugHosted set, or manually via the Local Scores table button.
+                vm.sendTestResultToServer = function (r) {
+                    if (!r || !r.id || vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[r.id]) return;
                     vm._sendingBenchmarkIds = vm._sendingBenchmarkIds || {};
-                    vm._sendingBenchmarkIds[s.id] = true;
+                    vm._sendingBenchmarkIds[r.id] = true;
+                    var machine = r.machine || {};
                     var benchmarkDto = {
                         ClientId: vm.bughostedClientId,
                         Token: vm.bughostedClientId,
-                        Date: s.date,
-                        Benchmark: String(s.level ?? ''),
-                        Steps: String(s.successfulEdits ?? '') + "/" + String((s.successfulEdits || 0) + (s.failedEdits || 0)),
-                        Score: String(s.scorePercent ?? '0'),
-                        Status: String(s.status ?? ''),
-                        Duration: s.durationMs ? String(s.durationMs) : '0',
-                        Model: String(s.modelUsed ?? ''),
-                        OS: String(vm.systemInfoCustom.os || vm.systemInfoDetected.os || ''),
-                        CPU: String(vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || ''),
-                        RAM: String(vm.systemInfoCustom.ramGb || vm.systemInfoDetected.ramBytes || ''),
-                        GPU: String(vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '')
+                        Date: r.runAt,
+                        Benchmark: String(r.testName || ''),
+                        Steps: String(r.successfulEdits ?? '') + "/" + String((r.successfulEdits || 0) + (r.failedEdits || 0)),
+                        Score: String(r.score ?? '0'),
+                        Status: String(r.status ?? ''),
+                        Duration: '0',
+                        Model: String((r.model && r.model.name) || ''),
+                        OS: String(machine.os || vm.systemInfoCustom.os || vm.systemInfoDetected.os || ''),
+                        CPU: String(machine.cpu || vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || ''),
+                        RAM: String(machine.ramBytes || vm.systemInfoCustom.ramGb || vm.systemInfoDetected.ramBytes || ''),
+                        GPU: String(machine.gpu || vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '')
                     };
 
                     $http.post('/api/bughosted/addbenchmark', benchmarkDto)
                         .then(function (response) {
-                            console.log('Successfully sent benchmark to server:', response.data);
-                            alert('Benchmark successfully sent to BugHosted!');
+                            console.log('Successfully sent test result to server:', response.data);
+                            if (vm.showSideToast) vm.showSideToast('Shared to BugHosted leaderboard');
                         })
                         .catch(function (error) {
-                            console.error('Error sending benchmark to server:', error);
-                            if (error && error.message) {
-                                alert('Failed to send benchmark. Error details:\n' + error.message);
-                            } else {
-                                alert('Failed to send benchmark due to an unknown error.');
-                            }
+                            console.error('Error sending test result to server:', error);
+                            var msg = (error && error.message) || 'unknown error';
+                            pushAgentLog(vm, 'warn', 'Failed to share result to BugHosted: ' + msg);
                         })
                         .finally(function () {
-                            delete vm._sendingBenchmarkIds[s.id];
+                            delete vm._sendingBenchmarkIds[r.id];
                         });
                 };
                 vm.msToDigitalTime = function (ms) {
@@ -751,7 +728,7 @@ angular.module('kanbanApp')
                 };
                 vm.saveSystemInfo = function () { $http.post('/api/benchmark/system-info', vm.systemInfoCustom).then(function () { vm.systemInfoSaved = true; $timeout(function () { vm.systemInfoSaved = false; }, 2000); }); };
                 vm.resetSystemInfo = function () { vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: '' }; vm.saveSystemInfo(); };
-                vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); }).catch(function () { }); };
+                vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/test-results/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); }).catch(function () { }); };
             }
         };
     }]);

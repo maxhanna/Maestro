@@ -1402,12 +1402,12 @@
           <thead>
             <tr style="border-bottom:1px solid var(--border);">
               <th style="text-align:left;padding:4px 8px;">Date</th>
-              <th style="text-align:left;padding:4px 8px;">Benchmark</th>
+              <th style="text-align:left;padding:4px 8px;">Test</th>
               <th style="text-align:left;padding:4px 8px;">Edits</th>
               <th style="text-align:left;padding:4px 8px;">Points</th>
-              <th style="text-align:left;padding:4px 8px;">%</th>
+              <th style="text-align:left;padding:4px 8px;">Score</th>
+              <th style="text-align:left;padding:4px 8px;">Gates</th>
               <th style="text-align:left;padding:4px 8px;">Status</th>
-              <th style="text-align:left;padding:4px 8px;">Duration</th>
               <th style="text-align:left;padding:4px 8px;">Model</th>
               <th style="width:24px;"></th>
             </tr>
@@ -1415,22 +1415,22 @@
           <tbody>
             <tr ng-repeat="s in vm.benchmarkScores" style="border-bottom:1px solid var(--border);cursor:pointer;"
               ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
-              <td style="padding:4px 8px;font-size:12px;" title="{{s.timestamp | date:'short'}}">{{s.timestamp | date:'short'}}</td>
-              <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
+              <td style="padding:4px 8px;font-size:12px;" title="{{s.runAt | date:'short'}}">{{s.runAt | date:'short'}}</td>
+              <td style="padding:4px 8px;">{{s.testName}}</td>
               <td style="padding:4px 8px;font-size:11px;">
                 <span style="color:var(--success);">{{s.successfulEdits || 0}} ok</span>
                 <span ng-if="s.failedEdits" style="color:var(--danger);"> / {{s.failedEdits}} fail</span>
               </td>
               <td style="padding:4px 8px;font-weight:700;">{{s.points || 0}}</td>
-              <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
-              <td style="padding:4px 8px;">{{s.status}}</td>
-              <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>
-              <td style="padding:4px 8px;font-size:11px;max-width:20%" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}
+              <td style="padding:4px 8px;" title="{{s.stepsPassed}}/{{s.totalSteps}} plan steps">{{s.score}}/100</td>
+              <td style="padding:4px 8px;" title="{{s.perfectPass ? 'All five gates passed' : 'Not every gate passed'}}">{{s.perfectPass ? '✓ perfect' : '—'}}</td>
+              <td style="padding:4px 8px;">{{s.passed ? 'passed' : 'failed'}}</td>
+              <td style="padding:4px 8px;font-size:11px;max-width:20%" title="{{s.model.name}}">{{(s.model.name || '') | limitTo:20}}
               </td>
               <td style="padding:4px 8px;">
                 <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"
                   style="color:var(--danger);font-size:11px;" title="Delete">✕</button>
-                <button class="btn btn-small" ng-click="vm.sendBenchmarkToServer(s)" ng-disabled="vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]">{{vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id] ? 'Sending...' : 'Send'}}</button>
+                <button class="btn btn-small" ng-click="vm.sendTestResultToServer(s)" ng-disabled="vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]">{{vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id] ? 'Sending...' : 'Send'}}</button>
               </td>
             </tr>
           </tbody>
