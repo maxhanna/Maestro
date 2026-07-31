@@ -111,6 +111,7 @@ angular.module('kanbanApp')
                         function startAgent() {
                             vm._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
+                            vm.complexityScore = null; vm.complexityLabel = ''; vm.complexityTokenCap = null; vm.complexityMaxTokens = null;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
                             vm._agentStartTime = Date.now();
@@ -158,6 +159,15 @@ angular.module('kanbanApp')
                                                         switch (eventName) {
                                                             case 'log':
                                                                 if (parsed) pushAgentLog(vm, parsed.level, parsed.message, parsed.detail);
+                                                                break;
+                                                            case 'complexity':
+                                                                if (parsed) {
+                                                                    vm.complexityScore = parsed.score;
+                                                                    vm.complexityLabel = parsed.label;
+                                                                    vm.complexityTokenCap = parsed.tokenCap;
+                                                                    vm.complexityMaxTokens = parsed.maxTokens;
+                                                                    pushAgentLog(vm, 'info', '🧠 Complexity: ' + parsed.score + '/100 (' + parsed.label + ') — thinking capped at ' + parsed.tokenCap + ' tokens (max ' + parsed.maxTokens + ')');
+                                                                }
                                                                 break;
                                                             case 'phase':
                                                                 if (parsed && parsed.message) {

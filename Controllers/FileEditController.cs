@@ -81,7 +81,7 @@ public class FileEditController : ControllerBase
         catch (Exception ex) { return StatusCode(500, ex.Message); }
     }
     [HttpGet("list")]
-    public IActionResult List([FromQuery] string project = "", [FromQuery] string path = "", [FromQuery] string search = "")
+    public IActionResult List([FromQuery] string project = "", [FromQuery] string path = "", [FromQuery] string search = "", [FromQuery] bool recursive = false)
     {
         var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
         string workspaceRoot = !string.IsNullOrWhiteSpace(configuredRoot)
@@ -124,6 +124,33 @@ public class FileEditController : ControllerBase
                 var searchEntries = matchingDirs.Concat(matchingFiles).OrderByDescending(x => x.isDirectory).ThenBy(x => x.name);
                 return Ok(new { path = "", entries = searchEntries, search = searchTerm });
             }
+            // Recursive listing — return all files and dirs under the path
+            if (recursive)
+            {
+                var recRoot = string.IsNullOrWhiteSpace(path) ? projectRoot : Path.GetFullPath(Path.Combine(projectRoot, path.Trim()));
+                if (!string.Equals(recRoot, projectRoot, StringComparison.OrdinalIgnoreCase) &&
+                    !recRoot.StartsWith(projectRootPrefix, StringComparison.OrdinalIgnoreCase))
+                    return BadRequest("Path outside project root is not allowed.");
+                if (!Directory.Exists(recRoot))
+                    return NotFound("Path not found.");
+                var recDirs = Directory.EnumerateDirectories(recRoot, "*", SearchOption.AllDirectories)
+                    .Select(d => new
+                    {
+                        name = Path.GetFileName(d),
+                        path = Path.GetRelativePath(projectRoot, d).Replace("\\", "/"),
+                        isDirectory = true
+                    });
+                var recFiles = Directory.EnumerateFiles(recRoot, "*", SearchOption.AllDirectories)
+                    .Select(f => new
+                    {
+                        name = Path.GetFileName(f),
+                        path = Path.GetRelativePath(projectRoot, f).Replace("\\", "/"),
+                        isDirectory = false
+                    });
+                var recEntries = recDirs.Concat(recFiles).OrderBy(e => e.path).ToList();
+                return Ok(new { path = "", entries = recEntries, recursive = true });
+            }
+
             // Normal directory listing when no search term
             var relativePath = (path ?? "").Trim().TrimStart('/', '\\');
             var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));

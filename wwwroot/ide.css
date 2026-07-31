@@ -121,47 +121,44 @@
     padding: 4px 0;
 }
 
-.ide-file-item {
-    padding: 0;
-    cursor: pointer;
-}
-
-.ide-file-item-label {
-    padding: 3px 8px;
-    font-size: 12px;
-    color: var(--text);
+/* Tree entry (file/directory in sidebar) */
+.ide-tree-entry {
     display: flex;
     align-items: center;
-    gap: 4px;
-    transition: background 0.12s;
+    gap: 2px;
+    padding: 1px 6px 1px 1px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    transition: background 0.08s;
+    user-select: none;
+    line-height: 1.6;
 }
 
-.ide-file-item-label:hover {
+.ide-tree-entry:hover {
     background: rgba(255, 255, 255, 0.05);
 }
 
-.ide-file-item--selected>.ide-file-item-label {
+.ide-tree-entry--selected {
     background: rgba(98, 114, 255, 0.15);
     color: var(--accent);
 }
 
-.ide-file-tree-nav {
-    padding: 6px 8px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
+.ide-tree-toggle {
+    width: 12px;
+    min-width: 12px;
+    font-size: 10px;
+    text-align: center;
+    color: var(--text-muted, #888);
+    line-height: 1;
 }
 
-.ide-file-tree-path {
-    color: var(--text-muted, #888);
+.ide-tree-name {
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 /* Editor Container */

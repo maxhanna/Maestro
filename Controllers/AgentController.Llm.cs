@@ -5,6 +5,10 @@ using Weaver.Services;
 namespace Weaver.Controllers;
 partial class AgentController
 {
+    private const int StreamWindowChars = 400;
+    private const int StreamChunkLen = 40;
+    private const int StreamRepeatThreshold = 4;
+
     private async Task<string> GetLlamaBaseUrl()
     {
         var cfg = await _configFile.LoadConfigAsync();
@@ -74,6 +78,8 @@ partial class AgentController
             var respText = await resp.Content.ReadAsStringAsync(ct);
             var llmContent = ExtractLlmContent(respText);
             if (string.IsNullOrWhiteSpace(llmContent)) return (respText, null, "Empty LLM response");
+            var hallError = DetectHallucination(llmContent);
+            if (hallError != null) return (llmContent, null, hallError);
             var parsed = ParseAgentResponse(llmContent);
             return (llmContent, parsed, parsed == null ? "JSON parse failed" : null);
         }
@@ -106,9 +112,6 @@ partial class AgentController
             var stream = await resp.Content.ReadAsStreamAsync(ct);
             var reader = new StreamReader(stream);
             var sb = new StringBuilder();
-            const int WindowChars = 400;
-            const int ChunkLen = 40;
-            const int RepeatThreshold = 4;
             using var repeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             while (true)
             {
@@ -133,14 +136,25 @@ partial class AgentController
                             {
                                 if (emitSse) await SendSse(Response, "token", new { token }, ct);
                                 sb.Append(token);
-                                if (sb.Length >= ChunkLen * (RepeatThreshold + 1) &&
-                                    IsRepeatingLoop(sb, WindowChars, ChunkLen, RepeatThreshold))
+                                // Check for repetition loop (chunk-level)
+                                if (sb.Length >= StreamChunkLen * (StreamRepeatThreshold + 1) &&
+                                    IsRepeatingLoop(sb, StreamWindowChars, StreamChunkLen, StreamRepeatThreshold))
                                 {
                                     try { resp.Dispose(); } catch { }
                                     var truncated = sb.ToString();
                                     return (truncated, null,
                                         $"Repetition loop detected after {truncated.Length} chars — aborted early. " +
                                         "The model got stuck re-emitting the same block. Retry with a smaller, more targeted anchor.");
+                                }
+                                // Check for wall-of-text hallucination (every ~500 chars beyond threshold)
+                                if (sb.Length % 500 < 10) // check roughly every 500 chars
+                                {
+                                    var wallError = CheckStreamingHallucination(sb);
+                                    if (wallError != null)
+                                    {
+                                        try { resp.Dispose(); } catch { }
+                                        return (sb.ToString(), null, wallError);
+                                    }
                                 }
                             }
                         }
@@ -150,6 +164,9 @@ partial class AgentController
             }
             var raw = sb.ToString();
             if (string.IsNullOrWhiteSpace(raw)) return ("", null, "Empty LLM response");
+            // Post-hoc hallucination check (safety net)
+            var hallError2 = DetectHallucination(raw);
+            if (hallError2 != null) return (raw, null, hallError2);
             var braceCount = 0;
             var topLevelOpens = 0;
             foreach (var c in raw)
@@ -284,6 +301,70 @@ partial class AgentController
             return string.Empty;
         }
     }
+    /// <summary>
+    /// Global hallucination detection — call on full LLM output (post-streaming or non-streaming).
+    /// Returns an error string if hallucination is detected, null otherwise.
+    /// Checks: wall-of-text (very low newline density), semantic repetition of long substrings.
+    /// </summary>
+    private static string? DetectHallucination(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw) || raw.Length < 1000) return null;
+
+        // 1. Wall-of-text check: very low newline density (fewer than 1 newline per 200 chars)
+        //    Legitimate JSON/code has ~1 newline per 50-100 chars. Hallucinated rambling has almost none.
+        var newlineCount = raw.Count(c => c == '\n');
+        var newlineRatio = (double)newlineCount / raw.Length;
+        if (raw.Length > 2000 && newlineRatio < 0.005) // fewer than 1 newline per 200 chars
+        {
+            return $"Hallucination (wall of text): {raw.Length} chars with {newlineCount} line breaks " +
+                   $"(ratio {newlineRatio:F4}). The model is rambling without structure. Output truncated.";
+        }
+
+        // 2. Semantic repetition: same 120+ char substring appearing 3+ times (not just chunk repetition)
+        if (raw.Length > 800)
+        {
+            const int subLen = 120;
+            var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (var i = 0; i <= raw.Length - subLen; i += 40) // step by 40 for performance
+            {
+                var sub = raw.Substring(i, subLen);
+                var trimmed = sub.Trim();
+                if (trimmed.Length < 60) continue; // skip near-empty/short substrings
+                seen.TryGetValue(trimmed, out var count);
+                count++;
+                if (count >= 3)
+                    return $"Hallucination (semantic repetition): same {trimmed.Length}-char block repeated {count}+ times. " +
+                           "The model is stuck in a repetition loop.";
+                seen[trimmed] = count;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Real-time newline-density check for streaming output.
+    /// Returns an error if the model has produced a large output with almost no line breaks.
+    /// </summary>
+    private static string? CheckStreamingHallucination(StringBuilder sb)
+    {
+        var len = sb.Length;
+        if (len < 2500) return null;
+
+        // Check full accumulated text for newline density
+        var newlineCount = 0;
+        for (var i = 0; i < len; i++)
+            if (sb[i] == '\n') newlineCount++;
+
+        var ratio = (double)newlineCount / len;
+        if (ratio < 0.005) // fewer than 1 newline per 200 chars
+        {
+            return $"Hallucination (wall of text): {len} chars with {newlineCount} line breaks (ratio {ratio:F4}) — aborted early.";
+        }
+
+        return null;
+    }
+
     private static bool IsRepeatingLoop(StringBuilder sb, int windowChars, int chunkLen, int repeatThreshold)
     {
         var len = sb.Length;
@@ -369,6 +450,23 @@ partial class AgentController
                             {
                                 if (emitSse) await SendSse(Response, "token", new { token }, ct);
                                 sb.Append(token);
+                                // Check for repetition loop
+                                if (sb.Length >= StreamChunkLen * (StreamRepeatThreshold + 1) &&
+                                    IsRepeatingLoop(sb, StreamWindowChars, StreamChunkLen, StreamRepeatThreshold))
+                                {
+                                    try { resp.Dispose(); } catch { }
+                                    return (sb.ToString(), "Repetition loop detected — aborted early. The model got stuck re-emitting the same block.");
+                                }
+                                // Check for wall-of-text hallucination
+                                if (sb.Length % 500 < 10)
+                                {
+                                    var wallError = CheckStreamingHallucination(sb);
+                                    if (wallError != null)
+                                    {
+                                        try { resp.Dispose(); } catch { }
+                                        return (sb.ToString(), wallError);
+                                    }
+                                }
                             }
                         }
                     }
@@ -377,6 +475,8 @@ partial class AgentController
             }
             var raw = sb.ToString();
             if (string.IsNullOrWhiteSpace(raw)) return ("", "Empty LLM response");
+            var hallError = DetectHallucination(raw);
+            if (hallError != null) return (raw, hallError);
             return (raw, null);
         }
         catch (TaskCanceledException) { return ("", "LLM request timed out"); }

@@ -290,6 +290,10 @@
               <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span>
               <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize | formatNumber}}
                 tokens</span>
+              <span ng-if="vm.complexityScore != null" class="complexity-tag"
+                title="Complexity: {{vm.complexityScore}}/100 ({{vm.complexityLabel}}). Thinking capped at {{vm.complexityTokenCap}} of {{vm.complexityMaxTokens}} max tokens.">
+                🧠 {{vm.complexityLabel}} ({{vm.complexityScore}}%) — {{vm.complexityTokenCap}} thinking tokens
+              </span>
             </span>
             <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
           </div>

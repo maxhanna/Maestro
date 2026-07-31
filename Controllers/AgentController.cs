@@ -7553,7 +7553,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string stepMode = "all")
     {
         var cfg = await LoadConfigAsync();
-        var sys = BuildIncrementalStepSystemPrompt(stepMode, cfg.enabledTools);
+        var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct));
         var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback);
         var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 2000);
         if (string.IsNullOrWhiteSpace(raw))
@@ -9291,7 +9291,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
      CancellationToken ct = default, string? steeringContext = null)
     {
         var cfg = await LoadConfigAsync();
-        var planningPrompt = BuildPlanningPrompt(cfg.enabledTools);
+        var planningPrompt = BuildPlanningPrompt(await FilterToolsForStepAsync(prompt, cfg.enabledTools, ct));
         var userPrompt = new StringBuilder();
         userPrompt.AppendLine("### TASK ###");
         userPrompt.AppendLine(prompt);
@@ -10349,7 +10349,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             try
             {
-                await AssessComplexityAsync(prompt, cardId, ct);
+                var complexityScore = await AssessComplexityAsync(prompt, cardId, ct);
+                if (complexityScore.HasValue && emitSse)
+                {
+                    var tokenCap = GetThinkingTokenCap(complexityScore.Value, cfg.thinkingMaxTokens);
+                    await SendSse(Response, "complexity", new
+                    {
+                        score = complexityScore.Value,
+                        tokenCap,
+                        maxTokens = cfg.thinkingMaxTokens,
+                        label = complexityScore.Value <= 10 ? "Trivial" :
+                                complexityScore.Value <= 25 ? "Simple" :
+                                complexityScore.Value <= 45 ? "Moderate" :
+                                complexityScore.Value <= 65 ? "Complex" :
+                                complexityScore.Value <= 85 ? "Very Complex" : "Extremely Complex"
+                    }, ct);
+                }
             }
             catch { /* non-critical — fall back to full thinking tokens */ }
         }
@@ -11448,7 +11463,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             "Start your response with '{' as the very first character. No prose, no markdown fences.";
         var cfg = await LoadConfigAsync();
         var (raw, _, _) = await CallLlmRawStreaming(
-            BuildPlanningPrompt(cfg.enabledTools), recoveryPrompt, emitSse, ct,
+            BuildPlanningPrompt(await FilterToolsForStepAsync(ramblingRaw, cfg.enabledTools, ct)), recoveryPrompt, emitSse, ct,
             requestTimeout: TimeSpan.FromMinutes(3), maxTokens: 2048);
         if (string.IsNullOrWhiteSpace(raw)) return null;
         var plan = AgentUtilities.ParsePlan(raw);

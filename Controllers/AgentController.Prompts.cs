@@ -596,6 +596,72 @@ partial class AgentController
         "_done", "_checkpoint"
     };
 
+    /// <summary>
+    /// Filters the enabled tools list to only those relevant to the given prompt/step context.
+    /// Uses a quick LLM call to assess relevance — more accurate than keyword heuristics.
+    /// Always includes _explore, _show, _done, _checkpoint. Falls back to full list on failure.
+    /// </summary>
+    private async Task<List<string>> FilterToolsForStepAsync(string? prompt, List<string>? enabledTools, CancellationToken ct)
+    {
+        if (enabledTools == null || enabledTools.Count == 0)
+            return enabledTools ?? new List<string>();
+
+        if (string.IsNullOrWhiteSpace(prompt))
+            return enabledTools;
+
+        var alwaysInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "_explore", "_show", "_done", "_checkpoint" };
+
+        // Build a compact tool list for the LLM to classify
+        var toolList = new StringBuilder();
+        foreach (var tool in enabledTools)
+        {
+            if (AllTools.TryGetValue(tool, out var desc))
+                toolList.AppendLine($"  {desc}");
+        }
+
+        var system = "You are a tool relevance classifier. Given a coding task and a list of available tools, " +
+            "return ONLY the tool names that COULD be useful for this task. " +
+            "Always include: _explore, _show, _done, _checkpoint. " +
+            "Output one tool name per line, nothing else. No markdown, no explanation.";
+
+        var user = $"Task:\n{prompt}\n\nAvailable tools:\n{toolList}";
+
+        try
+        {
+            var (raw, error) = await CallLlmRawText(system, user, false, ct,
+                requestTimeout: TimeSpan.FromSeconds(10), maxTokens: 200);
+
+            if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
+                return enabledTools; // fallback on failure
+
+            var selected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var line in raw.Split('\n'))
+            {
+                var trimmed = line.Trim().TrimStart('-', '*', ' ', '"').Trim();
+                if (trimmed.StartsWith('_') && trimmed.Length < 30)
+                    selected.Add(trimmed);
+            }
+
+            // Always include core tools
+            foreach (var t in alwaysInclude) selected.Add(t);
+
+            // Unknown tools (not in AllTools dict) — can't be classified, include by default
+            foreach (var t in enabledTools)
+                if (!AllTools.ContainsKey(t)) selected.Add(t);
+
+            var result = enabledTools.Where(t => selected.Contains(t)).ToList();
+
+            // Conservative: if filtering produced too few tools, return full list
+            // Threshold should be higher than the 4 always-included tools
+            return result.Count < 6 ? enabledTools : result;
+        }
+        catch
+        {
+            return enabledTools; // fallback on any error
+        }
+    }
+
     private static string BuildPlanningPrompt(List<string>? enabledTools = null)
     {
         var enabled = enabledTools != null && enabledTools.Count > 0

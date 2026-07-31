@@ -1831,6 +1831,17 @@ h3 .small.ghost:hover {
 	font-size: 11px;
 }
 
+.agent-status .complexity-tag {
+	margin-left: 6px;
+	padding: 2px 8px;
+	border-radius: 4px;
+	background: rgba(168, 85, 247, 0.12);
+	color: #c084fc;
+	font-size: 11px;
+	font-weight: 500;
+	cursor: help;
+}
+
 .agent-current {
 	margin-top: 8px;
 	padding: 10px;

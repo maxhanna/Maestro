@@ -125,18 +125,27 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
 
       vm.loadFilePickerEntries = function(search) {
         var params = { project: vm.selectedProject || '' };
-        if (vm.ide.filePickerPath) {
-          params.path = vm.ide.filePickerPath;
-        }
         if (search) {
           params.search = search;
+        } else {
+          // Load entire tree recursively so folders can be expanded without replacing the list
           params.recursive = true;
+        }
+        if (!search && vm.ide.filePickerPath) {
+          params.path = vm.ide.filePickerPath;
         }
         console.log('loadFilePickerEntries', params);
         vm.ide.filePickerLoading = true;
         $http.get('/api/editor/list', { params: params }).then(function(resp) {
           console.log('loadFilePickerEntries response', resp.data);
-          vm.ide.filePickerEntries = (resp.data && resp.data.entries) || [];
+          var entries = (resp.data && resp.data.entries) || [];
+          if (params.recursive && !search) {
+            vm._buildFileTree(entries);
+          } else {
+            // Search results stay flat
+            vm.ide.filePickerEntries = entries;
+            vm.ide._treeRoot = null;
+          }
           vm.ide.filePickerError = '';
           vm.ide.filePickerLoading = false;
         }, function(err) {
@@ -146,29 +155,87 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         });
       };
 
-      vm.idePickerEnterDir = function(path) {
-        console.log(path);
-        vm.ide.filePickerPath = path;
-        vm.ide.searchFilter = '';
+      // Build tree from flat recursive entries and compute display list
+      vm._expandedDirs = {};
+      vm._buildFileTree = function(entries) {
+        var root = { name: '', path: '', isDirectory: true, children: [], depth: 0 };
+        var map = { '': root };
+        // Build tree nodes
+        entries.forEach(function(e) {
+          var parts = e.path.split('/');
+          var parentPath = '';
+          for (var i = 0; i < parts.length - 1; i++) {
+            parentPath = parentPath ? parentPath + '/' + parts[i] : parts[i];
+            if (!map[parentPath]) {
+              map[parentPath] = { name: parts[i], path: parentPath, isDirectory: true, children: [], depth: 0 };
+            }
+          }
+          var node = { name: e.name, path: e.path, isDirectory: e.isDirectory, children: e.isDirectory ? [] : null, depth: 0 };
+          map[parentPath].children.push(node);
+          if (e.isDirectory) map[e.path] = node;
+        });
+        vm.ide._treeRoot = root;
+        vm._rebuildTreeDisplay();
+      };
+
+      vm._rebuildTreeDisplay = function() {
+        var result = [];
+        function walk(node, depth) {
+          node.depth = depth;
+          if (node.path) result.push(node);
+          if (node.children && vm._expandedDirs[node.path || '__root__']) {
+            node.children.forEach(function(child) { walk(child, depth + 1); });
+          }
+        }
+        // Always show root children (top-level dirs/files)
+        if (vm.ide._treeRoot) {
+          vm._expandedDirs['__root__'] = true;
+          walk(vm.ide._treeRoot, -1);
+        }
+        vm.ide.filePickerEntries = result;
+      };
+
+      vm.toggleTreeDir = function(node) {
+        if (!node.isDirectory) {
+          vm.openFile(node.path);
+          return;
+        }
+        var key = node.path || '__root__';
+        if (vm._expandedDirs[key]) {
+          delete vm._expandedDirs[key];
+        } else {
+          vm._expandedDirs[key] = true;
+        }
+        vm._rebuildTreeDisplay();
+      };
+
+      vm.refreshFileTree = function() {
+        vm._expandedDirs = {};
+        vm.ide.filePickerPath = '';
         vm.loadFilePickerEntries();
       };
 
+      vm.idePickerEnterDir = function(path) {
+        // Legacy: expand the directory in the tree
+        vm._expandedDirs[path] = true;
+        vm._rebuildTreeDisplay();
+      };
+
       vm.idePickerUpDir = function() {
-        if (!vm.ide.filePickerPath) return;
-        var segs = vm.ide.filePickerPath.split('/').filter(function(s) { return s && s.length; });
-        segs.pop();
-        vm.ide.filePickerPath = segs.join('/');
-        vm.loadFilePickerEntries();
+        vm.refreshFileTree();
       };
 
       // Navigate file explorer to show a file's parent directory if sidebar is open
       function _navigateExplorerToFile(path) {
-        if (!vm.ide.showSidebar) return;
-        var dir = path.split('/').slice(0, -1).join('/');
-        if (vm.ide.filePickerPath !== dir) {
-          vm.ide.filePickerPath = dir;
-          vm.loadFilePickerEntries();
+        if (!vm.ide.showSidebar || !vm.ide._treeRoot) return;
+        // Expand all ancestor directories so the file is visible in the tree
+        var parts = path.split('/');
+        var ancestor = '';
+        for (var i = 0; i < parts.length - 1; i++) {
+          ancestor = ancestor ? ancestor + '/' + parts[i] : parts[i];
+          vm._expandedDirs[ancestor] = true;
         }
+        vm._rebuildTreeDisplay();
       }
 
       vm.openFile = function(path) {
