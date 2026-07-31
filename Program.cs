@@ -32,10 +32,12 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
 }));
 var app = builder.Build();
-app.UseRouting();
-app.UseCors();
 
-// Serve static files from wwwroot/ on disk with caching (fast path)
+// Must precede UseRouting: StaticFileMiddleware bails out when routing has already
+// selected an endpoint, and the "/{**path}" embedded-resource fallback below is a
+// catch-all that matches every request. With this after UseRouting, wwwroot files on
+// disk were never served at all — every asset came from the copy embedded into the
+// assembly at build time, so editing a .js/.html did nothing until a full rebuild.
 app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = ctx =>
@@ -43,6 +45,9 @@ app.UseStaticFiles(new StaticFileOptions
         ctx.Context.Response.Headers.Append("Cache-Control", "public, max-age=3600");
     }
 });
+
+app.UseRouting();
+app.UseCors();
 
 var assembly = Assembly.GetExecutingAssembly();
 var resources = assembly.GetManifestResourceNames();
