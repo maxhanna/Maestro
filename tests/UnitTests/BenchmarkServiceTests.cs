@@ -228,3 +228,98 @@ public class BenchmarkServiceTests : IDisposable
         Assert.Equal(ids.Count, ids.Distinct().Count());
     }
 }
+
+/// <summary>
+/// Red step 1 (seed manifest story): every ladder plan must declare enough of a
+/// BenchmarkManifest for structurePreserved and formattingClean to be measurable.
+/// Written before BenchmarkPlanDefinition carries a manifest at all, so every test here
+/// is expected to fail to compile / fail at runtime until that lands.
+/// </summary>
+public class BenchmarkPlanManifestTests
+{
+    [Fact]
+    public void EveryBenchmarkPlan_CarriesAManifest()
+    {
+        foreach (var plan in BenchmarkService.GetBenchmarkPlans())
+            Assert.NotNull(plan.Benchmark);
+    }
+
+    [Fact]
+    public void EveryBenchmarkPlan_AllowedPathsMatchesItsOwnFolderName()
+    {
+        // The folder name embedded in each plan's Description is the ground truth the
+        // agent will actually create. allowedPaths must match that literal name, or
+        // structurePreserved fails every run regardless of what the agent does. This is
+        // also what catches Level 5's malformed description (missing closing quote before
+        // "Create 'datastructures.py'") — if the folder name can't be extracted cleanly,
+        // the allowedPaths glob and the real folder will not agree.
+        foreach (var plan in BenchmarkService.GetBenchmarkPlans())
+        {
+            var folderMatch = System.Text.RegularExpressions.Regex.Match(
+                plan.Description, @"folder called '([^']+)'");
+            Assert.True(folderMatch.Success,
+                $"Level {plan.Level}: could not extract a single-quoted folder name from the description — " +
+                "the description is malformed (see Level 5's original unbalanced quote).");
+
+            var folder = folderMatch.Groups[1].Value;
+            Assert.NotNull(plan.Benchmark);
+            Assert.Contains(plan.Benchmark!.AllowedPaths, p => p == $"{folder}/**");
+        }
+    }
+
+    [Fact]
+    public void EveryBenchmarkPlan_DeclaresFormattingModeFormatter()
+    {
+        foreach (var plan in BenchmarkService.GetBenchmarkPlans())
+        {
+            Assert.NotNull(plan.Benchmark?.Formatting);
+            Assert.Equal("formatter", plan.Benchmark!.Formatting!.Mode);
+        }
+    }
+
+    [Fact]
+    public void EveryBenchmarkPlan_DeclaredExtensionsAreResolvableByDefaultCommands()
+    {
+        // A manifest that requires an extension no default command covers would make
+        // formattingClean permanently null on a fresh install — shipping that would be
+        // indistinguishable from not having fixed the gate at all.
+        //
+        // Deliberately uses the real repo root, not a synthetic path: prettier-covered
+        // extensions (js/html/css/md) are only advertised when .formatter/node_modules
+        // actually exists at the given root (see DefaultFormatterCommands), so asserting
+        // against a fake path would be a false red for every non-Python level regardless
+        // of whether the real manifests are correct. This test therefore also requires
+        // .formatter/node_modules to be installed — the same prerequisite `dotnet build`
+        // already requires for the gate to be exercisable at all.
+        var defaults = BenchmarkService.DefaultFormatterCommands(FindRepoRoot());
+        foreach (var plan in BenchmarkService.GetBenchmarkPlans())
+        {
+            Assert.NotNull(plan.Benchmark?.Formatting);
+            Assert.NotEmpty(plan.Benchmark!.Formatting!.Extensions);
+            foreach (var ext in plan.Benchmark.Formatting.Extensions)
+                Assert.True(defaults.ContainsKey(ext),
+                    $"Level {plan.Level} requires '.{ext}' but DefaultFormatterCommands has no entry for it " +
+                    "(is .formatter/node_modules installed? run `npm install` in .formatter/).");
+        }
+    }
+
+    static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Weaver.sln")))
+            dir = dir.Parent;
+        return dir?.FullName
+            ?? throw new InvalidOperationException("Could not locate repo root (Weaver.sln) from " + AppContext.BaseDirectory);
+    }
+
+    [Fact]
+    public void Level0_EditsAtLeastOneFileSoFormattingIsMeasurable()
+    {
+        // Level 0 originally only created a directory. filesEdited would be empty, so
+        // FormattingGate.CheckAsync's editedPaths.Count==0 guard returns null — the gate
+        // is structurally unmeasurable no matter what formatter config exists. The fix is
+        // to give it a file to write, same shape as every other level.
+        var level0 = BenchmarkService.GetBenchmarkPlans().Single(p => p.Level == 0);
+        Assert.Matches(@"[Cc]reate.*(a |the )?file", level0.Description);
+    }
+}

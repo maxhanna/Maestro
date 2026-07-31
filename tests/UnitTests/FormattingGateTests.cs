@@ -1,5 +1,6 @@
 using Xunit;
 using Weaver;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -217,6 +218,103 @@ public class FormattingGateTests
                 new Dictionary<string, string> { ["cs"] = "dotnet format --verify-no-changes --include {file}" });
 
             Assert.False(result);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+}
+
+/// <summary>
+/// Red step 3 (seed manifest story): the end-to-end gate verdict for a Level 5 run
+/// (BenchmarkManifest requires "py"), using the real ruff invocation from
+/// BenchmarkService.DefaultFormatterCommands rather than a stubbed exit code. Level 5 is
+/// chosen because its manifest declares exactly one extension, keeping each test's
+/// failure attributable to a single gate.
+///
+/// PerfectPass is not exercised here — AllTrue requires ExactStepCount == true, and every
+/// ladder manifest ships with ExpectedSteps: null (calibration is a separate story), so
+/// PerfectPass is structurally false regardless of how clean the run is. What these tests
+/// prove instead is that the four gates calibration does not depend on are each correctly
+/// measurable and correctly true/false/null.
+/// </summary>
+public class LadderManifestEndToEndTests
+{
+    static BenchmarkManifest Level5Manifest =>
+        BenchmarkService.GetBenchmarkPlans().Single(p => p.Level == 5).Benchmark!;
+
+    [Fact]
+    public async Task LadderRun_BadlyFormattedPythonFile_FormattingCleanFalse()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver-ladder-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(dir, "benchmark_test_5"));
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "benchmark_test_5", "datastructures.py"),
+                "class Stack:\n  def __init__(self):\n    self.items=[]\n  def push(self,x):\n      self.items.append(x)\n");
+
+            var commands = BenchmarkService.ResolveFormatterCommands(null, dir);
+            var result = await FormattingGate.CheckAsync(dir,
+                new[] { "benchmark_test_5/datastructures.py" }, Level5Manifest.Formatting, commands);
+
+            Assert.False(result);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task LadderRun_WellFormattedFilesAndCleanPlan_FourMeasurableGatesTrue()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver-ladder-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(dir, "benchmark_test_5"));
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "benchmark_test_5", "datastructures.py"),
+                "class Stack:\n    def __init__(self):\n        self.items = []\n\n    def push(self, x):\n        self.items.append(x)\n");
+
+            var commands = BenchmarkService.ResolveFormatterCommands(null, dir);
+            var editedPaths = new[] { "benchmark_test_5/datastructures.py" };
+
+            var r = await TestScorer.ScoreAsync("ladder5", "card1",
+                new List<object>
+                {
+                    new Dictionary<string, object?> { ["type"] = "edit", ["status"] = "done", ["path"] = editedPaths[0] }
+                },
+                plan: new AgentPlan { Plan = { new PlanStep { File = editedPaths[0], Change = "add Stack" } } },
+                complete: true, filesEdited: editedPaths,
+                machine: new EnvironmentMetadata(), weaverVersion: "6",
+                projectRoot: dir, benchmark: Level5Manifest, formatterCommands: commands);
+
+            Assert.True(r.Gates.FormattingClean);
+            Assert.True(r.Gates.StructurePreserved);
+            Assert.True(r.Gates.PermissionsRespected);
+            Assert.True(r.Gates.NoReplan);
+            // The documented boundary of this story, not a bug: calibration is separate.
+            Assert.Null(r.Gates.ExactStepCount);
+            Assert.False(r.PerfectPass);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task LadderRun_MachineMissingRequiredFormatter_FormattingCleanIsNullNotTrue()
+    {
+        // The signal this test actually protects: an unmeasured gate must not be
+        // indistinguishable from a passing one. Asserting PerfectPass==false here would be
+        // vacuous (it is false for every ladder run in this story regardless), so this
+        // asserts the gate value itself.
+        var dir = Path.Combine(Path.GetTempPath(), "weaver-ladder-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(dir, "benchmark_test_5"));
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "benchmark_test_5", "datastructures.py"),
+                "class Stack:\n    def __init__(self):\n        self.items = []\n");
+
+            var machineWithNoPythonFormatter = new Dictionary<string, string>(); // deliberately empty
+
+            var result = await FormattingGate.CheckAsync(dir,
+                new[] { "benchmark_test_5/datastructures.py" }, Level5Manifest.Formatting,
+                machineWithNoPythonFormatter);
+
+            Assert.Null(result);
         }
         finally { Directory.Delete(dir, true); }
     }

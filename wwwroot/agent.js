@@ -655,7 +655,12 @@ angular.module('kanbanApp')
                     $http.get('/api/benchmark/plans').then(function (resp) {
                         var plan = (resp.data || []).find(function (p) { return p.level === level; });
                         if (!plan) return vm.benchmarkRunning = false;
-                        var card = { id: 'benchmark_' + level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', isTest: true, testName: plan.name, benchmark: { presetLevel: level }, ready: true };
+                        // plan.benchmark carries the level's real gate expectations
+                        // (allowedPaths/formatting/runs) from BenchmarkService.
+                        // GetBenchmarkPlans(); presetLevel is added client-side since the
+                        // manifest itself doesn't know which level it belongs to.
+                        var manifest = angular.extend({}, plan.benchmark, { presetLevel: level });
+                        var card = { id: 'benchmark_' + level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', isTest: true, testName: plan.name, benchmark: manifest, ready: true };
                         vm.state.todo.push(card); vm.saveCards(); vm.executeAgent(card); vm.closeBenchmarksPanel();
                     }).catch(function () { vm.benchmarkRunning = false; });
                 };

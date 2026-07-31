@@ -1,6 +1,7 @@
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -146,6 +147,46 @@ public class TestScorerTests
         var r = ScoreWithAllowedPaths(new[] { "bm/*" }, "bm/nested/file.txt");
 
         Assert.False(r.Gates.StructurePreserved);
+    }
+
+    // ── Red step 2 (seed manifest story): the actual manifests each ladder level will
+    // ship, exercised the way TestScorer really sees them — via BenchmarkManifest, not a
+    // hand-rolled allowedPaths array. Expected to fail until BenchmarkService.
+    // GetBenchmarkPlans() attaches real manifests (Red step 1).
+
+    static TestGateResults ScoreLadderRun(int level, params string[] editedPaths)
+    {
+        var plan = BenchmarkService.GetBenchmarkPlans().Single(p => p.Level == level);
+        var r = TestScorer.Score("ladder", "card1",
+            new List<object> { Step("edit", "done") }, PlanOf(1), complete: true,
+            filesEdited: editedPaths,
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: plan.Benchmark);
+        return r.Gates;
+    }
+
+    [Fact]
+    public void LadderManifest_FileInsideOwnFolder_StructurePreservedTrue()
+    {
+        var gates = ScoreLadderRun(1, "benchmark_test_1/test.md");
+        Assert.True(gates.StructurePreserved);
+    }
+
+    [Fact]
+    public void LadderManifest_FileInSiblingBenchmarkFolder_StructurePreservedFalse()
+    {
+        // The escape that most plausibly happens in practice: the agent writes into a
+        // neighbouring level's folder rather than truly outside the sandbox. A glob
+        // authored too loosely (e.g. "benchmark_test_*/**") would wave this through.
+        var gates = ScoreLadderRun(1, "benchmark_test_2/leaked.md");
+        Assert.False(gates.StructurePreserved);
+    }
+
+    [Fact]
+    public void LadderManifest_FileAtProjectRoot_StructurePreservedFalse()
+    {
+        var gates = ScoreLadderRun(1, "leaked_at_root.md");
+        Assert.False(gates.StructurePreserved);
     }
 
     [Fact]

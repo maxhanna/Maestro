@@ -289,18 +289,62 @@ public class BenchmarkService
         return level < plans.Count ? plans[level] : plans[^1];
     }
 
+    /// <summary>Builds the AllowedPaths + Formatting portion of a level's manifest.
+    /// ExpectedSteps is deliberately left null — pinning it requires observing several
+    /// real runs of the level (a separate calibration story), and pinning a number that
+    /// has not been observed to be reliably achievable would make exactStepCount fail a
+    /// clean run for the wrong reason.</summary>
+    static BenchmarkManifest LadderManifest(string folder, params string[] extensions) => new()
+    {
+        AllowedPaths = new List<string> { $"{folder}/**" },
+        Formatting = new BenchmarkFormatting { Mode = "formatter", Extensions = extensions.ToList() },
+        Runs = 3
+    };
+
     public static List<BenchmarkPlanDefinition> GetBenchmarkPlans()
     {
         return new List<BenchmarkPlanDefinition>
         {
-            new() { Level = 0, Name = "Benchmark 0", Description = "Create a folder called 'benchmark_0' at the project root." },
-            new() { Level = 1, Name = "Benchmark 1", Description = "Create a folder called 'benchmark_test_1' at the project root. Create a file called 'test.md' inside it and write 'Hello world'. Then append 'The capital of France is Paris'." },
-            new() { Level = 2, Name = "Benchmark 2", Description = "Create a folder called 'benchmark_test_2' at the project root. Create a Python script 'hello.py' inside it that prints 'Hello, World!', then modify it to ask for the user's name and greet them. Also create a JavaScript file 'hello.js' that logs 'Hello from JS' to the console." },
-            new() { Level = 3, Name = "Benchmark 3", Description = "Create a folder called 'benchmark_test_3'. Build an HTML page 'page.html' with a heading 'Benchmark Page', a lorem ipsum paragraph, and a centered styled div. Create 'style.css' with styles including a red body background. Add a button that changes paragraph text via inline script." },
-            new() { Level = 4, Name = "Benchmark 4", Description = "Create a folder called 'benchmark_test_4'. Create 'server.py' that runs an HTTP server on port 9999 serving 'index.html' at / and a /api/hello JSON endpoint. Create index.html with basic content." },
-            new() { Level = 5, Name = "Benchmark 5", Description = "Create a folder called 'benchmark_test_5. Create 'datastructures.py' with a Stack class (push, pop, peek, is_empty) and a Queue class (enqueue, dequeue, peek, is_empty)." },
-            new() { Level = 6, Name = "Benchmark 6", Description = "Create a folder called 'benchmark_test_6'. Inside this folder, create a file named 'readme.md', write initial content describing the benchmark purpose, then add instructions for running automated tests in multiple languages including Python, JavaScript, and C#." },
-            new() { Level = 7, Name = "Benchmark 7", Description = "Create a folder called 'benchmark_test_7' at the project root. Create a complex HTML page with embedded CSS and JS that includes interactive elements like buttons and forms. Implement responsive design using media queries and ensure cross-browser compatibility testing." }
+            new() {
+                Level = 0, Name = "Benchmark 0",
+                Description = "Create a folder called 'benchmark_0' at the project root. Create a file called 'notes.md' inside it and write 'Benchmark 0 complete'.",
+                Benchmark = LadderManifest("benchmark_0", "md")
+            },
+            new() {
+                Level = 1, Name = "Benchmark 1",
+                Description = "Create a folder called 'benchmark_test_1' at the project root. Create a file called 'test.md' inside it and write 'Hello world'. Then append 'The capital of France is Paris'.",
+                Benchmark = LadderManifest("benchmark_test_1", "md")
+            },
+            new() {
+                Level = 2, Name = "Benchmark 2",
+                Description = "Create a folder called 'benchmark_test_2' at the project root. Create a Python script 'hello.py' inside it that prints 'Hello, World!', then modify it to ask for the user's name and greet them. Also create a JavaScript file 'hello.js' that logs 'Hello from JS' to the console.",
+                Benchmark = LadderManifest("benchmark_test_2", "py", "js")
+            },
+            new() {
+                Level = 3, Name = "Benchmark 3",
+                Description = "Create a folder called 'benchmark_test_3'. Build an HTML page 'page.html' with a heading 'Benchmark Page', a lorem ipsum paragraph, and a centered styled div. Create 'style.css' with styles including a red body background. Add a button that changes paragraph text via inline script.",
+                Benchmark = LadderManifest("benchmark_test_3", "html", "css")
+            },
+            new() {
+                Level = 4, Name = "Benchmark 4",
+                Description = "Create a folder called 'benchmark_test_4'. Create 'server.py' that runs an HTTP server on port 9999 serving 'index.html' at / and a /api/hello JSON endpoint. Create index.html with basic content.",
+                Benchmark = LadderManifest("benchmark_test_4", "py", "html")
+            },
+            new() {
+                Level = 5, Name = "Benchmark 5",
+                Description = "Create a folder called 'benchmark_test_5'. Create 'datastructures.py' with a Stack class (push, pop, peek, is_empty) and a Queue class (enqueue, dequeue, peek, is_empty).",
+                Benchmark = LadderManifest("benchmark_test_5", "py")
+            },
+            new() {
+                Level = 6, Name = "Benchmark 6",
+                Description = "Create a folder called 'benchmark_test_6'. Inside this folder, create a file named 'readme.md', write initial content describing the benchmark purpose, then add instructions for running automated tests in multiple languages including Python, JavaScript, and C#.",
+                Benchmark = LadderManifest("benchmark_test_6", "md")
+            },
+            new() {
+                Level = 7, Name = "Benchmark 7",
+                Description = "Create a folder called 'benchmark_test_7' at the project root. Create a complex HTML page with embedded CSS and JS that includes interactive elements like buttons and forms. Implement responsive design using media queries and ensure cross-browser compatibility testing.",
+                Benchmark = LadderManifest("benchmark_test_7", "html")
+            }
         };
     }
 }
@@ -329,6 +373,11 @@ public class BenchmarkPlanDefinition
     public int Level { get; set; }
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
+
+    /// <summary>Gate expectations for this level — allowedPaths and formatting are set
+    /// for every level; ExpectedSteps stays null until calibrated (separate story), so
+    /// PerfectPass cannot be true for a ladder run yet.</summary>
+    public BenchmarkManifest? Benchmark { get; set; }
 }
 
 public class BenchmarkScore
