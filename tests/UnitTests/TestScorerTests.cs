@@ -30,6 +30,93 @@ public class TestScorerTests
     }
 
     [Fact]
+    public void Score_MixedEditOutcomes_ComputesEditPointsPercentAndStatus()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "done", "a.cs"),
+            Step("create", "created", "b.cs"),
+            Step("edit", "error", "c.cs"),
+            Step("command", "done"), // not an edit-type step — excluded from edit counting
+        };
+
+        var r = TestScorer.Score("mixed", "card1", steps, PlanOf(4), complete: true,
+            filesEdited: new[] { "a.cs", "b.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6");
+
+        Assert.Equal(2, r.SuccessfulEdits);
+        Assert.Equal(1, r.FailedEdits);
+        // successful + (successful again, only if zero failures) — one failure here, so no bonus.
+        Assert.Equal(2, r.Points);
+        Assert.Equal(66.7, r.EditScorePercent, precision: 1);
+        Assert.Equal("partial", r.Status);
+    }
+
+    [Fact]
+    public void Score_AllEditsCleanNoFailures_DoublesPointsAndMarksCompleted()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "done", "a.cs"),
+            Step("rename", "applied", "b.cs"),
+        };
+
+        var r = TestScorer.Score("clean", "card1", steps, PlanOf(2), complete: true,
+            filesEdited: new[] { "a.cs", "b.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6");
+
+        Assert.Equal(2, r.SuccessfulEdits);
+        Assert.Equal(0, r.FailedEdits);
+        Assert.Equal(4, r.Points); // 2 successful, doubled since nothing failed
+        Assert.Equal(100, r.EditScorePercent);
+        Assert.Equal("completed", r.Status);
+    }
+
+    [Fact]
+    public void Score_NoEditStepsAtAll_ReportsZeroPointsNotDivideByZero()
+    {
+        // A command-only card (e.g. "Benchmark 0" just creates a folder) attempts no
+        // edits. The percentage has no denominator here, so it must report 0 rather
+        // than NaN — NaN would serialise into the local store and the leaderboard.
+        var steps = new List<object>
+        {
+            Step("command", "done"),
+            Step("done_signal", "done"),
+        };
+
+        var r = TestScorer.Score("cmd-only", "card1", steps, PlanOf(2), complete: true,
+            filesEdited: Array.Empty<string>(),
+            machine: new EnvironmentMetadata(), weaverVersion: "6");
+
+        Assert.Equal(0, r.SuccessfulEdits);
+        Assert.Equal(0, r.FailedEdits);
+        Assert.Equal(0, r.Points);
+        Assert.Equal(0, r.EditScorePercent);
+        Assert.Equal("failed", r.Status);
+    }
+
+    [Fact]
+    public void Score_EveryEditFailed_ReportsFailedStatusAndNoPoints()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "error", "a.cs"),
+            Step("create", "rejected", "b.cs"),
+        };
+
+        var r = TestScorer.Score("all-bad", "card1", steps, PlanOf(2), complete: false,
+            filesEdited: Array.Empty<string>(),
+            machine: new EnvironmentMetadata(), weaverVersion: "6");
+
+        Assert.Equal(0, r.SuccessfulEdits);
+        Assert.Equal(2, r.FailedEdits);
+        Assert.Equal(0, r.Points);
+        Assert.Equal(0, r.EditScorePercent);
+        Assert.Equal("failed", r.Status);
+        Assert.False(r.Passed);
+    }
+
+    [Fact]
     public void Score_AllStepsDone_IsPerfectAndPassing()
     {
         var steps = new List<object>
