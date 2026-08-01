@@ -18,7 +18,7 @@ public class NotesController : ControllerBase
     public IActionResult Get([FromQuery] string? project)
     {
         var key = project ?? "";
-        var content = _db.GetValue("notes", key);
+        var content = _db.GetValue("notes:" + key);
         return Ok(new { project = key, content = content ?? "" });
     }
 
@@ -27,7 +27,7 @@ public class NotesController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(dto.Project))
             return BadRequest("project is required");
-        _db.SetValue("notes", dto.Project, dto.Content ?? "");
+        _db.SetValue("notes:" + dto.Project, dto.Content ?? "");
         return Ok(new { project = dto.Project, saved = true });
     }
 }

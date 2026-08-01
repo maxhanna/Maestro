@@ -340,20 +340,7 @@ angular.module('kanbanApp')
 
                 vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
                 vm.closeOptionsOnBlur = function (event) { $timeout(function () { vm.showProjectOptions = false; $timeout(function () { vm.saveSettings(true); }, 300); }, 300); };
-                vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); vm.loadNotes(); };
-                vm.loadNotes = function () {
-                    $http.get('/api/notes', { params: { project: vm.selectedProject } }).then(function (resp) {
-                        vm.notesContent = (resp.data && resp.data.content) || '';
-                        vm.notesDirty = false;
-                    }, function () { vm.notesContent = vm.notesContent || ''; vm.notesDirty = false; });
-                };
-                vm.saveNotes = function () {
-                    if (!vm.selectedProject) return;
-                    $http.post('/api/notes', { project: vm.selectedProject, content: vm.notesContent || '' }).then(function () {
-                        vm.notesDirty = false;
-                        pushAgentLog && pushAgentLog(vm, 'log', '📝 Notes saved for ' + vm.selectedProject);
-                    }, function (err) { $window.alert('Failed to save notes: ' + (err.data || err.statusText || err)); });
-                };
+                vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); };
                 vm.openEditProjectsPanel = function () { vm.newProjectName = ''; vm.newProjectPath = ''; vm.newProjectDescription = ''; vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.projects.forEach(function (p) { p._origPath = p.Path; }); vm.showEditProjectsPanel = true; };
                 vm.closeEditProjectsPanel = function () { vm.saveSettings(true); vm.showEditProjectsPanel = false; };
                 vm.addProjectFromPanel = function () {

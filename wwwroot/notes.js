@@ -65,9 +65,11 @@ angular.module('kanbanApp').factory('NotesMixin', function ($http, $timeout) {
         });
       };
 
-      // Auto-load notes when the panel is first opened
+      // Auto-load notes whenever the panel is opened (always uses the
+      // currently selected project so switching projects while closed
+      // can't leave stale notes visible)
       $scope.$watch('vm.showNotes', function (newVal) {
-        if (newVal && !vm.notesLastSaved) {
+        if (newVal) {
           vm.notesProject = vm.selectedProject || '';
           vm.loadNotes();
         }

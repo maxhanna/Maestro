@@ -443,7 +443,7 @@ partial class AgentController
 
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
-        string? steeringContext, List<string> rejectionFeedback)
+        string? steeringContext, List<string> rejectionFeedback, string? extendedReasoning = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("### TASK ###");
@@ -453,6 +453,12 @@ partial class AgentController
             sb.AppendLine();
             sb.AppendLine("### STEERING ###");
             sb.AppendLine(steeringContext);
+        }
+        if (!string.IsNullOrWhiteSpace(extendedReasoning))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### EXTENDED REASONING (from the deep-reasoning engine — read it fully; it decided this step's file, anchors and content. Follow it unless you find a concrete contradiction with the discovery context.) ###");
+            sb.AppendLine(extendedReasoning);
         }
         sb.AppendLine();
         sb.AppendLine("### DISCOVERY CONTEXT (only reference paths/content shown here) ###");

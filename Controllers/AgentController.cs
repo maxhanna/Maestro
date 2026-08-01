@@ -7550,11 +7550,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private async Task<IncrementalStepProposal?> ProposeNextIncrementalStepAsync(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string? steeringContext, List<string> rejectionFeedback, bool emitSse, CancellationToken ct,
-        string stepMode = "all")
+        string stepMode = "all", string? extendedReasoning = null)
     {
         var cfg = await LoadConfigAsync();
         var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct));
-        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback);
+        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning);
         var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 2000);
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -8303,7 +8303,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     "_planning", planningText,
                     $"Planning step {planSoFar.Count + 1}…", null, ct);
             }
-            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
+            string? extendedReasoning = null;
+            var prePlanCfg = await LoadConfigAsync();
+            if (prePlanCfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+            {
+                try
+                {
+                    extendedReasoning = await ExtendThinkingPrePlanAsync(
+                        cardId, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    await EmitLog(emitSse, "warn", $"Pre-plan thinking skipped: {ex.Message}", ct: ct);
+                }
+            }
+            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning);
             if (proposal == null)
             {
                 rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
@@ -9439,7 +9454,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     private async Task<(string discoveryText, List<object> steps)> RunLightBootstrap(
-        List<string> attachedFiles, string projectRoot, bool emitSse, CancellationToken ct = default)
+        string prompt, List<string> attachedFiles, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
         await EmitLog(emitSse, "info", "Fast-path bootstrap: reading attached files only");
         var files = (attachedFiles ?? new List<string>())
@@ -9492,6 +9507,50 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());
             allResults.Add(result);
         }
+        var alreadyRead = files.Select(f => f.Replace('\\', '/'))
+            .Where(f => allResults.Any(r => r is Dictionary<string, object?> d &&
+                                            d.GetValueOrDefault("path")?.ToString() == f &&
+                                            d.GetValueOrDefault("status")?.ToString() == "done"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (alreadyRead.Count > 0)
+        {
+            var allFiles = EnumerateProjectFiles(projectRoot);
+            var toRead = await RunBm25CrossCheck(prompt, alreadyRead.ToList(), projectRoot, allFiles, emitSse, ct);
+            var preSiblingCount = toRead.Count;
+            toRead = AddTemplateStyleSiblings(toRead, projectRoot);
+            var addedSiblings = toRead.Skip(preSiblingCount).ToList();
+            if (addedSiblings.Count > 0)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Phase 1 — adding {addedSiblings.Count} template/style sibling(s) of attached components: {string.Join(", ", addedSiblings)}",
+                    ct: ct);
+            }
+            toRead = toRead
+                .Where(f => !alreadyRead.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            if (toRead.Count > 0)
+            {
+                await EmitLog(emitSse, "info", $"Phase 1 — reading {toRead.Count} additional file(s): {string.Join(", ", toRead)}", ct: ct);
+                var readPlan = toRead.Select((f, i) => new AgentStep
+                {
+                    Index = allResults.Count + i,
+                    Type = "read",
+                    Path = f,
+                    Description = $"Auto: read {f}",
+                    Prompt = prompt
+                }).ToList();
+                var readResults = await ExecuteDiscoveryStepsConcurrent(
+                    readPlan, projectRoot, allResults.Count, emitSse);
+                foreach (var r in readResults)
+                {
+                    if (r is Dictionary<string, object?> d && d.GetValueOrDefault("status")?.ToString() == "done")
+                        sb.AppendLine($"\n### {d.GetValueOrDefault("path")}\n```\n{d.GetValueOrDefault("output")}\n```");
+                }
+                allResults.AddRange(readResults);
+                foreach (var f in toRead) _fileHints.LearnFromGrepOutput(prompt, f, projectRoot);
+            }
+        }
         if (emitSse)
         {
             var succeeded = allResults.Count(r =>
@@ -9520,7 +9579,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         List<string>? attachedFiles = null, CancellationToken ct = default)
     {
         if (attachedFiles != null && attachedFiles.Count > 0)
-            return await RunLightBootstrap(attachedFiles, projectRoot, emitSse, ct);
+            return await RunLightBootstrap(prompt, attachedFiles, projectRoot, emitSse, ct);
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER: enumerating project files…", ct: ct);
         var allSteps = new List<object>();
         var listStep = new AgentStep { Index = 0, Type = "list", Path = "", Description = "Auto: list project root" };
@@ -9528,14 +9587,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             new List<AgentStep> { listStep }, projectRoot, 0, emitSse);
         allSteps.AddRange(listResults);
         if (!Directory.Exists(projectRoot)) return ("", allSteps);
-        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages", ".vs", ".idea" };
-        var allFiles = Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories)
-            .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
-            .Where(rel => !skipDirs.Any(d =>
-                rel.StartsWith(d + "/", StringComparison.OrdinalIgnoreCase) ||
-                rel.Contains("/" + d + "/", StringComparison.OrdinalIgnoreCase)))
-            .ToList();
+        var allFiles = EnumerateProjectFiles(projectRoot);
         if (allFiles.Count == 0) return ("", allSteps);
         var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot)
             .Where(f => allFiles.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
@@ -9564,6 +9616,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
             return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
         }).ToList();
+        // BM25 cross-check: lexical scan of the whole project, compare with the
+        // LLM's list; files BM25 ranks highly but the LLM missed get a close LLM
+        // evaluation before being read into discovery context
+        toRead = await RunBm25CrossCheck(prompt, toRead, projectRoot, allFiles, emitSse, ct);
+        var preSiblingCount = toRead.Count;
+        toRead = AddTemplateStyleSiblings(toRead, projectRoot);
+        var addedSiblings = toRead.Skip(preSiblingCount).ToList();
+        if (addedSiblings.Count > 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"Phase 1 — adding {addedSiblings.Count} template/style sibling(s) of selected components: {string.Join(", ", addedSiblings)}",
+                ct: ct);
+        }
         await EmitLog(emitSse, "info", $"Phase 1 — reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
         if (toRead.Count > 0)
         {
@@ -9596,6 +9661,93 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "info",
             $"Phase 1 complete — {allSteps.Count} step(s), {toRead.Count} file(s) read", ct: ct);
         return (sb.ToString(), allSteps);
+    }
+    private static List<string> EnumerateProjectFiles(string projectRoot)
+    {
+        if (!Directory.Exists(projectRoot)) return new List<string>();
+        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages", ".vs", ".idea" };
+        return Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories)
+            .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
+            .Where(rel => !skipDirs.Any(d =>
+                rel.StartsWith(d + "/", StringComparison.OrdinalIgnoreCase) ||
+                rel.Contains("/" + d + "/", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+    }
+
+    /// <summary>
+    /// BM25 lexical cross-check shared by the full discovery path and the fast
+    /// attached-files path: scans the whole project, ranks files against the task,
+    /// and any file BM25 ranks highly but that isn't already being read gets a
+    /// close LLM evaluation before being added to the read list.
+    /// </summary>
+    private async Task<List<string>> RunBm25CrossCheck(
+        string prompt, List<string> toRead, string projectRoot, List<string> allFiles,
+        bool emitSse, CancellationToken ct)
+    {
+        if (allFiles.Count == 0) return toRead;
+        await SendSse(Response, "phase", new { phase = "discover", message = "BM25 cross-checking project files...", contextSize = 0 }, ct);
+        var bm25Top = ScoreProjectFilesWithBm25(prompt, projectRoot, allFiles, ct);
+        await EmitLog(emitSse, "info", $"Phase 1 — BM25 scan: {bm25Top.Count} most relevant file(s) by lexical scoring", new { Bm25Top = bm25Top }, ct: ct);
+        var bm25Only = bm25Top
+            .Where(f => !toRead.Any(t => string.Equals(t, f, StringComparison.OrdinalIgnoreCase)))
+            .Take(5)
+            .ToList();
+        if (bm25Only.Count > 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"Phase 1 — BM25 cross-check: {bm25Only.Count} file(s) ranked highly but not in the current read list — evaluating them closely: {string.Join(", ", bm25Only)}",
+                new { Bm25Only = bm25Only, CurrentList = toRead }, ct: ct);
+            var kept = await EvaluateBm25DiscrepanciesWithLlm(prompt, bm25Only, projectRoot, emitSse, ct);
+            if (kept.Count > 0)
+            {
+                toRead = toRead.Concat(kept).Distinct(StringComparer.OrdinalIgnoreCase).Take(12).ToList();
+                await EmitLog(emitSse, "info", $"Phase 1 — BM25 cross-check kept {kept.Count} file(s): {string.Join(", ", kept)}", new { Kept = kept }, ct: ct);
+            }
+            else
+            {
+                await EmitLog(emitSse, "info", "Phase 1 — BM25 cross-check: evaluated, no additional files worth reading", ct: ct);
+            }
+        }
+        else if (bm25Top.Count > 0)
+        {
+            await EmitLog(emitSse, "info", "Phase 1 — BM25 cross-check: all top lexical matches already in the read list", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "info", "Phase 1 — BM25 scan: no files matched the task lexically", ct: ct);
+        }
+        return toRead;
+    }
+
+    /// <summary>
+    /// For every selected .ts component, also surface its same-name template/style
+    /// siblings (.html, .css, .scss, .less, .vue) — e.g. selecting music.component.ts
+    /// must also read music.component.html, where templates like the popupPanel div
+    /// actually live.
+    /// </summary>
+    private static List<string> AddTemplateStyleSiblings(List<string> toRead, string projectRoot)
+    {
+        var withSiblings = new List<string>();
+        foreach (var f in toRead)
+        {
+            withSiblings.Add(f);
+            var lower = f.ToLowerInvariant();
+            if (!lower.EndsWith(".ts") || lower.Contains(".spec.") || lower.Contains(".test.")) continue;
+            var basePath = f[..^3];
+            foreach (var ext in new[] { ".html", ".css", ".scss", ".less", ".vue" })
+            {
+                var sibling = basePath + ext;
+                try
+                {
+                    if (System.IO.File.Exists(Path.GetFullPath(
+                            Path.Combine(projectRoot, sibling.Replace('/', Path.DirectorySeparatorChar)))))
+                        withSiblings.Add(sibling);
+                }
+                catch { }
+            }
+        }
+        return withSiblings.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
     private async Task<List<string>> SelectRelevantFilesWithLlm(
         string prompt, List<string> candidates, bool emitSse, CancellationToken ct)
@@ -9654,6 +9806,175 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         catch { }
         return deterministic.Concat(candidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
+    }
+    private static readonly HashSet<string> _bm25TextExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".cs", ".ts", ".js", ".tsx", ".jsx", ".html", ".css", ".scss", ".less", ".vue", ".svelte",
+        ".json", ".xml", ".yml", ".yaml", ".md", ".sql", ".py", ".java", ".go", ".rs", ".rb",
+        ".php", ".c", ".h", ".cpp", ".hpp", ".fs", ".fsx", ".sh", ".bat", ".ps1", ".ini", ".cfg",
+        ".env", ".gradle", ".properties", ".conf", ".toml", ".proto", ".graphql", ".prisma"
+    };
+    private static readonly HashSet<string> _bm25GeneratedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.lock", "cargo.lock",
+        "go.sum", "poetry.lock", "npm-shrinkwrap.json", "tsconfig.json", "tsconfig.tsbuildinfo",
+        "angular.json", "project.json", "package.json", "global.json", "launch.json", "tasks.json"
+    };
+    private static readonly HashSet<string> _bm25StopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "and", "for", "with", "this", "that", "from", "into", "when", "what", "which",
+        "where", "who", "how", "does", "do", "is", "are", "was", "were", "have", "has", "had",
+        "not", "but", "can", "could", "would", "should", "will", "there", "their", "your", "its",
+        "it's", "all", "any", "some", "each", "every", "both", "none", "one", "two", "if", "then",
+        "else", "than", "too", "very", "just", "only", "also", "may", "might", "must", "about",
+        "after", "before", "between", "during", "without", "within", "above", "below", "upon",
+        "over", "under", "here", "there", "again", "once", "other", "more", "most", "such",
+        "same", "still", "even", "though", "because", "since", "while", "until", "make", "made",
+        "get", "got", "let", "put", "see", "show", "use", "used", "using", "need", "want", "like",
+        "should", "please", "make", "sure", "ensure", "create", "add", "change", "fix", "bug"
+    };
+    private static List<string> ScoreProjectFilesWithBm25(
+        string prompt, string projectRoot, List<string> allFiles, CancellationToken ct)
+    {
+        var queryTokens = AgentUtilities.ExtractMeaningfulKeywords(prompt.ToLowerInvariant())
+            .Where(t => t.Length >= 2 && !_bm25StopWords.Contains(t))
+            .ToList();
+        if (queryTokens.Count == 0)
+            queryTokens = Regex.Matches(prompt.ToLowerInvariant(), @"[a-z0-9_]{2,}")
+                .Select(m => m.Value)
+                .Where(t => !_bm25StopWords.Contains(t))
+                .ToList();
+        if (queryTokens.Count == 0) return new List<string>();
+        var fileTokens = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        long totalTokens = 0;
+        foreach (var rel in allFiles)
+        {
+            if (ct.IsCancellationRequested) return new List<string>();
+            var ext = Path.GetExtension(rel);
+            if (!_bm25TextExtensions.Contains(ext)) continue;
+            if (rel.Contains(".min.", StringComparison.OrdinalIgnoreCase)) continue;
+            var fileName = Path.GetFileName(rel);
+            if (_bm25GeneratedNames.Contains(fileName)) continue;
+            if (rel.Contains("/generated/", StringComparison.OrdinalIgnoreCase) ||
+                rel.Contains("/migrations/", StringComparison.OrdinalIgnoreCase) ||
+                rel.Contains("/wwwroot/lib/", StringComparison.OrdinalIgnoreCase)) continue;
+            var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(full)) continue;
+            string text;
+            try
+            {
+                var fi = new FileInfo(full);
+                if (fi.Length > 512 * 1024 || fi.Length == 0) continue;
+                text = System.IO.File.ReadAllText(full);
+            }
+            catch { continue; }
+            var toks = Regex.Matches(text.ToLowerInvariant(), @"[a-z0-9_]{2,}")
+                .Select(m => m.Value)
+                .Where(t => !_bm25StopWords.Contains(t))
+                .ToList();
+            if (toks.Count < 20) continue;
+            fileTokens[rel] = toks;
+            totalTokens += toks.Count;
+        }
+        if (fileTokens.Count == 0) return new List<string>();
+        var n = fileTokens.Count;
+        var avgDl = (double)totalTokens / n;
+        var df = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var toks in fileTokens.Values)
+            foreach (var t in new HashSet<string>(toks, StringComparer.OrdinalIgnoreCase))
+                df[t] = df.GetValueOrDefault(t) + 1;
+        const double k1 = 1.5, b = 0.75;
+        var idf = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var q in queryTokens)
+            idf[q] = Math.Log(1 + (n - df.GetValueOrDefault(q) + 0.5) / (df.GetValueOrDefault(q) + 0.5));
+        var scores = new List<(string file, double score)>();
+        foreach (var kv in fileTokens)
+        {
+            if (ct.IsCancellationRequested) return new List<string>();
+            var tf = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in kv.Value) tf[t] = tf.GetValueOrDefault(t) + 1;
+            var dl = kv.Value.Count;
+            double s = 0;
+            foreach (var q in queryTokens)
+            {
+                var f = tf.GetValueOrDefault(q);
+                if (f == 0) continue;
+                s += idf[q] * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgDl));
+            }
+            var name = Path.GetFileNameWithoutExtension(kv.Key);
+            foreach (var q in queryTokens)
+            {
+                if (name.Contains(q, StringComparison.OrdinalIgnoreCase)) s += 3;
+                if (kv.Key.Contains(q, StringComparison.OrdinalIgnoreCase)) s += 1;
+            }
+            if (s > 0) scores.Add((kv.Key, s));
+        }
+        return scores.OrderByDescending(x => x.score)
+            .ThenBy(x => x.file.Length)
+            .Take(10)
+            .Select(x => x.file)
+            .ToList();
+    }
+    private async Task<List<string>> EvaluateBm25DiscrepanciesWithLlm(
+        string prompt, List<string> bm25OnlyFiles, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        if (bm25OnlyFiles.Count == 0) return new List<string>();
+        const string system =
+            "You are a file relevance evaluator for a coding agent. A lexical search (BM25) flagged the files below as " +
+            "potentially relevant to the task, but the agent's LLM selector did NOT pick them. Your job: read each file " +
+            "CLOSELY and judge whether it genuinely matters for the task — it owns part of the requested change, defines " +
+            "types/symbols/templates/styles the change depends on, or is the place where behavior visible to the user lives. " +
+            "Do NOT keep a file merely because a keyword appears; judge its actual content against the task. " +
+            "Output ONLY valid JSON, no markdown: {\"keep\": [\"path1\"], \"drop\": [\"path2\"]} — use paths exactly as listed.";
+        var sb = new StringBuilder();
+        sb.AppendLine($"Task: {prompt}");
+        sb.AppendLine();
+        sb.AppendLine("Candidate files (BM25-flagged, LLM missed):");
+        var existing = new List<string>();
+        foreach (var rel in bm25OnlyFiles)
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(full) || !AgentUtilities.IsPathUnderRoot(full, projectRoot)) continue;
+            existing.Add(rel);
+            string text;
+            try
+            {
+                var fi = new FileInfo(full);
+                if (fi.Length > 512 * 1024) { text = "(file too large to inline — read it if needed)"; }
+                else text = System.IO.File.ReadAllText(full);
+            }
+            catch { text = "(unreadable)"; }
+            if (text.Length > 8000) text = text[..8000] + "\n...(truncated)";
+            sb.AppendLine($"\n=== {rel} ===\n```\n{text}\n```");
+        }
+        if (existing.Count == 0) return new List<string>();
+        var (raw, _, _) = await CallLlmRaw(system, sb.ToString(), ct, TimeSpan.FromSeconds(30), maxTokens: 600);
+        if (string.IsNullOrWhiteSpace(raw)) return new List<string>();
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var s = cleaned.IndexOf('{'); var e = cleaned.LastIndexOf('}');
+            if (s >= 0 && e > s) cleaned = cleaned[s..(e + 1)];
+            using var doc = JsonDocument.Parse(cleaned);
+            var kept = new List<string>();
+            if (doc.RootElement.TryGetProperty("keep", out var keepEl) && keepEl.ValueKind == JsonValueKind.Array)
+            {
+                kept = keepEl.EnumerateArray()
+                    .Select(el => el.GetString()?.Replace('\\', '/') ?? "")
+                    .Where(f => !string.IsNullOrWhiteSpace(f) &&
+                                existing.Any(c => string.Equals(c, f, StringComparison.OrdinalIgnoreCase)))
+                    .Take(4)
+                    .ToList();
+            }
+            if (kept.Count > 0) return kept;
+        }
+        catch { }
+        return new List<string>();
     }
     private async Task<(string trimmedSkeleton, string architectureNote)> TrimSkeletonWithLlm(
         AgentUtilities.SkeletonResult skeleton, string prompt, bool emitSse, CancellationToken ct)
@@ -11490,12 +11811,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var normalized = parts.OrderBy(x => x);
         return file.Replace('\\', '/') + "::" + string.Join("|", normalized);
     }
-    private static bool ShouldExtendThinkForStep(string planFile)
-    {
-        if (string.IsNullOrWhiteSpace(planFile)) return false;
-        var lower = planFile.Trim().ToLowerInvariant();
-        return lower is not ("_done" or "_continue" or "_checkpoint" or "_show" or "_display" or "_ping");
-    }
     private static string TruncateForLog(string? s, int max)
     {
         if (string.IsNullOrEmpty(s)) return "";
@@ -11505,28 +11820,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
     /// <summary>
     /// Maps a complexity score (0-100) to a token cap for thinking output.
-    /// Higher complexity = more thinking tokens allowed. The maxAllowed parameter
-    /// from user config acts as the absolute ceiling.
+    /// The cap scales proportionally with the complexity percentage of the
+    /// configured maximum (e.g. 35/100 complexity gets ~35% of maxAllowed),
+    /// so harder tasks always get proportionally more thinking tokens.
     /// </summary>
     private static int GetThinkingTokenCap(int complexityScore, int maxAllowed)
     {
-        int cap;
-        if (complexityScore <= 10)
-            cap = 500;
-        else if (complexityScore <= 20)
-            cap = Math.Max(1000, (int)(maxAllowed * 0.10));
-        else if (complexityScore <= 35)
-            cap = Math.Max(1000, (int)(maxAllowed * 0.15));
-        else if (complexityScore <= 50)
-            cap = Math.Max(1200, (int)(maxAllowed * 0.22));
-        else if (complexityScore <= 65)
-            cap = Math.Max(1500, (int)(maxAllowed * 0.30));
-        else if (complexityScore <= 80)
-            cap = Math.Max(2000, (int)(maxAllowed * 0.45));
-        else if (complexityScore <= 90)
-            cap = Math.Max(2500, (int)(maxAllowed * 0.65));
-        else
-            cap = maxAllowed;
+        var ratio = Math.Clamp(complexityScore, 0, 100) / 100.0;
+        var cap = (int)(maxAllowed * ratio);
         return Math.Clamp(cap, 256, maxAllowed);
     }
 
@@ -11580,105 +11881,73 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         const int max = 8000;
         return t.Length <= max ? t : t[..max] + "\n…[truncated]…";
     }
-    private async Task<string?> ExtendThinkingAsync(
-        string? cardId, int stepIndex, PlanStep step, string projectRoot,
-        bool emitSse, CancellationToken ct,
-        bool postVerification = false, string? editSummary = null)
+
+    /// <summary>
+    /// Pre-plan extended reasoning: runs BEFORE the planner proposes the next step.
+    /// Decides what the step must contain (file, anchors, code to copy) so the
+    /// planner authors a concrete, grounded oldString/newString instead of guessing.
+    /// Reasoning accumulates in the per-card store keyed "preplan:" so later steps
+    /// build on earlier reasoning.
+    /// </summary>
+    private async Task<string?> ExtendThinkingPrePlanAsync(
+        string? cardId, string prompt, string discoveryContext, List<PlanStep> planSoFar,
+        string projectRoot, bool emitSse, CancellationToken ct)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(cardId)) return null;
-            var log = _stepThinkingStore.GetOrAdd(cardId, _ => new StringBuilder());
+            var log = _stepThinkingStore.GetOrAdd("preplan:" + cardId, _ => new StringBuilder());
             string previous;
             lock (log) { previous = log.ToString(); }
             const int prevMax = 14000;
             if (previous.Length > prevMax)
-                previous = "…[earlier thinking truncated]…\n" + previous[^prevMax..];
+                previous = "…[earlier reasoning truncated]…\n" + previous[^prevMax..];
 
-            var file = step.File ?? "";
-            var isVirtual = file.StartsWith('_');
-            string? fileContent = null;
-            if (!isVirtual && !string.IsNullOrWhiteSpace(file) && System.IO.File.Exists(
-                    Path.GetFullPath(Path.Combine(projectRoot, file.Replace('/', Path.DirectorySeparatorChar)))))
-            {
-                try
-                {
-                    fileContent = await System.IO.File.ReadAllTextAsync(
-                        Path.GetFullPath(Path.Combine(projectRoot, file.Replace('/', Path.DirectorySeparatorChar))),
-                        Encoding.UTF8, ct);
-                }
-                catch { }
-                if (fileContent != null && fileContent.Length > 6000)
-                    fileContent = fileContent[..6000] + "\n…[file truncated]…";
-            }
+            var related = SelectRelatedFilesForThinking(discoveryContext, prompt, null);
 
-            string system, user, header;
-            if (!postVerification)
-            {
-                header = $"EXTENDED THINKING — STEP {stepIndex + 1}";
-                system = "You are the deep-reasoning engine of an autonomous coding agent. Before a plan step executes, " +
-                    "you produce EXTENDED, VERBOSE thinking in plain prose. Your thinking becomes the working memory that " +
-                    "later steps read, so be concrete, factual and actionable. You may be as long as you need — this is a " +
-                    "thinking scratchpad, not user-facing output.\n" +
-                    "Rules:\n" +
-                    "- Write in first person, like a senior engineer talking to themselves while working.\n" +
-                    "- Read PREVIOUS STEPS' THINKING carefully. If any earlier step deferred a task, flagged a risk, or " +
-                    "described something that affects THIS step, address it explicitly.\n" +
-                    "- Ground every claim in the CURRENT FILE CONTENT shown below. Quote real identifiers, method names and " +
-                    "what you actually observe. Never assume code exists that is not shown.\n" +
-                    "- Think about: exactly what must change in this step, what could go wrong (missing imports, type errors, " +
-                    "breaking call sites, CRLF line endings, brace imbalance, duplicate anchors), and what the next step will need to know.\n" +
-                    "- End with a short 'VERIFY:' list — 2 to 4 concrete checks to perform after applying the change.\n" +
-                    "- Output ONLY the thinking prose. No JSON, no markdown fences, no code blocks, no headings like 'Thinking:'.";
-                var sb = new StringBuilder();
-                sb.AppendLine("Produce your extended thinking for the step about to execute.");
-                sb.AppendLine();
-                sb.AppendLine("### PREVIOUS STEPS' THINKING ###");
-                sb.AppendLine(string.IsNullOrWhiteSpace(previous) ? "(none yet — this is the first step)" : previous);
-                sb.AppendLine();
-                sb.AppendLine("### CURRENT STEP ###");
-                sb.AppendLine($"step {stepIndex + 1}, file: {file}");
-                sb.AppendLine($"change: {step.Change}");
-                if (!string.IsNullOrWhiteSpace(step.TargetSymbol))
-                    sb.AppendLine($"targetSymbol: {step.TargetSymbol}");
-                if (step.LineNumber > 0)
-                    sb.AppendLine($"lineNumber: {step.LineNumber}");
-                sb.AppendLine();
-                sb.AppendLine("### CURRENT FILE CONTENT ###");
-                sb.AppendLine(fileContent ?? (isVirtual ? "(virtual step — no file)" : "(file does not exist yet — this step may create it)"));
-                user = sb.ToString();
-            }
+            const string system =
+                "You are the deep-reasoning engine of an autonomous coding agent. BEFORE the planner proposes the next step, " +
+                "you produce EXTENDED, VERBOSE reasoning in plain prose about what the next step must do. Your reasoning is " +
+                "handed to the planner, so be concrete and prescriptive — this is where the exact edit is decided.\n" +
+                "Rules:\n" +
+                "- Write in first person, like a senior engineer preparing a precise edit.\n" +
+                "- Read PREVIOUS REASONING carefully and build on it. Never redo a step already committed in PLAN SO FAR.\n" +
+                "- Ground every claim in the RELEVANT PROJECT FILES: quote real identifiers, method names, imports and exact " +
+                "template markup. That is your source for what to copy, how it integrates, and which variables come into play. " +
+                "Never invent names or guess structure.\n" +
+                "- Decide: exactly which file to touch next, what to insert or change, the exact anchor text (oldString) to " +
+                "match against the current file, and the exact replacement (newString). Think about what could go wrong — " +
+                "missing imports, type errors, breaking call sites, duplicate anchors, CRLF line endings.\n" +
+                "- End with a short 'NEXT STEP:' section — 2 to 4 concrete directives: exact file path, exact anchor to find, " +
+                "and the code or variables to write.\n" +
+                "- Output ONLY the reasoning prose. No JSON, no markdown fences, no code blocks.";
+            var sb = new StringBuilder();
+            sb.AppendLine("Produce your extended reasoning for the NEXT step the planner should propose.");
+            sb.AppendLine();
+            sb.AppendLine("### TASK ###");
+            sb.AppendLine(string.IsNullOrWhiteSpace(prompt) ? "(no task text available)" : prompt);
+            sb.AppendLine();
+            sb.AppendLine("### PREVIOUS REASONING ###");
+            sb.AppendLine(string.IsNullOrWhiteSpace(previous) ? "(none yet — this is the first step)" : previous);
+            sb.AppendLine();
+            sb.AppendLine("### PLAN SO FAR (committed steps — do NOT redo these) ###");
+            if (planSoFar.Count == 0)
+                sb.AppendLine("(none — this is the first step)");
             else
             {
-                header = $"VERIFICATION THINKING — AFTER STEP {stepIndex + 1}";
-                system = "You are the verification engine of an autonomous coding agent. A plan step just executed. " +
-                    "Read the PREVIOUS STEPS' THINKING and the CURRENT FILE CONTENT, then produce VERBOSE verification " +
-                    "thinking in plain prose. This thinking is appended to the run's working memory for later steps.\n" +
-                    "Rules:\n" +
-                    "- Write in first person, like a senior engineer reviewing their own just-applied edit.\n" +
-                    "- Check: did the change land exactly as intended? Is anything broken — unbalanced braces, missing or " +
-                    "duplicated code, wrong indentation, leftover references, broken call sites?\n" +
-                    "- Compare against what earlier steps' thinking expected from this step. Note anything promised but not delivered.\n" +
-                    "- End with a short 'NEXT STEP NOTE:' section — 1 to 3 concrete facts the next step must know.\n" +
-                    "- Output ONLY the thinking prose. No JSON, no markdown fences, no code blocks.";
-                var sb = new StringBuilder();
-                sb.AppendLine("Produce your verification thinking for the step that just executed.");
-                sb.AppendLine();
-                sb.AppendLine("### STEP JUST EXECUTED ###");
-                sb.AppendLine($"step {stepIndex + 1}, file: {file}");
-                sb.AppendLine($"change: {step.Change}");
-                if (!string.IsNullOrWhiteSpace(editSummary))
-                    sb.AppendLine($"edit applied: {editSummary}");
-                sb.AppendLine();
-                sb.AppendLine("### PREVIOUS STEPS' THINKING ###");
-                sb.AppendLine(string.IsNullOrWhiteSpace(previous) ? "(none)" : previous);
-                sb.AppendLine();
-                sb.AppendLine("### CURRENT FILE CONTENT ###");
-                sb.AppendLine(fileContent ?? "(file missing or not a real file)");
-                user = sb.ToString();
+                for (var i = 0; i < planSoFar.Count; i++)
+                    sb.AppendLine($"  Step {i + 1}: [{planSoFar[i].File}] {planSoFar[i].Change}");
             }
+            if (!string.IsNullOrWhiteSpace(related))
+            {
+                sb.AppendLine();
+                sb.AppendLine("### RELEVANT PROJECT FILES ###");
+                sb.AppendLine("Files discovered for this task. Use these as your source of truth for what to copy and how to integrate.");
+                sb.AppendLine(related);
+            }
+            var user = sb.ToString();
 
-            var (raw, error) = await CallLlmRawText(system, user, emitSse, ct,
+            var (raw, error) = await CallLlmRawText(system, user, false, ct,
                 requestTimeout: _infiniteTimeout,
                 maxTokens: GetThinkingTokenCap(
                     _complexityScores.TryGetValue(cardId ?? "", out var cs) ? cs : 100,
@@ -11686,33 +11955,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
             {
                 await EmitLog(emitSse, "warn",
-                    $"{(postVerification ? "Verification" : "Extended")} thinking skipped for step {stepIndex + 1}: {error ?? "empty response"}",
-                    ct: ct);
+                    $"Pre-plan reasoning skipped for step {planSoFar.Count + 1}: {error ?? "empty response"}", ct: ct);
                 return null;
             }
             var cleaned = CapThinking(raw);
             if (cleaned.Length < 20)
             {
                 await EmitLog(emitSse, "warn",
-                    $"{(postVerification ? "Verification" : "Extended")} thinking produced no usable text for step {stepIndex + 1}",
-                    ct: ct);
+                    $"Pre-plan reasoning produced no usable text for step {planSoFar.Count + 1}", ct: ct);
                 return null;
             }
             if (emitSse)
                 await SendSse(Response, "step-thinking", new
                 {
                     text = cleaned,
-                    stepIndex,
-                    description = step.Change,
-                    phase = postVerification ? "verify" : "think"
+                    stepIndex = planSoFar.Count,
+                    description = "pre-plan",
+                    phase = "preplan"
                 }, ct);
             await EmitLog(emitSse, "info",
-                $"🧠 {(postVerification ? "Post-step verification" : "Extended thinking")} — step {stepIndex + 1}: {TruncateForLog(step.Change, 90)} ({cleaned.Length} chars)",
-                ct: ct);
+                $"🧠 Pre-plan reasoning — step {planSoFar.Count + 1}: ({cleaned.Length} chars)", ct: ct);
             lock (log)
             {
                 log.AppendLine();
-                log.AppendLine($"### {header} ###");
+                log.AppendLine($"### PRE-PLAN REASONING — STEP {planSoFar.Count + 1} ###");
                 log.AppendLine(cleaned);
             }
             return cleaned;
@@ -11720,12 +11986,118 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            await EmitLog(emitSse, "warn",
-                $"{(postVerification ? "Verification" : "Extended")} thinking error for step {stepIndex + 1}: {ex.Message}",
-                ct: ct);
+            await EmitLog(emitSse, "warn", $"Pre-plan thinking error: {ex.Message}", ct: ct);
             return null;
         }
     }
+
+    /// <summary>
+    /// Resolves the real file path a step is about to touch. For real edit steps this
+    /// is the step's File; for virtual steps (_create_file etc.) it is parsed out of
+    /// the Change description, which typically contains the target path.
+    /// </summary>
+    private static string? ExtractTargetPath(string? file, string? change)
+    {
+        if (!string.IsNullOrWhiteSpace(file) && !file.StartsWith('_'))
+            return file;
+        if (!string.IsNullOrWhiteSpace(change))
+        {
+            var token = change.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault(t => t.Contains('/') && t.Contains('.'));
+            if (token != null)
+                return token.TrimEnd(',', ';', ')', ']', '}', '"', '”', '`');
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Pulls the most relevant sections out of the serialized discovery context
+    /// (### read {path} fences) for the step's target file, so extended thinking can
+    /// ground itself in real code: what to copy, how it integrates, which variables
+    /// and imports come into play. Ranks files by (a) same-directory as the target,
+    /// (b) shared name tokens, and (c) whether the file's path or content matches
+    /// keywords from the task prompt — e.g. a task saying "like the music component"
+    /// surfaces music.component.html even though it lives in a different directory.
+    /// All sections up to the budget are included (ordered by relevance), because a
+    /// cross-directory reference file is often exactly what the step must copy from.
+    /// </summary>
+    private static string SelectRelatedFilesForThinking(string discoveryContext, string prompt, string? targetPath, int maxChars = 24000)
+    {
+        if (string.IsNullOrWhiteSpace(discoveryContext)) return "";
+        var sections = new List<(string path, string content)>();
+        foreach (Match m in Regex.Matches(discoveryContext, @"### read (?<path>[^\n`]+)\n```\n(?<content>[\s\S]*?)\n```"))
+        {
+            var p = m.Groups["path"].Value.Trim();
+            var c = m.Groups["content"].Value;
+            if (!string.IsNullOrWhiteSpace(p) && !string.IsNullOrWhiteSpace(c))
+                sections.Add((p, c));
+        }
+        if (sections.Count == 0) return "";
+
+        var promptTokens = new HashSet<string>(
+            AgentUtilities.ExtractMeaningfulKeywords(prompt.ToLowerInvariant()),
+            StringComparer.OrdinalIgnoreCase);
+
+        string? targetDir = null;
+        var targetName = "";
+        if (!string.IsNullOrWhiteSpace(targetPath))
+        {
+            var t = targetPath.Replace('\\', '/');
+            var idx = t.LastIndexOf('/');
+            targetDir = idx > 0 ? t[..idx] : "";
+            targetName = idx >= 0 ? t[(idx + 1)..] : t;
+        }
+        var targetTokens = targetName.Split(new[] { '.', '-', '_', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+            .Where(x => x.Length >= 2).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var scored = sections
+            .Select(s =>
+            {
+                var p = s.path.Replace('\\', '/');
+                var name = p.Contains('/') ? p[(p.LastIndexOf('/') + 1)..] : p;
+                var dir = p.Contains('/') ? p[..p.LastIndexOf('/')] : "";
+                var score = 0;
+                if (targetDir != null && dir.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
+                    score += 100;
+                else if (targetDir != null && dir.StartsWith(targetDir, StringComparison.OrdinalIgnoreCase))
+                    score += 30;
+                else if (targetDir != null && targetDir.StartsWith(dir, StringComparison.OrdinalIgnoreCase))
+                    score += 20;
+                var nameTokens = name.Split(new[] { '.', '-', '_', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Where(x => x.Length >= 2).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                score += nameTokens.Count(targetTokens.Contains) * 50;
+                if (targetDir != null && p.Equals(targetPath?.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                    score -= 500;
+                foreach (var token in promptTokens)
+                {
+                    if (p.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 25;
+                    if (name.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 40;
+                }
+                var probe = s.content.Length > 6000 ? s.content[..6000] : s.content;
+                foreach (var token in promptTokens)
+                {
+                    if (probe.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 45;
+                }
+                return (path: p, content: s.content, score);
+            })
+            .OrderByDescending(x => x.score)
+            .ThenBy(x => x.path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var sb = new StringBuilder();
+        foreach (var s in scored)
+        {
+            if (sb.Length >= maxChars) break;
+            var content = s.content.Length > 6000 ? s.content[..6000] + "\n…[truncated]…" : s.content;
+            var chunk = $"### read {s.path}\n```\n{content}\n```\n";
+            if (sb.Length + chunk.Length > maxChars)
+                sb.Append(chunk[..Math.Min(chunk.Length, maxChars - sb.Length)]);
+            else
+                sb.Append(chunk);
+        }
+        return sb.ToString().Trim();
+    }
+
     private async Task ExecutePlan(
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
@@ -11791,22 +12163,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             var planFile = item.File;
             var changeDesc = item.Change;
-            if (ShouldExtendThinkForStep(planFile))
-            {
-                var thinkCfg = await LoadConfigAsync();
-                if (thinkCfg.extendThinking)
-                {
-                    try
-                    {
-                        await ExtendThinkingAsync(cardId, itemIdx, item, projectRoot, emitSse, ct);
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex)
-                    {
-                        await EmitLog(emitSse, "warn", $"Extended thinking skipped: {ex.Message}", ct: ct);
-                    }
-                }
-            }
             if (planFile.Equals("_done", StringComparison.OrdinalIgnoreCase))
             {
                 await EmitLog(emitSse, "success", $"Task self-reported complete: {changeDesc}", ct: ct);
@@ -12040,21 +12396,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (emitSse) await SendSse(Response, "step", createResult, ct);
                     allResults.Add(createResult);
                     await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
-                    var createCfg = await LoadConfigAsync();
-                    if (createCfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
-                    {
-                        try
-                        {
-                            await ExtendThinkingAsync(cardId, itemIdx, item, projectRoot, emitSse, ct,
-                                postVerification: true,
-                                editSummary: $"created {newFileRelPath} ({contentToWrite.Length} chars)");
-                        }
-                        catch (OperationCanceledException) { throw; }
-                        catch (Exception ex)
-                        {
-                            await EmitLog(emitSse, "warn", $"Post-step verification skipped: {ex.Message}", ct: ct);
-                        }
-                    }
                 }
                 catch (Exception ex)
                 {
@@ -12481,21 +12822,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 planFile, currentContent, projectRoot, emitSse, ct);
                             await PersistCohesionToCardAsync(
                                 cardId, planFile, cohesionIssues, emitSse, ct);
-                        }
-                        var verifyCfg = await LoadConfigAsync();
-                        if (verifyCfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
-                        {
-                            try
-                            {
-                                await ExtendThinkingAsync(cardId, itemIdx, item, projectRoot, emitSse, ct,
-                                    postVerification: true,
-                                    editSummary: TruncateForLog(appliedNewStr, 240));
-                            }
-                            catch (OperationCanceledException) { throw; }
-                            catch (Exception ex)
-                            {
-                                await EmitLog(emitSse, "warn", $"Post-step verification skipped: {ex.Message}", ct: ct);
-                            }
                         }
                     }
                 }
