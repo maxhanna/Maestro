@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -9,15 +10,95 @@ partial class AgentController
     private const int StreamChunkLen = 40;
     private const int StreamRepeatThreshold = 4;
 
+    private string? _runBaseUrl;
+    private string? _runModel;
+
     private async Task<string> GetLlamaBaseUrl()
     {
+        if (!string.IsNullOrWhiteSpace(_runBaseUrl)) return _runBaseUrl;
         var cfg = await _configFile.LoadConfigAsync();
         return (cfg.llamaUrl ?? "http://localhost:8080").TrimEnd('/');
     }
     private async Task<string> GetLlamaModel()
     {
+        if (!string.IsNullOrWhiteSpace(_runModel)) return _runModel;
         var cfg = await _configFile.LoadConfigAsync();
         return cfg.llamaModel ?? "medgemma:4b";
+    }
+
+    /// <summary>
+    /// Resolves the LLM endpoint a card asked for (AgentRequest.EndpointId) so this run talks to that
+    /// endpoint instead of the default. Falls back to the default llamaUrl/llamaModel for unknown/empty ids.
+    /// </summary>
+    private async Task<(string baseUrl, string model, string name)> ResolveRunEndpointAsync(string? endpointId)
+    {
+        var cfg = await _configFile.LoadConfigAsync();
+        var defaultBaseUrl = (cfg.llamaUrl ?? "http://localhost:8080").TrimEnd('/');
+        var defaultModel = cfg.llamaModel ?? "medgemma:4b";
+        if (!string.IsNullOrWhiteSpace(endpointId) && cfg.llamaEndpoints != null)
+        {
+            var ep = cfg.llamaEndpoints.FirstOrDefault(e => e.id == endpointId);
+            if (ep != null)
+            {
+                var baseUrl = (string.IsNullOrWhiteSpace(ep.url) ? cfg.llamaUrl : ep.url).TrimEnd('/');
+                var model = string.IsNullOrWhiteSpace(ep.model) ? cfg.llamaModel : ep.model;
+                return (baseUrl, model, string.IsNullOrWhiteSpace(ep.name) ? ep.url : ep.name);
+            }
+        }
+        return (defaultBaseUrl, defaultModel, "Default");
+    }
+
+    /// <summary>
+    /// Polls the llama.cpp server's /slots endpoint while an LLM call streams and
+    /// forwards the same "progress" value the server prints to its console as SSE
+    /// "progress" events (percent 0-100), so the frontend can show a real loading
+    /// bar instead of a spinner. Falls back silently for backends without /slots
+    /// (e.g. Ollama), in which case the poller simply stops.
+    /// </summary>
+    private async Task PollLlamaProgressAsync(string baseUrl, CancellationToken ct)
+    {
+        var client = _clientFactory.CreateClient("llama");
+        client.Timeout = TimeSpan.FromSeconds(3);
+        double lastSent = -1;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var resp = await client.GetAsync(baseUrl + "/slots", ct);
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    // Backend has no /slots endpoint (e.g. Ollama) — stop polling.
+                    break;
+                }
+                if (resp.IsSuccessStatusCode)
+                {
+                    var json = await resp.Content.ReadAsStringAsync(ct);
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        double best = 0;
+                        var processing = false;
+                        foreach (var slot in doc.RootElement.EnumerateArray())
+                        {
+                            var st = slot.TryGetProperty("state", out var stEl) ? stEl.GetString() : "idle";
+                            if (st == "processing" && slot.TryGetProperty("progress", out var prEl))
+                            {
+                                processing = true;
+                                best = Math.Max(best, prEl.GetDouble());
+                            }
+                        }
+                        var pct = (int)Math.Round(best * 100);
+                        if (processing && pct != (int)lastSent)
+                        {
+                            lastSent = pct;
+                            await SendSse(Response, "progress", new { progress = best, percent = pct }, ct);
+                        }
+                    }
+                }
+            }
+            catch { /* transient error (timeout, server busy) — skip this tick */ }
+            try { await Task.Delay(500, ct); } catch { break; }
+        }
     }
     private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRaw(
         string systemPrompt, string userMessage, CancellationToken ct = default,
@@ -103,6 +184,13 @@ partial class AgentController
             repeat_last_n = 256
         };
         var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
+        // Derive the llama base URL from the target endpoint and start the
+        // /slots progress poller so the frontend sees real loading progress.
+        var llmBaseUrl = target.EndsWith("/v1/chat/completions", StringComparison.OrdinalIgnoreCase)
+            ? target.Substring(0, target.Length - "/v1/chat/completions".Length)
+            : target;
+        using var progressCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (emitSse) _ = PollLlamaProgressAsync(llmBaseUrl, progressCts.Token);
         try
         {
             var request = new HttpRequestMessage(HttpMethod.Post, target) { Content = httpContent };
@@ -184,6 +272,7 @@ partial class AgentController
         }
         catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }
         catch (Exception ex) { return ("", null, ex.Message); }
+        finally { try { progressCts.Cancel(); } catch { } }
     }
     private static string? ExtractNewlyAddedMethodName(string? stepChange, string? newStr)
     {
@@ -418,6 +507,8 @@ partial class AgentController
             repeat_last_n = 256
         };
         var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
+        using var progressCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (emitSse) _ = PollLlamaProgressAsync(baseUrl, progressCts.Token);
         try
         {
             var request = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/chat/completions") { Content = httpContent };
@@ -481,6 +572,7 @@ partial class AgentController
         }
         catch (TaskCanceledException) { return ("", "LLM request timed out"); }
         catch (Exception ex) { return ("", ex.Message); }
+        finally { try { progressCts.Cancel(); } catch { } }
     }
     private static string ExtractLlmContent(string respText)
     {

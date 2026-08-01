@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http.Features;
 using System.Collections.Concurrent;
 using System.Text;
@@ -79,13 +79,21 @@ public partial class AgentController : ControllerBase
         if (!emit) return;
         await SendSse(Response, "log", new { ts = DateTime.UtcNow.ToString("o"), level, message, detail }, ct);
     }
+    private static readonly SemaphoreSlim SseWriteLock = new(1, 1);
     private static async Task SendSse(HttpResponse response, string eventName, object data, CancellationToken ct = default)
     {
         try
         {
             var json = JsonSerializer.Serialize(data);
-            await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", ct);
-            await response.Body.FlushAsync(ct);
+            // Serialize writes so the concurrent /slots progress poller can't
+            // interleave partial frames with in-flight token/log events.
+            await SseWriteLock.WaitAsync(ct);
+            try
+            {
+                await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", ct);
+                await response.Body.FlushAsync(ct);
+            }
+            finally { SseWriteLock.Release(); }
         }
         catch (OperationCanceledException e) { Console.WriteLine($"ERROR, OperationCanceledException. Message: {e.Message}"); }
         catch (ObjectDisposedException e) { Console.WriteLine($"ERROR, ObjectDisposedException. Message: {e.Message}"); }
@@ -1070,6 +1078,56 @@ public partial class AgentController : ControllerBase
                           "Do NOT use oldString/newString for HTML insertion — use FORMAT D.");
         }
         sb.AppendLine();
+        // ── Pattern reference files: load the content the step says to mirror ──
+        var referencePaths = new List<string>();
+        if (step.ReferenceFiles != null)
+            referencePaths.AddRange(step.ReferenceFiles);
+        if (!string.IsNullOrWhiteSpace(step.Change))
+        {
+            foreach (Match rm in Regex.Matches(step.Change,
+                @"([\w./\\-]+\.(?:ts|js|html|cs|css|py|java|go|cshtml|razor|vue))\b",
+                RegexOptions.IgnoreCase))
+            {
+                var candidate = rm.Groups[1].Value.Replace('\\', '/');
+                if (!referencePaths.Contains(candidate, StringComparer.OrdinalIgnoreCase))
+                    referencePaths.Add(candidate);
+            }
+        }
+        var refSb = new StringBuilder();
+        foreach (var refPath in referencePaths)
+        {
+            var refRel = refPath.Replace('\\', '/');
+            var refFull = Path.GetFullPath(Path.Combine(projectRoot, refRel.Replace('/', Path.DirectorySeparatorChar)));
+            if (!AgentUtilities.IsPathUnderRoot(refFull, projectRoot)) continue;
+            if (!System.IO.File.Exists(refFull))
+            {
+                // Bare filename (e.g. "music.component.ts") mentioned in the change text
+                // may live deeper in the tree — search project-wide for a same-named file.
+                // Only accept an EXACT basename match; never fall back to an unrelated fuzzy hit.
+                var similar = AgentUtilities.FindSimilarFiles(refRel, projectRoot)
+                    .FirstOrDefault(f => Path.GetFileName(f).Equals(Path.GetFileName(refRel), StringComparison.OrdinalIgnoreCase));
+                if (similar == null) continue;
+                refFull = Path.GetFullPath(similar);
+                if (!AgentUtilities.IsPathUnderRoot(refFull, projectRoot)) continue;
+            }
+            string refContent;
+            try { refContent = await System.IO.File.ReadAllTextAsync(refFull, Encoding.UTF8, ct); }
+            catch { continue; }
+            if (string.IsNullOrWhiteSpace(refContent)) continue;
+            if (refContent.Length > 20000) refContent = refContent[..20000];
+            refSb.AppendLine();
+            refSb.AppendLine($"### PATTERN REFERENCE FILE: {refRel} (replicate the relevant pattern from this file) ###");
+            refSb.AppendLine("```");
+            refSb.AppendLine(refContent);
+            refSb.AppendLine("```");
+        }
+        if (refSb.Length > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("⚠ PATTERN REFERENCE FILES — the change description references these files as the pattern to follow (e.g. 'like music.component.ts'). Study them and replicate the SAME structure and naming (methods, properties like isPopupPanelOpen, toggle patterns). Do NOT write placeholder stubs.");
+            sb.AppendLine(refSb.ToString());
+        }
+        sb.AppendLine();
         sb.AppendLine("Output the edit now:");
         if (emitSse) { await SendSse(Response, "edit-resolve", new { }, ct); }
         // editStrategy was classified at the top of this method (after ext is known).
@@ -1107,6 +1165,7 @@ public partial class AgentController : ControllerBase
             var jsonCandidates = ExtractAllJsonObjects(rawTrimmed);
             string? cleaned = null;
             JsonDocument? jDoc = null;
+            var htmlCandidates = new List<JsonDocument>();
             foreach (var candidate in jsonCandidates)
             {
                 var c = RepairJsonNewlines(candidate);
@@ -1114,6 +1173,24 @@ public partial class AgentController : ControllerBase
                 try
                 {
                     var doc = JsonDocument.Parse(c);
+                    if (doc.RootElement.TryGetProperty("targetType", out var candTt) &&
+                        string.Equals(candTt.GetString(), "html", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // The LLM sometimes emits several FORMAT D payloads in one response;
+                        // collect them all so the html branch can try each until one resolves.
+                        htmlCandidates.Add(doc);
+                        // Only promote to jDoc (which gates the FORMAT D branch) a candidate that
+                        // actually carries targetName + newCode — a malformed first payload must
+                        // not block later valid ones from being tried.
+                        if (jDoc == null &&
+                            doc.RootElement.TryGetProperty("targetName", out _) &&
+                            doc.RootElement.TryGetProperty("newCode", out _))
+                        {
+                            jDoc = doc;
+                            cleaned = c;
+                        }
+                        continue;
+                    }
                     if (doc.RootElement.TryGetProperty("targetType", out _) ||
                         doc.RootElement.TryGetProperty("oldString", out _) ||
                         doc.RootElement.TryGetProperty("fullFile", out _) ||
@@ -1121,8 +1198,11 @@ public partial class AgentController : ControllerBase
                         (doc.RootElement.TryGetProperty("format", out var fmtEl) &&
                          string.Equals(fmtEl.GetString(), "method", StringComparison.OrdinalIgnoreCase)))
                     {
-                        jDoc = doc;
-                        cleaned = c;
+                        if (jDoc == null)
+                        {
+                            jDoc = doc;
+                            cleaned = c;
+                        }
                         break;
                     }
                 }
@@ -1248,52 +1328,76 @@ public partial class AgentController : ControllerBase
                         if (!System.IO.File.Exists(fullPath))
                             return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
                         var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                        var rawNewCode = newCodeStr;
-                        newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr, targetName);
-                        if (newCodeStr != rawNewCode)
+                        // Try EVERY emitted FORMAT D payload in order — the first one may have a
+                        // hallucinated targetName while a later payload is byte-exact.
+                        var docsToTry = htmlCandidates.Count > 0
+                            ? htmlCandidates
+                            : new List<JsonDocument> { jDoc };
+                        string? lastErr = null;
+                        foreach (var candDoc in docsToTry)
                         {
-                            await EmitLog(emitSse, "warn",
-                                $"Stripped leading </div> lines from newCode for {relPath}", ct: ct);
+                            var candRoot = candDoc.RootElement;
+                            var candTargetName = candRoot.TryGetProperty("targetName", out var cTnEl) ? cTnEl.GetString() : null;
+                            string? candNewCodeStr = null;
+                            if (candRoot.TryGetProperty("newCode", out var cNcEl))
+                            {
+                                candNewCodeStr = cNcEl.ValueKind == JsonValueKind.String
+                                    ? AgentUtilities.UnescapeString(cNcEl.GetString() ?? "")
+                                    : cNcEl.ValueKind == JsonValueKind.Array
+                                        ? string.Join("\n", cNcEl.EnumerateArray().Select(e => AgentUtilities.UnescapeString(e.GetString() ?? "")))
+                                        : null;
+                            }
+                            if (string.IsNullOrWhiteSpace(candTargetName) || string.IsNullOrWhiteSpace(candNewCodeStr))
+                                continue;
+                            var candRawNewCode = candNewCodeStr;
+                            candNewCodeStr = HtmlDomEditor.StripLeadingClosingDivs(candNewCodeStr, candTargetName);
+                            if (candNewCodeStr != candRawNewCode)
+                            {
+                                await EmitLog(emitSse, "warn",
+                                    $"Stripped leading </div> lines from newCode for {relPath}", ct: ct);
+                            }
+                            if (string.IsNullOrWhiteSpace(candNewCodeStr))
+                            {
+                                lastErr = "FORMAT D failed: newCode is empty. You MUST provide the full replacement HTML in newCode, not an empty array.";
+                                continue;
+                            }
+                            if (!candNewCodeStr.Contains('<', StringComparison.Ordinal))
+                            {
+                                lastErr = "FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.";
+                                continue;
+                            }
+                            if (sourceText.Contains(candNewCodeStr, StringComparison.OrdinalIgnoreCase))
+                            {
+                                await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
+                                return (null, null, false, null, true, null, false);
+                            }
+                            var candHasReplace = candRoot.TryGetProperty("replace", out var cRpEl);
+                            var candReplaceSection = candHasReplace && cRpEl.GetBoolean();
+                            var candHasInsertAfter = candRoot.TryGetProperty("insertAfter", out var cIaEl);
+                            var candInsertAfter = candHasInsertAfter && cIaEl.GetBoolean();
+                            var (matchedBlock, _, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, candTargetName, step.Change, step.LineNumber, expandToClosingTags: false, true);
+                            if (matchedBlock == null)
+                            {
+                                lastErr = htmlErr;
+                                continue;
+                            }
+                            if (candReplaceSection || (candHasInsertAfter && !candInsertAfter && !candHasReplace))
+                            {
+                                var indented = await FormatSnippetAsync(matchedBlock, candNewCodeStr, relPath);
+                                return (matchedBlock, indented, false, null, false, null, true);
+                            }
+                            if (candInsertAfter || (candHasReplace && !candReplaceSection && !candHasInsertAfter))
+                            {
+                                var indented = await FormatSnippetAsync(matchedBlock, candNewCodeStr, relPath);
+                                return (matchedBlock, matchedBlock + "\n" + indented, false, null, false, null, true);
+                            }
+                            return (matchedBlock, candNewCodeStr + "\n" + matchedBlock, false, null, false, null, true);
                         }
-                        if (string.IsNullOrWhiteSpace(newCodeStr))
-                        {
-                            await EmitLog(emitSse, "warn",
-                                $"FORMAT D rejected: newCode is EMPTY — when replace:true, newCode MUST contain the full replacement HTML. Include all content from targetName that should remain.", ct: ct);
-                            return (null, null, false, null, false,
-                                $"FORMAT D failed: newCode is empty. You MUST provide the full replacement HTML in newCode, not an empty array.", false);
-                        }
-                        if (!newCodeStr.Contains('<', StringComparison.Ordinal))
-                        {
-                            await EmitLog(emitSse, "warn",
-                                $"FORMAT D rejected: newCode contains no HTML opening tags — newCode must be valid HTML with opening tags", ct: ct);
-                            return (null, null, false, null, false,
-                                $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
-                        }
-                        if (sourceText.Contains(newCodeStr, StringComparison.OrdinalIgnoreCase))
-                        {
-                            await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
-                            return (null, null, false, null, true, null, false);
-                        }
-                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, expandToClosingTags: false, true);
-                        if (matchedBlock == null)
-                        {
-                            await EmitLog(emitSse, "warn",
-                                $"FORMAT D: targetName block not found — {htmlErr}", ct: ct);
-                            return (null, null, false, null, false,
-                                $"FORMAT D failed: targetName block not found in {relPath}. " +
-                                $"Copy the exact code block from the file as targetName.", false);
-                        }
-                        if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
-                        {
-                            var indented = await FormatSnippetAsync(matchedBlock, newCodeStr, relPath);
-                            return (matchedBlock, indented, false, null, false, null, true);
-                        }
-                        if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
-                        {
-                            var indented = await FormatSnippetAsync(matchedBlock, newCodeStr, relPath);
-                            return (matchedBlock, matchedBlock + "\n" + indented, false, null, false, null, true);
-                        }
-                        return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
+                        await EmitLog(emitSse, "warn",
+                            $"FORMAT D: targetName block not found — {lastErr ?? "no candidates"}", ct: ct);
+                        return (null, null, false, null, false,
+                            $"FORMAT D failed: targetName block not found in {relPath}. " +
+                            $"Copy the exact code block from the file as targetName.", false);
                     }
                     if (insertAfter && System.IO.File.Exists(fullPath))
                     {
@@ -5024,8 +5128,20 @@ public partial class AgentController : ControllerBase
                 var reasons = new List<string>();
                 var scores = new List<int>();
                 var needsExtraStepFlags = new List<bool>();
+                var deterministicPlaceholderReject = false;
                 for (int r = 0; r < VerificationRounds; r++)
                 {
+                    if (r == 0 && !string.IsNullOrWhiteSpace(newStr) && AgentUtilities.LooksLikePlaceholderStub(newStr))
+                    {
+                        deterministicPlaceholderReject = true;
+                        await EmitLog(emitSse, "warn",
+                            $"⛔ Deterministic placeholder-stub reject on {relPath}: new code is a placeholder stub (console.log-only body, placeholder comment, empty body, or NotImplementedException). Retrying with a directive to implement the real logic.", ct: ct);
+                        decisions.Add("abandon");
+                        reasons.Add("Deterministic placeholder-stub detection: new code is a placeholder stub — implement the REAL logic (mirror the pattern from the referenced component file).");
+                        scores.Add(0);
+                        needsExtraStepFlags.Add(false);
+                        break;
+                    }
                     // if (r == 0)
                     // {
                     //     var stepKeywords = Regex.Matches(step.Change ?? "", @"\b\w+\.\w+\b")
@@ -5141,28 +5257,44 @@ public partial class AgentController : ControllerBase
                                 if (System.IO.File.Exists(tsPath)) targetFile = tsCandidate;
                                 else if (System.IO.File.Exists(jsPath)) targetFile = jsCandidate;
                             }
+                            var inheritedRefs = step.ReferenceFiles ?? new List<string>();
+                            // If the referencing step carried an HTML sibling (e.g. music.component.html),
+                            // also hand the resolver the .ts twin — the component logic (like isPopupPanelOpen)
+                            // lives in the .ts file, not the template.
+                            if (Path.GetExtension(targetFile).Equals(".ts", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var htmlRef = inheritedRefs.FirstOrDefault(r =>
+                                    r.EndsWith(".html", StringComparison.OrdinalIgnoreCase));
+                                if (htmlRef != null)
+                                {
+                                    var tsTwin = Path.ChangeExtension(htmlRef, ".ts");
+                                    if (!inheritedRefs.Contains(tsTwin, StringComparer.OrdinalIgnoreCase))
+                                        inheritedRefs = inheritedRefs.Concat(new[] { tsTwin }).ToList();
+                                }
+                            }
                             var syntheticStep = new PlanStep
                             {
                                 File = targetFile,
-                                Change = $"Add implementation of {missingName}() method referenced in {System.IO.Path.GetFileName(relPath)}",
+                                Change = $"Add implementation of {missingName}() method referenced in {System.IO.Path.GetFileName(relPath)} — mirror the pattern used by the referencing component's sibling file if one exists",
                                 TargetSymbol = missingName,
                                 LineNumber = 0,
                                 OldString = null,
                                 NewString = null,
+                                ReferenceFiles = inheritedRefs,
                             };
                             plan.Plan.Insert(planItemIndex + 1, syntheticStep);
                             await EmitLog(emitSse, "info",
                                 $"  🔄 Verifier ({extraStepCount}/3 needsExtraStep): auto-added synthetic step to implement {missingName}() in {targetFile}",
                                 ct: ct);
                         }
-                        if (llmGateDecision == "abandon")
+                        if (llmGateDecision == "abandon" && !deterministicPlaceholderReject)
                         {
                             llmGateDecision = "keep";
                             llmGateScore = Math.Max(llmGateScore, 70);
                         }
                     }
                 }
-                if (llmGateDecision == "abandon" && oldStr != null)
+                if (llmGateDecision == "abandon" && oldStr != null && !deterministicPlaceholderReject)
                 {
                     var methodDecls = CountNewMethodsInNewCode(newStr ?? "", oldStr);
                     if (methodDecls > 0)
@@ -7781,7 +7913,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             "If the task is functionally complete, return planComplete=true.");
         }
         var researchVerbs = new[] { "locate", "find", "examine", "understand", "read", "explore", "look at", "inspect", "review", "check", "see", "search" };
-        if (researchVerbs.Any(v => changeLower.StartsWith(v)))
+        if (!step.File.Equals("_discover", StringComparison.OrdinalIgnoreCase) &&
+            researchVerbs.Any(v => changeLower.StartsWith(v)))
         {
             return (false, $"Research step rejected — '{changeLower.Split(' ')[0]}' is not an actionable edit. " +
                             "All steps must make actual code changes (add/modify/delete/replace). " +
@@ -7948,6 +8081,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }, ct);
                 if (exploredFiles.Add(proposal.ExploreFile))
                 {
+                    if (proposal.ExploreFile.Equals("_discover", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await EmitLog(emitSse, "info", "Planner requested _discover — running project-wide search…", ct: ct);
+                        discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                        regenAttempts = 0;
+                        continue;
+                    }
                     var isMarker = proposal.ExploreFile.StartsWith("_");
                     var alreadyInContext = false;
                     if (!isMarker)
@@ -8021,6 +8161,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (proposal.Step == null)
             {
                 rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
+            if (proposal.Step.File.Equals("_discover", StringComparison.OrdinalIgnoreCase))
+            {
+                if (exploredFiles.Add("_discover"))
+                {
+                    await EmitLog(emitSse, "info", "Incremental planning: _discover step — running project-wide search…", ct: ct);
+                    discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                    regenAttempts = 0;
+                    continue;
+                }
+                rejectionFeedback.Add("You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
@@ -8177,7 +8330,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         });
         var items = stepItems.Concat(new[]
         {
-            new { File = activityFile, Change = activityChange, Line = 0, OldString = "", NewString = "", done = true }
+            new { File = activityFile, Change = activityChange, Line = 0, OldString = "", NewString = "", done = activityFile != "_planning" }
         }).ToList();
         await SendSse(Response, "plan", new
         {
@@ -8207,7 +8360,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 thinking = "",
                 summary = "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far",
-                items = new[] { new { File = "_planning", Change = "Waiting for proposal…", Line = 0, OldString = "", NewString = "", done = false } },
+                items = new[] { new { File = "_planning", Change = "Thinking…", Line = 0, OldString = "", NewString = "", done = false } },
                 incremental = true
             }, ct);
         }
@@ -8231,7 +8384,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (emitSse)
         {
             await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
-                "_planning", "Waiting for proposal…",
+                "_planning", "Thinking…",
                 "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far", null, ct);
         }
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
@@ -8239,7 +8392,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ct.ThrowIfCancellationRequested();
             if (emitSse && pendingSteps.Count == 0 && !planCompleteDeclared)
             {
-                await SendSse(Response, "phase", new { message = $"Planning Step {planSoFar.Count + 1}" }, ct);
+                await SendSse(Response, "phase", new { message = $"Thinking about Step {planSoFar.Count + 1}…" }, ct);
             }
             if (pendingSteps.Count > 0)
             {
@@ -8297,7 +8450,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (emitSse && !planCompleteDeclared)
             {
                 var planningText = planSoFar.Count == 0
-                    ? "Waiting for proposal…"
+                    ? "Thinking…"
                     : $"Planning step {planSoFar.Count + 1} — verifying step {planSoFar.Count}…";
                 await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
                     "_planning", planningText,
@@ -8353,6 +8506,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 if (exploredFiles.Add(proposal.ExploreFile))
                 {
+                    if (proposal.ExploreFile.Equals("_discover", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await EmitLog(emitSse, "info", "Planner requested _discover — running project-wide search…", ct: ct);
+                        discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                        regenAttempts = 0;
+                        continue;
+                    }
                     var isMarker = proposal.ExploreFile.StartsWith("_");
                     var alreadyInContext = false;
                     if (!isMarker)
@@ -8394,6 +8554,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (proposal.Step == null)
             {
                 rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
+            if (proposal.Step.File.Equals("_discover", StringComparison.OrdinalIgnoreCase))
+            {
+                if (exploredFiles.Add("_discover"))
+                {
+                    await EmitLog(emitSse, "info", "Planner proposed _discover step — running project-wide search…", ct: ct);
+                    discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                    regenAttempts = 0;
+                    continue;
+                }
+                rejectionFeedback.Add("You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
@@ -8522,6 +8695,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 foreach (var extraStep in proposal.AdditionalSteps)
                 {
+                    if (extraStep.File != null && extraStep.File.Equals("_discover", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (exploredFiles.Add("_discover"))
+                        {
+                            await EmitLog(emitSse, "info", "Additional _discover step — running project-wide search…", ct: ct);
+                            discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                        }
+                        continue;
+                    }
                     if (!planSoFar.Any(s => string.Equals(s.File, extraStep.File, StringComparison.OrdinalIgnoreCase) &&
                                             TokenOverlap(s.Change ?? "", extraStep.Change ?? "") > 0.35))
                     {
@@ -9507,50 +9689,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());
             allResults.Add(result);
         }
-        var alreadyRead = files.Select(f => f.Replace('\\', '/'))
-            .Where(f => allResults.Any(r => r is Dictionary<string, object?> d &&
-                                            d.GetValueOrDefault("path")?.ToString() == f &&
-                                            d.GetValueOrDefault("status")?.ToString() == "done"))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (alreadyRead.Count > 0)
-        {
-            var allFiles = EnumerateProjectFiles(projectRoot);
-            var toRead = await RunBm25CrossCheck(prompt, alreadyRead.ToList(), projectRoot, allFiles, emitSse, ct);
-            var preSiblingCount = toRead.Count;
-            toRead = AddTemplateStyleSiblings(toRead, projectRoot);
-            var addedSiblings = toRead.Skip(preSiblingCount).ToList();
-            if (addedSiblings.Count > 0)
-            {
-                await EmitLog(emitSse, "info",
-                    $"Phase 1 — adding {addedSiblings.Count} template/style sibling(s) of attached components: {string.Join(", ", addedSiblings)}",
-                    ct: ct);
-            }
-            toRead = toRead
-                .Where(f => !alreadyRead.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-            if (toRead.Count > 0)
-            {
-                await EmitLog(emitSse, "info", $"Phase 1 — reading {toRead.Count} additional file(s): {string.Join(", ", toRead)}", ct: ct);
-                var readPlan = toRead.Select((f, i) => new AgentStep
-                {
-                    Index = allResults.Count + i,
-                    Type = "read",
-                    Path = f,
-                    Description = $"Auto: read {f}",
-                    Prompt = prompt
-                }).ToList();
-                var readResults = await ExecuteDiscoveryStepsConcurrent(
-                    readPlan, projectRoot, allResults.Count, emitSse);
-                foreach (var r in readResults)
-                {
-                    if (r is Dictionary<string, object?> d && d.GetValueOrDefault("status")?.ToString() == "done")
-                        sb.AppendLine($"\n### {d.GetValueOrDefault("path")}\n```\n{d.GetValueOrDefault("output")}\n```");
-                }
-                allResults.AddRange(readResults);
-                foreach (var f in toRead) _fileHints.LearnFromGrepOutput(prompt, f, projectRoot);
-            }
-        }
         if (emitSse)
         {
             var succeeded = allResults.Count(r =>
@@ -9558,7 +9696,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 d.GetValueOrDefault("status")?.ToString() == "done");
             var total = allResults.Count;
             await EmitLog(emitSse, "info",
-                $"Read {total} attached file(s), {succeeded} succeeded");
+                $"Read {total} attached file(s), {succeeded} succeeded — no auto discovery; the agent can _explore or _discover if it needs more context");
             var fileList = allResults
                 .Select(r => r is Dictionary<string, object?> d
                     ? new { index = d.GetValueOrDefault("index"), path = d.GetValueOrDefault("path"), status = d.GetValueOrDefault("status") }
@@ -9589,62 +9727,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!Directory.Exists(projectRoot)) return ("", allSteps);
         var allFiles = EnumerateProjectFiles(projectRoot);
         if (allFiles.Count == 0) return ("", allSteps);
-        var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot)
-            .Where(f => allFiles.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
-            .Take(4).ToList();
-        var heuristicCandidates = AgentUtilities.ApplyTaskTypeHeuristics(prompt, allFiles);
-        var candidatePool = hintedFiles
-            .Concat(heuristicCandidates)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(60).ToList();
-        List<string> toRead;
-        if (candidatePool.Count <= 6)
-        {
-            toRead = candidatePool;
-            await EmitLog(emitSse, "info", $"Phase 1 — {candidatePool.Count} candidate(s), reading all directly", ct: ct);
-        }
-        else
-        {
-            var candidatesText = string.Join(", ", candidatePool);
-            if (candidatesText.Length > 75) { candidatesText = candidatesText[..75] + "..."; }
-            await EmitLog(emitSse, "info", $"Phase 1 — selecting from {candidatePool.Count} candidates…", new { Candidates = candidatesText }, ct: ct);
-            var selected = await SelectRelevantFilesWithLlm(prompt, candidatePool, emitSse, ct);
-            toRead = hintedFiles.Concat(selected).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
-        }
-        toRead = toRead.Where(f =>
-        {
-            var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
-            return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
-        }).ToList();
-        // BM25 cross-check: lexical scan of the whole project, compare with the
-        // LLM's list; files BM25 ranks highly but the LLM missed get a close LLM
-        // evaluation before being read into discovery context
-        toRead = await RunBm25CrossCheck(prompt, toRead, projectRoot, allFiles, emitSse, ct);
-        var preSiblingCount = toRead.Count;
-        toRead = AddTemplateStyleSiblings(toRead, projectRoot);
-        var addedSiblings = toRead.Skip(preSiblingCount).ToList();
-        if (addedSiblings.Count > 0)
-        {
-            await EmitLog(emitSse, "info",
-                $"Phase 1 — adding {addedSiblings.Count} template/style sibling(s) of selected components: {string.Join(", ", addedSiblings)}",
-                ct: ct);
-        }
-        await EmitLog(emitSse, "info", $"Phase 1 — reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
-        if (toRead.Count > 0)
-        {
-            var readPlan = toRead.Select((f, i) => new AgentStep
-            {
-                Index = i,
-                Type = "read",
-                Path = f,
-                Description = $"Auto: read {f}",
-                Prompt = prompt
-            }).ToList();
-            var readResults = await ExecuteDiscoveryStepsConcurrent(
-                readPlan, projectRoot, allSteps.Count, emitSse);
-            allSteps.AddRange(readResults);
-            foreach (var f in toRead) _fileHints.LearnFromGrepOutput(prompt, f, projectRoot);
-        }
+        await EmitLog(emitSse, "info",
+            $"Phase 1 — {allFiles.Count} file(s) indexed ({_fileHints.GetFilesForPrompt(prompt, projectRoot).Count} hint(s)); " +
+            "no files auto-read — the agent explores on demand via _explore (specific file) or _discover (project-wide scan)",
+            ct: ct);
         var sb = new StringBuilder();
         sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
         sb.AppendLine();
@@ -9659,14 +9745,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.AppendLine();
         }
         await EmitLog(emitSse, "info",
-            $"Phase 1 complete — {allSteps.Count} step(s), {toRead.Count} file(s) read", ct: ct);
+            $"Phase 1 complete — {allSteps.Count} step(s), no files auto-read (exploration is on-demand via _explore/_discover)", ct: ct);
         return (sb.ToString(), allSteps);
     }
     private static List<string> EnumerateProjectFiles(string projectRoot)
     {
         if (!Directory.Exists(projectRoot)) return new List<string>();
         var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages", ".vs", ".idea" };
+            { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages", ".vs", ".idea", "out-tsc", "out-tsc-e2e", "node_modules" };
         return Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories)
             .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
             .Where(rel => !skipDirs.Any(d =>
@@ -9686,36 +9772,43 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         bool emitSse, CancellationToken ct)
     {
         if (allFiles.Count == 0) return toRead;
-        await SendSse(Response, "phase", new { phase = "discover", message = "BM25 cross-checking project files...", contextSize = 0 }, ct);
+        await SendSse(Response, "phase", new { phase = "discover", message = "BM25 scanning project files...", contextSize = 0 }, ct);
         var bm25Top = ScoreProjectFilesWithBm25(prompt, projectRoot, allFiles, ct);
-        await EmitLog(emitSse, "info", $"Phase 1 — BM25 scan: {bm25Top.Count} most relevant file(s) by lexical scoring", new { Bm25Top = bm25Top }, ct: ct);
+        if (bm25Top.Count > 0)
+        {
+            var ranked = bm25Top.Select((x, i) => $"[{i + 1}] {x.file} (score {x.score:0.0})");
+            await EmitLog(emitSse, "info", $"🔎 BM25 ranked {bm25Top.Count} file(s) by lexical scoring: {string.Join(", ", ranked)}",
+                new { RankedBm25 = bm25Top }, ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "info", "🔎 BM25 scan: no files matched the task lexically", ct: ct);
+            return toRead;
+        }
         var bm25Only = bm25Top
+            .Select(x => x.file)
             .Where(f => !toRead.Any(t => string.Equals(t, f, StringComparison.OrdinalIgnoreCase)))
             .Take(5)
             .ToList();
         if (bm25Only.Count > 0)
         {
             await EmitLog(emitSse, "info",
-                $"Phase 1 — BM25 cross-check: {bm25Only.Count} file(s) ranked highly but not in the current read list — evaluating them closely: {string.Join(", ", bm25Only)}",
+                $"🔎 BM25 cross-check: {bm25Only.Count} file(s) ranked highly but not in the current read list — evaluating them closely: {string.Join(", ", bm25Only)}",
                 new { Bm25Only = bm25Only, CurrentList = toRead }, ct: ct);
             var kept = await EvaluateBm25DiscrepanciesWithLlm(prompt, bm25Only, projectRoot, emitSse, ct);
             if (kept.Count > 0)
             {
                 toRead = toRead.Concat(kept).Distinct(StringComparer.OrdinalIgnoreCase).Take(12).ToList();
-                await EmitLog(emitSse, "info", $"Phase 1 — BM25 cross-check kept {kept.Count} file(s): {string.Join(", ", kept)}", new { Kept = kept }, ct: ct);
+                await EmitLog(emitSse, "info", $"🔎 BM25 cross-check kept {kept.Count} file(s): {string.Join(", ", kept)}", new { Kept = kept }, ct: ct);
             }
             else
             {
-                await EmitLog(emitSse, "info", "Phase 1 — BM25 cross-check: evaluated, no additional files worth reading", ct: ct);
+                await EmitLog(emitSse, "info", "🔎 BM25 cross-check: evaluated, no additional files worth reading", ct: ct);
             }
-        }
-        else if (bm25Top.Count > 0)
-        {
-            await EmitLog(emitSse, "info", "Phase 1 — BM25 cross-check: all top lexical matches already in the read list", ct: ct);
         }
         else
         {
-            await EmitLog(emitSse, "info", "Phase 1 — BM25 scan: no files matched the task lexically", ct: ct);
+            await EmitLog(emitSse, "info", "🔎 BM25 cross-check: all top lexical matches already in the read list", ct: ct);
         }
         return toRead;
     }
@@ -9749,6 +9842,91 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return withSiblings.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
+
+    /// <summary>
+    /// The _discover tool: a project-wide context exploration the planner invokes
+    /// STRICTLY when it needs more context and doesn't know which file to read.
+    /// Runs deterministic candidates (persisted hints + task-type heuristics), an
+    /// LLM selection pass if the pool is large, the BM25 lexical scan (ranked,
+    /// scores logged), template/style sibling expansion, then reads everything and
+    /// merges the sections into the discovery context.
+    /// </summary>
+    private async Task<string> RunDiscoveryToolAsync(
+        string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        await EmitLog(emitSse, "info", "🔎 Discovery tool: scanning project for task-relevant files…", ct: ct);
+        await SendSse(Response, "phase", new { phase = "discover", message = "Discovery tool: scanning project files...", contextSize = 0 }, ct);
+        var allFiles = EnumerateProjectFiles(projectRoot);
+        if (allFiles.Count == 0)
+        {
+            await EmitLog(emitSse, "info", "🔎 Discovery tool: no project files found", ct: ct);
+            return discoveryContext;
+        }
+        var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot)
+            .Where(f => allFiles.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
+            .Take(4).ToList();
+        var heuristicCandidates = AgentUtilities.ApplyTaskTypeHeuristics(prompt, allFiles);
+        var pool = hintedFiles.Concat(heuristicCandidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(60).ToList();
+        var toRead = pool.Take(6).ToList();
+        if (pool.Count > 6)
+        {
+            var candidatesText = string.Join(", ", pool);
+            if (candidatesText.Length > 75) candidatesText = candidatesText[..75] + "...";
+            await EmitLog(emitSse, "info", $"🔎 Discovery tool: selecting from {pool.Count} candidates…", new { Candidates = candidatesText }, ct: ct);
+            var selected = await SelectRelevantFilesWithLlm(prompt, pool, emitSse, ct);
+            toRead = hintedFiles.Concat(selected).Distinct(StringComparer.OrdinalIgnoreCase).Take(10).ToList();
+        }
+        toRead = toRead.Where(f =>
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
+            return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
+        }).ToList();
+        toRead = await RunBm25CrossCheck(prompt, toRead, projectRoot, allFiles, emitSse, ct);
+        var preSiblingCount = toRead.Count;
+        toRead = AddTemplateStyleSiblings(toRead, projectRoot);
+        var addedSiblings = toRead.Skip(preSiblingCount).ToList();
+        if (addedSiblings.Count > 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"🔎 Discovery tool: adding {addedSiblings.Count} template/style sibling(s): {string.Join(", ", addedSiblings)}",
+                ct: ct);
+        }
+        toRead = toRead
+            .Where(f => !discoveryContext.Contains($"### read {f.Replace('\\', '/')}"))
+            .ToList();
+        if (toRead.Count == 0)
+        {
+            await EmitLog(emitSse, "info", "🔎 Discovery tool: all relevant files are already in context", ct: ct);
+            return discoveryContext;
+        }
+        await EmitLog(emitSse, "info", $"🔎 Discovery tool: reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
+        var readPlan = toRead.Select((f, i) => new AgentStep
+        {
+            Index = i,
+            Type = "read",
+            Path = f,
+            Description = $"Discover: read {f}",
+            Prompt = prompt
+        }).ToList();
+        var readResults = await ExecuteDiscoveryStepsConcurrent(readPlan, projectRoot, 0, emitSse);
+        var merged = new StringBuilder(discoveryContext);
+        foreach (var r in readResults)
+        {
+            if (r is not Dictionary<string, object?> d) continue;
+            var path = d.GetValueOrDefault("path")?.ToString();
+            var output = d.GetValueOrDefault("output")?.ToString();
+            if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(output)) continue;
+            if (d.GetValueOrDefault("status")?.ToString() != "done") continue;
+            merged.AppendLine($"### read {path}");
+            merged.AppendLine("```");
+            merged.AppendLine(output);
+            merged.AppendLine("```");
+            merged.AppendLine();
+            _fileHints.LearnFromGrepOutput(prompt, path, projectRoot);
+        }
+        return merged.ToString();
+    }
+
     private async Task<List<string>> SelectRelevantFilesWithLlm(
         string prompt, List<string> candidates, bool emitSse, CancellationToken ct)
     {
@@ -9833,7 +10011,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "get", "got", "let", "put", "see", "show", "use", "used", "using", "need", "want", "like",
         "should", "please", "make", "sure", "ensure", "create", "add", "change", "fix", "bug"
     };
-    private static List<string> ScoreProjectFilesWithBm25(
+    private static List<(string file, double score)> ScoreProjectFilesWithBm25(
         string prompt, string projectRoot, List<string> allFiles, CancellationToken ct)
     {
         var queryTokens = AgentUtilities.ExtractMeaningfulKeywords(prompt.ToLowerInvariant())
@@ -9844,12 +10022,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .Select(m => m.Value)
                 .Where(t => !_bm25StopWords.Contains(t))
                 .ToList();
-        if (queryTokens.Count == 0) return new List<string>();
+        if (queryTokens.Count == 0) return new List<(string file, double score)>();
         var fileTokens = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         long totalTokens = 0;
         foreach (var rel in allFiles)
         {
-            if (ct.IsCancellationRequested) return new List<string>();
+            if (ct.IsCancellationRequested) return new List<(string file, double score)>();
             var ext = Path.GetExtension(rel);
             if (!_bm25TextExtensions.Contains(ext)) continue;
             if (rel.Contains(".min.", StringComparison.OrdinalIgnoreCase)) continue;
@@ -9876,7 +10054,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             fileTokens[rel] = toks;
             totalTokens += toks.Count;
         }
-        if (fileTokens.Count == 0) return new List<string>();
+        if (fileTokens.Count == 0) return new List<(string file, double score)>();
         var n = fileTokens.Count;
         var avgDl = (double)totalTokens / n;
         var df = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -9890,7 +10068,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var scores = new List<(string file, double score)>();
         foreach (var kv in fileTokens)
         {
-            if (ct.IsCancellationRequested) return new List<string>();
+            if (ct.IsCancellationRequested) return new List<(string file, double score)>();
             var tf = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (var t in kv.Value) tf[t] = tf.GetValueOrDefault(t) + 1;
             var dl = kv.Value.Count;
@@ -9912,7 +10090,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return scores.OrderByDescending(x => x.score)
             .ThenBy(x => x.file.Length)
             .Take(10)
-            .Select(x => x.file)
             .ToList();
     }
     private async Task<List<string>> EvaluateBm25DiscrepanciesWithLlm(
@@ -10203,8 +10380,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string? cardId = null, bool createTests = false, string? buildCommands = null)
     {
         _gracefulStop = false;
-        if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
-            throw new InvalidOperationException("LLM connectivity check failed.");
+        // Start the LLM connectivity probe immediately but don't block on it yet —
+        // the disk-bound discovery work below overlaps with the probe. It is awaited
+        // before any LLM call.
+        var connectivityTask = CheckLlmConnectivity(projectRoot, emitSse, ct);
 
         var lower = prompt.ToLowerInvariant();
         var mightBeBuildRepair = lower.Contains("build") || lower.Contains("compile") ||
@@ -10213,6 +10392,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             if (buildCommands != null && buildCommands.Trim().Length > 0)
             {
+                if (!await connectivityTask)
+                    throw new InvalidOperationException("LLM connectivity check failed.");
                 var isBuildRepair = await ClassifyIsBuildRepairPromptAsync(prompt, ct);
                 if (isBuildRepair)
                 {
@@ -10227,6 +10408,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
+            if (!await connectivityTask)
+                throw new InvalidOperationException("LLM connectivity check failed.");
             var resumeSteps = new List<object>();
             await ExecutePlan(prompt, projectRoot, emitSse, "", existingPlan, ct, resumeSteps,
                 steeringContext: steeringContext, attachedFiles: attachedFiles,
@@ -10248,7 +10431,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var (unifiedSteps, unifiedPlan, unifiedComplete) = await StepResolutionPipeline(prompt, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, skipContextReview: skipContextReview,
-                steeringContext: steeringContext, cardId: cardId);
+                steeringContext: steeringContext, cardId: cardId, connectivityTask: connectivityTask);
         allSteps = unifiedSteps;
         plan = unifiedPlan;
         pipelineComplete = unifiedComplete;
@@ -10562,6 +10745,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             plan.Plan = AgentUtilities.DeduplicateSimilarSteps(plan.Plan);
             var exploreSteps = plan.Plan
                 .Where(p => p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
+            var discoverSteps = plan.Plan
+                .Where(p => p.File.Equals("_discover", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (discoverSteps.Count > 0)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Planning {iter}/{MAX_PLANNING_ITERATIONS}: planner requested _discover — running project-wide search…", ct: ct);
+                discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                continue;
+            }
             var readOnlyPrefixes = new[] { "read", "look at", "examine", "inspect", "review",
                 "understand", "study", "browse", "view", "check how", "see how",
                 "get familiar", "explore" };
@@ -10635,42 +10827,77 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return deduped;
     }
+    private async Task<string?> LoadEditKnowledgeHeaderAsync(string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var ek = await _editKnowledge.LoadAsync(projectRoot, ct);
+        if (ek == null) return null;
+        var header = EditKnowledgeService.FormatForContext(ek);
+        if (!string.IsNullOrWhiteSpace(header))
+        {
+            await EmitLog(emitSse, "info",
+                $"Loaded edit knowledge for project: {ek.ProjectName} " +
+                $"({ek.Do.Count} do, {ek.Dont.Count} dont, " +
+                $"{ek.Patterns.Count} pattern categories, " +
+                $"{ek.RecentFailures.Count} recent failures)", ct: ct);
+        }
+        return header;
+    }
     private async Task<(List<object> steps, AgentPlan plan, bool complete)> StepResolutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         bool skipContextReview = false,
         string? steeringContext = null,
-        string? cardId = null)
+        string? cardId = null,
+        Task<bool>? connectivityTask = null)
     {
         var cfg = await LoadConfigAsync();
-        string? editKnowledgeHeader = null;
-        if (cfg.includeEditKnowledge)
-        {
-            var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
-            if (editKnowledge != null)
-            {
-                editKnowledgeHeader = EditKnowledgeService.FormatForContext(editKnowledge);
-                if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
-                {
-                    await EmitLog(emitSse, "info",
-                        $"Loaded edit knowledge for project: {editKnowledge.ProjectName} " +
-                        $"({editKnowledge.Do.Count} do, {editKnowledge.Dont.Count} dont, " +
-                        $"{editKnowledge.Patterns.Count} pattern categories, " +
-                        $"{editKnowledge.RecentFailures.Count} recent failures)", ct: ct);
-                }
-            }
-        }
+
+        // ── Startup: fire all independent disk-bound work concurrently ──
+        // Bootstrap discovery (file enumeration), project skeleton generation and the
+        // edit-knowledge load share no dependencies, so they run side-by-side instead
+        // of one-after-another. The LLM connectivity probe (started in Orchestrate)
+        // overlaps them too and is awaited before any LLM call below.
         var allSteps = new List<object>();
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
-        var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
+        // These disk/DB tasks deliberately start before the connectivity probe is
+        // awaited: on the rare probe failure their results are discarded, which is
+        // acceptable (probe result is cached for 5 minutes) and usually the overlap
+        // saves real wall-clock time at startup.
+        var bootstrapTask = RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
+        Task<AgentUtilities.SkeletonResult>? skeletonTask = null;
+        if (cfg.includeProjectSkeleton)
+            skeletonTask = AgentUtilities.GenerateSkeletonAsync(projectRoot);
+        Task<string?>? editKnowledgeTask = null;
+        if (cfg.includeEditKnowledge)
+            editKnowledgeTask = LoadEditKnowledgeHeaderAsync(projectRoot, emitSse, ct);
+
+        // LLM connectivity must pass before any LLM call below.
+        connectivityTask ??= CheckLlmConnectivity(projectRoot, emitSse, ct);
+        if (!await connectivityTask)
+            throw new InvalidOperationException("LLM connectivity check failed.");
+
+        var (discoveryContext, ds) = await bootstrapTask;
         allSteps.AddRange(ds);
+        string? editKnowledgeHeader = editKnowledgeTask != null ? await editKnowledgeTask : null;
+        AgentUtilities.SkeletonResult? skeleton = skeletonTask != null ? await skeletonTask : null;
+
+        // ── Startup: fire the three independent LLM calls concurrently ──
+        // Complexity assessment, skeleton trimming and the requirement checklist share
+        // no dependencies, so they run in parallel instead of back-to-back.
+        Task<int?>? complexityTask = (cfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+            ? AssessComplexityAsync(prompt, cardId, ct)
+            : null;
+        Task<(string trimmed, string note)>? skeletonTrimTask = null;
+        if (skeleton != null && (skeleton.Paths.Count > 0 || !string.IsNullOrWhiteSpace(skeleton.Tree)))
+            skeletonTrimTask = TrimSkeletonWithLlm(skeleton, prompt, emitSse, ct);
+        var checklistTask = BuildRequirementChecklistAsync(prompt, ct);
 
         // Quick complexity assessment for thinking token budgeting (if extendThinking is enabled)
-        if (cfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+        if (complexityTask != null)
         {
             try
             {
-                var complexityScore = await AssessComplexityAsync(prompt, cardId, ct);
+                var complexityScore = await complexityTask;
                 if (complexityScore.HasValue && emitSse)
                 {
                     var tokenCap = GetThinkingTokenCap(complexityScore.Value, cfg.thinkingMaxTokens);
@@ -10690,34 +10917,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             catch { /* non-critical — fall back to full thinking tokens */ }
         }
 
-        if (cfg.includeProjectSkeleton)
+        if (skeleton != null && skeleton.Paths.Count == 0 && string.IsNullOrWhiteSpace(skeleton.Tree))
         {
-            var skeleton = await AgentUtilities.GenerateSkeletonAsync(projectRoot);
-            if (skeleton.Paths.Count == 0 && string.IsNullOrWhiteSpace(skeleton.Tree))
+            await EmitLog(emitSse, "info", "Skeleton generation returned nothing, skipping", ct: ct);
+        }
+        else if (skeletonTrimTask != null)
+        {
+            var (trimmed, note) = await skeletonTrimTask;
+            if (!string.IsNullOrWhiteSpace(trimmed))
             {
-                await EmitLog(emitSse, "info", "Skeleton generation returned nothing, skipping", ct: ct);
+                var skeletonSection = new StringBuilder();
+                if (!string.IsNullOrWhiteSpace(note))
+                    skeletonSection.AppendLine($"### PROJECT ARCHITECTURE NOTE ###\n{note}\n");
+                skeletonSection.AppendLine(trimmed);
+                discoveryContext = skeletonSection.ToString() + "\n" + discoveryContext;
+                await EmitLog(emitSse, "info",
+                    $"Skeleton trimmed from {skeleton!.Paths.Count} paths to {trimmed.Length} chars {(string.IsNullOrWhiteSpace(note) ? "" : "— " + note)}", ct: ct);
             }
             else
             {
-                var (trimmed, note) = await TrimSkeletonWithLlm(skeleton, prompt, emitSse, ct);
-                if (!string.IsNullOrWhiteSpace(trimmed))
-                {
-                    var skeletonSection = new StringBuilder();
-                    if (!string.IsNullOrWhiteSpace(note))
-                        skeletonSection.AppendLine($"### PROJECT ARCHITECTURE NOTE ###\n{note}\n");
-                    skeletonSection.AppendLine(trimmed);
-                    discoveryContext = skeletonSection.ToString() + "\n" + discoveryContext;
-                    await EmitLog(emitSse, "info",
-                        $"Skeleton trimmed from {skeleton.Paths.Count} paths to {trimmed.Length} chars {(string.IsNullOrWhiteSpace(note) ? "" : "— " + note)}", ct: ct);
-                }
-                else
-                {
-                    await EmitLog(emitSse, "info", "Skeleton trimming produced nothing, skipping", ct: ct);
-                }
+                await EmitLog(emitSse, "info", "Skeleton trimming produced nothing, skipping", ct: ct);
             }
         }
-        string? requirementChecklist = await BuildRequirementChecklistAsync(prompt, ct);
-        requirementChecklist = requirementChecklist.Trim();
+
+        string? requirementChecklist = (await checklistTask).Trim();
         if (!string.IsNullOrWhiteSpace(requirementChecklist))
         {
             prompt = prompt + "\n\n" + requirementChecklist;
@@ -11947,7 +12170,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             var user = sb.ToString();
 
-            var (raw, error) = await CallLlmRawText(system, user, false, ct,
+            var (raw, error) = await CallLlmRawText(system, user, emitSse, ct,
                 requestTimeout: _infiniteTimeout,
                 maxTokens: GetThinkingTokenCap(
                     _complexityScores.TryGetValue(cardId ?? "", out var cs) ? cs : 100,
@@ -12412,6 +12635,39 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (emitSse) await SendSse(Response, "step", errResult, ct);
                     allResults.Add(errResult);
                     await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                }
+                stepIndex++;
+                continue;
+            }
+            if (planFile.Equals("_discover", StringComparison.OrdinalIgnoreCase))
+            {
+                await EmitLog(emitSse, "info", $"_discover: running project-wide search for the remaining plan steps…", ct: ct);
+                var beforeCtx = discoveryContext.Length;
+                discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                var addedChars = discoveryContext.Length - beforeCtx;
+                allResults.Add(new Dictionary<string, object?> { ["index"] = stepIndex, ["type"] = "_discover", ["status"] = "done", ["output"] = changeDesc });
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex,
+                        type = "_discover",
+                        status = "done",
+                        path = "_discover",
+                        description = changeDesc,
+                        planItemIndex = itemIdx,
+                        message = $"Discovery added {addedChars} chars to context"
+                    }, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                var remainingAfterDiscover = planItems.Skip(itemIdx + 1).ToList();
+                if (remainingAfterDiscover.Count > 0)
+                {
+                    var rp = await ReplanRemainingSteps(prompt, remainingAfterDiscover, discoveryContext, emitSse, ct);
+                    if (rp?.Count > 0)
+                    {
+                        planItems = MergePlanSteps(planItems, rp);
+                        if (emitSse)
+                            await SendSse(Response, "plan", new { summary = "Plan updated after _discover", items = planItems }, ct);
+                    }
                 }
                 stepIndex++;
                 continue;
@@ -13750,7 +14006,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         if (string.IsNullOrWhiteSpace(req.Prompt)) return BadRequest("Prompt is required");
         var projectRoot = AgentUtilities.GetProjectRoot(req.Project, _config, _env);
-        await EmitLog(true, "info", "Orchestrating Request.", new { projectRoot, task = req.Prompt });
+        var (runBaseUrl2, runModel2, runEndpointName2) = await ResolveRunEndpointAsync(req.EndpointId);
+        _runBaseUrl = runBaseUrl2;
+        _runModel = runModel2;
+        await EmitLog(true, "info", "Orchestrating Request.", new { projectRoot, task = req.Prompt, endpoint = runEndpointName2 });
         var (allSteps, plan, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
         return Ok(new
         {
@@ -13897,18 +14156,55 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 catch { break; }
             }
         }, keepaliveCts.Token);
+        var streamLogPath = Path.Combine(AppContext.BaseDirectory, "weaver-stream-errors.log");
+        try { System.IO.File.AppendAllText(streamLogPath, $"[{DateTime.Now:HH:mm:ss}] stream start cardId={req.CardId}\n"); } catch { }
+        try
+        {
+            await ExecuteStreamCore(req);
+        }
+        catch (OperationCanceledException)
+        {
+            try { System.IO.File.AppendAllText(streamLogPath, $"[{DateTime.Now:HH:mm:ss}] ABORTED (RequestAborted={Response.HttpContext.RequestAborted.IsCancellationRequested}): {req.CardId}\n"); } catch { }
+        }
+        catch (Exception ex)
+        {
+            try { System.IO.File.AppendAllText(streamLogPath, $"[{DateTime.Now:HH:mm:ss}] FATAL {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n"); } catch { }
+            await EmitLog(true, "error", $"⛔ Stream terminated unexpectedly: {ex.Message}", ct: Response.HttpContext.RequestAborted);
+        }
+        finally
+        {
+            keepaliveCts.Cancel();
+            try { await keepaliveTask; } catch { }
+            try { System.IO.File.AppendAllText(streamLogPath, $"[{DateTime.Now:HH:mm:ss}] stream end cardId={req.CardId}\n"); } catch { }
+        }
+    }
+
+    private async Task ExecuteStreamCore(AgentRequest req)
+    {
         if (string.IsNullOrWhiteSpace(req.Prompt))
         {
             await SendSse(Response, "error", new { message = "Prompt is required" });
             await SendSse(Response, "done", new { });
-            keepaliveCts.Cancel(); try { await keepaliveTask; } catch { }
             return;
         }
         try
         {
             var projectRoot = AgentUtilities.GetProjectRoot(req.Project, _config, _env);
             await SendSse(Response, "phase", new { phase = "start", projectRoot });
-            await EmitLog(true, "info", "Agent started", new { projectRoot, task = req.Prompt });
+            // Resolve the card's chosen LLM endpoint so this run talks to that endpoint, and
+            // announce it over SSE so the frontend can label this agent section with its LLM/endpoint.
+            var (runBaseUrl, runModel, runEndpointName) = await ResolveRunEndpointAsync(req.EndpointId);
+            _runBaseUrl = runBaseUrl;
+            _runModel = runModel;
+            await SendSse(Response, "run-start", new
+            {
+                cardId = req.CardId,
+                runId = req.RunId,
+                endpointName = runEndpointName,
+                endpointUrl = runBaseUrl,
+                endpointModel = runModel
+            }, ct: Response.HttpContext.RequestAborted);
+            await EmitLog(true, "info", "Agent started", new { projectRoot, task = req.Prompt, endpoint = runEndpointName });
             AgentPlan? existingPlan = null;
             HashSet<int>? completedIndices = null;
             bool isBenchmark = req.IsBenchmark;
@@ -13978,7 +14274,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         finally
         {
-            keepaliveCts.Cancel(); try { await keepaliveTask; } catch { }
+            _runBaseUrl = null;
+            _runModel = null;
             if (!string.IsNullOrWhiteSpace(req.CardId))
             {
                 _cancelledSteps.TryRemove(req.CardId, out _);

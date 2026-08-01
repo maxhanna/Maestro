@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html ng-app="kanbanApp">
 
 <head>
@@ -296,6 +296,39 @@
               </span>
             </span>
             <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
+            <span class="endpoint-tag" ng-if="vm.currentRun && vm.currentRun.endpointName"
+              title="{{vm.currentRun.endpointUrl}} / {{vm.currentRun.endpointModel}}">⚡ {{vm.currentRun.endpointName}}</span>
+          </div>
+
+          <!-- Concurrent agent sections (one per simultaneously-running agent, side by side) -->
+          <div class="agent-run-sections" ng-if="vm.agentRuns.length > 1">
+            <div class="agent-run-section" ng-repeat="run in vm.agentRuns track by run.runId"
+              ng-class="{active: run.active, done: run.status === 'done', error: run.status === 'error'}">
+              <div class="agent-run-header">
+                <span class="agent-run-status">{{run.active ? '●' : (run.status === 'error' ? '✕' : '✓')}}</span>
+                <span class="agent-run-endpoint" title="{{run.endpointUrl}} / {{run.endpointModel}}">⚡ {{run.endpointName}}</span>
+                <span class="agent-run-task" title="{{run.cardText}}">{{run.cardText | limitTo:40}}</span>
+                <span class="agent-run-progress" ng-if="run.active && run.llmProgressPercent != null">LLM {{run.llmProgressPercent}}%</span>
+                <span class="agent-run-duration">{{ vm.msToDigitalTime(run.elapsed) }}</span>
+                <button ng-if="run.active" ng-click="vm.stopRun(run)" class="small ghost" title="Stop this agent">⏹</button>
+              </div>
+              <details class="agent-run-log">
+                <summary>📋 Log ({{run.log.length}})</summary>
+                <div class="log-entries" style="margin-top:6px;max-height:180px;overflow-y:auto;">
+                  <div class="log-entry" ng-repeat="e in run.log track by $index" ng-class="e.level">
+                    <span class="log-ts">{{e.ts}}</span><span class="log-msg">{{e.message}}</span>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <!-- LLM loading progress (llama.cpp /slots progress forwarded over SSE) -->
+          <div class="llm-progress span-full" ng-if="vm.streamingActive && vm.llmProgressPercent != null">
+            <span class="llm-progress-label">LLM {{vm.llmProgressPercent}}%</span>
+            <div class="llm-progress-track">
+              <div class="llm-progress-fill" ng-style="{width: (vm.llmProgressPercent || 0) + '%'}"></div>
+            </div>
           </div>
 
           <div class="agent-current" ng-if="vm.streamingActive && vm.getActiveStep()">
@@ -463,8 +496,9 @@
                     <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                       <span ng-if="item.metaGroup" class="plan-item-metagroup"
                         title="Sub-plan group">{{item.metaGroup}}</span>
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
                         style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
@@ -1039,13 +1073,29 @@
         <!-- ===== TAB: Agent ===== -->
         <div ng-show="vm.settingsTab === 'agent'">
           <details>
-            <summary class="settings-header">LLM Endpoint</summary>
+            <summary class="settings-header">Default LLM Endpoint</summary>
             <div style="padding:8px 0;">
               <label for="settings-llama" style="font-size:0.85em;color:var(--muted);">URL</label>
               <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width:100%;margin-top:2px;" />
               <div style="margin-top:6px;">
                 <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model Name</label>
                 <input id="settings-llama-model" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" />
+              </div>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">Additional LLM Endpoints</summary>
+            <div style="padding:8px 0;display:flex;flex-direction:column;gap:6px;">
+              <div ng-repeat="ep in vm.llamaEndpoints track by $index"
+                style="border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:6px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+                <input ng-model="ep.name" placeholder="Name (e.g. GPU-2)" style="flex:1 1 90px;min-width:80px;padding:3px 6px;font-size:12px;" />
+                <input ng-model="ep.url" placeholder="http://localhost:8080" style="flex:2 1 160px;min-width:120px;padding:3px 6px;font-size:12px;" />
+                <input ng-model="ep.model" placeholder="medgemma:4b" style="flex:1 1 110px;min-width:90px;padding:3px 6px;font-size:12px;" />
+                <button ng-click="vm.removeLlamaEndpoint($index)" class="small ghost" style="padding:2px 8px;" title="Remove endpoint">✕</button>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                <button ng-click="vm.addLlamaEndpoint()" class="small primary">+ Add Endpoint</button>
+                <span style="font-size:11px;color:var(--muted);">Cards can be assigned one of these endpoints. Each running agent gets its own section labeled with its endpoint.</span>
               </div>
             </div>
           </details>

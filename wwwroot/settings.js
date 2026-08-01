@@ -82,6 +82,7 @@ angular.module('kanbanApp')
                 // Terminal/Config settings
                 vm.llamaUrl = 'http://localhost:8080';
                 vm.llamaModel = 'medgemma:4b';
+                vm.llamaEndpoints = [];
                 vm.terminalApprovalMode = 'approveAll';
                 vm.approvedTerminalRoots = [];
                 vm.disallowedTerminalRoots = [];
@@ -93,7 +94,7 @@ angular.module('kanbanApp')
                 vm.fileBodyTruncationChars = 8000;
                 vm.buildOutputTailChars = 8000;
                 vm.defaultMaxTokens = 2048;
-                vm.includeProjectSkeleton = false;
+                vm.includeProjectSkeleton = true;
                 vm.includeEditKnowledge = false;
                 vm.buildCommands = "";
                 vm.prByDefault = false;
@@ -137,6 +138,7 @@ angular.module('kanbanApp')
                 // Agent Tools
                 vm.toolList = [
                     { key: '_explore', label: 'Explore files for reference', enabled: true },
+                    { key: '_discover', label: 'Project-wide context search (BM25 + AI)', enabled: true },
                     { key: '_command', label: 'Run terminal commands', enabled: true },
                     { key: '_create_file', label: 'Create new files', enabled: true },
                     { key: '_web_search', label: 'Web search', enabled: true },
@@ -201,6 +203,7 @@ angular.module('kanbanApp')
                             if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
                             vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
                             vm.llamaModel = cfg.llamaModel || "medgemma:4b";
+                            vm.llamaEndpoints = (cfg.llamaEndpoints || []).map(function (e) { return { id: e.id || ('ep-' + Math.random().toString(36).slice(2, 9)), name: e.name || '', url: e.url || '', model: e.model || '' }; });
                             vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
                             vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
                             vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
@@ -251,6 +254,7 @@ angular.module('kanbanApp')
                         cfg.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
                         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
                         cfg.llamaModel = vm.llamaModel || "medgemma:4b";
+                        cfg.llamaEndpoints = vm.llamaEndpoints || [];
                         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
                         cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) { return r.trim().toLowerCase(); }).filter(Boolean);
                         cfg.disallowedTerminalRoots = (vm.disallowedTerminalRootsText || '').split(',').map(function (r) { return r.trim().toLowerCase(); }).filter(Boolean);
@@ -285,6 +289,13 @@ angular.module('kanbanApp')
 
                 vm.addEmailAccount = function () { vm.emailAccounts.push({ imapServer: '', imapPort: 993, useSsl: true, username: '', password: '', label: '', showAppPasswordInstructions: false, testing: false, testResult: null }); };
                 vm.removeEmailAccount = function (index) { vm.emailAccounts.splice(index, 1); };
+                vm.addLlamaEndpoint = function () { vm.llamaEndpoints.push({ id: 'ep-' + Math.random().toString(36).slice(2, 9), name: '', url: 'http://localhost:8080', model: '' }); };
+                vm.removeLlamaEndpoint = function (index) { vm.llamaEndpoints.splice(index, 1); };
+                vm.endpointLabel = function (id) {
+                    if (!id) return 'Default';
+                    var ep = (vm.llamaEndpoints || []).find(function (e) { return e.id === id; });
+                    return ep ? (ep.name || ep.url || 'Default') : 'Default';
+                };
                 vm.checkEmailServer = function (index) {
                     var acct = vm.emailAccounts[index]; if (!acct || !acct.imapServer) return acct.showAppPasswordInstructions = false;
                     var lower = acct.imapServer.toLowerCase();

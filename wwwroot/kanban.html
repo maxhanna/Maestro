@@ -102,8 +102,9 @@
                     <div class="plan-item-text">
                       <span ng-if="item.metaGroup" class="plan-item-metagroup"
                         title="Sub-plan group">{{item.metaGroup}}</span>
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
                     </div>
 
                     <span ng-if="item.oldString || item.newString"
@@ -206,6 +207,7 @@
           </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
+            <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create A Branch then PR on completion">
@@ -231,6 +233,11 @@
             </div>
           </div>
           <div class="card-actions">
+            <select ng-model="card.llmEndpointId" ng-change="vm.saveCardText(card)" ng-click="$event.stopPropagation()"
+              class="card-endpoint-select" title="LLM endpoint for this card (Default = settings endpoint)">
+              <option value="">⚡ Default</option>
+              <option ng-repeat="ep in vm.llamaEndpoints" value="{{ep.id}}">{{ep.name || ep.url}}</option>
+            </select>
             <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
               title="Attach file">📎</button>
             <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
@@ -363,8 +370,9 @@
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
                     </div>
                     <span ng-if="item.oldString || item.newString"
                       ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
@@ -497,6 +505,7 @@
 
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+            <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
             <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
               SELF-IMPROVING</span>
@@ -660,8 +669,9 @@
                       title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                         '⬜'}}</span>
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change">{{item.change}}</span>
+                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
+                      <span class="plan-item-change" ng-if="item.file !== '_planning'">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" ng-if="item.file === '_planning'">Thinking…</span>
                     </div>
                   </div>
                 </details>
@@ -760,8 +770,9 @@
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
                     </div>
                     <span ng-if="item.oldString || item.newString"
                       ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
@@ -829,6 +840,7 @@
 
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+            <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
               title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
@@ -943,8 +955,9 @@
                       title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                         '⬜'}}</span>
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change">{{item.change}}</span>
+                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
+                      <span class="plan-item-change" ng-if="item.file !== '_planning'">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" ng-if="item.file === '_planning'">Thinking…</span>
                     </div>
                   </div>
                 </details>
@@ -988,6 +1001,7 @@
           </div>
           <div class="card-tags">
             <span class="card-tag tag-self-improving" style="color: var(--accent2);">🔄 SELF-IMPROVING</span>
+            <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">

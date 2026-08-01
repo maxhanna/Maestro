@@ -22,6 +22,14 @@ public class EmailAccountConfig
     public string? label { get; set; }
 }
 
+public class LlamaEndpoint
+{
+    public string id { get; set; } = "";
+    public string name { get; set; } = "";
+    public string url { get; set; } = "http://localhost:8080";
+    public string model { get; set; } = "";
+}
+
 public class FrontendConfig
 {
     public List<ProjectDto> projects { get; set; } = new();
@@ -36,6 +44,7 @@ public class FrontendConfig
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";
     public string llamaModel { get; set; } = "medgemma:4b";
+    public List<LlamaEndpoint> llamaEndpoints { get; set; } = new();
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
     public List<string> disallowedTerminalRoots { get; set; } = new();
@@ -57,7 +66,7 @@ public class FrontendConfig
     public bool bughostedHeartbeatEnabled { get; set; } = false;
     public Dictionary<string, string>? themeColors { get; set; }
     public List<string> enabledTools { get; set; } = new();
-    public bool includeProjectSkeleton { get; set; } = false;
+    public bool includeProjectSkeleton { get; set; } = true;
     public bool includeEditKnowledge { get; set; } = false;
     public bool extendThinking { get; set; } = true;
     public int thinkingMaxTokens { get; set; } = 4096;

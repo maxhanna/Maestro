@@ -1,4 +1,4 @@
-﻿:root {
+:root {
 	--bg: #071025;
 	--surface: #0b1220;
 	--panel: #071322;
@@ -1842,6 +1842,36 @@ h3 .small.ghost:hover {
 	cursor: help;
 }
 
+/* ── LLM loading progress (llama.cpp /slots progress over SSE) ── */
+.llm-progress {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 4px 8px;
+	border-radius: 8px;
+	background: rgba(6, 182, 212, 0.06);
+}
+.llm-progress-label {
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--muted);
+	min-width: 64px;
+	white-space: nowrap;
+}
+.llm-progress-track {
+	flex: 1;
+	height: 6px;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.08);
+	overflow: hidden;
+}
+.llm-progress-fill {
+	height: 100%;
+	border-radius: 999px;
+	background: linear-gradient(90deg, #06b6d4, #8b5cf6);
+	transition: width 0.3s ease;
+}
+
 .agent-current {
 	margin-top: 8px;
 	padding: 10px;
@@ -3151,3 +3181,23 @@ h3 .small.ghost:hover {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
+
+/* ── Multi-agent sections & LLM endpoint picker ── */
+.agent-run-sections { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; margin: 8px 0; }
+.agent-run-section { border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 6px 8px; background: rgba(255,255,255,0.02); }
+.agent-run-section.active { border-color: var(--accent); background: rgba(6,182,212,0.05); }
+.agent-run-section.done { border-color: var(--success); opacity: 0.85; }
+.agent-run-section.error { border-color: var(--error); }
+.agent-run-header { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.agent-run-status { font-size: 11px; }
+.agent-run-section.active .agent-run-status { color: var(--success); }
+.agent-run-section.error .agent-run-status { color: var(--error); }
+.agent-run-endpoint { font-weight: 700; color: var(--accent); font-size: 11px; white-space: nowrap; }
+.agent-run-task { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.agent-run-progress { font-size: 11px; color: var(--warning); }
+.agent-run-duration { font-size: 11px; color: var(--muted); }
+.agent-run-log { margin-top: 4px; font-size: 12px; }
+.endpoint-tag { margin-left: 8px; padding: 2px 8px; border-radius: 4px; background: rgba(6,182,212,0.12); color: #67e8f9; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.card-tag.tag-endpoint { color: #67e8f9; border-color: rgba(6,182,212,0.4); }
+.card-endpoint-select { background: transparent; color: var(--text); border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; font-size: 11px; padding: 2px 4px; max-width: 130px; }
+

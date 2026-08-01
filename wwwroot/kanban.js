@@ -162,7 +162,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           attached: [],
           autoPr: vm.prByDefault !== false,
           selfImproving: false,
-          createTests: false
+          createTests: false,
+          llmEndpointId: ''
         });
         vm.saveCards();
         $timeout(function () {
@@ -340,7 +341,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.toggleCardReady = function (card) {
         try {
           card.ready = !card.ready;
-          if (card.ready && !vm.streamingActive) {
+          if (card.ready && (!vm.streamingActive || !vm.isCardActive(card.id))) {
             vm.startCard(card);
           }
         }
@@ -582,7 +583,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             createdAt: new Date().toISOString(),
             priority: card.priority || 'medium',
             attached: i === 0 ? angular.copy(card.attached || []) : [],
-            selfImproving: false
+            selfImproving: false,
+            llmEndpointId: card.llmEndpointId || ''
           });
         });
         vm.saveCards();

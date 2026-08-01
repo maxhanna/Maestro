@@ -172,6 +172,7 @@ partial class AgentController
             "  Assume the system handles these. Only flag completely missing functionality or critical syntax errors.\n" +
             " * MISSING METHODS ARE NOT BUGS: If the HTML references a method like showMoreReddit() that doesn't exist yet, DO NOT ABANDON. " +
             "  Set needsExtraStep=true and KEEP the edit. The system will auto-generate the missing method. Only ABANDON if the edit deletes existing code or breaks syntax.\n" +
+            " * PLACEHOLDER STUBS ARE FATAL: If the NEW code is a placeholder/stub implementation — a method body that is ONLY a console.log(...) call, contains a '// Placeholder implementation', '// TODO: implement', or '// stub' comment, an empty method body { }, or 'throw new NotImplementedException()' — ABANDON with reason 'placeholder stub — implement real logic'. The step asked for a real implementation.\n" +
             " * SYNTAX ERRORS ARE FATAL: If the edit has malformed HTML (e.g., `({ {x}}`), mismatched braces, or incorrect Angular syntax in the NEW code itself, ABANDON immediately. " +
             "  Do not create a repair step for syntax errors; the system will automatically retry the edit with the failure context.\n";
 
@@ -317,6 +318,7 @@ partial class AgentController
             if (enabled == null || enabled.Contains("_command")) markers.Add("_command");
             if (enabled == null || enabled.Contains("_web_search")) markers.Add("_web_search");
             if (enabled == null || enabled.Contains("_web_fetch")) markers.Add("_web_fetch");
+            if (enabled == null || enabled.Contains("_discover")) markers.Add("_discover");
             if (enabled == null || enabled.Contains("_git")) markers.Add("_git");
             if (enabled == null || enabled.Contains("_rename_file")) markers.Add("_rename_file");
             if (enabled == null || enabled.Contains("_delete_file")) markers.Add("_delete_file");
@@ -586,6 +588,7 @@ partial class AgentController
     private static readonly Dictionary<string, string> AllTools = new()
     {
         ["_explore"] = "\"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.",
+        ["_discover"] = "\"_discover\"          — Project-wide context search: use ONLY when the DISCOVERY CONTEXT lacks what you need and you do NOT know which file to read. Scans the whole project (lexical BM25 ranking + AI relevance selection) and reads the most relevant files into context. Do NOT use _discover for files you can name — use _explore instead. Do NOT use it when the attached/user-supplied files in DISCOVERY CONTEXT already cover the task.",
         ["_command"] = "\"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_directory or _create_file instead.",
         ["_create_directory"] = "\"_create_directory\"   — Create a folder/directory. Put the RELATIVE folder path in \"change\" (e.g. \"benchmark_test_1\"), not a description. Leave everything else empty. Deep/nested paths are created automatically. Do NOT use mkdir.",
         ["_create_file"] = "\"_create_file\"        — Create a new file: put the RELATIVE file path in \"change\", put the FULL file content in \"newString\", leave \"oldString\" empty. The file path should be just the path (e.g. \"benchmark_test_1/test.md\"), not a description. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.",
@@ -701,7 +704,8 @@ partial class AgentController
         sb.Append("causes repeated re-invocations that tend to invent redundant or conflicting follow-up edits. ");
         sb.Append("If the task is a single coherent code change (e.g. two related assignments in the same block, ");
         sb.Append("or one method body), output exactly ONE step for it.\n");
-        sb.Append("3. Tool choice: use _explore for repository source, _web_search/_web_fetch only for external current information, and _command only for terminal work that cannot be represented as an edit step.\n");
+        sb.Append("3. Tool choice: use _explore for a specific repository file, _discover ONLY when the discovery context lacks what you need and you cannot name the file to read, _web_search/_web_fetch only for external current information, and _command only for terminal work that cannot be represented as an edit step.\n");
+        sb.Append("3b. _discover is STRICTLY on-demand: the DISCOVERY CONTEXT below already includes ALL user-supplied files (read in full) plus the project skeleton. In most cases that is everything you need — do NOT add _discover or _explore steps speculatively. Add a _discover step ONLY if the task genuinely requires code that is neither in the context nor nameable as a file.\n");
         sb.Append("4. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n");
         sb.Append("5. COMMANDS BEFORE EDITS: if a generated/downloaded file must exist first, add _command BEFORE the edit step and write outputs inside the project.\n");
         sb.Append("6. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n");

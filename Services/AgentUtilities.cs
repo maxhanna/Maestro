@@ -847,6 +847,13 @@ public static class AgentUtilities
         });
         return changed ? result : content;
     }
+    // Keywords that can precede a `( ... ) { }` shape but are NOT method declarations.
+    // Matching is whole-line anchored, so `new Foo() { }` never matches anyway.
+    private static readonly HashSet<string> ControlFlowKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "if", "for", "while", "switch", "catch", "using", "lock", "foreach"
+    };
+
     private static readonly Regex[] PlaceholderPatterns = new[]
     {
         new Regex(@"\bMyMethod\b", RegexOptions.Compiled),
@@ -1279,7 +1286,8 @@ public static class AgentUtilities
         file.Equals("_command", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
-        file.Equals("_explore", StringComparison.OrdinalIgnoreCase));
+        file.Equals("_explore", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_discover", StringComparison.OrdinalIgnoreCase));
     public static bool IsPathUnderRoot(string fullPath, string root)
     {
         root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -1581,7 +1589,7 @@ public static class AgentUtilities
         var specialMarkers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "_git", "_ping", "_show", "_display", "_create_file", "_create_directory",
-            "_package_install", "_command", "_web_search", "_web_fetch", "_explore",
+            "_package_install", "_command", "_web_search", "_web_fetch", "_explore", "_discover",
             "_rename", "_rename_file", "_move_file", "_delete_file", "_continue"
         };
         return !specialMarkers.Contains(path);
@@ -4081,6 +4089,75 @@ public static class AgentUtilities
                 newString.Contains(marker, StringComparison.OrdinalIgnoreCase))
                 return $"Edit contains placeholder marker '{marker}'.";
         return null;
+    }
+
+    /// <summary>
+    /// Detects placeholder/stub implementations that do NOT implement real logic —
+    /// e.g. a method body that is only a console.log call, contains a
+    /// '// Placeholder implementation' or '// TODO: implement' comment, is an empty
+    /// body, or throws NotImplementedException. Used to reject such edits
+    /// deterministically instead of letting the LLM verifier score them as acceptable.
+    /// </summary>
+    public static bool LooksLikePlaceholderStub(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return false;
+
+        // Explicit placeholder comments
+        if (Regex.IsMatch(code,
+            @"//\s*(placeholder\s*(implementation|stub)|TODO\s*:?\s*(implement|add|fill\s*in)|stub\s+implementation|will\s+be\s+wired\s+up|not\s+implemented\s+yet|dummy\s+implementation|temporary\s+implementation)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled))
+            return true;
+
+        // NotImplementedException / NotSupportedException stubs
+        if (Regex.IsMatch(code, @"throw\s+new\s+(NotImplementedException|NotSupportedException)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled))
+            return true;
+
+        // Empty method body: `name(...): type { }` or arrow `(...) => { }`.
+        // Whole-line anchored and dominance-guarded so legitimate code like
+        // `if (x) { }`, `for (;;) { }`, `while (x) { }`, `new Foo() { }` or an object
+        // literal containing one empty helper is NOT flagged — only a stub that is
+        // essentially an empty declaration gets rejected.
+        var noComments = Regex.Replace(code, @"//[^\n]*", " ");
+        var meaningfulLines = noComments.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0 && l != "{" && l != "}" && l != "{ }")
+            .ToList();
+        if (meaningfulLines.Count <= 3)
+        {
+            var arrowEmpty = meaningfulLines.Any(l =>
+                Regex.IsMatch(l, @"^\([^)]*\)\s*=>\s*\{\s*\}\s*,?\s*$", RegexOptions.Compiled));
+            var methodEmpty = meaningfulLines.Any(l =>
+            {
+                var m = Regex.Match(l,
+                    @"^(?:(?:public|private|protected|internal|readonly|static|async|export|default|function|def|const|let|var)\s+)*(?<name>\w+)\s*\([^)]*\)\s*(:\s*[^{}\r\n]{0,80})?\s*\{\s*\}\s*,?\s*$",
+                    RegexOptions.Compiled);
+                return m.Success && !ControlFlowKeywords.Contains(m.Groups["name"].Value);
+            });
+            if (arrowEmpty || methodEmpty)
+                return true;
+        }
+
+        // Single-line console.log stub: `name(...): void { console.log('x'); }`
+        if (Regex.IsMatch(noComments.Trim(),
+            @"^\w+\s*\([^)]*\)\s*(:\s*[^{\r\n]{0,60})?\s*\{\s*console\.(log|error|warn|info)\([^;]*\);?\s*\}\s*;?$",
+            RegexOptions.Compiled))
+            return true;
+
+        // Console.log-only body: a block whose only meaningful statements are console.* calls.
+        // Signature lines like `showMenuPanel(): void {` are stripped (they end with `{`),
+        // so a body that only logs still gets caught.
+        var strippedComments = Regex.Replace(code, @"//[^\n]*", " ");
+        var meaningful = strippedComments.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0 && l != "{" && l != "}" && l != "{ }")
+            .Where(l => !(l.Contains('(') && l.EndsWith("{")) && !l.EndsWith("=>") && !l.EndsWith("=> {"))
+            .ToList();
+        if (meaningful.Count > 0 && meaningful.All(l =>
+            Regex.IsMatch(l, @"^console\.(log|error|warn|info)\([^;]*\);?$", RegexOptions.Compiled)))
+            return true;
+
+        return false;
     }
     public static bool IsHtmlLikeContent(string content) =>
      content.Contains('<') && Regex.IsMatch(content, @"</?\w+[\s/>]");

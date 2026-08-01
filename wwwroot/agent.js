@@ -21,6 +21,7 @@ angular.module('kanbanApp')
                 var entry = { ts: new Date().toLocaleTimeString(), level: level || 'info', message: message, detail: detail };
                 vm.agentActivityLog.push(entry); vm.agentActivityLogLength = vm.agentActivityLog.length;
                 if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift();
+                if (vm.currentRun && vm.currentRun.log) { vm.currentRun.log.push(entry); if (vm.currentRun.log.length > 200) vm.currentRun.log.shift(); }
                 if (vm.scrollToBottom) vm.scrollToBottom();
             } catch (e) { }
         }
@@ -71,9 +72,15 @@ angular.module('kanbanApp')
                 vm.streamingContextSize = 0; vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.streamingTokenBuffer = '';
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
+                vm.agentRuns = []; vm.currentRun = null;
+                vm.refreshStreamingActive = function () {
+                    vm.streamingActive = vm.agentRuns.some(function (r) { return r.active; });
+                    if (!vm.streamingActive) { vm.resumeTerminalPolling(); }
+                };
                 vm.pendingContextReview = null; vm.contextReviewCountdown = 0; vm.contextReviewTimer = null;
                 vm._agentStartTime = null;
                 vm.agentTimer = null;
+                vm.cancelAgentTimer = function () { if (vm.agentTimer) { $interval.cancel(vm.agentTimer); vm.agentTimer = null; } };
                 vm.formatLogDetail = function (detail) {
                     if (detail === undefined || detail === null) return '';
                     if (typeof detail === 'string') return detail;
@@ -102,23 +109,46 @@ angular.module('kanbanApp')
                 };
 
                 vm.executeAgent = function (card, isAutoRestart) {
-                    if (!card || vm.streamingActive || !card.text) return;
+                    if (!card || !card.text) return;
+                    if (vm.agentRuns.some(function (r) { return r.cardId === card.id && r.active; })) return;
                     var proj = card.filePath || vm.selectedProject; if (!proj) return $window.alert('No project assigned');
                     try {
                         if (!isAutoRestart) card._agentIteration = 0;
                         delete card.agentAnalysis; delete card.agentLog;
 
+                        var run = {
+                            runId: uid() + '-' + Date.now(),
+                            cardId: card.id,
+                            cardText: card.text,
+                            endpointId: card.llmEndpointId || '',
+                            endpointName: vm.endpointLabel ? vm.endpointLabel(card.llmEndpointId) : 'Default',
+                            endpointUrl: '', endpointModel: '',
+                            log: [], active: true, status: 'running', llmProgressPercent: null,
+                            startedAt: Date.now(), elapsed: 0,
+                            abortController: new AbortController()
+                        };
+                        vm.agentRuns.push(run);
+                        if (vm.agentRuns.length > 10) {
+                            var inactiveIdx = vm.agentRuns.findIndex(function (r) { return !r.active; });
+                            if (inactiveIdx !== -1) vm.agentRuns.splice(inactiveIdx, 1);
+                        }
+                        vm.currentRun = run;
+                        vm.refreshStreamingActive();
+
                         function startAgent() {
-                            vm._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
+                            run._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
                             vm.complexityScore = null; vm.complexityLabel = ''; vm.complexityTokenCap = null; vm.complexityMaxTokens = null;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
+                            vm.llmProgress = null; vm.llmProgressPercent = null; vm.llmProgressState = '';
                             vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
                             vm._agentStartTime = Date.now();
+                            if (vm.agentTimer) { $interval.cancel(vm.agentTimer); vm.agentTimer = null; }
                             vm.agentTimer = $interval(function () {
                                 if (vm.streamingActive) {
                                     vm.agentElapsed = (vm._agentStartTime ? Date.now() - vm._agentStartTime : 0);
                                 }
+                                vm.agentRuns.forEach(function (r) { if (r.active) r.elapsed = Date.now() - r.startedAt; });
                             }, 1000);
 
                             if (!isAutoRestart) {
@@ -131,21 +161,22 @@ angular.module('kanbanApp')
                             pushAgentLog(vm, 'info', isAutoRestart ? 'Agent restarting (' + (card._agentIteration || 0) + '/5)' : 'Agent started', { project: proj, task: card.text });
                             vm.activeCardText = card.text; vm._agentStartTime = Date.now();
                             var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-                            var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, buildCommands: vm.getProjectBuildCommands(proj) || null };
+                            var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, buildCommands: vm.getProjectBuildCommands(proj) || null, endpointId: card.llmEndpointId || '', runId: run.runId };
 
                             vm.moveCardToDoing(card.id); vm.activeCardId = card.id; vm.activeCardIds.add(card.id);
-                            var localAbortController = vm.abortController;
+                            var localAbortController = run.abortController;
 
                             fetch('/api/agent/execute-stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: localAbortController.signal })
                                 .then(function (response) {
-                                    if (!response.ok) { vm.streamingActive = false; vm.resumeTerminalPolling(); vm.agentResult = { error: 'Server error: ' + response.status }; $scope.$applyAsync(); return; }
+                                    if (!response.ok) { run.active = false; run.status = 'error'; vm.currentRun = null; vm.refreshStreamingActive(); vm.agentResult = { error: 'Server error: ' + response.status }; $scope.$applyAsync(); return; }
                                     var reader = response.body.getReader(); var decoder = new TextDecoder(); var buffer = '';
                                     function readNext() {
                                         reader.read().then(function (result) {
-                                            if (result.done) { if (!vm.streamingActive) return; vm.streamingActive = false; vm.resumeTerminalPolling(); $scope.$applyAsync(); return; }
+                                            if (result.done) { if (!run.active && !vm.streamingActive) return; run.active = false; if (run.status === 'running') run.status = 'done'; vm.currentRun = null; vm.refreshStreamingActive(); $scope.$applyAsync(); return; }
                                             buffer += decoder.decode(result.value, { stream: true }); var parts = buffer.split('\n\n'); buffer = parts.pop();
 
                                             $scope.$applyAsync(function () {
+                                                vm.currentRun = run;
                                                 for (var p = 0; p < parts.length; p++) {
                                                     var lines = parts[p].split('\n'); var eventName = ''; var data = ''; var eventLineFound = false;
                                                     for (var l = 0; l < lines.length; l++) {
@@ -159,6 +190,14 @@ angular.module('kanbanApp')
                                                         switch (eventName) {
                                                             case 'log':
                                                                 if (parsed) pushAgentLog(vm, parsed.level, parsed.message, parsed.detail);
+                                                                break;
+                                                            case 'run-start':
+                                                                if (parsed && run) {
+                                                                    run.endpointName = parsed.endpointName || run.endpointName;
+                                                                    run.endpointUrl = parsed.endpointUrl || '';
+                                                                    run.endpointModel = parsed.endpointModel || '';
+                                                                    pushAgentLog(vm, 'info', '⚡ Running on endpoint: ' + run.endpointName + (run.endpointModel ? ' (' + run.endpointModel + ')' : ''));
+                                                                }
                                                                 break;
                                                             case 'complexity':
                                                                 if (parsed) {
@@ -179,6 +218,14 @@ angular.module('kanbanApp')
                                                             case 'status':
                                                                 if (parsed && parsed.message) vm.streamingPhase = parsed.message;
                                                                 break;
+                                                            case 'progress':
+                                                                if (parsed) {
+                                                                    vm.llmProgress = parsed.progress != null ? parsed.progress : (parsed.percent != null ? parsed.percent / 100 : null);
+                                                                    vm.llmProgressPercent = parsed.percent != null ? parsed.percent : (parsed.progress != null ? Math.round(parsed.progress * 100) : 0);
+                                                                    vm.llmProgressState = parsed.state || '';
+                                                                    if (run) run.llmProgressPercent = vm.llmProgressPercent;
+                                                                }
+                                                                break;
                                                             case 'token':
                                                                 if (parsed && parsed.token) {
                                                                     vm.streamingTokenBuffer += parsed.token;
@@ -197,6 +244,8 @@ angular.module('kanbanApp')
                                                                 if (parsed && parsed.text) {
                                                                     var stepNum = (parsed.stepIndex !== undefined && parsed.stepIndex !== null) ? parsed.stepIndex + 1 : '?';
                                                                     var label = parsed.phase === 'verify' ? 'Verification thinking — after step ' : 'Extended thinking — step ';
+                                                                    // Surface the pre-plan / verify reasoning live in the Thinking panel too.
+                                                                    vm.streamingThinking = parsed.text;
                                                                     pushAgentLog(vm, 'think', '🧠 ' + label + stepNum + (parsed.description ? ' — ' + parsed.description : ''), { text: parsed.text });
                                                                 }
                                                                 break;
@@ -311,10 +360,39 @@ angular.module('kanbanApp')
                                                                 } else { pushAgentLog(vm, 'info', '🔍 Cohesion: no issues found'); }
                                                                 break;
                                                             case 'done':
-                                                                if (vm._doneProcessed) { pushAgentLog(vm, 'warn', 'Duplicate done event ignored'); break; }
-                                                                vm._doneProcessed = true;
-                                                                vm.sendSystemToast(); vm.streamingActive = false; vm.resumeTerminalPolling(); vm.steeringContext = '';
+                                                                if (run._doneProcessed) { pushAgentLog(vm, 'warn', 'Duplicate done event ignored'); break; }
+                                                                run._doneProcessed = true;
+                                                                vm.llmProgress = null; vm.llmProgressPercent = 0; vm.llmProgressState = '';
+                                                                vm.sendSystemToast(); vm.steeringContext = '';
                                                                 var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
+                                                                run.active = false; run.status = 'done'; run.elapsed = Date.now() - run.startedAt; vm.refreshStreamingActive();
+                                                                var editsApplied = parsed && parsed.editsApplied;
+                                                                var incomplete = parsed && parsed.incomplete;
+                                                                if (card.id !== vm.activeCardId) {
+                                                                    // A concurrently-running agent finished — complete its card but keep its section.
+                                                                    var concMsg = editsApplied ? 'Agent finished (concurrent)' : 'Agent finished without file edits (concurrent)';
+                                                                    pushAgentLog(vm, editsApplied ? 'info' : 'warn', concMsg);
+                                                                    var concAnalysis = {
+                                                                        summary: (parsed && parsed.summary) || vm.streamingSummary,
+                                                                        thinking: (parsed && parsed.thinking) || vm.streamingThinking,
+                                                                        steps: (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps),
+                                                                        filesEdited: (parsed && parsed.filesEdited) || vm.streamingFilesEdited,
+                                                                        planItems: angular.copy(vm.planItems),
+                                                                        warning: parsed && parsed.warning,
+                                                                        incomplete: !!incomplete
+                                                                    };
+                                                                    var mvIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
+                                                                    var mvCol = 'doing';
+                                                                    if (mvIdx === -1 && vm.state.selfImproving) { mvIdx = vm.state.selfImproving.findIndex(function (c) { return c.id === card.id; }); mvCol = 'selfImproving'; }
+                                                                    if (mvIdx !== -1) {
+                                                                        var mvCard = vm.state[mvCol].splice(mvIdx, 1)[0];
+                                                                        mvCard.agentAnalysis = concAnalysis;
+                                                                        mvCard.agentLog = angular.copy(run.log);
+                                                                        vm.state.done.push(mvCard);
+                                                                        vm.saveCards();
+                                                                    } else if (vm.saveCards) { vm.saveCards(); }
+                                                                    $scope.$applyAsync(); return;
+                                                                }
                                                                 var elapsedStr = elapsed > 0 ? (elapsed >= 60000 ? Math.floor(elapsed / 60000) + 'm ' + (elapsed % 60000) / 1000 + 's' : Math.floor(elapsed / 1000) + 's') : '';
 
                                                                 var editsApplied = parsed && parsed.editsApplied;
@@ -387,9 +465,9 @@ angular.module('kanbanApp')
                                                                 }
 
                                                                 function finishCard() {
-                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); vm._agentStartTime = null; vm.agentTimer = null; return; }
+                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); vm._agentStartTime = null; if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer(); return; }
                                                                     vm._agentStartTime = null;
-                                                                    vm.agentTimer = null;
+                                                                    if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
                                                                     if (!incomplete) {
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
@@ -439,10 +517,9 @@ angular.module('kanbanApp')
                                                                 } else { if (incomplete) pushAgentLog(vm, 'warn', 'Card kept in Doing — no files were modified'); finishCard(); }
                                                                 break;
                                                             case 'error':
-                                                                vm.streamingActive = false;
+                                                                run.active = false; run.status = 'error'; vm.currentRun = null; vm.refreshStreamingActive();
                                                                 vm._agentStartTime = null;
-                                                                vm.agentTimer = null;
-                                                                vm.resumeTerminalPolling();
+                                                                if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
                                                                 pushAgentLog(vm, 'error', parsed ? parsed.message : data);
                                                                 vm.agentResult = { error: parsed ? parsed.message : data };
                                                                 vm.activeCardId = null;
@@ -474,11 +551,11 @@ angular.module('kanbanApp')
                                             readNext();
                                         }).catch(function (readErr) {
                                             if (readErr && readErr.name === 'AbortError') return;
-                                            vm.streamingActive = false; vm.resumeTerminalPolling(); vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) }; $scope.$applyAsync();
+                                            run.active = false; run.status = 'error'; vm.currentRun = null; vm.refreshStreamingActive(); vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) }; $scope.$applyAsync();
                                         });
                                     }
                                     readNext();
-                                }).catch(function (err) { vm.streamingActive = false; vm.resumeTerminalPolling(); });
+                                }).catch(function (err) { run.active = false; run.status = 'error'; vm.currentRun = null; vm.refreshStreamingActive(); });
                         }
 
                         if (card.autoPr && proj) {
@@ -493,20 +570,43 @@ angular.module('kanbanApp')
                 };
 
                 vm.stopAgent = function (card) {
-                    vm.agentTimer = null;
                     vm._agentStartTime = null;
                     vm.agentElapsed = 0;
                     vm._agentStopped = true;
+                    var targetRun = null;
+                    if (card) targetRun = vm.agentRuns.find(function (r) { return r.cardId === card.id && r.active; });
+                    if (!targetRun) targetRun = vm.agentRuns.find(function (r) { return r.active; });
+                    var wasCurrent = targetRun && vm.currentRun === targetRun;
+                    if (targetRun) {
+                        if (targetRun.abortController) targetRun.abortController.abort();
+                        targetRun.active = false; targetRun.status = 'stopped';
+                        if (wasCurrent) vm.currentRun = null;
+                    }
                     if (vm.abortController) { vm.abortController.abort(); }
                     vm.abortController = new AbortController();
-                    vm.streamingActive = false;
+                    if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
+                    vm.refreshStreamingActive();
                     const message = 'Agent stopped by user.';
-                    vm.agentResult = { warning: message };
-                    pushAgentLog(vm, 'warn', message);
+                    if (wasCurrent) {
+                        vm.agentResult = { warning: message };
+                        pushAgentLog(vm, 'warn', message);
+                        vm.activeCardId = null;
+                        vm.activeCardIds = new Set();
+                    }
+                    if (targetRun && targetRun.log) targetRun.log.push({ ts: new Date().toLocaleTimeString(), level: 'warn', message: message, detail: undefined });
                     vm.showNotification(message);
-                    vm.activeCardId = null;
-                    vm.activeCardIds = new Set();
-                    vm.resumeTerminalPolling();
+                };
+
+                vm.stopRun = function (run) {
+                    if (!run) return;
+                    if (run.abortController) run.abortController.abort();
+                    run.active = false; run.status = 'stopped';
+                    var wasCurrent = vm.currentRun === run;
+                    if (wasCurrent) vm.currentRun = null;
+                    if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
+                    vm.refreshStreamingActive();
+                    if (wasCurrent) pushAgentLog(vm, 'warn', 'Agent run stopped by user.');
+                    if (run && run.log) run.log.push({ ts: new Date().toLocaleTimeString(), level: 'warn', message: 'Agent run stopped by user.', detail: undefined });
                 };
 
                 vm.askAI = function () {
