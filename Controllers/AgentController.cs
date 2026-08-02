@@ -2250,7 +2250,14 @@ public partial class AgentController : ControllerBase
                     var fuzzy = AgentUtilities.BuildExactMatchBlock(content, oldStr, step.LineNumber, step.Change);
                     if (fuzzy == null)
                     {
-                        return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
+                        // A concrete oldString → newString replacement must still be ATTEMPTED:
+                        // the tolerant apply matchers (line-based fuzzy + TryReplaceSafe) can absorb
+                        // minor drift between the plan snapshot and the current file. Only skip the
+                        // step (Irrelevant) when there is no replacement to apply.
+                        if (string.IsNullOrWhiteSpace(step.NewString))
+                        {
+                            return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
+                        }
                     }
                 }
             }
@@ -3904,12 +3911,13 @@ public partial class AgentController : ControllerBase
                 }
             }
         }
+        // HTML: the plan-provided oldString/newString is a concrete edit — TRY it first through the
+        // tolerant apply matchers. FORMAT D stays as the automatic fallback when the plan edit's
+        // oldString can't be matched (the LLM resolver enforces FORMAT D for HTML on retry).
         if (HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(planOldStr))
         {
-            planOldStr = null;
-            step.OldString = null;
             await EmitLog(emitSse, "info",
-                $"Cleared plan oldString for HTML file — FORMAT D will be used for {relPath}", ct: ct);
+                $"HTML file {relPath}: plan provides oldString/newString — applying plan edit first; FORMAT D remains the fallback if it doesn't match", ct: ct);
         }
         string? causalContext = null;
         if (System.IO.File.Exists(fullPath))
@@ -5272,20 +5280,33 @@ public partial class AgentController : ControllerBase
                                         inheritedRefs = inheritedRefs.Concat(new[] { tsTwin }).ToList();
                                 }
                             }
-                            var syntheticStep = new PlanStep
+                            // Skip the synthetic step if the method already exists on disk — the
+                            // resolver may have been seeded with a stale snapshot, and re-inserting
+                            // would create a duplicate (compile error).
+                            var syntheticTargetPath = System.IO.Path.GetFullPath(Path.Combine(projectRoot, targetFile.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+                            if (System.IO.File.Exists(syntheticTargetPath) &&
+                                MethodNameExistsInFile(await System.IO.File.ReadAllTextAsync(syntheticTargetPath, Encoding.UTF8, ct), missingName))
                             {
-                                File = targetFile,
-                                Change = $"Add implementation of {missingName}() method referenced in {System.IO.Path.GetFileName(relPath)} — mirror the pattern used by the referencing component's sibling file if one exists",
-                                TargetSymbol = missingName,
-                                LineNumber = 0,
-                                OldString = null,
-                                NewString = null,
-                                ReferenceFiles = inheritedRefs,
-                            };
-                            plan.Plan.Insert(planItemIndex + 1, syntheticStep);
-                            await EmitLog(emitSse, "info",
-                                $"  🔄 Verifier ({extraStepCount}/3 needsExtraStep): auto-added synthetic step to implement {missingName}() in {targetFile}",
-                                ct: ct);
+                                await EmitLog(emitSse, "info",
+                                    $"  ⏭ Verifier synthetic step skipped: {missingName}() already exists on disk in {targetFile}", ct: ct);
+                            }
+                            else
+                            {
+                                var syntheticStep = new PlanStep
+                                {
+                                    File = targetFile,
+                                    Change = $"Add implementation of {missingName}() method referenced in {System.IO.Path.GetFileName(relPath)} — mirror the pattern used by the referencing component's sibling file if one exists",
+                                    TargetSymbol = missingName,
+                                    LineNumber = 0,
+                                    OldString = null,
+                                    NewString = null,
+                                    ReferenceFiles = inheritedRefs,
+                                };
+                                plan.Plan.Insert(planItemIndex + 1, syntheticStep);
+                                await EmitLog(emitSse, "info",
+                                    $"  🔄 Verifier ({extraStepCount}/3 needsExtraStep): auto-added synthetic step to implement {missingName}() in {targetFile}",
+                                    ct: ct);
+                            }
                         }
                         if (llmGateDecision == "abandon" && !deterministicPlaceholderReject)
                         {
@@ -6733,16 +6754,36 @@ public partial class AgentController : ControllerBase
         if (!fnMatch.Success)
             fnMatch = Regex.Match(newStr, @"function\s+(\w+)\s*\(", RegexOptions.IgnoreCase);
         if (!fnMatch.Success)
+            fnMatch = Regex.Match(newStr, @"(?m)^\s*(?:(?:public|private|protected|internal|static|readonly|async)\s+)*(?:get\s+|set\s+)?(\w+)\s*\([^)]*\)\s*(?::[^;{]*)?\{", RegexOptions.IgnoreCase);
+        if (!fnMatch.Success)
             return null;
         var fnName = fnMatch.Groups[1].Value;
         if (fnName.Length <= 2) return null;
-        var existingPattern = $@"(?:vm\.)?{Regex.Escape(fnName)}\s*(?:[:=])\s*function\s*\(";
-        if (Regex.IsMatch(fileContent, existingPattern, RegexOptions.IgnoreCase))
-            return fnName;
-        var existingPattern2 = $@"function\s+{Regex.Escape(fnName)}\s*\(";
-        if (Regex.IsMatch(fileContent, existingPattern2, RegexOptions.IgnoreCase))
+        // MethodNameExistsInFile covers JS (`function name(` / `vm.name = function`) and TS
+        // (`openPopupPanel(): void {`) declaration styles.
+        if (MethodNameExistsInFile(fileContent, fnName))
             return fnName;
         return null;
+    }
+
+    /// <summary>
+    /// True when a method/function with the given name is already declared in the file —
+    /// covers TypeScript class methods (`openPopupPanel(): void {`, `async foo() {`, getters/setters),
+    /// JS function declarations, and vm./this./const arrow-assignment styles.
+    /// </summary>
+    private static bool MethodNameExistsInFile(string fileContent, string methodName)
+    {
+        if (string.IsNullOrWhiteSpace(methodName) || methodName.Length <= 2 || string.IsNullOrWhiteSpace(fileContent)) return false;
+        var esc = Regex.Escape(methodName);
+        // TS class method declaration: `name(...): Type {` / `async name() {` / `get name() {`
+        if (Regex.IsMatch(fileContent,
+            @"(?m)^\s*(?:(?:public|private|protected|internal|static|readonly|async)\s+)*(?:get\s+|set\s+)?" + esc + @"\s*\([^)]*\)\s*(?::[^;{]*)?\{",
+            RegexOptions.IgnoreCase)) return true;
+        // JS function declaration / assignment / arrow styles
+        if (Regex.IsMatch(fileContent,
+            @"(?:function\s+" + esc + @"\s*\(|(?:vm|this|self|that)\." + esc + @"\s*(?:[:=])\s*(?:async\s+)?function\s*\(|(?:vm|this|self|that)\." + esc + @"\s*=\s*(?:async\s+)?\([^)]*\)\s*=>|(?m)^\s*(?:const|let|var\s+)?" + esc + @"\s*[:=]\s*(?:async\s+)?(?:function\s*\(|\([^)]*\)\s*=>))",
+            RegexOptions.IgnoreCase)) return true;
+        return false;
     }
     private string FormatCssEditedRegion(string content, string appliedNewStr)
     {
@@ -8995,11 +9036,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                          $"Verifier reason: {extraReason}",
                                 TargetSymbol = missingSymbol,
                                 Priority = 1,
-                                LineNumber = 0
+                                LineNumber = 0,
+                                ReferenceFiles = stepToRun?.ReferenceFiles ?? new List<string>()
                             };
                             var isDup = planSoFar.Any(s =>
                                 string.Equals(s.File, autoStep.File, StringComparison.OrdinalIgnoreCase) &&
                                 TokenOverlap(s.Change ?? "", autoStep.Change) > 0.5);
+                            // Also skip when the method already exists on disk (stale-snapshot re-insertion).
+                            if (!isDup && !string.IsNullOrWhiteSpace(autoStep.File))
+                            {
+                                var autoStepPath = System.IO.Path.GetFullPath(Path.Combine(projectRoot, autoStep.File.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+                                if (System.IO.File.Exists(autoStepPath) &&
+                                    MethodNameExistsInFile(await System.IO.File.ReadAllTextAsync(autoStepPath, Encoding.UTF8, ct), missingSymbol))
+                                {
+                                    await EmitLog(emitSse, "info",
+                                        $"  ⏭ Verifier auto-step skipped: {missingSymbol}() already exists on disk in {autoStep.File}", ct: ct);
+                                    isDup = true;
+                                }
+                            }
                             if (!isDup)
                             {
                                 planSoFar.Add(autoStep);
