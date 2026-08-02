@@ -1630,6 +1630,16 @@ h3 .small.ghost:hover {
 	box-shadow: var(--shadow);
 }
 
+.agent-log .log-entry.bypass {
+	color: #4ade80;
+	background: rgba(74, 222, 128, 0.08);
+}
+
+.agent-log .log-entry.metric {
+	color: #c084fc;
+	background: rgba(192, 132, 252, 0.08);
+}
+
 .panel h3 {
 	margin: 0 0 8px 0;
 	font-size: 13px;
@@ -2112,6 +2122,18 @@ h3 .small.ghost:hover {
 
 .agent-activity-log .log-entry.warn {
 	color: #fbbf24;
+}
+
+.agent-activity-log .log-entry.bypass {
+	color: #4ade80;
+	background: rgba(74, 222, 128, 0.08);
+	border-radius: 4px;
+}
+
+.agent-activity-log .log-entry.metric {
+	color: #c084fc;
+	background: rgba(192, 132, 252, 0.08);
+	border-radius: 4px;
 }
 
 .agent-activity-log .log-ts {

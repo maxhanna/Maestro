@@ -82,4 +82,24 @@ public class PlanStep
     /// <summary>Multiple edits in one step — for small repetitive changes across columns/sections.</summary>
     [JsonPropertyName("edits")]
     public List<EditPair>? Edits { get; set; }
+
+    /// <summary>FORMAT C/D: the target symbol type (method/function/class/interface/property/html).</summary>
+    [JsonPropertyName("targetType")]
+    public string? TargetType { get; set; }
+
+    /// <summary>FORMAT C/D: the name of the symbol (or HTML code block) this edit targets.</summary>
+    [JsonPropertyName("targetName")]
+    public string? TargetName { get; set; }
+
+    /// <summary>FORMAT C: insert the new code after the target symbol instead of replacing it.</summary>
+    [JsonPropertyName("insertAfter")]
+    public bool? InsertAfter { get; set; }
+
+    /// <summary>FORMAT C/D: the replacement code, one array element per line.</summary>
+    [JsonPropertyName("newCode")]
+    public List<string>? NewCode { get; set; }
+
+    /// <summary>fullFile format: the complete file content to write (used when the file does not exist).</summary>
+    [JsonPropertyName("fullFile")]
+    public string? FullFile { get; set; }
 }

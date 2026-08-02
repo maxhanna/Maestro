@@ -17,7 +17,7 @@ angular.module('kanbanApp')
             try {
                 function normalise(s) { return (s || '').replace(/\d+/g, '#'); }
                 var recentDupe = vm.agentActivityLog.length > 0 && vm.agentActivityLog.slice(-3).some(function (e) { return e.level === level && normalise(e.message) === normalise(message); });
-                if (recentDupe && level !== 'error' && level !== 'warn') return;
+                if (recentDupe && level !== 'error' && level !== 'warn' && level !== 'bypass' && level !== 'metric') return;
                 var entry = { ts: new Date().toLocaleTimeString(), level: level || 'info', message: message, detail: detail };
                 vm.agentActivityLog.push(entry); vm.agentActivityLogLength = vm.agentActivityLog.length;
                 if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift();

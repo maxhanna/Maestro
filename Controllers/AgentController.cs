@@ -2061,13 +2061,6 @@ public partial class AgentController : ControllerBase
         "block", "button", "div", "element", "section", "it", "them", "its"
     };
 
-    /// <summary>
-    /// For remove/delete steps the planner's oldString can drift from the actual file content
-    /// (whitespace, missing tokens, formatting). Before concluding the removal is already done,
-    /// check whether the removal TARGET (extracted from the change description) still exists in
-    /// the file — if it does, the edit is still needed and the step proceeds to the resolver,
-    /// whose tolerant matchers absorb the oldString drift.
-    /// </summary>
     private static bool RemovalTargetStillPresent(string? change, string content, string? oldString)
     {
         if (string.IsNullOrWhiteSpace(change)) return false;
@@ -2078,8 +2071,7 @@ public partial class AgentController : ControllerBase
             var css = Regex.Match(change, @"\.([\w\-]+)|#([\w\-]+)");
             target = css.Success ? (css.Groups[1].Success ? css.Groups[1].Value : css.Groups[2].Value) : null;
         }
-        // A legitimately-present class may be named like a stopword (e.g. ".line", ".item").
-        // Fall back to the first CSS selector in the oldString before giving up on it.
+
         if (string.IsNullOrWhiteSpace(target) || target.Length < 2 || _removalStopwords.Contains(target))
         {
             var oldSel = Regex.Match(oldString ?? "", @"^\s*[\.#]([\w\-]+)", RegexOptions.IgnoreCase);
@@ -2087,18 +2079,30 @@ public partial class AgentController : ControllerBase
         }
         if (string.IsNullOrWhiteSpace(target) || target.Length < 2 || _removalStopwords.Contains(target))
             return false;
-        // Word-boundary match so ".editToggleBtn" doesn't match partial identifiers like
-        // ".editToggleBtnOld" — a boundary is present around CSS class/id selectors.
+            
         return Regex.IsMatch(content, @"(?:^|[^\w\-])" + Regex.Escape(target) + @"(?:[^\w\-]|$)", RegexOptions.IgnoreCase);
     }
 
-    /// <summary>True when the planner already supplied a concrete edit payload for the step.</summary>
     private static bool HasConcreteEdit(PlanStep? step)
     {
         if (step == null) return false;
         if (!string.IsNullOrWhiteSpace(step.OldString)) return true;
         if (!string.IsNullOrWhiteSpace(step.NewString)) return true;
-        return step.Edits != null && step.Edits.Count > 0;
+        if (step.Edits != null && step.Edits.Count > 0) return true;
+        // FORMAT C/D: targetType + targetName + newCode is a concrete replacement payload.
+        if (!string.IsNullOrWhiteSpace(step.TargetType) && !string.IsNullOrWhiteSpace(step.TargetName) &&
+            step.NewCode is { Count: > 0 }) return true;
+        // fullFile: complete file content is a concrete create-file payload.
+        if (!string.IsNullOrWhiteSpace(step.FullFile)) return true;
+        return false;
+    }
+
+    private static bool ShouldApplyDirectly(PlanStep? step)
+    {
+        if (step == null || !HasConcreteEdit(step)) return false;
+        if (step.InsertAfter == true) return false;
+        if (step.Edits is { Count: > 0 } && string.IsNullOrWhiteSpace(step.OldString)) return false;
+        return true;
     }
 
     private static (PreEditVerdict verdict, string reason) PreEditValidation(string fileContent, PlanStep step)
@@ -2307,6 +2311,11 @@ public partial class AgentController : ControllerBase
                         // step (Irrelevant) when there is no replacement to apply.
                         if (string.IsNullOrWhiteSpace(step.NewString))
                         {
+                            // Deletion with drifted oldString: if the removal target is STILL present
+                            // in the file, let the tolerant matcher attempt it instead of declaring
+                            // it Irrelevant (which would silently skip a plan-supplied deletion).
+                            if (RemovalTargetStillPresent(step.Change, content, step.OldString))
+                                return (PreEditVerdict.Proceed, "removal target still present — attempting tolerant deletion");
                             return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
                         }
                     }
@@ -3740,7 +3749,8 @@ public partial class AgentController : ControllerBase
         string? cardId = null,
         List<string>? attachedFiles = null,
         int replanDepth = 0,
-        Func<string, Task>? onActivity = null)
+        Func<string, Task>? onActivity = null,
+        bool skipLlmPreResolution = false)
     {
         var relPath = step.File.Replace('\\', '/').TrimStart('/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -3843,23 +3853,37 @@ public partial class AgentController : ControllerBase
                 return stepIndex + 1;
             }
         }
-        var exploration = await RunStepExplorationLoop(
-            step, projectRoot,
-            prompt ?? step.Change ?? "",
-            plan, planItemIndex, emitSse, ct, cardId, attachedFiles);
+        var exploration = skipLlmPreResolution
+            ? new StepExplorationResult
+            {
+                EnrichedStep = step,
+                ExplorationContext = "",
+                FilesRead = new List<string>(),
+                TargetSymbol = step.TargetSymbol,
+                Confidence = 100,
+                RoundsCompleted = 0
+            }
+            : await RunStepExplorationLoop(
+                step, projectRoot,
+                prompt ?? step.Change ?? "",
+                plan, planItemIndex, emitSse, ct, cardId, attachedFiles);
         step = exploration.EnrichedStep;
         var explorationContext = exploration.ExplorationContext;
-        var eiTask = EditIntentClassifier.ClassifyAsync(step.Change ?? "", relPath,
-            async (sys, usr, c) =>
-            {
-                var (raw, _, err) = await CallLlmRaw(sys, usr, c, TimeSpan.FromSeconds(15), maxTokens: 128);
-                return (raw, err);
-            }, ct);
+        var eiTask = skipLlmPreResolution
+            ? null
+            : EditIntentClassifier.ClassifyAsync(step.Change ?? "", relPath,
+                async (sys, usr, c) =>
+                {
+                    var (raw, _, err) = await CallLlmRaw(sys, usr, c, TimeSpan.FromSeconds(15), maxTokens: 128);
+                    return (raw, err);
+                }, ct);
         var fe = System.IO.File.Exists(fullPath);
         var fc = fe ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct) : "";
-        var ei = await eiTask;
-        var decidedEditStrategy = EditStrategyResolver.Decide(relPath, fe, fc, step.Change ?? "", ei);
-        if (decidedEditStrategy.ResolvedOldStr != null)
+        var ei = eiTask != null ? await eiTask : new EditIntent(EditIntentKind.TargetedEdit, null, null);
+        var decidedEditStrategy = skipLlmPreResolution
+            ? null
+            : EditStrategyResolver.Decide(relPath, fe, fc, step.Change ?? "", ei);
+        if (!skipLlmPreResolution && decidedEditStrategy!.ResolvedOldStr != null)
         {
             await EmitLog(emitSse, "info",
                 $"  🎯 AST-resolved '{decidedEditStrategy.TargetName}' ({decidedEditStrategy.ResolvedOldStr.Split('\n').Length}L) via EditStrategyResolver", decidedEditStrategy, ct: ct);
@@ -3868,7 +3892,7 @@ public partial class AgentController : ControllerBase
             explorationContext = $"### TARGET FILE: {relPath}\n\n```\n{decidedEditStrategy.ResolvedOldStr}\n```" +
                 (!string.IsNullOrWhiteSpace(explorationContext) ? "\n\n" + explorationContext : "");
         }
-        if (!string.IsNullOrWhiteSpace(explorationContext) && !string.IsNullOrWhiteSpace(step.Change))
+        if (!skipLlmPreResolution && !string.IsNullOrWhiteSpace(explorationContext) && !string.IsNullOrWhiteSpace(step.Change))
         {
             explorationContext = await EnrichContextWithProjectTypesAndSql(
                 projectRoot, relPath, step.Change, explorationContext,
@@ -3897,7 +3921,7 @@ public partial class AgentController : ControllerBase
             }, ct);
         }
         string? preservationDirective = null;
-        if (!string.IsNullOrWhiteSpace(exploration.TargetSymbol))
+        if (!skipLlmPreResolution && !string.IsNullOrWhiteSpace(exploration.TargetSymbol))
         {
             preservationDirective = await AnalyzePreservationAndDependenciesAsync(
                 step, projectRoot, relPath, exploration.TargetSymbol, explorationContext, emitSse, ct);
@@ -3971,7 +3995,7 @@ public partial class AgentController : ControllerBase
                 $"HTML file {relPath}: plan provides oldString/newString — applying plan edit first; FORMAT D remains the fallback if it doesn't match", ct: ct);
         }
         string? causalContext = null;
-        if (System.IO.File.Exists(fullPath))
+        if (!skipLlmPreResolution && System.IO.File.Exists(fullPath))
         {
             var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             causalContext = await RunCausalReasoningAsync(prompt ?? step.Change ?? "", relPath, preExtractContent, emitSse, ct);
@@ -3990,7 +4014,7 @@ public partial class AgentController : ControllerBase
             bool fromFormatC = false;
             if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
             {
-                if (decidedEditStrategy.Strategy == EditStrategy.InsertMethod)
+                if (decidedEditStrategy?.Strategy == EditStrategy.InsertMethod || step.InsertAfter == true)
                 {
                     planOldStr = null;
                     planNewStr = null;
@@ -3999,56 +4023,83 @@ public partial class AgentController : ControllerBase
             if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
             {
                 planOldTried = true;
+                var isRemovalChange = (step.Change ?? "").Trim().ToLowerInvariant() is var chL &&
+                    (chL.StartsWith("remove ") || chL.StartsWith("delete ") || chL.StartsWith("delete the ") ||
+                     chL.StartsWith("remove the ") || chL.Contains("remove the ") || chL.Contains("delete the "));
                 if (string.IsNullOrWhiteSpace(planNewStr))
                 {
-                    await EmitLog(emitSse, "info",
-                        $"AST-resolved oldString is set — making focused LLM call for replacement code only", ct: ct);
-                    var replacePrompt = new StringBuilder();
-                    replacePrompt.AppendLine("You are replacing the following method/function in the file. Output ONLY the replacement code — no JSON wrapper, no explanation, no markdown.");
-                    replacePrompt.AppendLine();
-                    replacePrompt.AppendLine("CURRENT METHOD SOURCE (to be replaced):");
-                    replacePrompt.AppendLine(planOldStr);
-                    replacePrompt.AppendLine();
-                    replacePrompt.AppendLine("CHANGE REQUIRED: " + (step.Change ?? ""));
-                    replacePrompt.AppendLine();
-                    replacePrompt.AppendLine("Output ONLY the replacement code. It MUST be a complete method/function declaration (signature + body).");
-                    replacePrompt.AppendLine("Do NOT include markdown code fences or any other text — just the raw source code.");
-                    var (rawReplacement, replaceError) = await CallLlmRawText(
-                        "You are a precise code editor. Output ONLY the replacement source code with no formatting, no markdown, no explanation. " +
-                        "Do NOT add comments (// or /* */) to the code.",
-                        replacePrompt.ToString(), emitSse, ct,
-                        requestTimeout: _infiniteTimeout,
-                        maxTokens: 2048);
-                    if (!string.IsNullOrWhiteSpace(replaceError) || string.IsNullOrWhiteSpace(rawReplacement) || rawReplacement.Length < 10)
+                    if (skipLlmPreResolution && step.NewCode is { Count: > 0 } && step.InsertAfter != true)
                     {
-                        resolveError = replaceError ?? "LLM returned empty replacement";
-                        await EmitLog(emitSse, "warn",
-                            $"Focused replacement call failed: {resolveError}", ct: ct);
+                        // FORMAT C/D REPLACE: the planner already supplied the replacement payload.
+                        // Materialize newCode directly — no focused LLM round-trip.
+                        oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
+                        newStr = AgentUtilities.NormalizeLineEndings(string.Join("\n", step.NewCode));
+                        fromFormatC = true;
+                        await EmitLog(emitSse, "info",
+                            $"Using plan-supplied FORMAT C/D newCode directly for {relPath} (old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L)", step, ct: ct);
+                    }
+                    else if (skipLlmPreResolution && string.IsNullOrWhiteSpace(step.NewString) && isRemovalChange)
+                    {
+                        // Deletion: the planner supplied oldString + empty newString AND the change
+                        // explicitly asks to remove/delete. Attempt the deletion directly; the
+                        // tolerant matcher absorbs drift. (Gated on removal intent so an oldString-only
+                        // "update/modify" step never gets treated as a destructive delete.)
+                        oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
+                        newStr = "";
+                        await EmitLog(emitSse, "info",
+                            $"Applying plan-supplied deletion for {relPath} (old={oldStr.Split('\n').Length}L → removed)", step, ct: ct);
                     }
                     else
                     {
-                        var cleaned = rawReplacement.Trim();
-                        cleaned = Regex.Replace(cleaned, @"^```[a-zA-Z]*\s*", "");
-                        cleaned = Regex.Replace(cleaned, @"\s*```$", "");
-                        oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
-                        newStr = AgentUtilities.NormalizeLineEndings(cleaned.Trim());
-                        var fmtExt = Path.GetExtension(relPath).ToLowerInvariant();
-                        if (fmtExt == ".css" || fmtExt == ".scss" || fmtExt == ".less")
-                            newStr = LlmCssCleaner.Clean(newStr);
-                        var trimmedNew = newStr.TrimStart();
-                        if (trimmedNew.StartsWith("{") && (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs"))
+                        await EmitLog(emitSse, "info",
+                            $"AST-resolved oldString is set — making focused LLM call for replacement code only", ct: ct);
+                        var replacePrompt = new StringBuilder();
+                        replacePrompt.AppendLine("You are replacing the following method/function in the file. Output ONLY the replacement code — no JSON wrapper, no explanation, no markdown.");
+                        replacePrompt.AppendLine();
+                        replacePrompt.AppendLine("CURRENT METHOD SOURCE (to be replaced):");
+                        replacePrompt.AppendLine(planOldStr);
+                        replacePrompt.AppendLine();
+                        replacePrompt.AppendLine("CHANGE REQUIRED: " + (step.Change ?? ""));
+                        replacePrompt.AppendLine();
+                        replacePrompt.AppendLine("Output ONLY the replacement code. It MUST be a complete method/function declaration (signature + body).");
+                        replacePrompt.AppendLine("Do NOT include markdown code fences or any other text — just the raw source code.");
+                        var (rawReplacement, replaceError) = await CallLlmRawText(
+                            "You are a precise code editor. Output ONLY the replacement source code with no formatting, no markdown, no explanation. " +
+                            "Do NOT add comments (// or) to the code.",
+                            replacePrompt.ToString(), emitSse, ct,
+                            requestTimeout: _infiniteTimeout,
+                            maxTokens: 2048);
+                        if (!string.IsNullOrWhiteSpace(replaceError) || string.IsNullOrWhiteSpace(rawReplacement) || rawReplacement.Length < 10)
                         {
-                            resolveError = "Focused LLM returned body-only code (starts with '{') — need a complete method declaration";
-                            await EmitLog(emitSse, "warn", $"  {resolveError} ({newStr.Length} chars)", ct: ct);
+                            resolveError = replaceError ?? "LLM returned empty replacement";
+                            await EmitLog(emitSse, "warn",
+                                $"Focused replacement call failed: {resolveError}", ct: ct);
                         }
                         else
                         {
-                            if (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
-                                newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
-                            newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
-                            fromFormatC = true;
-                            await EmitLog(emitSse, "info",
-                                $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
+                            var cleaned = rawReplacement.Trim();
+                            cleaned = Regex.Replace(cleaned, @"^```[a-zA-Z]*\s*", "");
+                            cleaned = Regex.Replace(cleaned, @"\s*```$", "");
+                            oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
+                            newStr = AgentUtilities.NormalizeLineEndings(cleaned.Trim());
+                            var fmtExt = Path.GetExtension(relPath).ToLowerInvariant();
+                            if (fmtExt == ".css" || fmtExt == ".scss" || fmtExt == ".less")
+                                newStr = LlmCssCleaner.Clean(newStr);
+                            var trimmedNew = newStr.TrimStart();
+                            if (trimmedNew.StartsWith("{") && (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs"))
+                            {
+                                resolveError = "Focused LLM returned body-only code (starts with '{') — need a complete method declaration";
+                                await EmitLog(emitSse, "warn", $"  {resolveError} ({newStr.Length} chars)", ct: ct);
+                            }
+                            else
+                            {
+                                if (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                                    newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
+                                newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
+                                fromFormatC = true;
+                                await EmitLog(emitSse, "info",
+                                    $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
+                            }
                         }
                     }
                 }
@@ -4242,7 +4293,11 @@ public partial class AgentController : ControllerBase
                 {
                     var oldLinesCount = oldStr!.Split('\n').Length;
                     var oldTrimmed = oldStr.TrimStart();
-                    if (oldLinesCount > 3)
+                    // Plan-supplied concrete deletions (skipLlmPreResolution) carry the EXACT block
+                    // the planner wants removed — the tolerant matcher verifies it exists line-by-line
+                    // before deleting, so the 3-line guard (meant for LLM-generated guesses) doesn't
+                    // apply. Let it through so the plan's deletion is attempted directly.
+                    if (oldLinesCount > 3 && !skipLlmPreResolution)
                     {
                         var err = $"DELETION SIZE LIMIT: oldString is {oldLinesCount} lines long. When newString is empty (deletion), oldString MUST be 1-3 lines maximum. Output ONLY the exact element being deleted.";
                         await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
@@ -7864,7 +7919,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change))
                 return new IncrementalStepProposal { PlanComplete = false, Thinking = thinking };
             var justification = root.TryGetProperty("justification", out var jEl) ? jEl.GetString() : null;
-            var primaryStep = ParseStepFromJson(file, change, targetSymbol, line, oldString, newString, refFiles, edits);
+            var targetType = stepEl.TryGetProperty("targetType", out var ttEl) && ttEl.ValueKind == JsonValueKind.String ? ttEl.GetString() : null;
+            var targetName = stepEl.TryGetProperty("targetName", out var tnEl) && tnEl.ValueKind == JsonValueKind.String ? tnEl.GetString() : null;
+            var insertAfter = stepEl.TryGetProperty("insertAfter", out var iaEl) && iaEl.ValueKind == JsonValueKind.True;
+            var newCode = new List<string>();
+            if (stepEl.TryGetProperty("newCode", out var ncEl) && ncEl.ValueKind == JsonValueKind.Array)
+                foreach (var ncItem in ncEl.EnumerateArray())
+                    if (ncItem.ValueKind == JsonValueKind.String)
+                        newCode.Add(AgentUtilities.UnescapeString(ncItem.GetString() ?? ""));
+            var fullFile = stepEl.TryGetProperty("fullFile", out var ffEl) ? ReadPlannerString(ffEl) : null;
+            var primaryStep = ParseStepFromJson(file, change, targetSymbol, line, oldString, newString, refFiles, edits,
+                targetType, targetName, insertAfter, newCode.Count > 0 ? newCode : null, fullFile);
             var additionalSteps = new List<PlanStep>();
             var allObjects = AgentUtilities.ExtractAllJsonObjects(raw);
             var foundPrimary = false;
@@ -7903,7 +7968,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 extraEdits.Add(new EditPair { OldString = eo ?? "", NewString = en ?? "" });
                         }
                     }
-                    additionalSteps.Add(ParseStepFromJson(extraFile, extraChange, extraTargetSymbol, extraLine, extraOld, extraNew, extraRefFiles, extraEdits));
+                    var extraTargetType = extraStepEl.TryGetProperty("targetType", out var ettEl) && ettEl.ValueKind == JsonValueKind.String ? ettEl.GetString() : null;
+                    var extraTargetName = extraStepEl.TryGetProperty("targetName", out var etnEl) && etnEl.ValueKind == JsonValueKind.String ? etnEl.GetString() : null;
+                    var extraInsertAfter = extraStepEl.TryGetProperty("insertAfter", out var eiaEl) && eiaEl.ValueKind == JsonValueKind.True;
+                    var extraNewCode = new List<string>();
+                    if (extraStepEl.TryGetProperty("newCode", out var encEl) && encEl.ValueKind == JsonValueKind.Array)
+                        foreach (var encItem in encEl.EnumerateArray())
+                            if (encItem.ValueKind == JsonValueKind.String)
+                                extraNewCode.Add(AgentUtilities.UnescapeString(encItem.GetString() ?? ""));
+                    var extraFullFile = extraStepEl.TryGetProperty("fullFile", out var effEl) ? ReadPlannerString(effEl) : null;
+                    additionalSteps.Add(ParseStepFromJson(extraFile, extraChange, extraTargetSymbol, extraLine, extraOld, extraNew, extraRefFiles, extraEdits,
+                        extraTargetType, extraTargetName, extraInsertAfter, extraNewCode.Count > 0 ? extraNewCode : null, extraFullFile));
                 }
                 catch { }
             }
@@ -7921,20 +7996,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             return null;
         }
     }
-    private static PlanStep ParseStepFromJson(string file, string change, string? targetSymbol, int line, string? oldString, string? newString, List<string> refFiles, List<EditPair> edits)
+    private static PlanStep ParseStepFromJson(string file, string change, string? targetSymbol, int line, string? oldString, string? newString, List<string> refFiles, List<EditPair> edits,
+        string? targetType = null, string? targetName = null, bool? insertAfter = null, List<string>? newCode = null, string? fullFile = null)
     {
         var normFile = file.Replace('\\', '/');
         if (normFile.StartsWith("_edit/", StringComparison.OrdinalIgnoreCase))
             normFile = normFile["_edit/".Length..];
+        // FORMAT C/D steps carry targetName+newCode (no oldString): map targetName onto
+        // TargetSymbol so AST resolution extracts the exact oldString from the real file.
+        var effectiveSymbol = string.IsNullOrWhiteSpace(targetSymbol) ? targetName : targetSymbol;
+        // fullFile steps carry the complete file content: surface it as NewString so the
+        // existing _create_file path (file missing + NewString set + OldString empty) applies it.
+        var effectiveNew = newString;
+        if (string.IsNullOrWhiteSpace(effectiveNew) && !string.IsNullOrWhiteSpace(fullFile))
+            effectiveNew = fullFile;
         return new PlanStep
         {
             File = normFile,
             Change = change,
-            TargetSymbol = targetSymbol,
+            TargetSymbol = effectiveSymbol,
+            TargetType = targetType,
+            TargetName = targetName,
+            InsertAfter = insertAfter,
+            NewCode = newCode != null && newCode.Count > 0 ? newCode : null,
+            FullFile = fullFile,
             Priority = 1,
             LineNumber = line,
             OldString = oldString,
-            NewString = newString,
+            NewString = effectiveNew,
             ReferenceFiles = refFiles,
             Edits = edits.Count > 0 ? edits : null
         };
@@ -8065,7 +8154,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     // continues normally (crap edit → ignored).
                     if (HasConcreteEdit(step))
                     {
-                        await EmitLog(emitSse, "info",
+                        await EmitLog(emitSse, "bypass",
                             $"⚡ Frozen plan — [{step.File}] {step.Change} carries a concrete edit; overriding heuristic '{reason}' and re-attempting the edit via the resolver (no re-planning)", ct: ct);
                     }
                     else
@@ -8144,6 +8233,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var thinkingLog = new StringBuilder();
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
+        var totalPlanningRounds = 0;
         var stepEventIndex = 0;
         await EmitLog(emitSse, "info", "Incremental planning: proposing steps one at a time…", ct: ct);
         if (emitSse)
@@ -8174,6 +8264,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
                 await EmitLog(emitSse, "success",
                     $"Incremental planning: plan complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
+                await EmitLog(emitSse, "metric",
+                    $"📊 Card planning: {planSoFar.Count} step(s), {totalPlanningRounds} total planning round(s)", ct: ct);
                 break;
             }
             if (!string.IsNullOrWhiteSpace(proposal.ExploreFile))
@@ -8382,7 +8474,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 planSoFar.Add(proposal.Step);
                 rejectionFeedback.Clear();
+                var planningRounds = regenAttempts + 1;
+                totalPlanningRounds += planningRounds;
                 regenAttempts = 0;
+                var retryWord = planningRounds - 1 == 1 ? "retry" : "retries";
+                await EmitLog(emitSse, planningRounds >= 3 ? "warn" : "metric",
+                    planningRounds > 1
+                        ? $"📊 Step {planSoFar.Count} planned in {planningRounds} rounds ({planningRounds - 1} {retryWord}) — [{proposal.Step.File}] {proposal.Step.Change}"
+                        : $"📊 Step {planSoFar.Count} planned in 1 round — [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
                 if (!string.IsNullOrWhiteSpace(proposal.Thinking))
                 {
                     thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
@@ -8438,15 +8537,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             NewString = s.NewString,
             done = runningIndex == null || idx < runningIndex.Value
         }).ToList<object>();
-        if (stepItems.Count> 0)
-        { 
+        if (stepItems.Count > 0)
+        {
             var items = stepItems.Concat(new[] {
                 new {
-                    File = activityFile, 
-                    Change = activityChange, 
-                    Line = 0, 
-                    OldString = "", 
-                    NewString = "", 
+                    File = activityFile,
+                    Change = activityChange,
+                    Line = 0,
+                    OldString = "",
+                    NewString = "",
                     done = activityFile != "_planning"
                 }
             }).ToList();
@@ -8473,6 +8572,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var thinkingLog = new StringBuilder();
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
+        var totalPlanningRounds = 0;
         if (emitSse)
         {
             await SendSse(Response, "plan", new
@@ -8492,9 +8592,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var stepNum = planSoFar.Count;
                 if (stepNum == 0) return;
                 var isVerifying = phase == "verifying";
+                var currentIsConcrete = ShouldApplyDirectly(planSoFar[stepNum - 1]);
                 var label = isVerifying
                     ? $"Verifying Step {stepNum}…"
-                    : $"Thinking about Step {stepNum}…";
+                    : currentIsConcrete
+                        ? $"Applying supplied edit — Step {stepNum}…"
+                        : $"Thinking about Step {stepNum}…";
                 await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
                     isVerifying ? "_verifying" : "_executing", label,
                     $"Executed {stepNum - 1} step(s) — {label}", stepNum - 1, ct);
@@ -8519,11 +8622,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 planSoFar.Add(queuedStep);
                 if (!string.IsNullOrWhiteSpace(queuedStep.Change))
                     thinkingLog.AppendLine($"Step {planSoFar.Count}: {queuedStep.Change}");
+                var queuedIsConcrete = ShouldApplyDirectly(queuedStep);
                 await EmitLog(emitSse, "info",
-                    $"▶ Thinking about Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}", ct: ct);
+                    queuedIsConcrete
+                        ? $"▶ Applying supplied edit — Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}"
+                        : $"▶ Thinking about Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}", ct: ct);
                 await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
-                    "_executing", $"Thinking about Step {planSoFar.Count} — {queuedStep.Change}",
-                    $"Completed {planSoFar.Count - 1} step(s) — thinking about Step {planSoFar.Count}",
+                    "_executing", queuedIsConcrete
+                        ? $"Applying supplied edit — Step {planSoFar.Count} — {queuedStep.Change}"
+                        : $"Thinking about Step {planSoFar.Count} — {queuedStep.Change}",
+                    $"Completed {planSoFar.Count - 1} step(s) — {(queuedIsConcrete ? "applying supplied edit for" : "thinking about")} Step {planSoFar.Count}",
                     planSoFar.Count - 1, ct);
                 await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                     summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
@@ -8539,7 +8647,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                        replanBudget: new[] { 0 }, onActivity: planActivity);
+                        replanBudget: new[] { 0 }, onActivity: planActivity,
+                        skipLlmPreResolution: queuedIsConcrete);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -8586,7 +8695,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 try
                 {
                     extendedReasoning = await ExtendThinkingPrePlanAsync(
-                        cardId, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct);
+                        cardId, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
+                        attachedFiles: attachedFiles);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -8596,7 +8706,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             else if (prePlanCfg.extendThinking && regenAttempts > 0)
             {
-                await EmitLog(emitSse, "info",
+                await EmitLog(emitSse, "bypass",
                     $"Pre-plan thinking skipped (retry {regenAttempts}) — re-proposing directly with rejection feedback", ct: ct);
             }
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning);
@@ -8618,8 +8728,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         summary = $"Plan complete — {planSoFar.Count} step(s) executed",
                         items = planSoFar.Select((s, idx) => new
                         {
-                            File = s.File, Change = s.Change, Line = s.LineNumber,
-                            OldString = s.OldString, NewString = s.NewString,
+                            File = s.File,
+                            Change = s.Change,
+                            Line = s.LineNumber,
+                            OldString = s.OldString,
+                            NewString = s.NewString,
                             done = true
                         }).ToList(),
                         incremental = true
@@ -8627,6 +8740,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 await EmitLog(emitSse, "success",
                     $"Interleaved execution: complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
+                await EmitLog(emitSse, "metric",
+                    $"📊 Card planning: {planSoFar.Count} step(s), {totalPlanningRounds} total planning round(s)", ct: ct);
                 planCompleteDeclared = true;
                 break;
             }
@@ -8755,10 +8870,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(true, "info", $"Pre-validate plan event: planSoFar.Count={planSoFar.Count}, step.File={proposal.Step.File}", ct: ct);
             var proposedPlanItems = planSoFar.Select((s, idx) => new
             {
-                File = s.File, Change = s.Change, Line = s.LineNumber,
-                OldString = s.OldString, NewString = s.NewString,
+                File = s.File,
+                Change = s.Change,
+                Line = s.LineNumber,
+                OldString = s.OldString,
+                NewString = s.NewString,
                 done = true
-            }).Concat(new[]
+            }).ToList<object>().Concat(new object[]
             {
                 new
                 {
@@ -8797,8 +8915,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         summary = planSummary,
                         items = planSoFar.Select((s, idx) => new
                         {
-                            File = s.File, Change = s.Change, Line = s.LineNumber,
-                            OldString = s.OldString, NewString = s.NewString,
+                            File = s.File,
+                            Change = s.Change,
+                            Line = s.LineNumber,
+                            OldString = s.OldString,
+                            NewString = s.NewString,
                             done = true
                         }).ToList(),
                         incremental = true
@@ -8817,11 +8938,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 continue;
             }
             consecutiveSlotFailures = 0;
+            var planningRounds = regenAttempts + 1;
+            totalPlanningRounds += planningRounds;
             regenAttempts = 0;
             rejectionFeedback.Clear();
+            var retryWord = planningRounds - 1 == 1 ? "retry" : "retries";
+            await EmitLog(emitSse, planningRounds >= 3 ? "warn" : "metric",
+                planningRounds > 1
+                    ? $"📊 Step {planSoFar.Count + 1} planned in {planningRounds} rounds ({planningRounds - 1} {retryWord}) — [{proposal.Step.File}] {proposal.Step.Change}"
+                    : $"📊 Step {planSoFar.Count + 1} planned in 1 round — [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
             if (HasConcreteEdit(proposal.Step))
-                await EmitLog(emitSse, "info",
-                    "⚡ Step accepted — planner supplied a concrete edit (oldString/newString); executing it directly without further planning", ct: ct);
+                await EmitLog(emitSse, "bypass",
+                    "⚡ Step accepted — planner supplied a concrete edit (oldString/newString, FORMAT C/D, or fullFile); executing it directly without further planning", ct: ct);
             if (proposal.AdditionalSteps?.Count > 0)
             {
                 foreach (var extraStep in proposal.AdditionalSteps)
@@ -8869,11 +8997,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 planSoFar.Add(stepToRun);
                 if (!string.IsNullOrWhiteSpace(proposal.Thinking))
                     thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
+                var stepToRunIsConcrete = ShouldApplyDirectly(stepToRun);
                 await EmitLog(emitSse, "info",
-                    $"▶ Thinking about Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
+                    stepToRunIsConcrete
+                        ? $"▶ Applying supplied edit — Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}"
+                        : $"▶ Thinking about Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
                 await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
-                    "_executing", $"Thinking about Step {planSoFar.Count} — {stepToRun.Change}",
-                    $"Completed {planSoFar.Count - 1} step(s) — thinking about Step {planSoFar.Count}",
+                    "_executing", stepToRunIsConcrete
+                        ? $"Applying supplied edit — Step {planSoFar.Count} — {stepToRun.Change}"
+                        : $"Thinking about Step {planSoFar.Count} — {stepToRun.Change}",
+                    $"Completed {planSoFar.Count - 1} step(s) — {(stepToRunIsConcrete ? "applying supplied edit for" : "thinking about")} Step {planSoFar.Count}",
                     planSoFar.Count - 1, ct);
                 await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                     summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
@@ -8889,7 +9022,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                        replanBudget: new[] { 0 }, onActivity: planActivity);
+                        replanBudget: new[] { 0 }, onActivity: planActivity,
+                        skipLlmPreResolution: stepToRunIsConcrete);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -8922,12 +9056,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         var synthStep = singleStepPlan.Plan[si]!;
                         planSoFar.Add(synthStep);
-                await EmitLog(emitSse, "info",
-                    $"▶ Resolving Edits for Step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
-                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
-                    "_executing", $"Resolving Edits for Step {planSoFar.Count} — {synthStep.Change}",
-                    $"Completed {planSoFar.Count - 1} step(s) — resolving edits for Step {planSoFar.Count}",
-                    planSoFar.Count - 1, ct);
+                        await EmitLog(emitSse, "info",
+                            $"▶ Resolving Edits for Step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
+                        await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                            "_executing", $"Resolving Edits for Step {planSoFar.Count} — {synthStep.Change}",
+                            $"Completed {planSoFar.Count - 1} step(s) — resolving edits for Step {planSoFar.Count}",
+                            planSoFar.Count - 1, ct);
                         await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                             summary: $"Interleaved execution — {planSoFar.Count} step(s) so far (incl. auto)", score: 90);
                         var synthPlan = new AgentPlan
@@ -10524,9 +10658,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string? cardId = null, bool createTests = false, string? buildCommands = null)
     {
         _gracefulStop = false;
-        // Start the LLM connectivity probe immediately but don't block on it yet —
-        // the disk-bound discovery work below overlaps with the probe. It is awaited
-        // before any LLM call.
         var connectivityTask = CheckLlmConnectivity(projectRoot, emitSse, ct);
 
         var lower = prompt.ToLowerInvariant();
@@ -11008,8 +11139,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // acceptable (probe result is cached for 5 minutes) and usually the overlap
         // saves real wall-clock time at startup.
         var bootstrapTask = RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
+        // When the user attached specific files, the whole-project skeleton is noise: the agent must
+        // think and plan only inside the attached files, not the project at large. Skip skeleton
+        // generation so it can't leak unrelated paths (styles.css, other components, etc.) into the
+        // discovery context that feeds the thinking phase and the planner.
+        var hasAttachedFiles = attachedFiles != null && attachedFiles.Count > 0;
         Task<AgentUtilities.SkeletonResult>? skeletonTask = null;
-        if (cfg.includeProjectSkeleton)
+        if (cfg.includeProjectSkeleton && !hasAttachedFiles)
             skeletonTask = AgentUtilities.GenerateSkeletonAsync(projectRoot);
         Task<string?>? editKnowledgeTask = null;
         if (cfg.includeEditKnowledge)
@@ -11058,7 +11194,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }, ct);
                 }
             }
-            catch { /* non-critical — fall back to full thinking tokens */ }
+            catch { }
         }
 
         if (skeleton != null && skeleton.Paths.Count == 0 && string.IsNullOrWhiteSpace(skeleton.Tree))
@@ -12199,8 +12335,52 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
+    /// Deterministic micro-assessment that keeps trivial tasks from being over-scored by the
+    /// LLM assessor (e.g. "auto focus the new card's input" should be ~5, not 30). Returns a
+    /// 0-100 estimate. A low value short-circuits the LLM call entirely.
+    /// </summary>
+    private static int HeuristicComplexityScore(string prompt)
+    {
+        var text = (prompt ?? string.Empty).Trim();
+        if (text.Length == 0) return 20;
+        var lower = text.ToLowerInvariant();
+
+        // Large-task signals: never downgrade these below "Complex" no matter the wording.
+        var largeSignals = new[]
+        {
+            "migration", "database", "new endpoint", "new api", "new route", "architecture", "refactor",
+            "new class", "new component", "new subsystem", "authentication", "multi-file",
+            "multiple files", "test suite", "deploy", "docker", "websocket", "background service"
+        };
+        if (largeSignals.Any(lower.Contains)) return 55;
+
+        // Micro-task signals: single-line UI/formatting/comment tweaks with no real logic.
+        var microSignals = new[]
+        {
+            "auto focus", "set focus", "focus the input", "focus the new", "focus new",
+            "scroll into view", "scroll to", "add a comment", "add comment", "typo", "fix typo",
+            "rename", "change the color", "change color", "add a placeholder", "placeholder",
+            "tooltip", "change the label", "change label", "change the text", "change text",
+            "capitalize", "uppercase", "make it bold", "make bold", "make it italic",
+            "add padding", "increase padding", "center the", "align the", "button text"
+        };
+        var isMicro = microSignals.Any(lower.Contains);
+        if (text.Length <= 40) return isMicro ? 5 : 10;
+        if (text.Length <= 120) return isMicro ? 8 : 15;
+        if (text.Length <= 350 && isMicro) return 10;
+        // Length is a weak complexity signal, but very long detailed prompts are rarely trivial:
+        // scale the default upward so the LLM clamp below never under-scores genuinely hard,
+        // keyword-less tasks (e.g. a 1500-char feature description gets no ceiling at all).
+        if (text.Length > 1500) return 45;
+        if (text.Length > 700) return 38;
+        return 30;
+    }
+
+    /// <summary>
     /// Quick LLM call to assess task complexity (0-100). Only called when extendThinking is enabled.
-    /// Returns null if the call fails — caller should fall back to full thinking tokens.
+    /// Trivial tasks are scored deterministically with zero latency; larger tasks use the LLM,
+    /// anchored by the heuristic so it cannot wildly over-score small prompts.
+    /// Returns null only when even the deterministic heuristic could not be computed.
     /// </summary>
     private async Task<int?> AssessComplexityAsync(string prompt, string? cardId, CancellationToken ct)
     {
@@ -12209,31 +12389,58 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         try
         {
+            var heuristic = HeuristicComplexityScore(prompt);
+
+            // Trivial tasks (typo, comment, focus/scroll tweak, color/label/placeholder change) are
+            // decided deterministically — no LLM round-trip, and they can never be mis-scored as
+            // "Moderate" like "auto focus the new card input" was.
+            if (heuristic <= 10)
+            {
+                _complexityScores[cardId] = heuristic;
+                return heuristic;
+            }
+
             var system = "You are a task complexity assessor. Given a coding task description, rate its complexity " +
-                "from 0 to 100 where:\n" +
-                "0-10: Trivial -- a one-line change, a typo fix, adding a simple comment.\n" +
-                "10-25: Simple -- adding a small property or field, changing a constant.\n" +
-                "25-45: Moderate -- adding a method, modifying a few lines in one file.\n" +
-                "45-65: Complex -- multi-file changes, new class/component, API endpoint.\n" +
+                "from 0 to 100. Be strict and prefer LOW scores — most small UI, styling and single-function " +
+                "changes are 0-10. Anchor points:\n" +
+                "0-10: Trivial -- a one-line change, typo/comment, renaming, changing a color/label/placeholder, " +
+                "adding auto-focus or scroll-into-view, a tiny CSS tweak.\n" +
+                "10-25: Simple -- adding a small property or field, changing a constant, a 2-5 line tweak in one file.\n" +
+                "25-45: Moderate -- adding a method with real logic, modifying several related lines in one file.\n" +
+                "45-65: Complex -- multi-file changes, new class/component, API endpoint, new route.\n" +
                 "65-85: Very complex -- architectural changes, database migrations, new subsystems.\n" +
                 "85-100: Extremely complex -- full feature implementation, system-wide refactoring.\n\n" +
+                "A task that touches a single function or a few lines of one file is never above 25. " +
+                "When in doubt, score LOWER.\n\n" +
                 "Output ONLY a single integer between 0 and 100. No explanation, no markdown.";
 
-            var user = $"Rate the complexity of this coding task:\n\n{prompt}";
+            var user = $"Rate the complexity of this coding task (a deterministic heuristic estimated {heuristic}/100 — " +
+                $"your score should be close to that unless the task is genuinely harder):\n\n{prompt}";
 
             var (raw, error) = await CallLlmRawText(system, user, false, ct,
                 requestTimeout: TimeSpan.FromSeconds(15), maxTokens: 10);
 
             if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
-                return null;
+            {
+                // LLM unavailable: fall back to the heuristic instead of the full thinking budget.
+                _complexityScores[cardId] = heuristic;
+                return heuristic;
+            }
 
-            if (int.TryParse(raw.Trim(), out var score))
+            var match = Regex.Match(raw.Trim(), @"\d+");
+            if (match.Success && int.TryParse(match.Value, out var score))
             {
                 score = Math.Clamp(score, 0, 100);
+                // Guard against the assessor over-scoring small prompts: the ceiling applies only
+                // when the heuristic is a *confident* low (short text or micro-task signal). The
+                // 30/38/45 defaults — and the 55 large-signal floor — release the LLM to score
+                // genuinely complex keyword-less tasks freely.
+                if (heuristic <= 20)
+                    score = Math.Min(score, heuristic + 20);
                 _complexityScores[cardId] = score;
                 return score;
             }
-            return null;
+            return heuristic;
         }
         catch
         {
@@ -12258,7 +12465,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// </summary>
     private async Task<string?> ExtendThinkingPrePlanAsync(
         string? cardId, string prompt, string discoveryContext, List<PlanStep> planSoFar,
-        string projectRoot, bool emitSse, CancellationToken ct)
+        string projectRoot, bool emitSse, CancellationToken ct,
+        List<string>? attachedFiles = null)
     {
         try
         {
@@ -12270,9 +12478,39 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (previous.Length > prevMax)
                 previous = "…[earlier reasoning truncated]…\n" + previous[^prevMax..];
 
-            var related = SelectRelatedFilesForThinking(discoveryContext, prompt, null);
+            // When the user attached specific files, the thinking phase MUST reason only inside
+            // those files — never the project at large. Build the RELEVANT PROJECT FILES section
+            // from the attached files directly (their full contents), instead of letting the
+            // discovery context (which may include skeleton paths / unrelated components) leak in.
+            var hasAttached = attachedFiles != null && attachedFiles.Count > 0;
+            var related = "";
+            if (hasAttached)
+            {
+                const int attachedMaxChars = 24000;
+                const int perFileTruncate = 6000;
+                var attachedSb = new StringBuilder();
+                foreach (var af in attachedFiles!)
+                {
+                    if (string.IsNullOrWhiteSpace(af)) continue;
+                    var afRel = af.Replace('\\', '/');
+                    var afFull = Path.GetFullPath(
+                        Path.Combine(projectRoot, afRel.TrimStart('/').Replace('/', Path.DirectorySeparatorChar)));
+                    if (!System.IO.File.Exists(afFull)) continue;
+                    var afContent = await System.IO.File.ReadAllTextAsync(afFull, Encoding.UTF8, ct);
+                    if (afContent.Length > perFileTruncate)
+                        afContent = afContent[..perFileTruncate] + "\n…[truncated]…";
+                    var block = $"### read {afRel}\n```\n{afContent}\n```\n";
+                    if (attachedSb.Length + block.Length > attachedMaxChars) break;
+                    attachedSb.Append(block);
+                }
+                related = attachedSb.ToString().Trim();
+            }
+            else
+            {
+                related = SelectRelatedFilesForThinking(discoveryContext, prompt, null);
+            }
 
-            const string system =
+            var system =
                 "You are the deep-reasoning engine of an autonomous coding agent. BEFORE the planner proposes the next step, " +
                 "you produce EXTENDED, VERBOSE reasoning in plain prose about what the next step must do. Your reasoning is " +
                 "handed to the planner, so be concrete and prescriptive — this is where the exact edit is decided.\n" +
@@ -12288,6 +12526,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 "- End with a short 'NEXT STEP:' section — 2 to 4 concrete directives: exact file path, exact anchor to find, " +
                 "and the code or variables to write.\n" +
                 "- Output ONLY the reasoning prose. No JSON, no markdown fences, no code blocks.";
+            if (hasAttached)
+            {
+                system += "\n" +
+                    "- ATTACHED FILES ONLY: The user attached specific file(s). The RELEVANT PROJECT FILES section below " +
+                    "contains ONLY those attached files, in full. Reason exclusively inside them — every file you name, every " +
+                    "anchor you propose, every edit you describe MUST live in one of those attached files. Do NOT reference, " +
+                    "invent, or speculate about any other file in the project (no global stylesheets, no sibling components, " +
+                    "no imports from unrelated files). If the attached files don't contain something you need, say so and " +
+                    "plan within what is attached.";
+            }
             var sb = new StringBuilder();
             sb.AppendLine("Produce your extended reasoning for the NEXT step the planner should propose.");
             sb.AppendLine();
@@ -12308,8 +12556,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (!string.IsNullOrWhiteSpace(related))
             {
                 sb.AppendLine();
-                sb.AppendLine("### RELEVANT PROJECT FILES ###");
-                sb.AppendLine("Files discovered for this task. Use these as your source of truth for what to copy and how to integrate.");
+                sb.AppendLine(hasAttached ? "### ATTACHED FILES (the ONLY files you may touch) ###" : "### RELEVANT PROJECT FILES ###");
+                sb.AppendLine(hasAttached
+                    ? "These are the user's attached files, shown in full. Reason exclusively inside them — every edit must target one of these files."
+                    : "Files discovered for this task. Use these as your source of truth for what to copy and how to integrate.");
                 sb.AppendLine(related);
             }
             var user = sb.ToString();
@@ -12392,12 +12642,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         if (string.IsNullOrWhiteSpace(discoveryContext)) return "";
         var sections = new List<(string path, string content)>();
-        foreach (Match m in Regex.Matches(discoveryContext, @"### read (?<path>[^\n`]+)\n```\n(?<content>[\s\S]*?)\n```"))
+        // Match both the discovery format ("### read {path}") and the light-bootstrap attached-file
+        // format ("### {path}") so attached files are picked up for thinking/planning too.
+        foreach (Match m in Regex.Matches(discoveryContext, @"### (?:read )?(?<path>[^\n`]+)\n```\n(?<content>[\s\S]*?)\n```"))
         {
             var p = m.Groups["path"].Value.Trim();
             var c = m.Groups["content"].Value;
-            if (!string.IsNullOrWhiteSpace(p) && !string.IsNullOrWhiteSpace(c))
-                sections.Add((p, c));
+            if (string.IsNullOrWhiteSpace(p) || string.IsNullOrWhiteSpace(c)) continue;
+            // Only treat as a file section if it looks like a real file path (dir separator or an
+            // extension), so non-file "### SECTION ###" headers followed by a fence aren't misread.
+            var looksLikeFile = p.Contains('/') || p.Contains('\\') ||
+                                Regex.IsMatch(p, @"[\w.-]+\.\w{1,8}\s*$");
+            if (!looksLikeFile) continue;
+            sections.Add((p, c));
         }
         if (sections.Count == 0) return "";
 
@@ -12471,7 +12728,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string? steeringContext = null, List<string>? attachedFiles = null,
         HashSet<int>? completedStepIndices = null, string? cardId = null,
         int[]? replanBudget = null,
-        Func<string, Task>? onActivity = null)
+        Func<string, Task>? onActivity = null,
+        bool skipLlmPreResolution = false)
     {
         var stepIndex = 0;
         var planItems = plan.Plan.ToList();
@@ -12958,7 +13216,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         item, projectRoot, emitSse, ct, allResults, stepIndex,
                         prompt: prompt, plan: plan, planItemIndex: itemIdx,
                         cardId: cardId, attachedFiles: attachedFiles,
-                        onActivity: onActivity);
+                        onActivity: onActivity,
+                        skipLlmPreResolution: skipLlmPreResolution);
                     if (stepSig != null &&
                         (allResults.Count > prevCount &&
                          allResults[^1] is Dictionary<string, object?> lastResult &&

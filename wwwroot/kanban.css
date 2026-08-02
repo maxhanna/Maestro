@@ -404,6 +404,28 @@ body.dragging-active .card:hover {
     color: #7dd3fc;
 }
 
+.log-entry.bypass {
+    color: #4ade80;
+    background: rgba(74, 222, 128, 0.08);
+    border-radius: 4px;
+    padding: 2px 4px;
+}
+
+.log-entry.bypass summary {
+    color: #4ade80;
+}
+
+.log-entry.metric {
+    color: #c084fc;
+    background: rgba(192, 132, 252, 0.08);
+    border-radius: 4px;
+    padding: 2px 4px;
+}
+
+.log-entry.metric summary {
+    color: #c084fc;
+}
+
 .log-entry-body {
     padding: 2px 0 2px 12px;
 }
