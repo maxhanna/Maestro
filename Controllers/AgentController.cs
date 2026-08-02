@@ -1274,7 +1274,7 @@ public partial class AgentController : ControllerBase
                         "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body. " +
                         "Do NOT return alreadyDone either — ONLY FORMAT C with insertAfter:true will be accepted.", false);
                 }
-                if (fileExists && fileContent.Length > cfg5.maxFullFileTokens * 4)
+                if (fileExists && fileContent != null && fileContent.Length > cfg5.maxFullFileTokens * 4)
                 {
                     return (null, null, false, null, false,
                         $"fullFile rejected — file is {fileContent.Length} chars, exceeding the maxFullFileTokens limit ({cfg5.maxFullFileTokens * 4}). " +
@@ -2055,6 +2055,52 @@ public partial class AgentController : ControllerBase
             return (oldStr, newStr, false, null, false, null, false);
         }
     }
+    private static readonly HashSet<string> _removalStopwords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "all", "any", "this", "these", "those", "code", "class", "css", "line", "lines",
+        "block", "button", "div", "element", "section", "it", "them", "its"
+    };
+
+    /// <summary>
+    /// For remove/delete steps the planner's oldString can drift from the actual file content
+    /// (whitespace, missing tokens, formatting). Before concluding the removal is already done,
+    /// check whether the removal TARGET (extracted from the change description) still exists in
+    /// the file — if it does, the edit is still needed and the step proceeds to the resolver,
+    /// whose tolerant matchers absorb the oldString drift.
+    /// </summary>
+    private static bool RemovalTargetStillPresent(string? change, string content, string? oldString)
+    {
+        if (string.IsNullOrWhiteSpace(change)) return false;
+        var m = Regex.Match(change, @"(?:remove|delete)\s+(?:the\s+)?([\w.\-]+)", RegexOptions.IgnoreCase);
+        var target = m.Success ? m.Groups[1].Value.Trim() : null;
+        if (string.IsNullOrWhiteSpace(target) || target.Length < 2 || _removalStopwords.Contains(target))
+        {
+            var css = Regex.Match(change, @"\.([\w\-]+)|#([\w\-]+)");
+            target = css.Success ? (css.Groups[1].Success ? css.Groups[1].Value : css.Groups[2].Value) : null;
+        }
+        // A legitimately-present class may be named like a stopword (e.g. ".line", ".item").
+        // Fall back to the first CSS selector in the oldString before giving up on it.
+        if (string.IsNullOrWhiteSpace(target) || target.Length < 2 || _removalStopwords.Contains(target))
+        {
+            var oldSel = Regex.Match(oldString ?? "", @"^\s*[\.#]([\w\-]+)", RegexOptions.IgnoreCase);
+            target = oldSel.Success ? oldSel.Groups[1].Value : null;
+        }
+        if (string.IsNullOrWhiteSpace(target) || target.Length < 2 || _removalStopwords.Contains(target))
+            return false;
+        // Word-boundary match so ".editToggleBtn" doesn't match partial identifiers like
+        // ".editToggleBtnOld" — a boundary is present around CSS class/id selectors.
+        return Regex.IsMatch(content, @"(?:^|[^\w\-])" + Regex.Escape(target) + @"(?:[^\w\-]|$)", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>True when the planner already supplied a concrete edit payload for the step.</summary>
+    private static bool HasConcreteEdit(PlanStep? step)
+    {
+        if (step == null) return false;
+        if (!string.IsNullOrWhiteSpace(step.OldString)) return true;
+        if (!string.IsNullOrWhiteSpace(step.NewString)) return true;
+        return step.Edits != null && step.Edits.Count > 0;
+    }
+
     private static (PreEditVerdict verdict, string reason) PreEditValidation(string fileContent, PlanStep step)
     {
         if (string.IsNullOrWhiteSpace(fileContent))
@@ -2169,7 +2215,11 @@ public partial class AgentController : ControllerBase
                 {
                     var trimOld = string.Join("\n", oldStr.Split('\n').Select(l => l.TrimEnd()));
                     var trimFile = string.Join("\n", content.Split('\n').Select(l => l.TrimEnd()));
-                    if (!trimFile.Contains(trimOld, StringComparison.Ordinal))
+                    // The planner's oldString can drift from the actual file content (whitespace,
+                    // formatting). Only declare the removal already done when the removal TARGET is
+                    // genuinely gone — if it still exists, Proceed so the resolver applies the edit.
+                    if (!trimFile.Contains(trimOld, StringComparison.Ordinal) &&
+                        !RemovalTargetStillPresent(step.Change, content, step.OldString))
                         return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
                 }
             }
@@ -2188,7 +2238,8 @@ public partial class AgentController : ControllerBase
                     }
                 }
                 if (!string.IsNullOrWhiteSpace(codeToRemove) && codeToRemove.Length >= 20 &&
-                    !content.Contains(codeToRemove, StringComparison.Ordinal))
+                    !content.Contains(codeToRemove, StringComparison.Ordinal) &&
+                    !RemovalTargetStillPresent(step.Change, content, step.OldString))
                     return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
             }
         }
@@ -8003,7 +8054,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
                 var (verdict, reason) = PreEditValidation(content, step);
                 if (verdict == PreEditVerdict.AlreadyDone)
-                    return (false, $"Already satisfied in the current file — {reason}. Move on to the next requirement.");
+                {
+                    // FROZEN-PLAN RULE: once the planner has produced a concrete edit
+                    // (oldString/newString) for this step, the plan is frozen — a heuristic
+                    // AlreadyDone verdict (often a false positive from oldString drift, e.g.
+                    // "code to be removed is already absent") must NOT bounce the step back
+                    // into LLM re-planning/re-thinking. Route it to the resolver, which
+                    // re-attempts the actual edit with tolerant matchers. If the edit
+                    // genuinely cannot apply, the resolver reports a no-op and the pipeline
+                    // continues normally (crap edit → ignored).
+                    if (HasConcreteEdit(step))
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"⚡ Frozen plan — [{step.File}] {step.Change} carries a concrete edit; overriding heuristic '{reason}' and re-attempting the edit via the resolver (no re-planning)", ct: ct);
+                    }
+                    else
+                    {
+                        return (false, $"Already satisfied in the current file — {reason}. Move on to the next requirement.");
+                    }
+                }
             }
         }
         if (isSpecial) return (true, null);
@@ -8360,7 +8429,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string activityFile, string activityChange, string summary, int? runningIndex, CancellationToken ct)
     {
         if (!emitSse) return;
-        var stepItems = planSoFar.Select((s, idx) => new
+        List<Object> stepItems = planSoFar.Select((s, idx) => new
         {
             File = s.File,
             Change = s.Change,
@@ -8368,19 +8437,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             OldString = s.OldString,
             NewString = s.NewString,
             done = runningIndex == null || idx < runningIndex.Value
-        });
-        var items = stepItems.Concat(new[]
-        {
-            new { File = activityFile, Change = activityChange, Line = 0, OldString = "", NewString = "", done = activityFile != "_planning" }
-        }).ToList();
-        await SendSse(Response, "plan", new
-        {
-            thinking = thinkingLog.ToString(),
-            summary = summary,
-            items = items,
-            incremental = true,
-            live = true
-        }, ct);
+        }).ToList<object>();
+        if (stepItems.Count> 0)
+        { 
+            var items = stepItems.Concat(new[] {
+                new {
+                    File = activityFile, 
+                    Change = activityChange, 
+                    Line = 0, 
+                    OldString = "", 
+                    NewString = "", 
+                    done = activityFile != "_planning"
+                }
+            }).ToList();
+            await SendSse(Response, "plan", new
+            {
+                thinking = thinkingLog.ToString(),
+                summary = summary,
+                items = items,
+                incremental = true,
+                live = true
+            }, ct);
+        }
     }
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
@@ -8499,7 +8577,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             string? extendedReasoning = null;
             var prePlanCfg = await LoadConfigAsync();
-            if (prePlanCfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+            // Retry mode (a step was just rejected): the planner already produced its concrete
+            // edit for this step — skip the pre-plan thinking round so rejected edits flow
+            // straight back into re-proposal instead of spawning more (often hallucinated)
+            // thinking walls. A crap edit is ignored and the edit pipeline continues normally.
+            if (prePlanCfg.extendThinking && regenAttempts == 0 && !string.IsNullOrWhiteSpace(cardId))
             {
                 try
                 {
@@ -8511,6 +8593,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await EmitLog(emitSse, "warn", $"Pre-plan thinking skipped: {ex.Message}", ct: ct);
                 }
+            }
+            else if (prePlanCfg.extendThinking && regenAttempts > 0)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Pre-plan thinking skipped (retry {regenAttempts}) — re-proposing directly with rejection feedback", ct: ct);
             }
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning);
             if (proposal == null)
@@ -8732,6 +8819,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             consecutiveSlotFailures = 0;
             regenAttempts = 0;
             rejectionFeedback.Clear();
+            if (HasConcreteEdit(proposal.Step))
+                await EmitLog(emitSse, "info",
+                    "⚡ Step accepted — planner supplied a concrete edit (oldString/newString); executing it directly without further planning", ct: ct);
             if (proposal.AdditionalSteps?.Count > 0)
             {
                 foreach (var extraStep in proposal.AdditionalSteps)
