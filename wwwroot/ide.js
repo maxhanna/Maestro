@@ -25,6 +25,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         searchMatches: [],
         searchCurrentIdx: -1,
         searchVisible: false,
+        minimapVisible: true,
         gitDiffVisible: false,
         gitDiffLoading: false,
         gitDiffData: null,
@@ -45,6 +46,15 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       };
       var _searchMarks = [];
       var _searchDebounce = null;
+      var _minimapEl = null;
+      var _minimapCanvas = null;
+      var _minimapBgCanvas = null;
+      var _minimapScheduled = false;
+      var _minimapOverlayOnly = false;
+      var _minimapBgDirty = true;
+      var _minimapDragging = false;
+      var _minimapWindowBound = false;
+      var _minimapResizeObs = null;
 
 
       var _contentSyncDebounce = null;
@@ -319,6 +329,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
               var wrapper = vm._editor.getWrapperElement();
               if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
               vm._editor = null;
+              _destroyMinimap();
             }
           }
         }
@@ -357,6 +368,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           var wrapper = vm._editor.getWrapperElement();
           if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
           vm._editor = null;
+          _destroyMinimap();
         }
         var savedTheme = vm.ideTheme || 'weaver-dark';
         if (savedTheme !== 'weaver-dark') {
@@ -413,6 +425,11 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         });
         vm._editor.setSize('100%', '100%');
         vm._editor.refresh();
+        _ensureMinimap();
+        vm._editor.on('change', _scheduleMinimapDraw);
+        vm._editor.on('cursorActivity', _scheduleMinimapOverlay);
+        vm._editor.on('scroll', _scheduleMinimapOverlay);
+        _scheduleMinimapDraw();
       }
 
       function setEditorContent(content, path) {
@@ -429,6 +446,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         if (mode) vm._editor.setOption('mode', mode);
         vm._editor.clearHistory();
         vm._editorIgnoreChange = false;
+        _scheduleMinimapDraw();
       }
 
       vm.highlightSyntax = function (tab) {
@@ -503,6 +521,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
             var wrapper = vm._editor.getWrapperElement();
             if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
             vm._editor = null;
+            _destroyMinimap();
           }
         }
       };
@@ -605,6 +624,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           var wrapper = vm._editor.getWrapperElement();
           if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
           vm._editor = null;
+          _destroyMinimap();
         }
         vm.ide.openTabs = [];
         vm.ide.currentFile = null;
@@ -657,6 +677,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm.ide.searchCurrentIdx = -1;
         vm.ide.searchQuery = '';
         if (vm._editor) vm._editor.focus();
+        _scheduleMinimapOverlay();
       };
 
       vm.doSearch = function () {
@@ -681,6 +702,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           vm._editor.setSelection(vm.ide.searchMatches[0].from, vm.ide.searchMatches[0].to);
           vm._editor.scrollIntoView({ from: vm.ide.searchMatches[0].from, to: vm.ide.searchMatches[0].to });
         }
+        _scheduleMinimapOverlay();
       };
 
       vm.searchNext = function () {
@@ -691,6 +713,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         var match = vm.ide.searchMatches[idx];
         vm._editor.setSelection(match.from, match.to);
         vm._editor.scrollIntoView({ from: match.from, to: match.to });
+        _scheduleMinimapOverlay();
       };
 
       vm.searchPrev = function () {
@@ -701,6 +724,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         var match = vm.ide.searchMatches[idx];
         vm._editor.setSelection(match.from, match.to);
         vm._editor.scrollIntoView({ from: match.from, to: match.to });
+        _scheduleMinimapOverlay();
       };
 
       vm.onSearchKeydown = function ($event) {
@@ -716,6 +740,191 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           $event.preventDefault();
         }
       };
+
+      // ── Minimap (VS Code-style overview) ─────────────────────────────
+      var MINIMAP_TOKEN_COLORS = {
+        'keyword': '#c792ea', 'atom': '#f78c6c', 'number': '#f78c6c',
+        'def': '#82aaff', 'variable': '#e6edf3', 'variable-2': '#e6edf3',
+        'variable-3': '#e6edf3', 'property': '#b392f0', 'operator': '#89ddff',
+        'comment': '#637777', 'string': '#89ddff', 'string-2': '#89ddff',
+        'meta': '#ffcb6b', 'qualifier': '#ffcb6b', 'builtin': '#f78c6c',
+        'bracket': '#89ddff', 'tag': '#f07178', 'attribute': '#ffcb6b',
+        'link': '#82aaff', 'error': '#ff5370', 'type': '#c792ea'
+      };
+
+      vm.toggleMinimap = function () {
+        vm.ide.minimapVisible = !vm.ide.minimapVisible;
+        if (_minimapEl) _minimapEl.classList.toggle('ide-minimap--hidden', !vm.ide.minimapVisible);
+        _scheduleMinimapDraw();
+      };
+
+      function _ensureMinimap() {
+        var container = document.querySelector('.ide-codemirror-container');
+        if (!container || !vm._editor) return;
+        if (_minimapEl && _minimapEl.parentNode === container) return;
+        if (_minimapEl && _minimapEl.parentNode) _minimapEl.parentNode.removeChild(_minimapEl);
+        _minimapEl = document.createElement('div');
+        _minimapEl.className = 'ide-minimap' + (vm.ide.minimapVisible ? '' : ' ide-minimap--hidden');
+        _minimapCanvas = document.createElement('canvas');
+        _minimapEl.appendChild(_minimapCanvas);
+        container.appendChild(_minimapEl);
+        _minimapEl.addEventListener('mousedown', function (e) {
+          _minimapDragging = true;
+          _minimapScrollToEvent(e);
+          e.preventDefault();
+        });
+        _minimapEl.addEventListener('wheel', function (e) {
+          if (!vm._editor) return;
+          var si = vm._editor.getScrollInfo();
+          vm._editor.scrollTo(null, si.top + (e.deltaY || 0) * 2.5);
+          e.preventDefault();
+        }, { passive: false });
+        if (!_minimapWindowBound) {
+          _minimapWindowBound = true;
+          window.addEventListener('mousemove', _minimapWindowMove);
+          window.addEventListener('mouseup', function () { _minimapDragging = false; });
+        }
+        if (_minimapResizeObs) { _minimapResizeObs.disconnect(); _minimapResizeObs = null; }
+        if (typeof ResizeObserver !== 'undefined') {
+          _minimapResizeObs = new ResizeObserver(function () { _scheduleMinimapDraw(); });
+          _minimapResizeObs.observe(container);
+        }
+      }
+
+      function _destroyMinimap() {
+        _minimapDragging = false;
+        if (_minimapEl && _minimapEl.parentNode) _minimapEl.parentNode.removeChild(_minimapEl);
+        _minimapEl = null;
+        _minimapCanvas = null;
+        _minimapBgCanvas = null;
+        if (_minimapResizeObs) { _minimapResizeObs.disconnect(); _minimapResizeObs = null; }
+      }
+
+      function _minimapWindowMove(e) {
+        if (!_minimapDragging) return;
+        _minimapScrollToEvent(e);
+      }
+
+      function _minimapScrollToEvent(e) {
+        if (!_minimapEl || !vm._editor) return;
+        var rect = _minimapEl.getBoundingClientRect();
+        var y = e.clientY - rect.top;
+        var H = rect.height || 1;
+        var cm = vm._editor;
+        var lineCount = cm.lineCount();
+        if (!lineCount) return;
+        var line = Math.max(0, Math.min(lineCount - 1, Math.floor((y / H) * lineCount)));
+        var si = cm.getScrollInfo();
+        cm.scrollTo(null, (line / lineCount) * si.height);
+        cm.focus();
+      }
+
+      function _scheduleMinimapDraw() {
+        _minimapBgDirty = true;
+        _scheduleMinimapRaf(false);
+      }
+
+      function _scheduleMinimapOverlay() {
+        _scheduleMinimapRaf(true);
+      }
+
+      function _scheduleMinimapRaf(overlayOnly) {
+        if (_minimapScheduled) { _minimapOverlayOnly = _minimapOverlayOnly && overlayOnly; return; }
+        _minimapScheduled = true;
+        _minimapOverlayOnly = overlayOnly;
+        requestAnimationFrame(function () {
+          _minimapScheduled = false;
+          if (vm._editor && _minimapEl && vm.ide.minimapVisible) _drawMinimap(_minimapOverlayOnly);
+        });
+      }
+
+      function _drawMinimap(overlayOnly) {
+        var cm = vm._editor;
+        if (!cm || !_minimapEl || !_minimapCanvas) return;
+        var W = _minimapEl.clientWidth, H = _minimapEl.clientHeight;
+        if (W < 8 || H < 8) return;
+        var dpr = window.devicePixelRatio || 1;
+        var canvas = _minimapCanvas;
+        var ctx = canvas.getContext('2d');
+        var lineCount = cm.lineCount();
+        var lineH = lineCount ? H / lineCount : 1;
+        // Background (token-colored preview) — rendered to an offscreen canvas,
+        // only rebuilt on content change; overlays never stack on top of stale pixels.
+        if (_minimapBgDirty) {
+          if (!_minimapBgCanvas) _minimapBgCanvas = document.createElement('canvas');
+          _minimapBgCanvas.width = Math.round(W * dpr);
+          _minimapBgCanvas.height = Math.round(H * dpr);
+          var bctx = _minimapBgCanvas.getContext('2d');
+          bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          bctx.fillStyle = 'rgba(13, 17, 23, 0.85)';
+          bctx.fillRect(0, 0, W, H);
+          if (lineCount) {
+            var last = cm.lastLine();
+            var maxChars = 1;
+            var step = Math.max(1, Math.floor((last + 1) / 400));
+            for (var l = 0; l <= last; l += step) {
+              var len = cm.getLine(l).length;
+              if (len > maxChars) maxChars = len;
+            }
+            var charW = Math.max(1, (W - 4) / Math.max(maxChars, 80));
+            var base = 'rgba(230, 237, 243, 0.55)';
+            for (var i = 0; i <= last; i++) {
+              var y = i * lineH;
+              var h = Math.max(1, lineH - 0.4);
+              var tokens = cm.getLineTokens(i, 0);
+              if (tokens && tokens.length) {
+                for (var t = 0; t < tokens.length; t++) {
+                  var tok = tokens[t];
+                  var color = base;
+                  if (tok.type) {
+                    var cls = tok.type.split(' ')[0];
+                    color = MINIMAP_TOKEN_COLORS[cls] || base;
+                  }
+                  var x = 2 + tok.start * charW;
+                  var tw = Math.max(1, (tok.end - tok.start) * charW);
+                  bctx.fillStyle = color;
+                  bctx.fillRect(x, y, tw, h);
+                }
+              } else {
+                bctx.fillStyle = 'rgba(230, 237, 243, 0.35)';
+                bctx.fillRect(2, y, 1, h);
+              }
+            }
+          }
+          _minimapBgDirty = false;
+        }
+        // Clear the visible canvas every frame, blit the cached background, then overlays
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (_minimapBgCanvas) ctx.drawImage(_minimapBgCanvas, 0, 0, W, H);
+        if (!lineCount) return;
+        // Selection
+        var sels = cm.listSelections();
+        for (var s = 0; s < sels.length; s++) {
+          var a = Math.min(sels[s].anchor.line, sels[s].head.line);
+          var b = Math.max(sels[s].anchor.line, sels[s].head.line);
+          ctx.fillStyle = 'rgba(56, 139, 253, 0.45)';
+          ctx.fillRect(0, a * lineH, W, Math.max(1, (b - a + 1) * lineH));
+        }
+        // Ctrl+F search hits
+        if (vm.ide.searchMatches && vm.ide.searchMatches.length) {
+          for (var m = 0; m < vm.ide.searchMatches.length; m++) {
+            var ml = vm.ide.searchMatches[m].from.line;
+            var isCurrent = m === vm.ide.searchCurrentIdx;
+            ctx.fillStyle = isCurrent ? 'rgba(88, 166, 255, 0.95)' : 'rgba(210, 153, 34, 0.8)';
+            ctx.fillRect(0, ml * lineH, W, Math.max(1, lineH));
+          }
+        }
+        // Viewport indicator
+        var si = cm.getScrollInfo();
+        var vh = Math.max(1, (si.clientHeight / si.height) * H);
+        var vt = (si.top / si.height) * H;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.10)';
+        ctx.fillRect(0, vt, W, vh);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+        ctx.strokeRect(0.5, vt + 0.5, W - 1, vh - 1);
+      }
 
       // ── Git Diff as IDE tabs ──────────────────────────────────────────
       function _openGitTab(type, displayName, pathKey) {

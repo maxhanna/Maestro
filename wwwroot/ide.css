@@ -405,6 +405,43 @@
     min-height: 0;
 }
 
+/* Minimap (VS Code-style overview) */
+.ide-minimap {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 96px;
+    z-index: 5;
+    background: rgba(13, 17, 23, 0.55);
+    border-left: 1px solid #21262d;
+    cursor: pointer;
+    overflow: hidden;
+    user-select: none;
+    transition: background 0.15s, box-shadow 0.15s;
+}
+
+.ide-minimap:hover {
+    background: rgba(13, 17, 23, 0.72);
+    box-shadow: inset -2px 0 8px rgba(0, 0, 0, 0.35);
+}
+
+.ide-minimap--hidden {
+    display: none;
+}
+
+.ide-minimap canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.ide-panel-btn--active {
+    background: rgba(6, 182, 212, 0.18);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
 .ide-codemirror-container .CodeMirror {
     height: 100%;
     font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
