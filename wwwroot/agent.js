@@ -74,8 +74,60 @@ angular.module('kanbanApp')
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.agentRuns = []; vm.currentRun = null;
                 vm.refreshStreamingActive = function () {
-                    vm.streamingActive = vm.agentRuns.some(function (r) { return r.active; });
+                    var activeNow = vm.agentRuns.filter(function (r) { return r.active; }).length;
+                    var wasActive = vm._lastActiveRunCount || 0;
+                    vm._lastActiveRunCount = activeNow;
+                    vm.streamingActive = activeNow > 0;
                     if (!vm.streamingActive) { vm.resumeTerminalPolling(); }
+                    // A run just ended (active count dropped) -> drain the Ready
+                    // queue so parked cards on now-free endpoints start. Deferred
+                    // so the finished card's completion bookkeeping runs first.
+                    if (activeNow < wasActive) {
+                        $timeout(function () { if (vm.processQueuedCards) { vm.processQueuedCards(); } }, 100);
+                    }
+                };
+                // True when the given LLM endpoint ('' = the default endpoint)
+                // already has a run in flight. Each endpoint runs one card at a time.
+                vm.isEndpointBusy = function (endpointId) {
+                    var ep = endpointId || '';
+                    return vm.agentRuns.some(function (r) { return r.active && (r.endpointId || '') === ep; });
+                };
+                // Number of runs currently active. The agent view only splits into
+                // side-by-side sections when this is > 1 (multiple endpoints working
+                // simultaneously).
+                vm.activeRunCount = function () {
+                    return vm.agentRuns.filter(function (r) { return r.active; }).length;
+                };
+                // Starts the next Ready card(s) whose LLM endpoint is now free.
+                // Cards parked behind a busy endpoint (_endpointQueued) always start;
+                // generally-ready cards start only when the auto-queue is enabled.
+                vm._drainingQueue = false;
+                vm.processQueuedCards = function () {
+                    if (vm._drainingQueue || !vm.state) return;
+                    vm._drainingQueue = true;
+                    try {
+                        var candidates = [];
+                        (vm.state.todo || []).forEach(function (c) {
+                            // _endpointQueued cards were explicitly started by the user,
+                            // so drain them even if they belong to a different project.
+                            if (c.ready && !c.selfImproving && (c._endpointQueued || c.filePath === vm.selectedProject)) candidates.push(c);
+                        });
+                        if (vm.state.selfImproving) {
+                            vm.state.selfImproving.forEach(function (c) {
+                                if (c.ready && c.selfImproving && (c._endpointQueued || c.filePath === vm.selectedProject)) candidates.push(c);
+                            });
+                        }
+                        for (var i = 0; i < candidates.length; i++) {
+                            var card = candidates[i];
+                            var ep = card.llmEndpointId || '';
+                            if (vm.isEndpointBusy(ep)) continue;
+                            if (!card._endpointQueued && !vm.autoQueue) continue;
+                            vm.moveCardToDoing(card.id);
+                            vm.executeAgent(card);
+                        }
+                    } finally {
+                        vm._drainingQueue = false;
+                    }
                 };
                 vm.pendingContextReview = null; vm.contextReviewCountdown = 0; vm.contextReviewTimer = null;
                 vm._agentStartTime = null;
@@ -111,6 +163,43 @@ angular.module('kanbanApp')
                 vm.executeAgent = function (card, isAutoRestart) {
                     if (!card || !card.text) return;
                     if (vm.agentRuns.some(function (r) { return r.cardId === card.id && r.active; })) return;
+
+                    // ── Per-endpoint serialization ──
+                    // Only one card may run per LLM endpoint at a time ('' = the
+                    // default endpoint). If this card's endpoint already has an
+                    // active run, keep the card in the Ready state and queue it —
+                    // processQueuedCards starts it when the busy run finishes.
+                    var cardEndpoint = card.llmEndpointId || '';
+                    if (vm.isEndpointBusy(cardEndpoint)) {
+                        card.ready = true;
+                        card._endpointQueued = true;
+                        // The caller may have already moved the card to Doing —
+                        // park it back in its source column in the Ready state.
+                        var parkCol = card.selfImproving ? 'selfImproving' : 'todo';
+                        if (vm.state) {
+                            var doingIdx = (vm.state.doing || []).findIndex(function (c) { return c.id === card.id; });
+                            if (doingIdx !== -1) {
+                                var parkedCard = vm.state.doing.splice(doingIdx, 1)[0];
+                                if (!vm.state[parkCol]) vm.state[parkCol] = [];
+                                vm.state[parkCol].push(parkedCard);
+                            } else {
+                                // Card not found in Doing — make sure it stays visible
+                                // in its source column so it can be drained later instead
+                                // of silently disappearing (reconstructed-object calls).
+                                var inCol = (vm.state[parkCol] || []).some(function (c) { return c.id === card.id; });
+                                if (!inCol) {
+                                    if (!vm.state[parkCol]) vm.state[parkCol] = [];
+                                    vm.state[parkCol].push(card);
+                                }
+                            }
+                        }
+                        pushAgentLog(vm, 'info', '⏳ ' + (vm.endpointLabel ? vm.endpointLabel(card.llmEndpointId) : 'Default') + ' endpoint is busy — card stays Ready until the current card finishes.');
+                        vm.saveCards();
+                        $scope.$applyAsync();
+                        return;
+                    }
+                    delete card._endpointQueued;
+
                     var proj = card.filePath || vm.selectedProject; if (!proj) return $window.alert('No project assigned');
                     try {
                         if (!isAutoRestart) card._agentIteration = 0;
@@ -473,23 +562,7 @@ angular.module('kanbanApp')
                                                                         vm.moveCardToDone(card);
                                                                         $timeout(function () {
                                                                             if (!vm.autoQueue) return;
-                                                                            var readyTodo = vm.state.todo.filter(function (c) {
-                                                                                return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
-                                                                            });
-                                                                            if (readyTodo.length) {
-                                                                                var next = readyTodo[readyTodo.length - 1];
-                                                                                vm.moveCardToDoing(next.id);
-                                                                                vm.executeAgent(next);
-                                                                                return;
-                                                                            }
-                                                                            var siReady = vm.state.selfImproving.filter(function (c) {
-                                                                                return c.filePath === vm.selectedProject && c.ready && c.selfImproving;
-                                                                            });
-                                                                            if (siReady.length) {
-                                                                                var nextSi = siReady[siReady.length - 1];
-                                                                                vm.moveCardToDoing(nextSi.id);
-                                                                                vm.executeAgent(nextSi);
-                                                                            }
+                                                                            vm.processQueuedCards();
                                                                         }, 500);
                                                                         return;
                                                                     }
@@ -500,10 +573,7 @@ angular.module('kanbanApp')
                                                                     }
                                                                     $timeout(function () {
                                                                         if (!vm.autoQueue) return;
-                                                                        var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
-                                                                        if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
-                                                                        var siReady = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
-                                                                        if (siReady.length) { var nextSi = siReady[siReady.length - 1]; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
+                                                                        vm.processQueuedCards();
                                                                     }, 500);
                                                                 }
 

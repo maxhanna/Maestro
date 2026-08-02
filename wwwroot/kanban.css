@@ -222,6 +222,18 @@ body.dragging-active .card:hover {
     font-weight: 700;
 }
 
+.card .card-tag.tag-queued {
+    background: rgba(251, 146, 60, 0.15);
+    color: var(--brand-warning);
+    font-weight: 700;
+    animation: tag-queued-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes tag-queued-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}
+
 .card .attachments {
     margin-top: 6px;
     padding-top: 6px;

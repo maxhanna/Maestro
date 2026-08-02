@@ -301,7 +301,7 @@
           </div>
 
           <!-- Concurrent agent sections (one per simultaneously-running agent, side by side) -->
-          <div class="agent-run-sections" ng-if="vm.agentRuns.length > 1">
+          <div class="agent-run-sections" ng-if="vm.activeRunCount() > 1">
             <div class="agent-run-section" ng-repeat="run in vm.agentRuns track by run.runId"
               ng-class="{active: run.active, done: run.status === 'done', error: run.status === 'error'}">
               <div class="agent-run-header">

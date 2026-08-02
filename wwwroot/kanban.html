@@ -207,6 +207,7 @@
           </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
+            <span class="card-tag tag-queued" ng-if="card.ready && card._endpointQueued" title="Queued — this endpoint is busy; the card starts when the current card finishes.">⏳ QUEUED</span>
             <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
@@ -1003,6 +1004,7 @@
           </div>
           <div class="card-tags">
             <span class="card-tag tag-self-improving" style="color: var(--accent2);">🔄 SELF-IMPROVING</span>
+            <span class="card-tag tag-queued" ng-if="card.ready && card._endpointQueued" title="Queued — this endpoint is busy; the card starts when the current card finishes.">⏳ QUEUED</span>
             <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
           </div>
