@@ -38,7 +38,7 @@
             style="padding:12px; color:#666; font-size:11px; text-align:center;">No files found.</div>
           <div ng-repeat="e in vm.ide.filePickerEntries track by e.path" class="ide-tree-entry"
             ng-class="{'ide-tree-entry--selected': vm.ide.currentFile === e.path}"
-            ng-style="{paddingLeft: (1 + e.depth * 1) + 'px'}"
+            ng-style="{paddingLeft: (5 + e.depth * 5) + 'px'}"
             ng-click="vm.toggleTreeDir(e)">
             <span class="ide-tree-toggle" ng-if="e.isDirectory">
               <span ng-if="vm._expandedDirs[e.path]">▾</span>
