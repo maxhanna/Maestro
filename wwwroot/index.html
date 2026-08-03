@@ -1183,6 +1183,18 @@
                 </div>
                 <input type="range" id="ctx-diffContextSummaryChars" ng-model="vm.diffContextSummaryChars" min="1000" max="32000" step="500" style="width:100%;" />
               </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-llmInfiniteTimeout" ng-model="vm.llmInfiniteTimeout" ng-change="vm.onLlmInfiniteToggle()" />
+                <label for="ctx-llmInfiniteTimeout">Infinite LLM Timeout</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">never time out agent LLM requests (default)</span>
+              </div>
+              <div ng-if="!vm.llmInfiniteTimeout">
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-llmTimeoutMinutes">LLM Timeout (minutes, min 5)</label>
+                  <span>{{vm.llmTimeoutMinutes | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-llmTimeoutMinutes" ng-model="vm.llmTimeoutMinutes" min="5" max="240" step="5" style="width:100%;" />
+              </div>
               <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the agent to handle larger files but consume more tokens.</span>
             </div>
           </details>

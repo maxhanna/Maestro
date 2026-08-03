@@ -73,6 +73,7 @@ public class FrontendConfig
     public bool compactThinkingContext { get; set; } = true;
     public bool summarizeDiffContext { get; set; } = true;
     public int diffContextSummaryChars { get; set; } = 6000;
+    public int llmTimeoutMinutes { get; set; } = 0;
     public bool useVSCodeInsteadOfIDE { get; set; } = false;
     public string ideTheme { get; set; } = "weaver-dark";
     public bool ideMinimapVisible { get; set; } = true;

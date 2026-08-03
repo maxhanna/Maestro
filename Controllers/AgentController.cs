@@ -36,6 +36,11 @@ public partial class AgentController : ControllerBase
         {
             _cfgCache = await _configFile.LoadConfigAsync();
             _cfgCacheTime = DateTime.UtcNow;
+            // LLM request timeout is user-configurable: 0 (or <5) = infinite, else minutes.
+            var timeoutMinutes = _cfgCache.llmTimeoutMinutes;
+            _infiniteTimeout = timeoutMinutes <= 0
+                ? Timeout.InfiniteTimeSpan
+                : TimeSpan.FromMinutes(Math.Max(5, timeoutMinutes));
         }
         return _cfgCache;
     }

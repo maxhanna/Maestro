@@ -77,6 +77,10 @@ angular.module('kanbanApp')
                 vm.defaultProject = '';
                 vm.settingsDefaultProject = '';
                 vm.autoQueue = true;
+                // Self-improving cards must be physically started by the user. Once armed
+                // (selfImprovingAgentActive), they cycle 1-by-1 forever while no regular
+                // card (todo/doing/done) is active.
+                vm.selfImprovingAgentActive = false;
                 vm.useVSCodeInsteadOfIDE = false;
 
                 // Terminal/Config settings
@@ -99,6 +103,13 @@ angular.module('kanbanApp')
                 vm.compactThinkingContext = true;
                 vm.summarizeDiffContext = true;
                 vm.diffContextSummaryChars = 6000;
+                vm.llmTimeoutMinutes = 0;
+                vm.llmInfiniteTimeout = true;
+                // When the user turns "Infinite" off, default the slider to the 5-minute floor
+                // instead of leaving a stale 0 that sits below the slider's min.
+                vm.onLlmInfiniteToggle = function () {
+                    if (!vm.llmInfiniteTimeout && vm.llmTimeoutMinutes < 5) vm.llmTimeoutMinutes = 5;
+                };
                 vm.buildCommands = "";
                 vm.prByDefault = false;
                 vm.themeColors = {};
@@ -163,6 +174,7 @@ angular.module('kanbanApp')
                         if (raw) {
                             var s = JSON.parse(raw);
                             vm.autoQueue = s.autoQueue !== false;
+                            if (typeof s.selfImprovingAgentActive === 'boolean') vm.selfImprovingAgentActive = s.selfImprovingAgentActive;
                             // Stash the saved minimap state so IDEMixin.init (which runs after
                             // this mixin) can restore it synchronously before config loads.
                             if (typeof s.ideMinimapVisible === 'boolean') vm._savedIdeMinimapVisible = s.ideMinimapVisible;
@@ -171,10 +183,22 @@ angular.module('kanbanApp')
                 }
                 loadLocalSettings();
 
+                // Lightweight single-key persist (no full config round-trip) so arming the
+                // self-improving cycle from the queue code survives a reload.
+                vm.persistSelfImprovingAgent = function () {
+                    try {
+                        var raw = $window.localStorage.getItem(SETTINGS_KEY);
+                        var s = raw ? JSON.parse(raw) : {};
+                        s.selfImprovingAgentActive = vm.selfImprovingAgentActive === true;
+                        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+                    } catch (e) { }
+                };
+
                 function saveLocalSettings() {
                     try {
                         $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({
                             autoQueue: vm.autoQueue,
+                            selfImprovingAgentActive: vm.selfImprovingAgentActive === true,
                             ideMinimapVisible: vm.ide ? vm.ide.minimapVisible !== false : true
                         }));
                     } catch (e) { }
@@ -232,6 +256,8 @@ angular.module('kanbanApp')
                             vm.compactThinkingContext = cfg.compactThinkingContext !== false;
                             vm.summarizeDiffContext = cfg.summarizeDiffContext !== false;
                             vm.diffContextSummaryChars = typeof cfg.diffContextSummaryChars === 'number' ? cfg.diffContextSummaryChars : 6000;
+                            vm.llmTimeoutMinutes = typeof cfg.llmTimeoutMinutes === 'number' && cfg.llmTimeoutMinutes > 0 ? Math.max(5, cfg.llmTimeoutMinutes) : 0;
+                            vm.llmInfiniteTimeout = vm.llmTimeoutMinutes <= 0;
 
                             vm.enabledTools = cfg.enabledTools || [];
                             vm.toolList.forEach(function (t) { t.enabled = vm.enabledTools.length === 0 || vm.enabledTools.indexOf(t.key) !== -1; });
@@ -284,6 +310,8 @@ angular.module('kanbanApp')
                         cfg.compactThinkingContext = vm.compactThinkingContext !== false;
                         cfg.summarizeDiffContext = vm.summarizeDiffContext !== false;
                         cfg.diffContextSummaryChars = vm.diffContextSummaryChars || 6000;
+                        // LLM request timeout: 0 (or unchecked infinite) = no timeout, otherwise >= 5 minutes.
+                        cfg.llmTimeoutMinutes = vm.llmInfiniteTimeout || !vm.llmTimeoutMinutes ? 0 : Math.max(5, vm.llmTimeoutMinutes);
                         cfg.showNotes = vm.showNotes === true;
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
                         cfg.ideTheme = vm.ideTheme || 'weaver-dark';

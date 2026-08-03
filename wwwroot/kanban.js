@@ -678,7 +678,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (moved) {
           console.log("Found card in doing, moving to " + targetCol);
           if (targetCol === 'selfImproving') {
-            vm.state[targetCol].unshift(moved);
+            // Round-robin: a completed self-improving card goes to the BACK of the list
+            // so the armed cycle advances 1-by-1 (A → B → C → A …) instead of re-running
+            // the same front card forever.
+            vm.state[targetCol].push(moved);
           } else {
             vm.state[targetCol].push(moved);
           }
@@ -697,6 +700,18 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (!card) return;
         try {
           if (card.ready) {
+            // Self-improving cards only run while NO regular card (todo/doing/done) is
+            // active — even on a physical start. Arm the cycle and leave the card Ready;
+            // processQueuedCards drains it (1-by-1) once regular work clears.
+            if (card.selfImproving && vm.regularAgentActive && vm.regularAgentActive()) {
+              if (vm.selfImprovingAgentActive !== true) {
+                vm.selfImprovingAgentActive = true;
+                if (vm.persistSelfImprovingAgent) vm.persistSelfImprovingAgent();
+              }
+              card.ready = true;
+              vm.saveCards();
+              return;
+            }
             vm.moveCardToDoing(card.id);
             vm.executeAgent(card);
           } else {
@@ -722,11 +737,23 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
       vm.processSelfImprovingQueue = function () {
         if (vm.streamingActive) return;
+        // Self-improving cards only run when the user has armed the cycle AND no regular
+        // card (todo/doing/done) is active.
+        if (!vm.selfImprovingAgentActive) return;
+        if (vm.regularAgentActive && vm.regularAgentActive()) return;
         var readyCards = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
         if (!readyCards.length) return;
-        var next = readyCards[readyCards.length - 1];
+        // Round-robin: completed cards are pushed to the BACK, so pick the front
+        // card to advance 1-by-1 through the list.
+        var next = readyCards[0];
         vm.moveCardToDoing(next.id);
         vm.executeAgent(next);
+      };
+
+      vm.toggleSelfImprovingAgent = function () {
+        vm.selfImprovingAgentActive = !vm.selfImprovingAgentActive;
+        if (vm.persistSelfImprovingAgent) vm.persistSelfImprovingAgent();
+        if (vm.selfImprovingAgentActive && vm.processQueuedCards) vm.processQueuedCards();
       };
 
       vm.countSelfImprovingCards = function () {

@@ -81,7 +81,7 @@ public static class AstCodeEditorService
         { ".jsx", "JavaScript" },
         { ".mjs", "JavaScript" },
         { ".cjs", "JavaScript" },
-        { ".cs", "c_sharp" },
+        { ".cs", "c-sharp" }, // NB: native lib is tree-sitter-c-sharp.dll — "c_sharp" fails to load
         { ".py", "python" },
         { ".rb", "ruby" },
         { ".go", "go" },
@@ -144,7 +144,7 @@ public static class AstCodeEditorService
             "(class_declaration name: (identifier) @name) @target",
             "(export_statement declaration: (function_declaration name: (identifier) @name)) @target",
         ],
-        ["c_sharp"] =
+        ["c-sharp"] =
         [
             "(method_declaration name: (identifier) @name) @target",
             "(local_function_statement name: (identifier) @name) @target",

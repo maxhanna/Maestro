@@ -92,6 +92,12 @@ angular.module('kanbanApp')
                     var ep = endpointId || '';
                     return vm.agentRuns.some(function (r) { return r.active && (r.endpointId || '') === ep; });
                 };
+                // True when a non-self-improving card (todo/doing/done) currently has an
+                // active run. Self-improving cards yield to regular work — they only start
+                // while this is false.
+                vm.regularAgentActive = function () {
+                    return vm.agentRuns.some(function (r) { return r.active && !r.selfImproving; });
+                };
                 // Number of runs currently active. The agent view only splits into
                 // side-by-side sections when this is > 1 (multiple endpoints working
                 // simultaneously).
@@ -106,13 +112,17 @@ angular.module('kanbanApp')
                     if (vm._drainingQueue || !vm.state) return;
                     vm._drainingQueue = true;
                     try {
+                        // Self-improving cards only drain once the user has physically armed
+                        // the cycle (started a self-improving card) AND no regular card
+                        // (todo/doing/done) is currently active — regular work always wins.
+                        var selfImprovingArmed = vm.selfImprovingAgentActive === true && !vm.regularAgentActive();
                         var candidates = [];
                         (vm.state.todo || []).forEach(function (c) {
                             // _endpointQueued cards were explicitly started by the user,
                             // so drain them even if they belong to a different project.
                             if (c.ready && !c.selfImproving && (c._endpointQueued || c.filePath === vm.selectedProject)) candidates.push(c);
                         });
-                        if (vm.state.selfImproving) {
+                        if (vm.state.selfImproving && selfImprovingArmed) {
                             vm.state.selfImproving.forEach(function (c) {
                                 if (c.ready && c.selfImproving && (c._endpointQueued || c.filePath === vm.selectedProject)) candidates.push(c);
                             });
@@ -121,7 +131,10 @@ angular.module('kanbanApp')
                             var card = candidates[i];
                             var ep = card.llmEndpointId || '';
                             if (vm.isEndpointBusy(ep)) continue;
-                            if (!card._endpointQueued && !vm.autoQueue) continue;
+                            // Armed self-improving cards cycle even without autoQueue — the
+                            // user physically started them; regular cards still need autoQueue.
+                            var isArmedSelfImproving = card.selfImproving && vm.selfImprovingAgentActive === true;
+                            if (!card._endpointQueued && !vm.autoQueue && !isArmedSelfImproving) continue;
                             vm.moveCardToDoing(card.id);
                             vm.executeAgent(card);
                         }
@@ -163,6 +176,14 @@ angular.module('kanbanApp')
                 vm.executeAgent = function (card, isAutoRestart) {
                     if (!card || !card.text) return;
                     if (vm.agentRuns.some(function (r) { return r.cardId === card.id && r.active; })) return;
+
+                    // Physically starting a self-improving card arms the infinite cycle. It
+                    // stays armed (persisted) until the user disables it, but only actually
+                    // runs while no regular card (todo/doing/done) is active.
+                    if (card.selfImproving && vm.selfImprovingAgentActive !== true) {
+                        vm.selfImprovingAgentActive = true;
+                        if (vm.persistSelfImprovingAgent) vm.persistSelfImprovingAgent();
+                    }
 
                     // ── Per-endpoint serialization ──
                     // Only one card may run per LLM endpoint at a time ('' = the
@@ -209,6 +230,7 @@ angular.module('kanbanApp')
                             runId: uid() + '-' + Date.now(),
                             cardId: card.id,
                             cardText: card.text,
+                            selfImproving: card.selfImproving || false,
                             endpointId: card.llmEndpointId || '',
                             endpointName: vm.endpointLabel ? vm.endpointLabel(card.llmEndpointId) : 'Default',
                             endpointUrl: '', endpointModel: '',

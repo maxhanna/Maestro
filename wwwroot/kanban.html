@@ -7,8 +7,9 @@
       🗄 ({{vm.cardsForProject('archived').length}})
     </button>
     <button ng-click="vm.showSelfImproving = !vm.showSelfImproving"
-      class="{{vm.showSelfImproving ? 'active' : 'ghost'}}" style="margin-left:4px;">
-      📈 ({{vm.cardsForProject('selfImproving').length}})
+      class="{{vm.showSelfImproving || vm.selfImprovingAgentActive ? 'active' : 'ghost'}}" style="margin-left:4px;"
+      title="Self-improving cards — {{vm.selfImprovingAgentActive ? 'cycle ACTIVE (runs while no regular card is active)' : 'cycle off'}}">
+      📈 ({{vm.cardsForProject('selfImproving').length}}){{vm.selfImprovingAgentActive ? ' ♾️' : ''}}
     </button>
     <button ng-click="vm.showTodo = !vm.showTodo" class="{{vm.showTodo ? 'active' : 'ghost'}}" style="margin-left:4px;">
       📋 ({{vm.cardsForProject('todo').length}})
@@ -984,6 +985,10 @@
       <h3>
         <span class="col-header">📈 Self-Improving <span
             class="col-badge">{{vm.cardsForProject('selfImproving').length}}</span></span>
+        <button class="small {{vm.selfImprovingAgentActive ? 'success' : 'ghost'}}"
+          ng-click="vm.toggleSelfImprovingAgent()"
+          title="{{vm.selfImprovingAgentActive ? 'Self-improving cycle ACTIVE — cards run 1-by-1 while no regular card is active. Click to stop.' : 'Self-improving cycle OFF — start it by pressing ▶ Run on a card, or click to arm it. Runs only while no regular card is active.'}}">♾️
+          {{vm.selfImprovingAgentActive ? 'ACTIVE' : 'OFF'}}</button>
         <button class="small ghost" ng-click="vm.showSelfImproving = false" title="Close self-improving view">✕</button>
       </h3>
       <div class="cards" id="col-selfImproving" dropzone="move"
