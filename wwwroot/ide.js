@@ -25,7 +25,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         searchMatches: [],
         searchCurrentIdx: -1,
         searchVisible: false,
-        minimapVisible: true,
+        // Restored from the settings localStorage store (stashed by SettingsMixin)
+        // so the on/off state survives a page reload; defaults to visible.
+        minimapVisible: vm._savedIdeMinimapVisible === undefined ? true : vm._savedIdeMinimapVisible,
         gitDiffVisible: false,
         gitDiffLoading: false,
         gitDiffData: null,
@@ -55,6 +57,11 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       var _minimapDragging = false;
       var _minimapWindowBound = false;
       var _minimapResizeObs = null;
+      var _minimapTipEl = null;
+      // Git diff markers: [{ line: 0-based new-file line, kind: 'add'|'remove'|'modify' }]
+      var _minimapDiffMarkers = null;
+      var _minimapDiffPath = null;   // file the current markers were computed for
+      var _minimapDiffCache = {};    // path → markers (avoid refetching on tab switches)
 
 
       var _contentSyncDebounce = null;
@@ -468,6 +475,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileOpen(path, content);
+          _refreshMinimapDiff(path);
           // Initialize or update CodeMirror
           $timeout(function () {
             if (!vm._editor) {
@@ -513,6 +521,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
               } else {
                 setEditorContent(vm.ide.currentTab.content, path);
               }
+              // Deferred into the same digest as the content swap so a cache hit
+              // can't draw the new file's markers over the still-old editor.
+              _refreshMinimapDiff(path);
             }
           }, 50);
         } else if (tab) {
@@ -549,6 +560,8 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileSave(vm.ide.currentFile, content);
+          // Diff changes after a save — refresh the minimap markers.
+          _refreshMinimapDiff(vm.ide.currentFile);
         }, function(err) {
           console.error('Failed to save file:', err);
         });
@@ -589,6 +602,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           } else {
             setEditorContent('', fullPath);
           }
+          _refreshMinimapDiff(fullPath);
         }, 50);
       };
 
@@ -752,10 +766,18 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         'link': '#82aaff', 'error': '#ff5370', 'type': '#c792ea'
       };
 
+      var MINIMAP_DIFF_COLORS = {
+        'add': 'rgba(74, 222, 128, 0.95)',
+        'remove': 'rgba(248, 113, 113, 0.95)',
+        'modify': 'rgba(251, 191, 36, 0.95)'
+      };
+
       vm.toggleMinimap = function () {
         vm.ide.minimapVisible = !vm.ide.minimapVisible;
         if (_minimapEl) _minimapEl.classList.toggle('ide-minimap--hidden', !vm.ide.minimapVisible);
         _scheduleMinimapDraw();
+        // Persist so the toggle survives a reload (localStorage store + config endpoint).
+        if (vm.saveSettings) vm.saveSettings(true);
       };
 
       function _ensureMinimap() {
@@ -770,7 +792,8 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         container.appendChild(_minimapEl);
         _minimapEl.addEventListener('mousedown', function (e) {
           _minimapDragging = true;
-          _minimapScrollToEvent(e);
+          _minimapHideTip();
+          _minimapScrollToEvent(e, !!e.altKey);
           e.preventDefault();
         });
         _minimapEl.addEventListener('wheel', function (e) {
@@ -779,6 +802,12 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           vm._editor.scrollTo(null, si.top + (e.deltaY || 0) * 2.5);
           e.preventDefault();
         }, { passive: false });
+        _minimapEl.addEventListener('mousemove', function (e) {
+          _minimapTipAt(e);
+        });
+        _minimapEl.addEventListener('mouseleave', function () {
+          _minimapHideTip();
+        });
         if (!_minimapWindowBound) {
           _minimapWindowBound = true;
           window.addEventListener('mousemove', _minimapWindowMove);
@@ -797,26 +826,156 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         _minimapEl = null;
         _minimapCanvas = null;
         _minimapBgCanvas = null;
+        if (_minimapTipEl && _minimapTipEl.parentNode) _minimapTipEl.parentNode.removeChild(_minimapTipEl);
+        _minimapTipEl = null;
         if (_minimapResizeObs) { _minimapResizeObs.disconnect(); _minimapResizeObs = null; }
+        _minimapDiffMarkers = null;
+        _minimapDiffPath = null;
+        _minimapDiffCache = {};
       }
 
       function _minimapWindowMove(e) {
         if (!_minimapDragging) return;
-        _minimapScrollToEvent(e);
+        _minimapScrollToEvent(e, !!e.altKey);
       }
 
-      function _minimapScrollToEvent(e) {
-        if (!_minimapEl || !vm._editor) return;
+      // Shared: map a mouse position over the minimap to a clamped 0-based
+      // line index, so hover tooltips and click/drag navigation always agree.
+      function _minimapLineAt(e) {
+        if (!_minimapEl || !vm._editor) return -1;
         var rect = _minimapEl.getBoundingClientRect();
         var y = e.clientY - rect.top;
         var H = rect.height || 1;
+        var lineCount = vm._editor.lineCount();
+        if (!lineCount) return -1;
+        return Math.max(0, Math.min(lineCount - 1, Math.floor((y / H) * lineCount)));
+      }
+
+      // Alt-click/drag centers the clicked line in the viewport instead of
+      // top-aligning it.
+      function _minimapScrollToEvent(e, centerLine) {
+        if (!_minimapEl || !vm._editor) return;
         var cm = vm._editor;
+        var line = _minimapLineAt(e);
+        if (line < 0) return;
         var lineCount = cm.lineCount();
-        if (!lineCount) return;
-        var line = Math.max(0, Math.min(lineCount - 1, Math.floor((y / H) * lineCount)));
         var si = cm.getScrollInfo();
-        cm.scrollTo(null, (line / lineCount) * si.height);
+        if (centerLine) {
+          var target = cm.heightAtLine(line, 'local') - si.clientHeight / 2;
+          target = Math.max(0, Math.min(target, Math.max(0, si.height - si.clientHeight)));
+          cm.scrollTo(null, target);
+        } else {
+          cm.scrollTo(null, (line / lineCount) * si.height);
+        }
         cm.focus();
+      }
+
+      function _minimapHideTip() {
+        if (_minimapTipEl) _minimapTipEl.hidden = true;
+      }
+
+      // Hover tooltip: line number + first 40 chars of the line under the mouse.
+      function _minimapTipAt(e) {
+        if (!_minimapEl || !vm._editor) return;
+        var line = _minimapLineAt(e);
+        if (line < 0) return;
+        if (!_minimapTipEl) {
+          _minimapTipEl = document.createElement('div');
+          _minimapTipEl.className = 'ide-minimap-tip';
+          document.body.appendChild(_minimapTipEl);
+        }
+        var rect = _minimapEl.getBoundingClientRect();
+        var cm = vm._editor;
+        var text = (cm.getLine(line) || '').replace(/\s+/g, ' ').trim();
+        if (text.length > 40) text = text.slice(0, 40) + '…';
+        _minimapTipEl.textContent = (line + 1) + ': ' + (text || '·');
+        _minimapTipEl.hidden = false;
+        var tipW = _minimapTipEl.offsetWidth || 180;
+        var tipH = _minimapTipEl.offsetHeight || 20;
+        var left = rect.left - tipW - 8;
+        if (left < 8) left = rect.right + 8;
+        var top = Math.max(8, Math.min(e.clientY - tipH / 2, window.innerHeight - tipH - 8));
+        _minimapTipEl.style.left = left + 'px';
+        _minimapTipEl.style.top = top + 'px';
+      }
+
+      // ── Git diff markers on the minimap ────────────────────────────────
+      // Map LCS diff rows (from vm.computeLineDiff) onto 0-based new-file line
+      // numbers: added lines → green, removed lines → red (anchored where the
+      // deletion happened), a removal directly replaced by an addition → yellow.
+      function _computeMinimapDiffMarkers(rows, newLineCount) {
+        var markers = [];
+        var cursor = 1; // 1-based index of the next new line yet to be consumed
+        var i = 0;
+        while (i < rows.length) {
+          var row = rows[i];
+          if (row.type === 'equal') {
+            cursor = (row.newNum || cursor) + 1;
+            i++;
+            continue;
+          }
+          if (row.type === 'add') {
+            var isModify = i > 0 && rows[i - 1].type === 'remove';
+            markers.push({ line: (row.newNum || cursor) - 1, kind: isModify ? 'modify' : 'add' });
+            cursor = (row.newNum || cursor) + 1;
+            i++;
+            continue;
+          }
+          // Remove run — skip past it to inspect what follows
+          var j = i;
+          while (j < rows.length && rows[j].type === 'remove') j++;
+          var next = j < rows.length ? rows[j] : null;
+          if (next && next.type === 'add') {
+            // Replacement — the following add rows get the yellow marker; no red.
+            i = j;
+            continue;
+          }
+          // Pure deletion — red bar anchored at the line the deletion collapsed into.
+          var pos = Math.max(0, Math.min(cursor - 1, newLineCount - 1));
+          for (var k = i; k < j; k++) markers.push({ line: pos, kind: 'remove' });
+          i = j;
+        }
+        return markers;
+      }
+
+      function _refreshMinimapDiff(path) {
+        if (!path || path.indexOf('_git:') === 0) return;
+        if (_minimapDiffCache[path]) {
+          _minimapDiffMarkers = _minimapDiffCache[path];
+          _minimapDiffPath = path;
+          _scheduleMinimapOverlay();
+          return;
+        }
+        // Fetching a different file — don't draw the old file's markers meanwhile.
+        if (_minimapDiffPath !== path) {
+          _minimapDiffMarkers = null;
+          _minimapDiffPath = path;
+        }
+        $http.get('/api/editor/git-diff-file', { params: { project: vm.selectedProject, path: path } }).then(function (resp) {
+          var data = resp.data || {};
+          if (!data.isGitRepo) {
+            _minimapDiffCache[path] = null;
+            if (vm.ide.currentFile === path) _minimapDiffMarkers = null;
+            return;
+          }
+          // Count real lines (CodeMirror semantics — no phantom trailing ''), so
+          // an EOF deletion clamps to the last visible line instead of a dropped one.
+          var newContent = data.newContent || '';
+          var realLineCount = newContent.replace(/\n$/, '').split('\n').length;
+          var markers = _computeMinimapDiffMarkers(
+            vm.computeLineDiff(data.oldContent || '', newContent),
+            realLineCount
+          );
+          _minimapDiffCache[path] = markers;
+          if (vm.ide.currentFile === path) {
+            _minimapDiffMarkers = markers;
+            _minimapDiffPath = path;
+            _scheduleMinimapOverlay();
+          }
+        }, function () {
+          _minimapDiffCache[path] = null;
+          if (vm.ide.currentFile === path) _minimapDiffMarkers = null;
+        });
       }
 
       function _scheduleMinimapDraw() {
@@ -924,6 +1083,33 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         ctx.fillRect(0, vt, W, vh);
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
         ctx.strokeRect(0.5, vt + 0.5, W - 1, vh - 1);
+        // Cursor line markers (glow) — one per active cursor/selection head
+        var sels2 = cm.listSelections();
+        for (var s2 = 0; s2 < sels2.length; s2++) {
+          var cl = sels2[s2].head.line;
+          if (cl == null || cl < 0 || cl >= lineCount) continue;
+          var cy = cl * lineH;
+          ctx.save();
+          ctx.shadowColor = 'rgba(56, 139, 253, 0.9)';
+          ctx.shadowBlur = 6;
+          ctx.fillStyle = 'rgba(56, 139, 253, 0.5)';
+          ctx.fillRect(0, cy, W, Math.max(1, lineH));
+          ctx.restore();
+          ctx.fillStyle = 'rgba(56, 139, 253, 0.95)';
+          ctx.fillRect(0, cy, 2.5, Math.max(1, lineH));
+        }
+        // Git diff markers — drawn last on the right edge so the translucent
+        // selection/search overlays can't wash them out, and they don't fight
+        // the left-edge cursor bar.
+        if (_minimapDiffMarkers && _minimapDiffPath === vm.ide.currentFile) {
+          for (var g = 0; g < _minimapDiffMarkers.length; g++) {
+            var gd = _minimapDiffMarkers[g];
+            if (gd.line < 0 || gd.line >= lineCount) continue;
+            var gy = gd.line * lineH;
+            ctx.fillStyle = MINIMAP_DIFF_COLORS[gd.kind] || 'rgba(248, 113, 113, 0.95)';
+            ctx.fillRect(W - 3, gy, 3, Math.max(1, lineH));
+          }
+        }
       }
 
       // ── Git Diff as IDE tabs ──────────────────────────────────────────

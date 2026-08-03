@@ -8253,6 +8253,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
             if (proposal == null)
             {
+                await EmitLog(emitSse, "warn", "Incremental planning: rejected — response was not valid JSON; retrying with parse feedback", ct: ct);
                 rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
                     "Output ONLY the JSON object described in the system prompt.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
@@ -8341,6 +8342,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 else
                 {
+                    await EmitLog(emitSse, "warn",
+                        $"Incremental planning: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", ct: ct);
                     rejectionFeedback.Add(
                         $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full in the " +
                         "DISCOVERY CONTEXT above. Do not re-request it. Read it carefully and propose the actual next " +
@@ -8362,6 +8365,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.Step == null)
             {
+                await EmitLog(emitSse, "warn", "Incremental planning: rejected — returned neither planComplete, exploreFile, nor a step; retrying", ct: ct);
                 rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
@@ -8375,6 +8379,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     regenAttempts = 0;
                     continue;
                 }
+                await EmitLog(emitSse, "warn", "Incremental planning: rejected — _discover was already run this session; retrying", ct: ct);
                 rejectionFeedback.Add("You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
@@ -8570,6 +8575,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var planCompleteDeclared = false;
         var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var thinkingLog = new StringBuilder();
+        // Bounded accumulator for the "CHANGES FROM PREVIOUS STEP" section: instead of stacking
+        // every step's raw diff forever, we keep ONE section and LLM-summarize it once it passes
+        // cfg.diffContextSummaryChars (when cfg.summarizeDiffContext is on).
+        var diffContextAccum = new StringBuilder();
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
         var totalPlanningRounds = 0;
@@ -8712,6 +8721,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning);
             if (proposal == null)
             {
+                await EmitLog(emitSse, "warn", "Interleaved execution: rejected — response was not valid JSON; retrying with parse feedback", ct: ct);
                 rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
                     "Output ONLY the JSON object described in the system prompt.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
@@ -8767,6 +8777,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                     if (alreadyInContext)
                     {
+                        await EmitLog(emitSse, "warn",
+                            $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already in discovery context; retrying", ct: ct);
                         rejectionFeedback.Add(
                             $"STOP — '{proposal.ExploreFile}' is ALREADY in the DISCOVERY CONTEXT above. " +
                             "Do NOT request it again. Read it and propose the actual next step.");
@@ -8787,6 +8799,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 else
                 {
+                    await EmitLog(emitSse, "warn",
+                        $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", ct: ct);
                     rejectionFeedback.Add(
                         $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full above. " +
                         "Do not re-request it. Propose the actual next step using the exact names visible there.");
@@ -8796,6 +8810,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.Step == null)
             {
+                await EmitLog(emitSse, "warn", "Interleaved execution: rejected — returned neither planComplete, exploreFile, nor a step; retrying", ct: ct);
                 rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
@@ -8809,6 +8824,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     regenAttempts = 0;
                     continue;
                 }
+                await EmitLog(emitSse, "warn", "Interleaved execution: rejected — _discover was already run this session; retrying", ct: ct);
                 rejectionFeedback.Add("You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.");
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
@@ -8831,6 +8847,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 });
                 if (duplicateOf != null)
                 {
+                    await EmitLog(emitSse, "warn",
+                        $"Interleaved execution: rejected duplicate step — [{proposal.Step.File}] {proposal.Step.Change} repeats completed step [{duplicateOf.File}] {duplicateOf.Change}", ct: ct);
                     rejectionFeedback.Add(
                         $"STEP ALREADY DONE (IMMUTABLE) — [{proposal.Step.File}] {proposal.Step.Change}\n" +
                         $"is too similar to the COMPLETED step:\n" +
@@ -8854,7 +8872,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             string? completionNote = null;
             var lastResult = allResults
                 .OfType<Dictionary<string, object?>>()
-                .Where(r => r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("type")?.ToString() is "modified")
+                .Where(r => r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("status")?.ToString() is "modified" or "done" or "created")
                 .LastOrDefault();
             if (lastResult != null && lastResult["needsExtraStep"] is false &&
                 string.Equals(lastResult.GetValueOrDefault("path")?.ToString(), proposal.Step.File, StringComparison.OrdinalIgnoreCase))
@@ -9110,6 +9128,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 var touchedPaths = newResults
                     .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
+                    // Only edits that actually stuck feed the next planning round — failed/reverted
+                    // attempts must never appear as applied changes.
+                    .Where(r => r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
                     .Select(r => r.GetValueOrDefault("path")?.ToString())
                     .Where(p => !string.IsNullOrWhiteSpace(p))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -9163,17 +9184,36 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext += $"\n{inventoryKey}\n" +
                         string.Join("\n", files.Select(f => $"  - {f}")) + "\n";
                 }
+                // Feed ONLY successful diffs into the bounded accumulator, then (optionally) LLM-
+                // summarize once the accumulated section passes the user's threshold. One section,
+                // replaced in place — never a growing stack of raw diffs.
                 if (stepDiffs.Count > 0)
                 {
+                    diffContextAccum.AppendLine(string.Join("\n", stepDiffs));
+                }
+                var diffCfg = await LoadConfigAsync();
+                if (diffCfg.summarizeDiffContext && diffContextAccum.Length > diffCfg.diffContextSummaryChars)
+                {
+                    var summary = await SummarizeDiffContextAsync(diffContextAccum.ToString(), emitSse, ct);
+                    if (!string.IsNullOrWhiteSpace(summary))
+                    {
+                        diffContextAccum.Clear();
+                        diffContextAccum.Append(summary);
+                        await EmitLog(emitSse, "metric",
+                            $"📊 Diff context summarized: accumulated diffs ({diffCfg.diffContextSummaryChars}+ chars) → compact summary", ct: ct);
+                    }
+                }
+                if (diffContextAccum.Length > 0)
+                {
                     var diffSection = "\n### CHANGES FROM PREVIOUS STEP ###\n" +
-                        string.Join("\n", stepDiffs) + "\n" +
+                        diffContextAccum.ToString().TrimEnd() + "\n" +
                         "(These changes are already reflected in the file content above. " +
                         "The next step MUST build on them, not repeat them.)\n";
-                    discoveryContext += diffSection;
+                    discoveryContext = ReplaceDiscoveryDiffSection(discoveryContext, diffSection);
                 }
                 var newEditLogLines = newResults
                     .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit" &&
-                                r.GetValueOrDefault("status")?.ToString() != "skipped")
+                                r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
                     .Select(r => $"  · {r.GetValueOrDefault("path")}: {r.GetValueOrDefault("change") ?? r.GetValueOrDefault("editAction") ?? "modified"}")
                     .ToList();
                 if (newEditLogLines.Count > 0)
@@ -9184,7 +9224,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         discoveryContext += "\n" + fullLog;
                 }
                 var editLog = newResults
-        .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
+        .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit" &&
+                    r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
         .Select(r => $"  {r.GetValueOrDefault("path")} — " +
             (r.GetValueOrDefault("change")?.ToString() ?? r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
         .ToList();
@@ -9322,6 +9363,55 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                     }
                 }
+                // ── Between-steps completion verification ──────────────────────────────────
+                // The per-step edit verifier marked the last edit complete (needsExtraStep=false).
+                // Before proposing yet ANOTHER step, verify whether the WHOLE task is now satisfied
+                // by the original prompt + all applied changes. If it is, declare the plan complete
+                // instead of blindly planning a redundant follow-up step.
+                if (stepSucceeded && !hadFailure)
+                {
+                    var lastVerifiedComplete = newResults
+                        .OfType<Dictionary<string, object?>>()
+                        .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+                                  r.GetValueOrDefault("status")?.ToString() is "modified" or "done" or "created" &&
+                                  r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("needsExtraStep") is false);
+                    if (lastVerifiedComplete)
+                    {
+                        await EmitLog(emitSse, "info",
+                            "🔍 Between-steps verification: last edit verified complete — checking whether the whole task is done…", ct: ct);
+                        var (isComplete, assessReason) = await AssessCompletion(
+                            prompt, allResults, projectRoot, ct,
+                            new AgentPlan { Plan = planSoFar.ToList(), Summary = "Interleaved verification", Score = 90 },
+                            attachedFiles: attachedFiles);
+                        // AssessCompletion defaults to complete=true on LLM timeout / parse
+                        // failure — never trust that here, or we'd strand a half-finished task.
+                        var assessFailed = string.IsNullOrWhiteSpace(assessReason) ||
+                            assessReason.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
+                            assessReason.Contains("Could not parse", StringComparison.OrdinalIgnoreCase);
+                        if (isComplete && !assessFailed)
+                        {
+                            planCompleteDeclared = true;
+                            await EmitLog(emitSse, "success",
+                                $"✓ Plan complete after step {planSoFar.Count} — {assessReason}", ct: ct);
+                            thinkingLog.AppendLine($"\n[Plan complete — {assessReason}]");
+                            if (emitSse)
+                                await SendSse(Response, "plan", new
+                                {
+                                    thinking = thinkingLog.ToString(),
+                                    summary = $"Plan complete — {assessReason}",
+                                    items = planSoFar.Select((s, idx) => new
+                                    {
+                                        File = s.File, Change = s.Change, Line = s.LineNumber,
+                                        OldString = s.OldString, NewString = s.NewString, done = true
+                                    }).ToList(),
+                                    incremental = true
+                                }, ct);
+                            break;
+                        }
+                        await EmitLog(emitSse, "metric",
+                            $"🔍 Between-steps verification: task NOT complete yet — {assessReason}", ct: ct);
+                    }
+                }
             }
         }
         var finalPlan = new AgentPlan
@@ -9373,6 +9463,70 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return sb.ToString();
     }
+    /// <summary>
+    /// Replaces the existing "### CHANGES FROM PREVIOUS STEP ###" section in the discovery
+    /// context with a fresh one (appending it if none exists yet). Keeps exactly ONE bounded
+    /// diff section instead of a growing stack of raw diffs per step.
+    /// </summary>
+    private static string ReplaceDiscoveryDiffSection(string discoveryContext, string newSection)
+    {
+        const string marker = "### CHANGES FROM PREVIOUS STEP ###";
+        var idx = discoveryContext.IndexOf(marker, StringComparison.Ordinal);
+        if (idx < 0)
+            return discoveryContext.TrimEnd() + "\n" + newSection.TrimStart('\n');
+        var sectionStart = discoveryContext.LastIndexOf("\n### ", idx, StringComparison.Ordinal);
+        var start = sectionStart >= 0 ? sectionStart : discoveryContext.LastIndexOf('\n', idx);
+        if (start < 0) start = 0;
+        var sectionEnd = discoveryContext.IndexOf("\n### ", idx + marker.Length, StringComparison.Ordinal);
+        var end = sectionEnd >= 0 ? sectionEnd : discoveryContext.Length;
+        var prefix = discoveryContext[..start].TrimEnd();
+        var suffix = discoveryContext[end..];
+        return prefix + "\n" + newSection.TrimStart('\n') + "\n" + suffix.TrimStart('\n');
+    }
+
+    /// <summary>
+    /// LLM compaction for the accumulated per-step diffs. Preserves file paths, symbols and the
+    /// essence of each change so later steps can still build on them without the raw text.
+    /// </summary>
+    private async Task<string?> SummarizeDiffContextAsync(string accumulatedDiffs, bool emitSse, CancellationToken ct)
+    {
+        var system =
+            "You are a context-compaction engine for a coding agent. Below is a raw accumulation of " +
+            "code diffs from previous steps of the same task. Rewrite them as ONE compact, high-signal " +
+            "summary that preserves: every file path touched, every symbol/method/class added or changed, " +
+            "and the essence of each change — enough for the next step to build on them without the raw " +
+            "diff text. Keep it under ~1800 chars. Output ONLY the summary text; no markdown fences, no JSON.";
+        var user = $"### ACCUMULATED DIFFS ###\n{accumulatedDiffs}";
+        var (raw, error) = await CallLlmRawText(system, user, false, ct,
+            requestTimeout: TimeSpan.FromMinutes(1), maxTokens: 512);
+        if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw)) return null;
+        var cleaned = raw.Trim();
+        if (cleaned.Length < 20) return null;
+        return cleaned.Length > 4000 ? cleaned[..4000] + "\n…[summarized]…" : cleaned;
+    }
+
+    /// <summary>
+    /// LLM compaction for the accumulated pre-plan thinking carried between steps. Produces a
+    /// dense recap (task, files, symbols added/renamed, anchors, decisions, what remains) so the
+    /// next thinking round builds on a summary instead of the raw wall of reasoning.
+    /// </summary>
+    private async Task<string?> CompactThinkingContextAsync(string accumulatedThinking, bool emitSse, CancellationToken ct)
+    {
+        var system =
+            "You are the memory-compaction engine of a multi-step coding agent. Below is the accumulated " +
+            "PREVIOUS REASONING from earlier planning steps of the SAME task. Rewrite it as ONE dense " +
+            "recap that preserves everything the NEXT thinking round must know: the task, every file " +
+            "touched, every symbol/method/class added or renamed, anchors used, decisions made, and what " +
+            "remains to do. Keep it under ~1800 chars. Output ONLY the recap prose; no markdown fences, no JSON.";
+        var user = $"### ACCUMULATED PREVIOUS REASONING (compact this) ###\n{accumulatedThinking}";
+        var (raw, error) = await CallLlmRawText(system, user, false, ct,
+            requestTimeout: TimeSpan.FromMinutes(1), maxTokens: 512);
+        if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw)) return null;
+        var cleaned = raw.Trim();
+        if (cleaned.Length < 20) return null;
+        return cleaned.Length > 4000 ? cleaned[..4000] + "\n…[compacted]…" : cleaned;
+    }
+
     private async Task<IncrementalSubPlanProposal?> ProposeNextSubPlanAsync(
         string originalPrompt, string discoveryContext, List<MetaPlanSubPlan> subPlansSoFar,
         List<string> rejectionFeedback, bool emitSse, CancellationToken ct)
@@ -9483,7 +9637,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "success", $"Meta-plan: complete after {subPlansSoFar.Count} stage(s) — {proposal.CompletionReason}", ct: ct);
                 break;
             }
-            if (proposal.SubPlan == null) { if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) break; continue; }
+            if (proposal.SubPlan == null)
+            {
+                await EmitLog(emitSse, "warn", "Meta-plan: rejected — response contained no subPlan; retrying", ct: ct);
+                if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
             var (valid, reason) = await ValidateSubPlanAsync(proposal.SubPlan, prompt, subPlansSoFar, ct);
             if (!valid)
             {
@@ -10005,10 +10164,32 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!Directory.Exists(projectRoot)) return ("", allSteps);
         var allFiles = EnumerateProjectFiles(projectRoot);
         if (allFiles.Count == 0) return ("", allSteps);
+        // NEW: BM25-first auto-read — rank the whole project against the task lexically and
+        // auto-read the top files so the planner starts with the right context instead of
+        // flailing with _explore/_discover one file at a time.
+        var bm25Top = ScoreProjectFilesWithBm25(prompt, projectRoot, allFiles, ct);
+        var toRead = bm25Top.Select(x => x.file).Take(6).ToList();
+        toRead = AddTemplateStyleSiblings(toRead, projectRoot);
+        toRead = toRead
+            .Where(f =>
+            {
+                var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
+                return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
+            })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(10)
+            .ToList();
+        var rankedList = toRead
+            .Select(f =>
+            {
+                var hit = bm25Top.FirstOrDefault(x => string.Equals(x.file, f, StringComparison.OrdinalIgnoreCase));
+                return hit.file != null ? FormatBm25Hits(hit.file, hit.score, hit.tokenHits) : f;
+            })
+            .ToList();
         await EmitLog(emitSse, "info",
             $"Phase 1 — {allFiles.Count} file(s) indexed ({_fileHints.GetFilesForPrompt(prompt, projectRoot).Count} hint(s)); " +
-            "no files auto-read — the agent explores on demand via _explore (specific file) or _discover (project-wide scan)",
-            ct: ct);
+            $"BM25 auto-read {toRead.Count} task-relevant file(s): {string.Join("; ", rankedList)}",
+            new { RankedBm25 = bm25Top }, ct: ct);
         var sb = new StringBuilder();
         sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
         sb.AppendLine();
@@ -10022,8 +10203,52 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.AppendLine(output.ToString());
             sb.AppendLine();
         }
-        await EmitLog(emitSse, "info",
-            $"Phase 1 complete — {allSteps.Count} step(s), no files auto-read (exploration is on-demand via _explore/_discover)", ct: ct);
+        if (toRead.Count > 0)
+        {
+            var readPlan = toRead.Select((f, i) => new AgentStep
+            {
+                Index = i,
+                Type = "read",
+                Path = f,
+                Description = $"Bootstrap: read {f}",
+                Prompt = prompt
+            }).ToList();
+            var readResults = await ExecuteDiscoveryStepsConcurrent(readPlan, projectRoot, allSteps.Count, emitSse);
+            var fileCharBudget = (await LoadConfigAsync()).maxFullFileTokens * 4;
+            // Aggregate budget: stop pulling files once the auto-read section approaches the
+            // overall context target so a big repo can't flood the prompt with top-ranked files.
+            var totalBudget = Math.Max(40000, fileCharBudget * 3);
+            var usedChars = 0;
+            var mergedCount = 0;
+            foreach (var r in readResults)
+            {
+                if (r is not Dictionary<string, object?> d) continue;
+                var path = d.GetValueOrDefault("path")?.ToString();
+                var output = d.GetValueOrDefault("output")?.ToString();
+                if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(output)) continue;
+                if (d.GetValueOrDefault("status")?.ToString() != "done") continue;
+                var snippet = output.Length > fileCharBudget
+                    ? output[..fileCharBudget] + "\n…[truncated]…"
+                    : output;
+                if (usedChars + snippet.Length > totalBudget) break;
+                usedChars += snippet.Length;
+                sb.AppendLine($"### read {path}");
+                sb.AppendLine("```");
+                sb.AppendLine(snippet);
+                sb.AppendLine("```");
+                sb.AppendLine();
+                allSteps.Add(d);
+                mergedCount++;
+                _fileHints.LearnFromGrepOutput(prompt, path, projectRoot);
+            }
+            await EmitLog(emitSse, "info",
+                $"Phase 1 complete — {allSteps.Count} step(s), BM25 auto-read {mergedCount} task-relevant file(s) into context", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "info",
+                $"Phase 1 complete — {allSteps.Count} step(s), no files auto-read (BM25 found no strong task matches; exploration is on-demand via _explore/_discover)", ct: ct);
+        }
         return (sb.ToString(), allSteps);
     }
     private static List<string> EnumerateProjectFiles(string projectRoot)
@@ -10054,7 +10279,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var bm25Top = ScoreProjectFilesWithBm25(prompt, projectRoot, allFiles, ct);
         if (bm25Top.Count > 0)
         {
-            var ranked = bm25Top.Select((x, i) => $"[{i + 1}] {x.file} (score {x.score:0.0})");
+            var ranked = bm25Top.Select((x, i) => $"[{i + 1}] {FormatBm25Hits(x.file, x.score, x.tokenHits)} (score {x.score:0.0})");
             await EmitLog(emitSse, "info", $"🔎 BM25 ranked {bm25Top.Count} file(s) by lexical scoring: {string.Join(", ", ranked)}",
                 new { RankedBm25 = bm25Top }, ct: ct);
         }
@@ -10289,7 +10514,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "get", "got", "let", "put", "see", "show", "use", "used", "using", "need", "want", "like",
         "should", "please", "make", "sure", "ensure", "create", "add", "change", "fix", "bug"
     };
-    private static List<(string file, double score)> ScoreProjectFilesWithBm25(
+    /// <summary>Files scoring below this total don't get token attribution in the log —
+    /// they collapse to a plain path so noisy prompts with many marginal matches stay readable.</summary>
+    private const double Bm25AttributionMinScore = 2.0;
+
+    /// <summary>
+    /// Formats a file's BM25 entry for the log: "notepad.service.ts ← notepad(4.2), note(1.1)"
+    /// when the file cleared the attribution threshold and carries token hits, otherwise the bare
+    /// path (marginal matches and sibling files that were never lexically scored).
+    /// </summary>
+    private static string FormatBm25Hits(string file, double score, List<(string token, double contribution)>? tokenHits)
+    {
+        if (score < Bm25AttributionMinScore || tokenHits == null || tokenHits.Count == 0) return file;
+        return $"{file} ← {string.Join(", ", tokenHits.Select(h => $"{h.token}({h.contribution:0.0})"))}";
+    }
+    private static List<(string file, double score, List<(string token, double contribution)> tokenHits)> ScoreProjectFilesWithBm25(
         string prompt, string projectRoot, List<string> allFiles, CancellationToken ct)
     {
         var queryTokens = AgentUtilities.ExtractMeaningfulKeywords(prompt.ToLowerInvariant())
@@ -10300,12 +10539,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .Select(m => m.Value)
                 .Where(t => !_bm25StopWords.Contains(t))
                 .ToList();
-        if (queryTokens.Count == 0) return new List<(string file, double score)>();
+        if (queryTokens.Count == 0) return new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
         var fileTokens = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         long totalTokens = 0;
         foreach (var rel in allFiles)
         {
-            if (ct.IsCancellationRequested) return new List<(string file, double score)>();
+            if (ct.IsCancellationRequested) return new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
             var ext = Path.GetExtension(rel);
             if (!_bm25TextExtensions.Contains(ext)) continue;
             if (rel.Contains(".min.", StringComparison.OrdinalIgnoreCase)) continue;
@@ -10332,7 +10571,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             fileTokens[rel] = toks;
             totalTokens += toks.Count;
         }
-        if (fileTokens.Count == 0) return new List<(string file, double score)>();
+        if (fileTokens.Count == 0) return new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
         var n = fileTokens.Count;
         var avgDl = (double)totalTokens / n;
         var df = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -10343,27 +10582,39 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var idf = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         foreach (var q in queryTokens)
             idf[q] = Math.Log(1 + (n - df.GetValueOrDefault(q) + 0.5) / (df.GetValueOrDefault(q) + 0.5));
-        var scores = new List<(string file, double score)>();
+        var scores = new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
         foreach (var kv in fileTokens)
         {
-            if (ct.IsCancellationRequested) return new List<(string file, double score)>();
+            if (ct.IsCancellationRequested) return new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
             var tf = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (var t in kv.Value) tf[t] = tf.GetValueOrDefault(t) + 1;
             var dl = kv.Value.Count;
             double s = 0;
+            var hits = new List<(string token, double contribution)>();
             foreach (var q in queryTokens)
             {
                 var f = tf.GetValueOrDefault(q);
                 if (f == 0) continue;
-                s += idf[q] * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgDl));
+                var contrib = idf[q] * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgDl));
+                s += contrib;
+                hits.Add((q, contrib));
             }
+            // Attribute filename/path bonuses to the matching query tokens so the
+            // ranked list shows WHY a file scored highly (e.g. name contains 'notepad').
             var name = Path.GetFileNameWithoutExtension(kv.Key);
             foreach (var q in queryTokens)
             {
-                if (name.Contains(q, StringComparison.OrdinalIgnoreCase)) s += 3;
-                if (kv.Key.Contains(q, StringComparison.OrdinalIgnoreCase)) s += 1;
+                double bonus = 0;
+                if (name.Contains(q, StringComparison.OrdinalIgnoreCase)) bonus += 3;
+                if (kv.Key.Contains(q, StringComparison.OrdinalIgnoreCase)) bonus += 1;
+                if (bonus <= 0) continue;
+                s += bonus;
+                var hitIdx = hits.FindIndex(h => h.token.Equals(q, StringComparison.OrdinalIgnoreCase));
+                if (hitIdx >= 0) hits[hitIdx] = (q, hits[hitIdx].contribution + bonus);
+                else hits.Add((q, bonus));
             }
-            if (s > 0) scores.Add((kv.Key, s));
+            if (s > 0)
+                scores.Add((kv.Key, s, hits.OrderByDescending(h => h.contribution).Take(5).ToList()));
         }
         return scores.OrderByDescending(x => x.score)
             .ThenBy(x => x.file.Length)
@@ -11148,7 +11399,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (cfg.includeProjectSkeleton && !hasAttachedFiles)
             skeletonTask = AgentUtilities.GenerateSkeletonAsync(projectRoot);
         Task<string?>? editKnowledgeTask = null;
-        if (cfg.includeEditKnowledge)
+        // Edit knowledge is whole-project context (do/don't/patterns across many files) — it
+        // references files outside the attached set, so suppress it for attached-file tasks
+        // (mirrors the skeleton suppression above).
+        if (cfg.includeEditKnowledge && !hasAttachedFiles)
             editKnowledgeTask = LoadEditKnowledgeHeaderAsync(projectRoot, emitSse, ct);
 
         // LLM connectivity must pass before any LLM call below.
@@ -11165,12 +11419,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // Complexity assessment, skeleton trimming and the requirement checklist share
         // no dependencies, so they run in parallel instead of back-to-back.
         Task<int?>? complexityTask = (cfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
-            ? AssessComplexityAsync(prompt, cardId, ct)
+            ? AssessComplexityAsync(prompt, cardId, ct, heuristicOnly: hasAttachedFiles)
             : null;
         Task<(string trimmed, string note)>? skeletonTrimTask = null;
         if (skeleton != null && (skeleton.Paths.Count > 0 || !string.IsNullOrWhiteSpace(skeleton.Tree)))
             skeletonTrimTask = TrimSkeletonWithLlm(skeleton, prompt, emitSse, ct);
-        var checklistTask = BuildRequirementChecklistAsync(prompt, ct);
+        var checklistTask = BuildRequirementChecklistAsync(prompt, ct, attachedFiles);
 
         // Quick complexity assessment for thinking token budgeting (if extendThinking is enabled)
         if (complexityTask != null)
@@ -12382,7 +12636,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// anchored by the heuristic so it cannot wildly over-score small prompts.
     /// Returns null only when even the deterministic heuristic could not be computed.
     /// </summary>
-    private async Task<int?> AssessComplexityAsync(string prompt, string? cardId, CancellationToken ct)
+    private async Task<int?> AssessComplexityAsync(string prompt, string? cardId, CancellationToken ct, bool heuristicOnly = false)
     {
         if (string.IsNullOrWhiteSpace(cardId)) return null;
         if (_complexityScores.TryGetValue(cardId, out var cached)) return cached;
@@ -12395,6 +12649,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // decided deterministically — no LLM round-trip, and they can never be mis-scored as
             // "Moderate" like "auto focus the new card input" was.
             if (heuristic <= 10)
+            {
+                _complexityScores[cardId] = heuristic;
+                return heuristic;
+            }
+
+            // Attached-file tasks are scoped to the attached set: the LLM assessor would read the
+            // whole task prompt (referencing files outside the attached set), so stick to the
+            // deterministic heuristic for thinking-token budgeting instead.
+            if (heuristicOnly)
             {
                 _complexityScores[cardId] = heuristic;
                 return heuristic;
@@ -12474,9 +12737,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var log = _stepThinkingStore.GetOrAdd("preplan:" + cardId, _ => new StringBuilder());
             string previous;
             lock (log) { previous = log.ToString(); }
-            const int prevMax = 14000;
-            if (previous.Length > prevMax)
-                previous = "…[earlier reasoning truncated]…\n" + previous[^prevMax..];
+            // Thinking is carried between steps via this store — left unchecked it racks up context
+            // fast. Bound it to the user's thinking-token budget (~4 chars/token): when the accumulated
+            // reasoning passes the budget, compact it via LLM (if enabled) so later steps build on a
+            // summary instead of the raw wall of text.
+            var thinkCfg = await LoadConfigAsync();
+            var budgetChars = Math.Clamp(thinkCfg.thinkingMaxTokens, 256, 16384) * 4;
+            if (previous.Length > budgetChars)
+            {
+                if (thinkCfg.compactThinkingContext)
+                {
+                    var compacted = await CompactThinkingContextAsync(previous, emitSse, ct);
+                    if (!string.IsNullOrWhiteSpace(compacted) && compacted.Length < previous.Length)
+                    {
+                        lock (log) { log.Clear(); log.Append(compacted); }
+                        previous = compacted;
+                        await EmitLog(emitSse, "metric",
+                            $"🧠 Thinking context compacted: {budgetChars}+ chars of accumulated reasoning → {compacted.Length}-char recap (budget {thinkCfg.thinkingMaxTokens} tokens)", ct: ct);
+                    }
+                    else
+                    {
+                        previous = "…[earlier reasoning truncated to thinking budget]…\n" + previous[^Math.Min(budgetChars, previous.Length)..];
+                    }
+                }
+                else
+                {
+                    previous = "…[earlier reasoning truncated to thinking budget]…\n" + previous[^Math.Min(budgetChars, previous.Length)..];
+                }
+            }
 
             // When the user attached specific files, the thinking phase MUST reason only inside
             // those files — never the project at large. Build the RELEVANT PROJECT FILES section

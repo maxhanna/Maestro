@@ -554,9 +554,9 @@ angular.module('kanbanApp')
                                                                 }
 
                                                                 function finishCard() {
-                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); vm._agentStartTime = null; if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer(); return; }
+                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); vm._agentStartTime = null; if (!vm.agentRuns.some(function (r) { return r.active; })) vm.cancelAgentTimer(); return; }
                                                                     vm._agentStartTime = null;
-                                                                    if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
+                                                                    if (!vm.agentRuns.some(function (r) { return r.active; })) vm.cancelAgentTimer();
                                                                     if (!incomplete) {
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
@@ -589,7 +589,7 @@ angular.module('kanbanApp')
                                                             case 'error':
                                                                 run.active = false; run.status = 'error'; vm.currentRun = null; vm.refreshStreamingActive();
                                                                 vm._agentStartTime = null;
-                                                                if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
+                                                                if (!vm.agentRuns.some(function (r) { return r.active; })) vm.cancelAgentTimer();
                                                                 pushAgentLog(vm, 'error', parsed ? parsed.message : data);
                                                                 vm.agentResult = { error: parsed ? parsed.message : data };
                                                                 vm.activeCardId = null;
@@ -654,7 +654,7 @@ angular.module('kanbanApp')
                     }
                     if (vm.abortController) { vm.abortController.abort(); }
                     vm.abortController = new AbortController();
-                    if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
+                    if (!vm.agentRuns.some(function (r) { return r.active; })) vm.cancelAgentTimer();
                     vm.refreshStreamingActive();
                     const message = 'Agent stopped by user.';
                     if (wasCurrent) {
@@ -673,7 +673,7 @@ angular.module('kanbanApp')
                     run.active = false; run.status = 'stopped';
                     var wasCurrent = vm.currentRun === run;
                     if (wasCurrent) vm.currentRun = null;
-                    if (!vm.agentRuns.some(function (r) { return r.active; })) cancelAgentTimer();
+                    if (!vm.agentRuns.some(function (r) { return r.active; })) vm.cancelAgentTimer();
                     vm.refreshStreamingActive();
                     if (wasCurrent) pushAgentLog(vm, 'warn', 'Agent run stopped by user.');
                     if (run && run.log) run.log.push({ ts: new Date().toLocaleTimeString(), level: 'warn', message: 'Agent run stopped by user.', detail: undefined });
@@ -966,6 +966,7 @@ angular.module('kanbanApp')
                         });
                 };
                 vm.msToDigitalTime = function (ms) {
+                    if (!ms || isNaN(ms)) return '00:00:00';
                     return new Date(ms).toISOString().slice(11, 19);
                 }
                 vm.fetchBenchmarksFromServer = function () {

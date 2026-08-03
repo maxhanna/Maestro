@@ -862,7 +862,7 @@ partial class AgentController
         return sb.ToString();
     }
      
-    private async Task<string> BuildRequirementChecklistAsync(string prompt, CancellationToken ct)
+    private async Task<string> BuildRequirementChecklistAsync(string prompt, CancellationToken ct, List<string>? attachedFiles = null)
     {
         var sys =
             "You extract a short checklist of literal, testable requirements from a coding task. " +
@@ -873,6 +873,15 @@ partial class AgentController
             "brand voice, etc.), that is a requirement. If the task implies the change must be VISIBLE/USED/" +
             "WIRED UP — not just exist as new code — that is always a requirement, even if not stated explicitly, " +
             "because 'add X so it does Y' always implies X actually gets called somewhere that produces Y.";
+        // When the user attached specific files, the checklist must stay scoped to that set —
+        // items about other files would drag outside-file references into the planner.
+        if (attachedFiles is { Count: > 0 })
+        {
+            var attachedList = string.Join(", ", attachedFiles.Select(f => f.Replace('\\', '/')));
+            sys += "\n\nSCOPE: the task is restricted to these attached files ONLY: " + attachedList + ". " +
+                   "Only extract requirements that apply to those attached files. " +
+                   "Do NOT include requirements about any other files, symbols, tests, or code not present in the attached set.";
+        }
 
         var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 400);
         if (string.IsNullOrWhiteSpace(raw))

@@ -43,7 +43,7 @@ angular.module('kanbanApp')
                                 calendarCards: vm.calCards || [] 
                             }
                         ),
-                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
+                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, compactThinkingContext: vm.compactThinkingContext, summarizeDiffContext: vm.summarizeDiffContext, diffContextSummaryChars: vm.diffContextSummaryChars, approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
                     };
                 }
 
@@ -162,6 +162,9 @@ angular.module('kanbanApp')
                         if (cmd.params.defaultMaxTokens !== undefined) vm.defaultMaxTokens = cmd.params.defaultMaxTokens;
                         if (cmd.params.includeProjectSkeleton !== undefined) vm.includeProjectSkeleton = cmd.params.includeProjectSkeleton;
                         if (cmd.params.includeEditKnowledge !== undefined) vm.includeEditKnowledge = cmd.params.includeEditKnowledge;
+                        if (cmd.params.compactThinkingContext !== undefined) vm.compactThinkingContext = cmd.params.compactThinkingContext;
+                        if (cmd.params.summarizeDiffContext !== undefined) vm.summarizeDiffContext = cmd.params.summarizeDiffContext;
+                        if (cmd.params.diffContextSummaryChars !== undefined) vm.diffContextSummaryChars = cmd.params.diffContextSummaryChars;
                         if (cmd.params.approvedTerminalRoots !== undefined) vm.approvedTerminalRoots = cmd.params.approvedTerminalRoots;
                         if (cmd.params.disallowedTerminalRoots !== undefined) vm.disallowedTerminalRoots = cmd.params.disallowedTerminalRoots;
                         if (cmd.params.buildCommands !== undefined) vm.buildCommands = cmd.params.buildCommands;

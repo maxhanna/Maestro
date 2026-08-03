@@ -96,6 +96,9 @@ angular.module('kanbanApp')
                 vm.defaultMaxTokens = 2048;
                 vm.includeProjectSkeleton = true;
                 vm.includeEditKnowledge = false;
+                vm.compactThinkingContext = true;
+                vm.summarizeDiffContext = true;
+                vm.diffContextSummaryChars = 6000;
                 vm.buildCommands = "";
                 vm.prByDefault = false;
                 vm.themeColors = {};
@@ -160,6 +163,9 @@ angular.module('kanbanApp')
                         if (raw) {
                             var s = JSON.parse(raw);
                             vm.autoQueue = s.autoQueue !== false;
+                            // Stash the saved minimap state so IDEMixin.init (which runs after
+                            // this mixin) can restore it synchronously before config loads.
+                            if (typeof s.ideMinimapVisible === 'boolean') vm._savedIdeMinimapVisible = s.ideMinimapVisible;
                         }
                     } catch (e) { }
                 }
@@ -167,7 +173,10 @@ angular.module('kanbanApp')
 
                 function saveLocalSettings() {
                     try {
-                        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({ autoQueue: vm.autoQueue }));
+                        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+                            autoQueue: vm.autoQueue,
+                            ideMinimapVisible: vm.ide ? vm.ide.minimapVisible !== false : true
+                        }));
                     } catch (e) { }
                 }
 
@@ -200,6 +209,7 @@ angular.module('kanbanApp')
                             if (typeof cfg.showNotes === 'boolean') vm.showNotes = cfg.showNotes;
                             if (typeof cfg.useVSCodeInsteadOfIDE === 'boolean') vm.useVSCodeInsteadOfIDE = cfg.useVSCodeInsteadOfIDE;
                             if (typeof cfg.ideTheme === 'string') vm.ideTheme = cfg.ideTheme;
+                            if (typeof cfg.ideMinimapVisible === 'boolean' && vm.ide) vm.ide.minimapVisible = cfg.ideMinimapVisible;
                             if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
                             vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
                             vm.llamaModel = cfg.llamaModel || "medgemma:4b";
@@ -219,6 +229,9 @@ angular.module('kanbanApp')
                             vm.includeEditKnowledge = cfg.includeEditKnowledge === true;
                             vm.extendThinking = cfg.extendThinking !== false;
                             vm.thinkingMaxTokens = typeof cfg.thinkingMaxTokens === 'number' ? cfg.thinkingMaxTokens : 4096;
+                            vm.compactThinkingContext = cfg.compactThinkingContext !== false;
+                            vm.summarizeDiffContext = cfg.summarizeDiffContext !== false;
+                            vm.diffContextSummaryChars = typeof cfg.diffContextSummaryChars === 'number' ? cfg.diffContextSummaryChars : 6000;
 
                             vm.enabledTools = cfg.enabledTools || [];
                             vm.toolList.forEach(function (t) { t.enabled = vm.enabledTools.length === 0 || vm.enabledTools.indexOf(t.key) !== -1; });
@@ -268,9 +281,13 @@ angular.module('kanbanApp')
                         cfg.includeEditKnowledge = vm.includeEditKnowledge === true;
                         cfg.extendThinking = vm.extendThinking === true;
                         cfg.thinkingMaxTokens = vm.thinkingMaxTokens || 4096;
+                        cfg.compactThinkingContext = vm.compactThinkingContext !== false;
+                        cfg.summarizeDiffContext = vm.summarizeDiffContext !== false;
+                        cfg.diffContextSummaryChars = vm.diffContextSummaryChars || 6000;
                         cfg.showNotes = vm.showNotes === true;
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
                         cfg.ideTheme = vm.ideTheme || 'weaver-dark';
+                        cfg.ideMinimapVisible = !!(vm.ide && vm.ide.minimapVisible);
                         cfg.emailAccounts = vm.emailAccounts.map(function (a) { return { imapServer: a.imapServer, imapPort: a.imapPort, useSsl: a.useSsl, username: a.username, password: a.password, label: a.label }; });
                         cfg.bughostedUrl = vm.bughostedUrl || '';
                         cfg.bughostedUsername = vm.bughostedUsername || '';

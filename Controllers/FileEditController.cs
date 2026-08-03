@@ -236,6 +236,137 @@ public class FileEditController : ControllerBase
             return StatusCode(500, ex.Message);
         }
     }
+    [HttpGet("snippet")]
+    public IActionResult GetSnippet([FromQuery] string file = "", [FromQuery] int line = 0, [FromQuery] int context = 3)
+    {
+        if (string.IsNullOrWhiteSpace(file) || line <= 0)
+            return BadRequest(new { error = "file and line are required" });
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        string workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            workspaceRoot = Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        }
+        else
+        {
+            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+        }
+        try
+        {
+            var resolved = ResolveSnippetFile(workspaceRoot, file);
+            if (resolved == null || !System.IO.File.Exists(resolved))
+                return NotFound(new { error = "File not found in workspace." });
+            var rel = Path.GetRelativePath(workspaceRoot, resolved).Replace('\\', '/');
+            var allLines = System.IO.File.ReadAllLines(resolved);
+            if (allLines.Length == 0)
+                return Ok(new { path = rel, file = Path.GetFileName(resolved), line = 0, lines = new List<object>() });
+            context = Math.Clamp(context, 0, 20);
+            var target = Math.Clamp(line, 1, allLines.Length);
+            var start = Math.Max(0, target - 1 - context);
+            var end = Math.Min(allLines.Length, target + context);
+            var snippet = new List<object>();
+            for (var i = start; i < end; i++)
+            {
+                snippet.Add(new { number = i + 1, text = allLines[i], isTarget = (i + 1) == target });
+            }
+            return Ok(new { path = rel, file = Path.GetFileName(resolved), line = target, lines = snippet });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    private string? ResolveSnippetFile(string workspaceRoot, string file)
+    {
+        var norm = file.Trim();
+        // Strip scheme://host prefixes (file://, http://host/...)
+        norm = System.Text.RegularExpressions.Regex.Replace(norm, @"^[a-z]+://[^/]+/", "/", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        norm = norm.Replace("file:///", "/").Replace("file://", "/");
+        norm = norm.Replace('\\', '/').TrimStart('/');
+        if (string.IsNullOrWhiteSpace(norm)) return null;
+
+        var candidates = new List<string>();
+        if (Path.IsPathRooted(norm))
+        {
+            var abs = Path.GetFullPath(norm);
+            if (IsPathWithinWorkspace(abs, workspaceRoot))
+                candidates.Add(abs);
+        }
+        else
+        {
+            // Direct candidates: under the workspace root, under the app's own
+            // content root (Weaver's wwwroot), and under each project folder.
+            candidates.Add(Path.GetFullPath(Path.Combine(workspaceRoot, norm)));
+            candidates.Add(Path.GetFullPath(Path.Combine(_env.ContentRootPath, norm)));
+            if (Directory.Exists(workspaceRoot))
+            {
+                foreach (var dir in Directory.GetDirectories(workspaceRoot))
+                    candidates.Add(Path.GetFullPath(Path.Combine(dir, norm)));
+            }
+        }
+        foreach (var c in candidates)
+        {
+            if (IsPathWithinWorkspace(c, workspaceRoot) && System.IO.File.Exists(c))
+                return c;
+        }
+
+        // Basename fallback: bounded recursive search, skipping noise dirs.
+        // workspaceRoot covers its top-level project folders, and the app's
+        // content root covers Weaver's own wwwroot; only add the content root
+        // separately when it lives outside the workspace (custom WorkspaceRoot).
+        var basename = Path.GetFileName(norm);
+        if (string.IsNullOrWhiteSpace(basename)) return null;
+        var roots = new List<string> { workspaceRoot };
+        if (!IsPathWithinWorkspace(_env.ContentRootPath, workspaceRoot))
+            roots.Add(_env.ContentRootPath);
+        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "node_modules", ".git", "bin", "obj", "dist", "build", ".vs", ".idea", ".vscode", ".playwright-mcp", ".freebuff", ".venv", "venv" };
+        foreach (var root in roots)
+        {
+            try
+            {
+                foreach (var f in EnumerateFilesBounded(root, basename, skipDirs, 0))
+                {
+                    var full = Path.GetFullPath(f);
+                    if (IsPathWithinWorkspace(full, workspaceRoot))
+                        return full;
+                }
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    private static bool IsPathWithinWorkspace(string path, string workspaceRoot)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        var rootPrefix = workspaceRoot.EndsWith(Path.DirectorySeparatorChar.ToString())
+            ? workspaceRoot : workspaceRoot + Path.DirectorySeparatorChar;
+        return path.Equals(workspaceRoot, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> EnumerateFilesBounded(string root, string fileName, HashSet<string> skipDirs, int depth)
+    {
+        if (depth > 10) yield break;
+        if (!Directory.Exists(root)) yield break;
+        foreach (var f in Directory.EnumerateFiles(root))
+        {
+            if (Path.GetFileName(f).Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                yield return f;
+        }
+        foreach (var d in Directory.EnumerateDirectories(root))
+        {
+            var name = Path.GetFileName(d);
+            if (skipDirs.Contains(name)) continue;
+            foreach (var f in EnumerateFilesBounded(d, fileName, skipDirs, depth + 1))
+                yield return f;
+        }
+    }
+
     [HttpGet("check-modified")]
     public IActionResult CheckModified([FromQuery] string project = "", [FromQuery] string path = "", [FromQuery] string? since = null)
     {
@@ -513,6 +644,7 @@ public class FileEditController : ControllerBase
             newContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
         // Read old content from git HEAD
         string oldContent = "";
+        bool isGitRepo = false;
         try
         {
             using var process = new Process();
@@ -536,12 +668,36 @@ public class FileEditController : ControllerBase
                 oldContent = gitOutput;
         }
         catch { }
+        // Distinguish "new/untracked file" from "not a git repo at all" so the
+        // minimap doesn't paint every line green for non-git projects.
+        try
+        {
+            using var checkProc = new Process();
+            checkProc.StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "rev-parse --is-inside-work-tree",
+                WorkingDirectory = projectRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            checkProc.Start();
+            var checkOut = (await checkProc.StandardOutput.ReadToEndAsync()).Trim();
+            await checkProc.WaitForExitAsync();
+            isGitRepo = checkProc.ExitCode == 0 && string.Equals(checkOut, "true", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { }
         return Ok(new
         {
             path,
             oldContent,
             newContent,
-            isNewFile = string.IsNullOrWhiteSpace(oldContent)
+            isNewFile = string.IsNullOrWhiteSpace(oldContent),
+            isGitRepo
         });
     }
     public class GitCommitRequest

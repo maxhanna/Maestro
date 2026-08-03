@@ -1166,6 +1166,23 @@
                 </div>
                 <input type="range" id="ctx-thinkingMaxTokens" ng-model="vm.thinkingMaxTokens" min="256" max="16384" step="256" style="width:100%;" />
               </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-compactThinkingContext" ng-model="vm.compactThinkingContext" />
+                <label for="ctx-compactThinkingContext">Compact Thinking Context</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">summarize carried thinking once it exceeds the budget above</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-summarizeDiffContext" ng-model="vm.summarizeDiffContext" />
+                <label for="ctx-summarizeDiffContext">Summarize Diff Context</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">compact accumulated step diffs into one summary past the threshold</span>
+              </div>
+              <div ng-if="vm.summarizeDiffContext">
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-diffContextSummaryChars">Diff Summary Threshold Chars</label>
+                  <span>{{vm.diffContextSummaryChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-diffContextSummaryChars" ng-model="vm.diffContextSummaryChars" min="1000" max="32000" step="500" style="width:100%;" />
+              </div>
               <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the agent to handle larger files but consume more tokens.</span>
             </div>
           </details>
@@ -1655,6 +1672,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/addon/search/searchcursor.min.js"></script>
   <script
     src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/addon/search/match-highlighter.min.js"></script>
+  <script src="/error-core.js"></script>
   <script src="/app.js"></script>
   <script src="/kanban.js"></script>
   <script src="/calendar.js"></script>

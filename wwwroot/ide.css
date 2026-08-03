@@ -436,6 +436,30 @@
     height: 100%;
 }
 
+.ide-minimap-tip {
+    position: fixed;
+    z-index: 100000;
+    pointer-events: none;
+    background: #10141a;
+    border: 1px solid rgba(139, 148, 158, 0.3);
+    border-left: 3px solid #388bfd;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-family: var(--mono-font, Consolas, Menlo, monospace);
+    font-size: 11px;
+    line-height: 1.4;
+    color: #e6edf3;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    max-width: 300px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ide-minimap-tip[hidden] {
+    display: none;
+}
+
 .ide-panel-btn--active {
     background: rgba(6, 182, 212, 0.18);
     border-color: var(--accent);
