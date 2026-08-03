@@ -292,7 +292,7 @@
                 tokens</span>
               <span ng-if="vm.complexityScore != null" class="complexity-tag"
                 title="Complexity: {{vm.complexityScore}}/100 ({{vm.complexityLabel}}). Thinking capped at {{vm.complexityTokenCap}} of {{vm.complexityMaxTokens}} max tokens.">
-                🧠 {{vm.complexityLabel}} ({{vm.complexityScore}}%) — {{vm.complexityTokenCap}} thinking tokens
+                🧠 {{vm.complexityLabel}}
               </span>
             </span>
             <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
@@ -496,9 +496,9 @@
                     <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                       <span ng-if="item.metaGroup" class="plan-item-metagroup"
                         title="Sub-plan group">{{item.metaGroup}}</span>
-                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
                         style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">

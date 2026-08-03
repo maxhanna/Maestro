@@ -1133,7 +1133,7 @@ public partial class AgentController : ControllerBase
         // editStrategy was classified at the top of this method (after ext is known).
         // Build system prompt from it and fire the LLM call.
         var systemPrompt = BuildEditSystemPrompt(editStrategy);
-        var (raw, _, resolveError2) = await CallLlmRawStreaming(systemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 1536);
+        var (raw, _, resolveError2) = await CallLlmRawStreaming(systemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 4096);
         if (!string.IsNullOrWhiteSpace(resolveError2) && resolveError2.Contains("Repetition loop detected", StringComparison.OrdinalIgnoreCase))
         {
             return (null, null, false, null, false, resolveError2, false);
@@ -1141,17 +1141,6 @@ public partial class AgentController : ControllerBase
         if (string.IsNullOrWhiteSpace(raw))
         {
             return (null, null, false, null, false, "LLM returned empty response", false);
-        }
-        if (raw.Length > 6000 || raw.Split('\n').Length > 80)
-        {
-            var ext2 = Path.GetExtension(relPath ?? "").ToLowerInvariant();
-            var formatHint = ext2 == ".cs"
-                ? "Use FORMAT C with insertAfter:true and newCode as an array of lines."
-                : "Use oldString/newString with 3-5 lines of anchor context. Copy lines verbatim from the file above, modify only what needs to change.";
-            return (null, null, false, null, false,
-                "LLM response was too long (" + raw.Length + " chars) and likely truncated due to a repetition loop. " +
-                "Do NOT output massive blocks, do NOT use fullFile, and do NOT return alreadyDone. " +
-                formatHint, false);
         }
         string? oldStr = null, newStr = null;
         try
@@ -1273,12 +1262,6 @@ public partial class AgentController : ControllerBase
                         "Set targetType=\"method\", targetName to an EXISTING method name (e.g. the last method in the class), " +
                         "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body. " +
                         "Do NOT return alreadyDone either — ONLY FORMAT C with insertAfter:true will be accepted.", false);
-                }
-                if (fileExists && fileContent != null && fileContent.Length > cfg5.maxFullFileTokens * 4)
-                {
-                    return (null, null, false, null, false,
-                        $"fullFile rejected — file is {fileContent.Length} chars, exceeding the maxFullFileTokens limit ({cfg5.maxFullFileTokens * 4}). " +
-                        "Use a targeted oldString/newString edit instead. Pick a unique 1-3 line anchor near the change point.", false);
                 }
                 string? body = null;
                 if (ffVal.ValueKind == JsonValueKind.String)
@@ -1723,17 +1706,6 @@ public partial class AgentController : ControllerBase
                     oldStr = FixAngularAttributeCasing(oldStr);
                 if (!string.IsNullOrWhiteSpace(newStr))
                     newStr = FixAngularAttributeCasing(newStr);
-                if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(fileContent) &&
-                    newStr.Split('\n').Length > 30 &&
-                    fileContent.Split('\n').Length > 0 &&
-                    (double)newStr.Split('\n').Length / fileContent.Split('\n').Length > 0.6)
-                {
-                    return (null, null, false, null, false,
-                        "newString is " + newStr.Split('\n').Length + " lines — that's >60% of the file. " +
-                        "For an INSERTION, newString should be the 1-2 anchor lines PLUS the new content. " +
-                        "Do NOT reproduce the entire file. Pick the SINGLE line immediately before the insertion point " +
-                        "as oldString, and set newString to that line + your new HTML block.", false);
-                }
                 if (!string.IsNullOrWhiteSpace(newStr))
                 {
                     var cleanedNewStr = AgentUtilities.CleanVerbatimStringEscapes(newStr);
@@ -1808,13 +1780,6 @@ public partial class AgentController : ControllerBase
                         "You MUST output the EXACT, COMPLETE code verbatim. Do NOT abbreviate or truncate. " +
                         "oldString MUST be the literal 1-3 lines of code from the file, copied character-for-character." +
                         snippet, false);
-                }
-                if (string.IsNullOrWhiteSpace(forcedOldString) && !string.IsNullOrWhiteSpace(oldStr) && oldStr.Split('\n').Length > 15)
-                {
-                    return (null, null, false, null, false,
-                        $"oldString is {oldStr.Split('\n').Length} lines long — STRICT MAXIMUM IS 10 LINES. " +
-                        "You outputted a massive block which caused token exhaustion/truncation. " +
-                        "Use a 1-3 line anchor targeting the exact line to change.", false);
                 }
                 newStr = AgentUtilities.AutoFixPythonStatements(newStr ?? "", relPath);
                 if (!string.IsNullOrWhiteSpace(newStr) && Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase))
@@ -4209,13 +4174,6 @@ public partial class AgentController : ControllerBase
                 {
                     await EmitLog(emitSse, "warn",
                         $"⚠ Accepting replacement for small existing file {relPath} ({fullContent.Length} chars)", ct: ct);
-                }
-                if (fullContent.Length > cfg8.maxFullFileTokens * 4)
-                {
-                    await EmitLog(emitSse, "warn",
-                        $"fullFile too large ({fullContent.Length} chars) — skipping",
-                        ct: ct);
-                    continue;
                 }
                 stepIndex = await ApplyFullFile(
                     fullContent, step, fullPath, relPath,
@@ -7834,7 +7792,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var cfg = await LoadConfigAsync();
         var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct));
         var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning);
-        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 2000);
+        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 4096);
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Incremental step proposal returned empty: {err}", ct: ct);
@@ -8588,7 +8546,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 thinking = "",
                 summary = "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far",
-                items = new[] { new { File = "_planning", Change = "Thinking…", Line = 0, OldString = "", NewString = "", done = false } },
+                items = new[] { new { File = "_planning", Change = "Reading task & discovery context…", Line = 0, OldString = "", NewString = "", done = false } },
                 incremental = true
             }, ct);
         }
@@ -8603,10 +8561,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var isVerifying = phase == "verifying";
                 var currentIsConcrete = ShouldApplyDirectly(planSoFar[stepNum - 1]);
                 var label = isVerifying
-                    ? $"Verifying Step {stepNum}…"
+                    ? $"Verifying Step {stepNum} — checking the edit…"
                     : currentIsConcrete
-                        ? $"Applying supplied edit — Step {stepNum}…"
-                        : $"Thinking about Step {stepNum}…";
+                        ? $"Applying edits — Step {stepNum}…"
+                        : $"Thinking for edit — Step {stepNum}…";
                 await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
                     isVerifying ? "_verifying" : "_executing", label,
                     $"Executed {stepNum - 1} step(s) — {label}", stepNum - 1, ct);
@@ -8615,7 +8573,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (emitSse)
         {
             await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
-                "_planning", "Thinking…",
+                "_planning", "Reading task & discovery context…",
                 "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far", null, ct);
         }
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
@@ -8634,13 +8592,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var queuedIsConcrete = ShouldApplyDirectly(queuedStep);
                 await EmitLog(emitSse, "info",
                     queuedIsConcrete
-                        ? $"▶ Applying supplied edit — Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}"
-                        : $"▶ Thinking about Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}", ct: ct);
+                        ? $"▶ Applying edits — Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}"
+                        : $"▶ Thinking for edit — Step {planSoFar.Count} — [{queuedStep.File}] {queuedStep.Change}", ct: ct);
                 await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
                     "_executing", queuedIsConcrete
-                        ? $"Applying supplied edit — Step {planSoFar.Count} — {queuedStep.Change}"
-                        : $"Thinking about Step {planSoFar.Count} — {queuedStep.Change}",
-                    $"Completed {planSoFar.Count - 1} step(s) — {(queuedIsConcrete ? "applying supplied edit for" : "thinking about")} Step {planSoFar.Count}",
+                        ? $"Applying edits — Step {planSoFar.Count} — {queuedStep.Change}"
+                        : $"Thinking for edit — Step {planSoFar.Count} — {queuedStep.Change}",
+                    $"Completed {planSoFar.Count - 1} step(s) — {(queuedIsConcrete ? "applying edits for" : "thinking for edit on")} Step {planSoFar.Count}",
                     planSoFar.Count - 1, ct);
                 await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                     summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
@@ -8684,15 +8642,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (!stepSucceeded) { break; }
                 continue;
             }
-            if (emitSse && !planCompleteDeclared)
-            {
-                var planningText = planSoFar.Count == 0
-                    ? "Thinking…"
-                    : $"Planning step {planSoFar.Count + 1} — verifying step {planSoFar.Count}…";
-                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
-                    "_planning", planningText,
-                    $"Planning step {planSoFar.Count + 1}…", null, ct);
-            }
             string? extendedReasoning = null;
             var prePlanCfg = await LoadConfigAsync();
             // Retry mode (a step was just rejected): the planner already produced its concrete
@@ -8701,6 +8650,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // thinking walls. A crap edit is ignored and the edit pipeline continues normally.
             if (prePlanCfg.extendThinking && regenAttempts == 0 && !string.IsNullOrWhiteSpace(cardId))
             {
+                if (emitSse && !planCompleteDeclared)
+                    await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                        "_planning", $"Deep thinking for plan — Step {planSoFar.Count + 1}…",
+                        $"Deep thinking for plan — Step {planSoFar.Count + 1}…", null, ct);
                 try
                 {
                     extendedReasoning = await ExtendThinkingPrePlanAsync(
@@ -8717,6 +8670,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 await EmitLog(emitSse, "bypass",
                     $"Pre-plan thinking skipped (retry {regenAttempts}) — re-proposing directly with rejection feedback", ct: ct);
+            }
+            if (emitSse && !planCompleteDeclared)
+            {
+                var proposingText = planSoFar.Count == 0
+                    ? "Reading task & proposing the first step…"
+                    : $"Proposing step {planSoFar.Count + 1} — planning the edit…";
+                await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                    "_planning", proposingText,
+                    $"Proposing step {planSoFar.Count + 1}…", null, ct);
             }
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning);
             if (proposal == null)
@@ -9018,13 +8980,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var stepToRunIsConcrete = ShouldApplyDirectly(stepToRun);
                 await EmitLog(emitSse, "info",
                     stepToRunIsConcrete
-                        ? $"▶ Applying supplied edit — Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}"
-                        : $"▶ Thinking about Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
+                        ? $"▶ Applying edits — Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}"
+                        : $"▶ Thinking for edit — Step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
                 await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
                     "_executing", stepToRunIsConcrete
-                        ? $"Applying supplied edit — Step {planSoFar.Count} — {stepToRun.Change}"
-                        : $"Thinking about Step {planSoFar.Count} — {stepToRun.Change}",
-                    $"Completed {planSoFar.Count - 1} step(s) — {(stepToRunIsConcrete ? "applying supplied edit for" : "thinking about")} Step {planSoFar.Count}",
+                        ? $"Applying edits — Step {planSoFar.Count} — {stepToRun.Change}"
+                        : $"Thinking for edit — Step {planSoFar.Count} — {stepToRun.Change}",
+                    $"Completed {planSoFar.Count - 1} step(s) — {(stepToRunIsConcrete ? "applying edits for" : "thinking for edit on")} Step {planSoFar.Count}",
                     planSoFar.Count - 1, ct);
                 await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
                     summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
@@ -9379,6 +9341,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         await EmitLog(emitSse, "info",
                             "🔍 Between-steps verification: last edit verified complete — checking whether the whole task is done…", ct: ct);
+                        if (emitSse)
+                            await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                                "_verifying", $"Verifying whole task — checking if the plan is complete after Step {planSoFar.Count}…",
+                                $"Verifying whole task after Step {planSoFar.Count}…", planSoFar.Count - 1, ct);
                         var (isComplete, assessReason) = await AssessCompletion(
                             prompt, allResults, projectRoot, ct,
                             new AgentPlan { Plan = planSoFar.ToList(), Summary = "Interleaved verification", Score = 90 },

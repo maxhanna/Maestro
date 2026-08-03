@@ -102,9 +102,9 @@
                     <div class="plan-item-text">
                       <span ng-if="item.metaGroup" class="plan-item-metagroup"
                         title="Sub-plan group">{{item.metaGroup}}</span>
-                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                     </div>
 
                     <span ng-if="item.oldString || item.newString"
@@ -371,9 +371,9 @@
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                     </div>
                     <span ng-if="item.oldString || item.newString"
                       ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
@@ -670,9 +670,9 @@
                       title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                         '⬜'}}</span>
-                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
-                      <span class="plan-item-change" ng-if="item.file !== '_planning'">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" ng-if="item.file === '_planning'">Thinking…</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-change" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                     </div>
                   </div>
                 </details>
@@ -771,9 +771,9 @@
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="item.file !== '_planning'">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="item.file === '_planning'">Thinking…</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                     </div>
                     <span ng-if="item.oldString || item.newString"
                       ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
@@ -956,9 +956,9 @@
                       title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                         '⬜'}}</span>
-                      <span class="plan-item-file">{{item.file === '_planning' ? '💭' : item.file}}<span ng-if="item.line && item.file !== '_planning'">:{{item.line}}</span></span>
-                      <span class="plan-item-change" ng-if="item.file !== '_planning'">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" ng-if="item.file === '_planning'">Thinking…</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-change" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                     </div>
                   </div>
                 </details>

@@ -355,6 +355,28 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         return items.filter(function (i) { return i.done; }).length;
       };
 
+      vm.isPlanMarker = function (file) {
+        return file === '_planning' || file === '_executing' || file === '_verifying' || file === '_exploring';
+      };
+
+      vm.planMarkerIcon = function (file) {
+        if (file === '_planning') return '💭';
+        if (file === '_executing') return '⚡';
+        if (file === '_verifying') return '🔍';
+        if (file === '_exploring') return '🔎';
+        return null;
+      };
+
+      vm.planMarkerLabel = function (file, change) {
+        if (!vm.isPlanMarker(file)) return null;
+        if (change) return change;
+        if (file === '_planning') return 'Thinking…';
+        if (file === '_executing') return 'Working…';
+        if (file === '_verifying') return 'Verifying…';
+        if (file === '_exploring') return 'Exploring…';
+        return 'Working…';
+      };
+
       vm.togglePlanItem = function (card, index) {
         if (!card._plan || !card._plan.items) return;
         var item = card._plan.items.find(function (i) { return i.index === index; });
