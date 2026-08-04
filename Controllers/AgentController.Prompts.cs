@@ -285,7 +285,7 @@ partial class AgentController
         }
         return sb.ToString();
     }
-    private static string BuildIncrementalStepSystemPrompt(string stepMode = "all", List<string>? enabledTools = null)
+    private static string BuildIncrementalStepSystemPrompt(string stepMode = "all", List<string>? enabledTools = null, int? atomicStepEstimate = null)
     {
         var enabled = enabledTools != null && enabledTools.Count > 0
             ? new HashSet<string>(enabledTools, StringComparer.OrdinalIgnoreCase)
@@ -317,6 +317,14 @@ partial class AgentController
         sb.Append("Your job on EACH turn is to propose exactly ONE new step — the next atomic action required — ");
         sb.Append("or declare the plan complete if no further step is needed.\n\n");
         sb.Append("Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n");
+        if (atomicStepEstimate is > 0)
+        {
+            sb.Append($"📏 ATOMIC-STEP BUDGET: You estimated this task needs ~{atomicStepEstimate} atomic step(s). ");
+            sb.Append("Once the count of committed steps in PLAN SO FAR reaches or exceeds that estimate, you MUST ");
+            sb.Append("declare planComplete=true unless an EXPLICIT requirement in the ORIGINAL TASK is still clearly ");
+            sb.Append("unmet. Do NOT invent extra steps, refactors, cleanup, or \"while I'm here\" improvements — ");
+            sb.Append("exceeding your own estimate is a strong hallucination signal.\n\n");
+        }
         sb.Append("### DECISION ###\n");
         sb.Append("If the plan-so-far, together with the discovery context, already fully satisfies the task:\n");
         sb.Append("{\"planComplete\": true, \"completionReason\": \"one sentence: why nothing more is needed\"}\n\n");
@@ -430,11 +438,22 @@ partial class AgentController
     }
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
-        string? steeringContext, List<string> rejectionFeedback, string? extendedReasoning = null)
+        string? steeringContext, List<string> rejectionFeedback, string? extendedReasoning = null,
+        int? atomicStepEstimate = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("### TASK ###");
         sb.AppendLine(originalPrompt);
+        if (atomicStepEstimate is > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"📏 STEP BUDGET: You estimated ~{atomicStepEstimate} atomic step(s) for this task. ");
+            sb.AppendLine($"PLAN SO FAR has {planSoFar.Count} committed step(s). ");
+            if (planSoFar.Count >= atomicStepEstimate)
+                sb.AppendLine("You are AT/OVER your estimate — declare planComplete=true now unless an explicit requirement is clearly still unmet. Do not add fluff.");
+            else
+                sb.AppendLine($"You may plan up to {atomicStepEstimate - planSoFar.Count} more step(s) before hitting your estimate; stay lean.");
+        }
         if (!string.IsNullOrWhiteSpace(steeringContext))
         {
             sb.AppendLine();

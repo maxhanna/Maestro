@@ -392,11 +392,11 @@ angular.module('kanbanApp', [])
     '$http', '$interval', '$window', '$scope', '$timeout',
     'KanbanMixin', 'CalendarMixin', 'IDEMixin', 'NotesMixin',
     'SettingsMixin', 'BugHostedMixin', 'TerminalMixin',
-    'AgentMixin', 'FilePickerMixin',
+    'AgentMixin', 'FilePickerMixin', 'MeetingMixin',
     function ($http, $interval, $window, $scope, $timeout,
       KanbanMixin, CalendarMixin, IDEMixin, NotesMixin,
       SettingsMixin, BugHostedMixin, TerminalMixin,
-      AgentMixin, FilePickerMixin) {
+      AgentMixin, FilePickerMixin, MeetingMixin) {
 
       const vm = this;
 
@@ -517,6 +517,7 @@ angular.module('kanbanApp', [])
       TerminalMixin.init(vm, $scope);
       FilePickerMixin.init(vm, $scope);
       AgentMixin.init(vm, $scope);
+      MeetingMixin.init(vm, $scope);
       BugHostedMixin.init(vm, $scope);
 
       // === Global Init Calls ===

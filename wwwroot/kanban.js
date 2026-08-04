@@ -676,6 +676,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
         var moved = vm.state.doing.splice(idx, 1)[0];
         if (moved) {
+          // Stamp the completion time so stats like "cards finished this week"
+          // reflect when the card actually finished, not when it was created.
+          moved.finishedAt = new Date().toISOString();
           console.log("Found card in doing, moving to " + targetCol);
           if (targetCol === 'selfImproving') {
             // Round-robin: a completed self-improving card goes to the BACK of the list

@@ -1358,4 +1358,147 @@ public class FormatDPayloadCorpusTests
         FuzzHarness.AssertExercised(refusals, "no doc exercised the code-file duplicate-refusal path");
         FuzzHarness.AssertExercised(sameNameRemovals, "no doc exercised the same-name code-file deletion path");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  FORMAT D ALREADY-DONE — removal-with-survivor protection (kanban priority badge)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Mirrors the wild bug: the kanban.html "remove the priority badge" deletion arrived
+    // as a FORMAT D payload whose targetName was the FULL block (survivor BENCH span +
+    // priority badge span) and newCode was either empty (pure deletion) or the surviving
+    // fragment. The generic "HTML block already present" guard must NOT fire just because
+    // the survivor fragment is present — only the FULL targetName block being absent
+    // proves the removal already happened. This locks the FormatDAlreadyDoneVerdict
+    // helper the resolver now consults in both FORMAT D branches (~1317 / ~1954).
+
+    /// <summary>
+    /// Invokes the real <c>AgentController.FormatDAlreadyDoneVerdict</c> (private static)
+    /// — the shared already-done verdict used by both FORMAT D execution branches.
+    /// </summary>
+    private static (bool alreadyDone, string reason) InvokeFormatDAlreadyDoneVerdict(
+        string sourceText, string? targetName, string? newCode)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "FormatDAlreadyDoneVerdict", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("FormatDAlreadyDoneVerdict not found");
+        var result = method.Invoke(null, new object?[] { sourceText, targetName, newCode })
+            ?? throw new InvalidOperationException("FormatDAlreadyDoneVerdict returned null");
+        return ((bool, string))result;
+    }
+
+    /// <summary>Byte-mirror of the kanban.html To Do card card-tags section: a BENCH
+    /// survivor span + the priority badge span that the wild deletion targeted.</summary>
+    private static string BuildKanbanTagsDoc(int cardIdx)
+    {
+        return "  <div class=\"card\" id=\"c" + cardIdx + "\">\n" +
+            "    <textarea>text</textarea>\n" +
+            "    <div class=\"card-tags\">\n" +
+            "      <span class=\"card-tag tag-bench\" ng-if=\"card._benchmark\" style=\"color:#e5c07b;font-weight:700;\">BENCH</span>\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.flagged\">FLAGGED</span>\n" +
+            "    </div>\n" +
+            "  </div>";
+    }
+
+    [Fact]
+    public void Fuzz_FormatD_RemovalWithSurvivor_GuardChecksFullBlockNotFragment()
+    {
+        const int docCount = 24;
+        var checkedDocs = 0;
+        for (var i = 0; i < docCount; i++)
+        {
+            var html = "<main>\n" + BuildKanbanTagsDoc(i) + "\n</main>";
+            var survivor = "      <span class=\"card-tag tag-bench\" ng-if=\"card._benchmark\" style=\"color:#e5c07b;font-weight:700;\">BENCH</span>";
+            var targetBlock = "      <span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>";
+            var fullBlock = survivor + "\n" + targetBlock;
+
+            // Case A — pure deletion (empty/absent newCode): targetName = the priority span
+            // itself. The block is present → NOT already done (the removal must proceed).
+            var (aDone, aReason) = InvokeFormatDAlreadyDoneVerdict(html, targetBlock, "");
+            Assert.False(aDone, $"doc #{i}: deletion payload on present target must NOT be already-done: {aReason}");
+
+            // Case B — replace-with-survivor (newCode = surviving fragment): targetName is
+            // the FULL block (BENCH + priority), newCode is the BENCH fragment. The survivor
+            // IS present, but the full target block still is too → NOT already done.
+            var (bDone, bReason) = InvokeFormatDAlreadyDoneVerdict(html, fullBlock, survivor);
+            Assert.False(bDone, $"doc #{i}: survivor fragment + present full block must NOT be already-done: {bReason}");
+
+            // Apply the Case B removal for real: resolve the full block anchor, replace it
+            // with the survivor → the priority badge is gone, BENCH + FLAGGED survive.
+            var (matched, _, err) = HtmlDomEditor.ResolveHtmlAnchor(html, fullBlock, "Remove the priority badge");
+            Assert.NotNull(matched);
+            Assert.Null(err);
+            var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matched!, survivor, 0, "Remove the priority badge");
+            Assert.True(replaced, $"doc #{i}: survivor replace must apply: {matchError}");
+            Assert.Contains("BENCH", applied, StringComparison.Ordinal);
+            Assert.Contains("FLAGGED", applied, StringComparison.Ordinal);
+            Assert.DoesNotContain("card.priority", applied);
+
+            // AFTER the removal: the full target block is gone → BOTH verdicts flip to
+            // already-done (no double work on re-run), and the survivor fragment alone is
+            // NOT mistaken for "still present" evidence.
+            var (aDone2, aReason2) = InvokeFormatDAlreadyDoneVerdict(applied, targetBlock, "");
+            Assert.True(aDone2, $"doc #{i}: deleted target must now be already-done: {aReason2}");
+            var (bDone2, bReason2) = InvokeFormatDAlreadyDoneVerdict(applied, fullBlock, survivor);
+            Assert.True(bDone2, $"doc #{i}: removed full block must now be already-done: {bReason2}");
+            Assert.Contains("absent", aReason2, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("absent", bReason2, StringComparison.OrdinalIgnoreCase);
+
+            checkedDocs++;
+        }
+        FuzzHarness.AssertAllDocsChecked(checkedDocs, docCount, "FORMAT D removal-with-survivor guard corpus");
+    }
+
+    [Fact]
+    public void FormatD_AlreadyDone_WhitespaceDriftedSurvivor_AlsoUsesFullBlock()
+    {
+        // The COLLAPSED-fragment path: newCode is NOT a verbatim substring of targetName
+        // (indentation drift between the emitted survivor and the same lines inside the
+        // full target block), but whitespace-collapsed it IS a strict fragment. The guard
+        // must still use the FULL target block's absence — not the drifted survivor.
+        var html = "<main>\n" +
+            "  <div class=\"card-tags\">\n" +
+            "      <span class=\"card-tag tag-bench\">BENCH</span>\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.priority\">{{card.priority}}</span>\n" +
+            "  </div>\n" +
+            "</main>";
+        // targetName = the full 6-space-indented block (BENCH + priority lines).
+        var fullBlock = "      <span class=\"card-tag tag-bench\">BENCH</span>\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.priority\">{{card.priority}}</span>";
+        // newCode = the survivor re-indented to 4 spaces — NOT an exact substring of
+        // fullBlock, but an exact substring of the file (the file's BENCH line IS
+        // 6-space-indented, so this drifted survivor is absent verbatim too — only the
+        // collapsed comparison links it).
+        var driftedSurvivor = "    <span class=\"card-tag tag-bench\">BENCH</span>";
+
+        // Survivor (drifted) present + full target block present → NOT already done.
+        var (notDone, notReason) = InvokeFormatDAlreadyDoneVerdict(html, fullBlock, driftedSurvivor);
+        Assert.False(notDone, $"drifted survivor + present full block must NOT be already-done: {notReason}");
+
+        // Apply the real removal: resolve the full block anchor, replace with the drifted
+        // survivor → priority badge gone, BENCH survives.
+        var (matched, _, err) = HtmlDomEditor.ResolveHtmlAnchor(html, fullBlock, "Remove the priority badge");
+        Assert.NotNull(matched);
+        Assert.Null(err);
+        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matched!, driftedSurvivor, 0, "Remove the priority badge");
+        Assert.True(replaced, $"drifted survivor replace must apply: {matchError}");
+        Assert.Contains("BENCH", applied, StringComparison.Ordinal);
+        Assert.DoesNotContain("card.priority", applied);
+
+        // After removal: full target block gone → already-done, even though the drifted
+        // survivor remains.
+        var (done, doneReason) = InvokeFormatDAlreadyDoneVerdict(applied, fullBlock, driftedSurvivor);
+        Assert.True(done, $"removed full block must now be already-done: {doneReason}");
+        Assert.Contains("absent", doneReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FormatD_AlreadyDone_PlainInsertStillTripsGuard()
+    {
+        // NEGATIVE CONTROL — the guard is NOT disabled: a genuine insertion whose newCode
+        // is already present (and is NOT a fragment of targetName) still trips AlreadyDone.
+        var html = "<main>\n  <div class=\"panel\">x</div>\n</main>";
+        var (done, reason) = InvokeFormatDAlreadyDoneVerdict(html, "<div class=\"panel\">", "<div class=\"panel\">x</div>");
+        Assert.True(done, $"plain insert of present code must be already-done: {reason}");
+        Assert.Contains("already present", reason, StringComparison.OrdinalIgnoreCase);
+    }
 }

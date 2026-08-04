@@ -1,0 +1,50 @@
+<div class="meeting-panel">
+  <div class="ide-panel-header" ng-mousedown="vm.startMeetingDrag($event)">
+    <span class="ide-drag-handle" title="Drag to reposition">⠿</span>
+    <span class="ide-panel-title">🕷️ Meeting View</span>
+    <div class="ide-panel-controls">
+      <button class="ide-panel-btn" ng-click="vm.replayMeeting()" ng-disabled="!vm.meetingReplay || !vm.meetingReplay.length || vm.streamingActive" title="{{vm.meetingReplaying ? 'Stop replay' : 'Replay the last agent run'}}">{{vm.meetingReplaying ? '⏹' : '▶'}}</button>
+      <button class="ide-panel-btn replay-speed-btn" ng-click="vm.cycleMeetingReplaySpeed()" ng-disabled="!vm.meetingReplay || !vm.meetingReplay.length || vm.streamingActive" title="Replay speed — click to cycle (1× / 1.5× / 2×)">{{vm.meetingReplaySpeed}}×</button>
+      <button class="ide-panel-btn" ng-click="vm.toggleMeetingMute()" title="{{vm.meetingMuted ? 'Unmute sounds' : 'Mute sounds'}}">{{vm.meetingMuted ? '🔇' : '🔊'}}</button>
+      <button class="ide-panel-btn" ng-click="vm.resetMeeting()" title="Reset the office">↺</button>
+      <button class="ide-panel-btn" ng-click="vm.closeMeeting()" title="Close Meeting View">✕</button>
+    </div>
+  </div>
+  <div class="meeting-body" ng-mouseenter="vm.setMeetingHovered(true)" ng-mouseleave="vm.setMeetingHovered(false)">
+    <canvas id="meetingCanvas" class="meeting-canvas"></canvas>
+    <div class="meeting-replay-badge" ng-show="vm.meetingReplaying">▶ REPLAY<span ng-if="vm.meetingReplaySpeed > 1"> · {{vm.meetingReplaySpeed}}×</span></div>
+    <div class="meeting-scrubber" ng-show="vm.meetingReplay && vm.meetingReplay.length" ng-click="vm.seekReplay($event)" title="Click to seek within the run">
+      <div class="meeting-scrubber-track">
+        <div class="meeting-scrubber-fill" id="meetingScrubberFill"></div>
+      </div>
+      <span class="meeting-scrubber-time" id="meetingScrubberTime">0:00 / 0:00</span>
+    </div>
+    <div class="meeting-status-bar">
+      <span class="meeting-speaker">{{vm.meetingSpeaker}}</span>
+      <span class="meeting-hint">The spiders animate the live agent run — planning, editing, verifying.</span>
+    </div>
+    <div class="meeting-ticker" ng-show="vm.meetingTicker.length">
+      <span class="meeting-ticker-label">STEPS</span>
+      <div class="meeting-ticker-viewport">
+        <!-- Two copies of the items let the -50% keyframe loop seamlessly. -->
+        <div class="meeting-ticker-track" ng-class="{ 'meeting-ticker-track-paused': vm.meetingReplaying }">
+          <span class="meeting-ticker-item" ng-repeat="t in vm.meetingTicker track by $index" ng-class="'meeting-ticker-' + t.kind">{{t.label}}</span>
+          <span class="meeting-ticker-item" ng-repeat="t in vm.meetingTicker track by $index" ng-class="'meeting-ticker-' + t.kind">{{t.label}}</span>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-gossip-log" ng-show="vm.gossipLog.length">
+      <div class="meeting-gossip-log-head">
+        <span class="meeting-gossip-log-title">💬 OFFICE CHAT</span>
+        <button class="meeting-gossip-log-clear" ng-click="vm.gossipLog = []; $event.stopPropagation()" title="Clear the chat log">✕</button>
+      </div>
+      <div class="meeting-gossip-log-feed" id="meetingGossipFeed">
+        <div class="meeting-gossip-line" ng-repeat="g in vm.gossipLog track by $index">
+          <span class="meeting-gossip-time">{{vm.gossipTimeLabel(g.t)}}</span>
+          <span class="meeting-gossip-who">{{g.who}}:</span>
+          <span class="meeting-gossip-text">{{g.text}}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

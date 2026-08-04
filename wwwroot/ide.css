@@ -157,8 +157,27 @@
 }
 
 .ide-tree-name {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* Child-count badge on folders — makes empty vs populated folders obvious at a glance. */
+.ide-tree-count {
+    margin-left: auto;
+    padding: 0 4px;
+    font-size: 9px;
+    line-height: 1.5;
+    color: var(--text-muted, #888);
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 7px;
+    flex-shrink: 0;
+}
+
+.ide-tree-entry:hover .ide-tree-count {
+    color: var(--accent);
+    background: rgba(98, 114, 255, 0.18);
 }
 
 /* Inline rename input inside a tree entry */

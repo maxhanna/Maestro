@@ -224,6 +224,11 @@
               <input type="checkbox" ng-model="vm.showNotes" ng-change="vm.saveSettings(true)" /> Show Notes
             </label>
           </div>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showMeeting" ng-change="vm.saveSettings(true)" /> Show Meeting View
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -291,8 +296,8 @@
               <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize | formatNumber}}
                 tokens</span>
               <span ng-if="vm.complexityScore != null" class="complexity-tag"
-                title="Complexity: {{vm.complexityScore}}/100 ({{vm.complexityLabel}}). Thinking capped at {{vm.complexityTokenCap}} of {{vm.complexityMaxTokens}} max tokens.">
-                🧠 {{vm.complexityLabel}}
+                title="Complexity: {{vm.complexityScore}}/100 ({{vm.complexityLabel}}). Thinking capped at {{vm.complexityTokenCap}} of {{vm.complexityMaxTokens}} max tokens.{{vm.complexityAtomicSteps ? ' ~' + vm.complexityAtomicSteps + ' atomic step(s) estimated.' : ''}}">
+                🧠 {{vm.complexityLabel}}<span ng-if="vm.complexityAtomicSteps">&nbsp;·&nbsp;~{{vm.complexityAtomicSteps}} steps</span>
               </span>
             </span>
             <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
@@ -767,6 +772,15 @@
       <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startNotesResize('e', $event)"></div>
       <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startNotesResize('s', $event)"></div>
       <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startNotesResize('se', $event)"></div>
+    </div>
+
+    <!-- FLOATING MEETING VIEW PANEL -->
+    <div class="meeting-floating-panel" ng-if="vm.showMeeting"
+      ng-style="{left: vm.meeting.left + 'px', top: vm.meeting.top + 'px', width: vm.meeting.width + 'px', height: vm.meeting.height + 'px'}">
+      <div ng-include="'meeting.html'" style="height: 100%; width: 100%; background: var(--bg);"></div>
+      <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startMeetingResize('e', $event)"></div>
+      <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startMeetingResize('s', $event)"></div>
+      <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startMeetingResize('se', $event)"></div>
     </div>
   </main>
 
@@ -1329,6 +1343,10 @@
             <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
               <input type="checkbox" ng-model="vm.showNotes" />
               <span>📒 Notes</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showMeeting" />
+              <span>🕷️ Meeting View</span>
             </label>
           </div>
           <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
@@ -1953,6 +1971,7 @@
   <script src="/voice-input.js"></script>
   <script src="/ide.js"></script>
   <script src="/notes.js"></script>
+  <script src="/meeting.js"></script>
   <script>
     (function () {
       if (!('serviceWorker' in navigator)) return;

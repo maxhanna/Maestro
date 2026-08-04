@@ -237,6 +237,8 @@ angular.module('kanbanApp')
                             if (typeof cfg.showCalendar === 'boolean') vm.showCalendar = cfg.showCalendar;
                             if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
                             if (typeof cfg.showNotes === 'boolean') vm.showNotes = cfg.showNotes;
+                            if (typeof cfg.showMeeting === 'boolean') vm.showMeeting = cfg.showMeeting;
+                            if (typeof cfg.meetingMuted === 'boolean') vm.meetingMuted = cfg.meetingMuted;
                             if (typeof cfg.useVSCodeInsteadOfIDE === 'boolean') vm.useVSCodeInsteadOfIDE = cfg.useVSCodeInsteadOfIDE;
                             if (typeof cfg.ideTheme === 'string') vm.ideTheme = cfg.ideTheme;
                             if (typeof cfg.ideMinimapVisible === 'boolean' && vm.ide) vm.ide.minimapVisible = cfg.ideMinimapVisible;
@@ -320,6 +322,8 @@ angular.module('kanbanApp')
                         // LLM request timeout: 0 (or unchecked infinite) = no timeout, otherwise >= 5 minutes.
                         cfg.llmTimeoutMinutes = vm.llmInfiniteTimeout || !vm.llmTimeoutMinutes ? 0 : Math.max(5, vm.llmTimeoutMinutes);
                         cfg.showNotes = vm.showNotes === true;
+                        cfg.showMeeting = vm.showMeeting === true;
+                        cfg.meetingMuted = vm.meetingMuted === true;
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
                         cfg.ideTheme = vm.ideTheme || 'weaver-dark';
                         cfg.ideMinimapVisible = !!(vm.ide && vm.ide.minimapVisible);

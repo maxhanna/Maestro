@@ -199,7 +199,8 @@ public class BetweenStepsVerificationTests
             new object?[]
             {
                 "Make the button work", executedSteps, projectRoot,
-                CancellationToken.None, new AgentPlan(), new List<string>()
+                CancellationToken.None, new AgentPlan(), new List<string>(),
+                /* atomicStepEstimate */ null
             })!;
         return await task;
     }

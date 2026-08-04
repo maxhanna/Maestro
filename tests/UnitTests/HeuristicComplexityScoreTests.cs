@@ -178,4 +178,70 @@ public class HeuristicComplexityScoreTests
         Assert.Equal(5, Score("AUTO FOCUS the new card"));
         Assert.Equal(55, Score("MIGRATE THE DATABASE"));
     }
+
+    // ── Atomic-step estimate mapping (HeuristicAtomicStepEstimate) ────────
+
+    private static readonly MethodInfo StepEstimateMethod =
+        typeof(Weaver.Controllers.AgentController)
+            .GetMethod("HeuristicAtomicStepEstimate", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+            ?? throw new InvalidOperationException("HeuristicAtomicStepEstimate static method not found.");
+
+    private static int Estimate(int heuristicScore)
+        => (int)(StepEstimateMethod.Invoke(null, new object?[] { heuristicScore }) ?? -1);
+
+    /// <summary>
+    /// Locks the heuristic fallback mapping used when the LLM assessor is
+    /// unavailable: complexity bands → atomic-step budget (1..6). Trivial stays
+    /// 1, and the budget grows monotonically with the heuristic so harder tasks
+    /// never get a smaller step budget than easier ones.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(5, 1)]
+    [InlineData(10, 1)]
+    [InlineData(11, 2)]
+    [InlineData(25, 2)]
+    [InlineData(26, 3)]
+    [InlineData(45, 3)]
+    [InlineData(46, 4)]
+    [InlineData(65, 4)]
+    [InlineData(66, 5)]
+    [InlineData(85, 5)]
+    [InlineData(86, 6)]
+    [InlineData(100, 6)]
+    public void StepEstimate_MapsComplexityBands_Monotonically(int heuristic, int expectedSteps)
+        => Assert.Equal(expectedSteps, Estimate(heuristic));
+
+    [Fact]
+    public void StepEstimate_NeverZero_ForAnyHeuristic()
+    {
+        for (var h = 0; h <= 100; h++)
+            Assert.InRange(Estimate(h), 1, 6);
+    }
+
+    [Fact]
+    public void StepEstimate_IsMonotonicNonDecreasing()
+    {
+        var prev = 0;
+        for (var h = 0; h <= 100; h++)
+        {
+            var cur = Estimate(h);
+            Assert.True(cur >= prev, $"estimate regressed at heuristic {h}: {cur} < {prev}");
+            prev = cur;
+        }
+    }
+
+    /// <summary>
+    /// The whole-card estimate feeds the step budget ONLY in the top-level
+    /// interleaved loop; the meta-plan sub-plan loop deliberately does NOT
+    /// receive it (its planSoFar is sub-plan-scoped). Lock the contract that
+    /// the estimate is positive and sane whenever the heuristic produces a
+    /// score — the budget guard `atomicStepEstimate is > 0` depends on it.
+    /// </summary>
+    [Fact]
+    public void StepEstimate_IsPositive_ForEveryHeuristicScoreBand()
+    {
+        foreach (var score in new[] { 5, 8, 10, 15, 20, 30, 38, 45, 55 })
+            Assert.True(Estimate(score) >= 1, $"heuristic {score} produced a non-positive step estimate");
+    }
 }

@@ -46,6 +46,8 @@ public class FrontendConfig
     public bool showKanban { get; set; } = true;
     public bool showCalendar { get; set; } = false;
     public bool showNotes { get; set; } = false;
+    public bool showMeeting { get; set; } = false;
+    public bool meetingMuted { get; set; } = false;
     public bool prByDefault { get; set; } = false;
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";

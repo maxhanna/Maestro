@@ -176,25 +176,54 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         });
       };
 
-      // Build tree from flat recursive entries and compute display list
+      // Build tree from flat recursive entries and compute display list.
+      // Order-independent: the backend interleaves dirs/files by path, so we
+      // can't assume a folder's entry arrives before its children. Every node
+      // is attached to its parent exactly once via the path->node map, which
+      // prevents phantom folders, duplicate folders, and orphaned subtrees.
       vm._expandedDirs = {};
       vm._buildFileTree = function(entries) {
         var root = { name: '', path: '', isDirectory: true, children: [], depth: 0 };
         var map = { '': root };
-        // Build tree nodes
+        // Ensure a directory node exists for path and is attached to its parent.
+        function ensureDir(path) {
+          if (map[path]) return map[path];
+          var node = { name: path.split('/').pop(), path: path, isDirectory: true, children: [], depth: 0 };
+          map[path] = node;
+          var slash = path.lastIndexOf('/');
+          var parentPath = slash <= 0 ? '' : path.slice(0, slash);
+          ensureDir(parentPath).children.push(node);
+          return node;
+        }
         entries.forEach(function(e) {
-          var parts = e.path.split('/');
-          var parentPath = '';
-          for (var i = 0; i < parts.length - 1; i++) {
-            parentPath = parentPath ? parentPath + '/' + parts[i] : parts[i];
-            if (!map[parentPath]) {
-              map[parentPath] = { name: parts[i], path: parentPath, isDirectory: true, children: [], depth: 0 };
-            }
+          if (!e || !e.path) return;
+          var path = e.path.replace(/\\/g, '/');
+          var slash = path.lastIndexOf('/');
+          var parentPath = slash <= 0 ? '' : path.slice(0, slash);
+          var parent = ensureDir(parentPath);
+          // If the entry is the real directory record, reuse (don't duplicate)
+          // the node the children may have already created implicitly, and
+          // adopt the backend's authoritative display name.
+          if (e.isDirectory) {
+            var dn = ensureDir(path);
+            if (e.name) dn.name = e.name;
+          } else {
+            var node = { name: e.name || path.split('/').pop(), path: path, isDirectory: false, children: null, depth: 0 };
+            if (!map[path]) map[path] = node;
+            // Dedupe: a file path can appear once per listing, but guard anyway.
+            if (parent.children.indexOf(map[path]) === -1) parent.children.push(map[path]);
           }
-          var node = { name: e.name, path: e.path, isDirectory: e.isDirectory, children: e.isDirectory ? [] : null, depth: 0 };
-          map[parentPath].children.push(node);
-          if (e.isDirectory) map[e.path] = node;
         });
+        // Stable ordering: directories first, then files, both alphabetical.
+        function sortChildren(node) {
+          if (!node.children) return;
+          node.children.sort(function (a, b) {
+            if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+            return (a.name || '').localeCompare(b.name || '');
+          });
+          node.children.forEach(sortChildren);
+        }
+        sortChildren(root);
         vm.ide._treeRoot = root;
         vm._rebuildTreeDisplay();
       };
@@ -234,6 +263,28 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm._expandedDirs = {};
         vm.ide.filePickerPath = '';
         vm.loadFilePickerEntries();
+      };
+
+      // A small per-type icon so the tree reads at a glance; folders get a
+      // child-count badge in the markup instead.
+      var FILE_ICONS = {
+        '.cs': '🟦', '.js': '🟨', '.ts': '🟦', '.jsx': '🟦', '.tsx': '🟦',
+        '.html': '🟧', '.htm': '🟧', '.css': '🟪', '.scss': '🟪', '.less': '🟪',
+        '.json': '🟫', '.xml': '🟫', '.yml': '🟫', '.yaml': '🟫', '.sql': '🗄',
+        '.py': '🐍', '.java': '☕', '.md': '📝', '.txt': '📄', '.png': '🖼',
+        '.jpg': '🖼', '.jpeg': '🖼', '.gif': '🖼', '.svg': '🖼', '.ico': '🖼',
+        '.pdf': '📕', '.zip': '📦', '.tar': '📦', '.gz': '📦', '.sh': '🖥',
+        '.bat': '🖥', '.ps1': '🖥', '.db': '🗃', '.lock': '🔒'
+      };
+      vm.fileIcon = function(path) {
+        if (!path) return '📄';
+        var dot = path.lastIndexOf('.');
+        if (dot < 0) return '📄';
+        return FILE_ICONS[path.slice(dot).toLowerCase()] || '📄';
+      };
+      vm.folderCount = function(e) {
+        if (!e || !e.children) return 0;
+        return e.children.length;
       };
 
       vm.idePickerEnterDir = function(path) {
@@ -477,6 +528,18 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           $scope.$digest();
         }
       });
+      // The file explorer renders its own context menu (opened on mousedown
+      // button 2). The native browser/OS menu fires on the separate
+      // 'contextmenu' event after mouseup, so preventDefault on mousedown alone
+      // does NOT stop it (notably on Windows). Suppress it for the whole file
+      // tree so only the IDE's menu ever appears.
+      document.addEventListener('contextmenu', function(ev) {
+        var inTree = ev.target && ev.target.closest ? ev.target.closest('.ide-file-tree') : null;
+        if (inTree) {
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+      });
 
       // Navigate file explorer to show a file's parent directory if sidebar is open
       function _navigateExplorerToFile(path) {
@@ -604,9 +667,37 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       vm._editor = null;
       vm._editorIgnoreChange = false;
 
-      function initEditor() {
+      function _scheduleEditorRefresh() {
+        if (!vm._editor) return;
+        // CodeMirror measures its viewport height once at render time. If the
+        // floating IDE panel (ng-if + ng-include) hasn't finished laying out,
+        // it measures a 0/partial height and only a slice of the file is
+        // visible until a scroll or resize forces a re-measure. Defer through
+        // two animation frames so the re-measure happens after layout settles.
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            if (vm._editor) vm._editor.refresh();
+          });
+        });
+      }
+
+      function initEditor(retriesArg) {
+        // A concurrent retry chain (showIDE watcher vs loadFileContent's
+        // $timeout) may have already created the editor — bail instead of
+        // removing the fresh wrapper and rebuilding (all callers null
+        // vm._editor first, so this guard only affects racing chains).
+        if (vm._editor) return;
         var container = document.querySelector('.ide-codemirror-container');
-        if (!container) return;
+        if (!container) {
+          // On the very first open, the floating panel's ng-include may still be
+          // fetching ide.html — the editor host doesn't exist yet. Retry instead
+          // of silently giving up, or the file would never render.
+          var retries = retriesArg || 0;
+          if (retries < 25) {
+            $timeout(function () { initEditor(retries + 1); }, 100);
+          }
+          return;
+        }
         if (vm._editor) {
           var wrapper = vm._editor.getWrapperElement();
           if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
@@ -673,6 +764,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm._editor.on('cursorActivity', _scheduleMinimapOverlay);
         vm._editor.on('scroll', _scheduleMinimapOverlay);
         _scheduleMinimapDraw();
+        // Deferred re-measure: the panel/flex layout may not be settled yet, so
+        // CM can render only a partial buffer until a scroll/resize re-measures.
+        _scheduleEditorRefresh();
       }
 
       function setEditorContent(content, path) {
@@ -690,6 +784,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm._editor.clearHistory();
         vm._editorIgnoreChange = false;
         _scheduleMinimapDraw();
+        _scheduleEditorRefresh();
       }
 
       vm.highlightSyntax = function (tab) {
@@ -895,6 +990,31 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       };
       vm.stopIdePolling = stopFileChangePolling;
 
+      // The floating panel is ng-if'd on vm.showIDE, so opening/closing the IDE
+      // tears down and recreates the editor DOM. When the panel re-appears the
+      // cached CodeMirror instance may be detached (closed via the ✕ button,
+      // which only flips showIDE) or never initialized (first open). Re-attach
+      // or re-create it and force a re-measure once the panel is laid out.
+      $scope.$watch(function () { return vm.showIDE; }, function (visible) {
+        if (!visible) return;
+        $timeout(function () {
+          if (vm._editor) {
+            var wrapper = vm._editor.getWrapperElement();
+            var attached = wrapper && wrapper.parentNode && document.documentElement.contains(wrapper);
+            if (!attached) {
+              vm._editor = null;
+              _destroyMinimap();
+            }
+          }
+          if (!vm._editor && vm.ide.currentTab &&
+              (vm.ide.currentTab.type === 'file' || !vm.ide.currentTab.type)) {
+            initEditor();
+          } else if (vm._editor) {
+            _scheduleEditorRefresh();
+          }
+        }, 0);
+      });
+
       // ── Search ─────────────────────────────────────────────────────────
       vm.openSearch = function () {
         vm.ide.searchVisible = true;
@@ -1051,7 +1171,13 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         }
         if (_minimapResizeObs) { _minimapResizeObs.disconnect(); _minimapResizeObs = null; }
         if (typeof ResizeObserver !== 'undefined') {
-          _minimapResizeObs = new ResizeObserver(function () { _scheduleMinimapDraw(); });
+          _minimapResizeObs = new ResizeObserver(function () {
+            _scheduleMinimapDraw();
+            // The editor must re-measure whenever the panel/container resizes
+            // (drag-resize, sidebar toggle, layout settle after open), or the
+            // rendered buffer stays clipped at the old size.
+            _scheduleEditorRefresh();
+          });
           _minimapResizeObs.observe(container);
         }
       }

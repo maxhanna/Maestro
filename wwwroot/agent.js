@@ -249,7 +249,7 @@ angular.module('kanbanApp')
                         function startAgent() {
                             run._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
-                            vm.complexityScore = null; vm.complexityLabel = ''; vm.complexityTokenCap = null; vm.complexityMaxTokens = null;
+                            vm.complexityScore = null; vm.complexityLabel = ''; vm.complexityTokenCap = null; vm.complexityMaxTokens = null; vm.complexityAtomicSteps = null;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.llmProgress = null; vm.llmProgressPercent = null; vm.llmProgressState = '';
                             vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
@@ -316,7 +316,8 @@ angular.module('kanbanApp')
                                                                     vm.complexityLabel = parsed.label;
                                                                     vm.complexityTokenCap = parsed.tokenCap;
                                                                     vm.complexityMaxTokens = parsed.maxTokens;
-                                                                    pushAgentLog(vm, 'info', '🧠 Complexity: ' + parsed.score + '/100 (' + parsed.label + ') — thinking capped at ' + parsed.tokenCap + ' tokens (max ' + parsed.maxTokens + ')');
+                                                                    vm.complexityAtomicSteps = parsed.atomicSteps;
+                                                                    pushAgentLog(vm, 'info', '🧠 Complexity: ' + parsed.score + '/100 (' + parsed.label + ') — thinking capped at ' + parsed.tokenCap + ' tokens (max ' + parsed.maxTokens + ')' + (parsed.atomicSteps ? ', ~' + parsed.atomicSteps + ' atomic step(s) estimated' : ''));
                                                                 }
                                                                 break;
                                                             case 'phase':

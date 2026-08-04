@@ -53,6 +53,7 @@ public partial class AgentController : ControllerBase
     private static readonly ConcurrentDictionary<string, HashSet<int>> _cancelledSteps = new();
     private static readonly ConcurrentDictionary<string, StringBuilder> _stepThinkingStore = new();
     private static readonly ConcurrentDictionary<string, int> _complexityScores = new();
+    private static readonly ConcurrentDictionary<string, int> _atomicStepEstimates = new();
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
@@ -1357,6 +1358,16 @@ public partial class AgentController : ControllerBase
                                     expandToClosingTags: false, true);
                                 if (delBlock == null)
                                 {
+                                    // Anchor failed to resolve: distinguish "already removed" from
+                                    // a hallucinated/drifted targetName. Only declare AlreadyDone when
+                                    // the FULL target block is genuinely absent — a surviving fragment
+                                    // is NOT evidence of a completed removal.
+                                    var (delDone, delReason) = FormatDAlreadyDoneVerdict(sourceText, candTargetName, candNewCodeStr);
+                                    if (delDone)
+                                    {
+                                        await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — {delReason}", ct: ct);
+                                        return (null, null, false, null, true, null, false);
+                                    }
                                     lastErr = delErr;
                                     continue;
                                 }
@@ -1386,9 +1397,10 @@ public partial class AgentController : ControllerBase
                                 lastErr = "FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.";
                                 continue;
                             }
-                            if (sourceText.Contains(candNewCodeStr, StringComparison.OrdinalIgnoreCase))
+                            var (candDone, candDoneReason) = FormatDAlreadyDoneVerdict(sourceText, candTargetName, candNewCodeStr);
+                            if (candDone)
                             {
-                                await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
+                                await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — {candDoneReason}", ct: ct);
                                 return (null, null, false, null, true, null, false);
                             }
                             var (matchedBlock, _, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, candTargetName, step.Change, step.LineNumber, expandToClosingTags: false, true);
@@ -1995,6 +2007,15 @@ public partial class AgentController : ControllerBase
                                     expandToClosingTags: false, true);
                                 if (delBlock == null)
                                 {
+                                    // Already-done verdict BEFORE erroring: distinguishes "already
+                                    // removed" (full target block absent) from a hallucinated/drifted
+                                    // targetName (present → retry with a better anchor).
+                                    var (delDone, delReason) = FormatDAlreadyDoneVerdict(sourceText, tn, newCodeStr);
+                                    if (delDone)
+                                    {
+                                        await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — {delReason}", ct: ct);
+                                        return (null, null, false, null, true, null, false);
+                                    }
                                     return (null, null, false, null, false,
                                         $"FORMAT D failed: targetName block not found in {relPath}. " +
                                         $"Copy the exact code block from the file as targetName.", false);
@@ -2011,6 +2032,12 @@ public partial class AgentController : ControllerBase
                             {
                                 return (null, null, false, null, false,
                                     $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
+                            }
+                            var (fmtDone, fmtDoneReason) = FormatDAlreadyDoneVerdict(sourceText, tn, newCodeStr);
+                            if (fmtDone)
+                            {
+                                await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — {fmtDoneReason}", ct: ct);
+                                return (null, null, false, null, true, null, false);
                             }
                             var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, tn, step.Change, step.LineNumber);
                             if (matchedBlock == null)
@@ -2099,6 +2126,153 @@ public partial class AgentController : ControllerBase
             return false;
             
         return Regex.IsMatch(content, @"(?:^|[^\w\-])" + Regex.Escape(target) + @"(?:[^\w\-]|$)", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// FORMAT D already-done verdict — the removal-with-survivor rule from
+    /// PreEditValidation applied to the FORMAT D payload path (targetType="html",
+    /// targetName + empty/absent newCode = a deletion). A deletion expressed as
+    /// replace-with-survivor (newCode is a fragment of targetName) must NOT be declared
+    /// already-done just because the surviving fragment is present in the file — only the
+    /// FULL targetName block being absent proves the removal already happened. Mirrors the
+    /// PreEditValidation survivor-fragment fix for oldString/newString edits.
+    /// </summary>
+    private static (bool alreadyDone, string reason) FormatDAlreadyDoneVerdict(
+        string sourceText, string? targetName, string? newCode)
+    {
+        // Empty/absent newCode = pure deletion: only the full target block being absent
+        // means the removal already happened.
+        if (string.IsNullOrWhiteSpace(newCode))
+        {
+            return FormatDTargetBlockAbsent(sourceText, targetName)
+                ? (true, "FORMAT D deletion already applied — target block absent")
+                : (false, "");
+        }
+        // newCode present: if it is a strict fragment of targetName (exact or
+        // whitespace-collapsed), this is a removal-with-survivor — the survivor's presence
+        // proves NOTHING; only the full target block being absent proves the removal done.
+        if (IsSurvivorFragment(targetName, newCode))
+        {
+            return FormatDTargetBlockAbsent(sourceText, targetName)
+                ? (true, "FORMAT D removal already applied — target block absent, survivor present")
+                : (false, "");
+        }
+        // Plain insert/replace guard (unchanged behavior): newCode already present → done.
+        return sourceText.Contains(newCode, StringComparison.OrdinalIgnoreCase)
+            ? (true, "HTML block already present")
+            : (false, "");
+    }
+
+    /// <summary>
+    /// True when <paramref name="newBlock"/> is a STRICT fragment of
+    /// <paramref name="oldBlock"/> (exact, or whitespace-collapsed with a min length so
+    /// tiny tokens like <c>&lt;/div&gt;</c> never count) — the removal-with-survivor
+    /// shape shared by PreEditValidation (oldString/newString) and the FORMAT D payload
+    /// path (targetName/newCode). A deletion expressed as "replace block with a fragment
+    /// of it" must not trip the insert already-done guard: only the FULL block being
+    /// absent proves the removal already happened.
+    /// </summary>
+    private static bool IsSurvivorFragment(string? oldBlock, string? newBlock)
+    {
+        if (string.IsNullOrWhiteSpace(oldBlock) || string.IsNullOrWhiteSpace(newBlock)) return false;
+        var oldNorm = AgentUtilities.NormalizeLineEndings(oldBlock);
+        var newNorm = AgentUtilities.NormalizeLineEndings(newBlock);
+        if (newNorm.Length >= oldNorm.Length) return false;
+        if (oldNorm.Contains(newNorm, StringComparison.Ordinal)) return true;
+        return newNorm.Length >= 3 &&
+               AgentUtilities.CollapseWhitespace(oldNorm).Contains(
+                   AgentUtilities.CollapseWhitespace(newNorm), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// True when the FULL <paramref name="targetBlock"/> is genuinely absent from
+    /// <paramref name="sourceText"/> — exact, trailing-trimmed, and whitespace-collapsed
+    /// comparisons all fail. A surviving fragment is NOT evidence of absence; only the
+    /// whole block being gone proves a FORMAT D deletion already applied. The collapsed
+    /// fallback is conservative: a SHORT collapsed target (&lt; 15 chars) that doesn't
+    /// collapse-match is treated as still-present rather than absent, because short
+    /// snippets with intra-token whitespace drift can defeat collapsed matching — and a
+    /// false "already done" would silently skip a removal that still needs applying.
+    /// </summary>
+    private static bool FormatDTargetBlockAbsent(string sourceText, string? targetBlock)
+    {
+        if (string.IsNullOrWhiteSpace(targetBlock)) return true;
+        var target = AgentUtilities.NormalizeLineEndings(targetBlock);
+        if (sourceText.Contains(target, StringComparison.Ordinal)) return false;
+        var trimTarget = string.Join("\n", target.Split('\n').Select(l => l.TrimEnd()));
+        var trimFile = string.Join("\n", sourceText.Split('\n').Select(l => l.TrimEnd()));
+        if (trimFile.Contains(trimTarget, StringComparison.Ordinal)) return false;
+        var collapsedTarget = AgentUtilities.CollapseWhitespace(target);
+        // Positive collapsed match → present at any length.
+        if (AgentUtilities.CollapseWhitespace(sourceText).Contains(collapsedTarget, StringComparison.Ordinal))
+            return false;
+        // Negative match: only trust it for long enough blocks; short snippets stay
+        // "present" (conservative — never false-skip a removal).
+        return collapsedTarget.Length >= 15;
+    }
+
+    /// <summary>
+    /// THE single source of truth for "is this deletion already applied?" — shared by the
+    /// executor guard (PreEditValidation) and the plan auditor (PlanPreAuditAsync) so they
+    /// ALWAYS agree on removals. A removal is already-done ONLY when the FULL removal
+    /// target is absent from the file: exact → trailing-trimmed → whitespace-collapsed, and
+    /// keyword evidence confirms the target is gone. A surviving fragment (oldString =
+    /// survivor + target → newString = survivor) is NOT evidence of a completed removal —
+    /// only the full target block being absent proves it (the survivor-fragment rule).
+    /// Covers all three deletion carriers: oldString/newString, FORMAT D
+    /// (targetType=html + targetName + empty/absent newCode), and description-quoted code.
+    /// </summary>
+    private static bool IsRemovalAlreadyApplied(string content, PlanStep step)
+    {
+        // FORMAT D payload: delegate to FormatDAlreadyDoneVerdict (the resolver's own
+        // verdict) so ALL three shapes agree with the executor — pure deletion (empty/
+        // absent newCode → full targetName block must be absent), replace-with-survivor
+        // (newCode is a fragment of targetName → same full-block-absence rule), and plain
+        // insert/replace (newCode already present).
+        // PRECEDENCE: when a step carries BOTH FORMAT D fields (TargetType=html +
+        // TargetName) AND OldString/NewString, the FORMAT D carrier wins and the
+        // oldString evidence is ignored. This is deliberate — TargetName is the anchor
+        // the executor resolves against, so it is the stronger authority on the removal.
+        // ParseStepFromJson populates both only in edge cases; the verdict stays
+        // deterministic by arm order.
+        if (string.Equals(step.TargetType, "html", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(step.TargetName) && string.IsNullOrWhiteSpace(step.NewString))
+        {
+            var fmtNewCode = step.NewCode is { Count: > 0 } ? string.Join("\n", step.NewCode) : null;
+            return FormatDAlreadyDoneVerdict(content, step.TargetName, fmtNewCode).alreadyDone;
+        }
+        // oldString-based deletion (incl. survivor-fragment shape).
+        if (!string.IsNullOrWhiteSpace(step.OldString))
+        {
+            var oldStr = AgentUtilities.NormalizeLineEndings(step.OldString);
+            if (content.Contains(oldStr, StringComparison.Ordinal)) return false;
+            var trimOld = string.Join("\n", oldStr.Split('\n').Select(l => l.TrimEnd()));
+            var trimFile = string.Join("\n", content.Split('\n').Select(l => l.TrimEnd()));
+            if (trimFile.Contains(trimOld, StringComparison.Ordinal)) return false;
+            // Keyword evidence: the removal target must be genuinely gone, not just drifted.
+            return !RemovalTargetStillPresent(step.Change, content, step.OldString);
+        }
+        // Description-only carrier: an HTML block or quoted snippet in the change text.
+        if (!string.IsNullOrWhiteSpace(step.Change))
+        {
+            var htmlMatch = Regex.Match(step.Change, @"<(\w+)\b[^>]*>.*?</\1>", RegexOptions.Singleline);
+            string? codeToRemove = htmlMatch.Success ? htmlMatch.Value : null;
+            if (string.IsNullOrWhiteSpace(codeToRemove))
+            {
+                var quoteMatch = Regex.Match(step.Change, @"`([^`]+)`|""([^""]+)""|'([^']+)'");
+                if (quoteMatch.Success)
+                {
+                    codeToRemove = quoteMatch.Groups[1].Success ? quoteMatch.Groups[1].Value
+                                 : quoteMatch.Groups[2].Success ? quoteMatch.Groups[2].Value
+                                 : quoteMatch.Groups[3].Value;
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(codeToRemove) && codeToRemove.Length >= 20 &&
+                !content.Contains(codeToRemove, StringComparison.Ordinal) &&
+                !RemovalTargetStillPresent(step.Change, content, step.OldString))
+                return true;
+        }
+        return false;
     }
 
     private static bool HasConcreteEdit(PlanStep? step)
@@ -2230,40 +2404,12 @@ public partial class AgentController : ControllerBase
         }
         if (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete "))
         {
-            if (!string.IsNullOrWhiteSpace(step.OldString))
-            {
-                var oldStr = AgentUtilities.NormalizeLineEndings(step.OldString);
-                if (!content.Contains(oldStr, StringComparison.Ordinal))
-                {
-                    var trimOld = string.Join("\n", oldStr.Split('\n').Select(l => l.TrimEnd()));
-                    var trimFile = string.Join("\n", content.Split('\n').Select(l => l.TrimEnd()));
-                    // The planner's oldString can drift from the actual file content (whitespace,
-                    // formatting). Only declare the removal already done when the removal TARGET is
-                    // genuinely gone — if it still exists, Proceed so the resolver applies the edit.
-                    if (!trimFile.Contains(trimOld, StringComparison.Ordinal) &&
-                        !RemovalTargetStillPresent(step.Change, content, step.OldString))
-                        return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
-                }
-            }
-            else if (!string.IsNullOrWhiteSpace(step.Change))
-            {
-                var htmlMatch = Regex.Match(step.Change, @"<(\w+)\b[^>]*>.*?</\1>", RegexOptions.Singleline);
-                string? codeToRemove = htmlMatch.Success ? htmlMatch.Value : null;
-                if (string.IsNullOrWhiteSpace(codeToRemove))
-                {
-                    var quoteMatch = Regex.Match(step.Change, @"`([^`]+)`|""([^""]+)""|'([^']+)'");
-                    if (quoteMatch.Success)
-                    {
-                        codeToRemove = quoteMatch.Groups[1].Success ? quoteMatch.Groups[1].Value
-                                     : quoteMatch.Groups[2].Success ? quoteMatch.Groups[2].Value
-                                     : quoteMatch.Groups[3].Value;
-                    }
-                }
-                if (!string.IsNullOrWhiteSpace(codeToRemove) && codeToRemove.Length >= 20 &&
-                    !content.Contains(codeToRemove, StringComparison.Ordinal) &&
-                    !RemovalTargetStillPresent(step.Change, content, step.OldString))
-                    return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
-            }
+            // Shared with PlanPreAuditAsync: a removal is already-done ONLY when the FULL
+            // removal target is absent (exact → trimmed → collapsed) AND keyword evidence is
+            // gone. A survivor fragment (oldString = survivor + target → newString = survivor)
+            // is NOT evidence of a completed removal — the executor and the auditor agree.
+            if (IsRemovalAlreadyApplied(content, step))
+                return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
         }
         if (changeLower.StartsWith("move ") || changeLower.StartsWith("insert "))
         {
@@ -2302,17 +2448,11 @@ public partial class AgentController : ControllerBase
             // proves the removal is done. Skipping the survivor check here also lets the removal
             // branches above (remove/delete-prefixed changes) and the oldString-not-found path
             // below make the correct AlreadyDone decision against the actual removal target.
-            var isSurvivorFragment = !string.IsNullOrWhiteSpace(step.OldString) &&
-                AgentUtilities.NormalizeLineEndings(step.OldString).Contains(newStr, StringComparison.Ordinal);
+            var isSurvivorFragment = IsSurvivorFragment(step.OldString, newStr);
             if (!isSurvivorFragment && content.Contains(newStr, StringComparison.Ordinal))
                 return (PreEditVerdict.AlreadyDone, "code already present in file");
             var collapsedNew = CollapseWhitespace(newStr);
-            var collapsedOld = string.IsNullOrWhiteSpace(step.OldString)
-                ? null
-                : CollapseWhitespace(AgentUtilities.NormalizeLineEndings(step.OldString));
-            var isSurvivorFragmentCollapsed = collapsedOld != null && collapsedNew.Length < collapsedOld.Length &&
-                collapsedOld.Contains(collapsedNew, StringComparison.Ordinal);
-            if (!isSurvivorFragment && !isSurvivorFragmentCollapsed && collapsedNew.Length >= 15 &&
+            if (!isSurvivorFragment && collapsedNew.Length >= 15 &&
                 CollapseWhitespace(content).Contains(collapsedNew, StringComparison.Ordinal))
                 return (PreEditVerdict.AlreadyDone, "code already present in file (whitespace differences only)");
         }
@@ -2592,25 +2732,42 @@ public partial class AgentController : ControllerBase
                 var changeLower = (step.Change ?? "").ToLowerInvariant();
                 if (!changeLower.StartsWith("remove ") && !changeLower.StartsWith("delete "))
                     continue;
-                var htmlMatch = Regex.Match(step.Change ?? "", @"<(\w+)\b[^>]*>.*?</\1>", RegexOptions.Singleline);
-                string? codeToRemove = htmlMatch.Success ? htmlMatch.Value : null;
-                if (string.IsNullOrWhiteSpace(codeToRemove) || codeToRemove.Length < 20)
-                    continue;
                 var relPath = step.File.Replace('\\', '/');
                 var fullPath = Path.GetFullPath(
                     Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
                 if (!System.IO.File.Exists(fullPath)) continue;
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                if (content.Contains(codeToRemove, StringComparison.Ordinal))
+                // Shared with PreEditValidation: a removal is already-done ONLY when the FULL
+                // removal target is absent (exact → trimmed → collapsed) AND keyword evidence is
+                // gone. A survivor fragment (oldString = survivor + target → newString = survivor)
+                // is NOT evidence of a completed removal — the auditor agrees with the executor.
+                // This deterministically overrides the LLM verdict for EVERY removal carrier
+                // (oldString, FORMAT D targetName, or description-quoted code), not just HTML
+                // blocks embedded in the change description as before.
+                if (IsRemovalAlreadyApplied(content, step))
                 {
                     await EmitLog(emitSse, "info",
-                        $"Audit: step {i + 1} — code to remove IS present in file, NOT already done (deterministic override)", ct: ct);
+                        $"Audit: step {i + 1} — removal target already absent from file, already done (deterministic override)", ct: ct);
+                    auditSteps.Add(new AuditPlanStepResult
+                    {
+                        Index = i,
+                        AlreadyDone = true,
+                        NeedsDecoupling = false,
+                        Reason = "Removal target is already absent from file — step already done",
+                        DecoupledSteps = null
+                    });
+                    preCheckedIndices.Add(i);
+                }
+                else
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Audit: step {i + 1} — removal target IS present in file, NOT already done (deterministic override)", ct: ct);
                     auditSteps.Add(new AuditPlanStepResult
                     {
                         Index = i,
                         AlreadyDone = false,
                         NeedsDecoupling = false,
-                        Reason = "Code to be removed is present in file — step is needed",
+                        Reason = "Removal target is present in file — step is needed",
                         DecoupledSteps = null
                     });
                     preCheckedIndices.Add(i);
@@ -2640,22 +2797,21 @@ public partial class AgentController : ControllerBase
                     var changeLower = (step.Change ?? "").ToLowerInvariant();
                     if (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete "))
                     {
-                        var htmlMatch = Regex.Match(step.Change ?? "", @"<(\w+)\b[^>]*>.*?</\1>", RegexOptions.Singleline);
-                        if (htmlMatch.Success)
+                        var relPath = step.File.Replace('\\', '/');
+                        var fullPath = Path.GetFullPath(
+                            Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+                        if (System.IO.File.Exists(fullPath))
                         {
-                            var relPath = step.File.Replace('\\', '/');
-                            var fullPath = Path.GetFullPath(
-                                Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-                            if (System.IO.File.Exists(fullPath))
+                            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                            // Same shared rule as the pre-check and PreEditValidation: if the FULL
+                            // removal target is still present (survivor fragment included), the LLM's
+                            // 'already done' verdict is wrong and must be overridden.
+                            if (!IsRemovalAlreadyApplied(content, step))
                             {
-                                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                                if (content.Contains(htmlMatch.Value, StringComparison.Ordinal))
-                                {
-                                    await EmitLog(emitSse, "warn",
-                                        $"Audit sanity check: step {idx + 1} was marked 'already done' but code is present — overriding", ct: ct);
-                                    alreadyDone = false;
-                                    reason = "Override: code to be removed is still present in file";
-                                }
+                                await EmitLog(emitSse, "warn",
+                                    $"Audit sanity check: step {idx + 1} was marked 'already done' but the removal target is still present — overriding", ct: ct);
+                                alreadyDone = false;
+                                reason = "Override: code to be removed is still present in file";
                             }
                         }
                     }
@@ -7900,11 +8056,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private async Task<IncrementalStepProposal?> ProposeNextIncrementalStepAsync(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string? steeringContext, List<string> rejectionFeedback, bool emitSse, CancellationToken ct,
-        string stepMode = "all", string? extendedReasoning = null)
+        string stepMode = "all", string? extendedReasoning = null, int? atomicStepEstimate = null)
     {
         var cfg = await LoadConfigAsync();
-        var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct));
-        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning);
+        var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct), atomicStepEstimate);
+        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning, atomicStepEstimate);
         var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 4096);
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -8307,7 +8463,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
     private async Task<(AgentPlan plan, string discoveryContext)> RunIncrementalPlanningLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
-        CancellationToken ct, string? steeringContext, string? cardId = null)
+        CancellationToken ct, string? steeringContext, string? cardId = null,
+        int? atomicStepEstimate = null)
     {
         var planSoFar = new List<PlanStep>();
         var rejectionFeedback = new List<string>();
@@ -8332,7 +8489,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (emitSse)
                 await SendSse(Response, "phase", new { message = $"Planning — step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
             var proposal = await ProposeNextIncrementalStepAsync(
-                prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
+                prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct,
+                atomicStepEstimate: atomicStepEstimate);
             if (proposal == null)
             {
                 await EmitLog(emitSse, "warn", "Incremental planning: rejected — response was not valid JSON; retrying with parse feedback", ct: ct);
@@ -8347,8 +8505,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
                 await EmitLog(emitSse, "success",
                     $"Incremental planning: plan complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
+                var budgetTxt = atomicStepEstimate is > 0
+                    ? $" (estimated {atomicStepEstimate})" : "";
                 await EmitLog(emitSse, "metric",
-                    $"📊 Card planning: {planSoFar.Count} step(s), {totalPlanningRounds} total planning round(s)", ct: ct);
+                    $"📊 Card planning: {planSoFar.Count} step(s){budgetTxt}, {totalPlanningRounds} total planning round(s)", ct: ct);
                 break;
             }
             if (!string.IsNullOrWhiteSpace(proposal.ExploreFile))
@@ -8649,7 +8809,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
-        List<string>? attachedFiles = null)
+        List<string>? attachedFiles = null, int? atomicStepEstimate = null)
     {
         var planSoFar = new List<PlanStep>();
         var allResults = new List<object>();
@@ -8804,7 +8964,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     "_planning", proposingText,
                     $"Proposing step {planSoFar.Count + 1}…", null, ct);
             }
-            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning);
+            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning, atomicStepEstimate: atomicStepEstimate);
             if (proposal == null)
             {
                 await EmitLog(emitSse, "warn", "Interleaved execution: rejected — response was not valid JSON; retrying with parse feedback", ct: ct);
@@ -8836,8 +8996,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 await EmitLog(emitSse, "success",
                     $"Interleaved execution: complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
+                var budgetTxt = atomicStepEstimate is > 0
+                    ? $" (estimated {atomicStepEstimate})" : "";
                 await EmitLog(emitSse, "metric",
-                    $"📊 Card planning: {planSoFar.Count} step(s), {totalPlanningRounds} total planning round(s)", ct: ct);
+                    $"📊 Card planning: {planSoFar.Count} step(s){budgetTxt}, {totalPlanningRounds} total planning round(s)", ct: ct);
                 planCompleteDeclared = true;
                 break;
             }
@@ -9465,7 +9627,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var (isComplete, assessReason) = await AssessCompletion(
                         prompt, allResults, projectRoot, ct,
                         new AgentPlan { Plan = planSoFar.ToList(), Summary = "Interleaved verification", Score = 90 },
-                        attachedFiles: attachedFiles);
+                        attachedFiles: attachedFiles, atomicStepEstimate: atomicStepEstimate);
                     // AssessCompletion now uses the configurable LLM timeout and retries once,
                     // so a slow local model can actually finish the assessment. If the assessment
                     // is STILL unavailable (LLM down / unparseable response), do NOT treat that
@@ -11507,7 +11669,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // ── Startup: fire the three independent LLM calls concurrently ──
         // Complexity assessment, skeleton trimming and the requirement checklist share
         // no dependencies, so they run in parallel instead of back-to-back.
-        Task<int?>? complexityTask = (cfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
+        Task<(int? score, int? atomicSteps)>? complexityTask = (cfg.extendThinking && !string.IsNullOrWhiteSpace(cardId))
             ? AssessComplexityAsync(prompt, cardId, ct, heuristicOnly: hasAttachedFiles)
             : null;
         Task<(string trimmed, string note)>? skeletonTrimTask = null;
@@ -11516,11 +11678,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var checklistTask = BuildRequirementChecklistAsync(prompt, ct, attachedFiles);
 
         // Quick complexity assessment for thinking token budgeting (if extendThinking is enabled)
+        int? atomicStepEstimate = null;
         if (complexityTask != null)
         {
             try
             {
-                var complexityScore = await complexityTask;
+                var (complexityScore, atomicSteps) = await complexityTask;
+                atomicStepEstimate = atomicSteps;
                 if (complexityScore.HasValue && emitSse)
                 {
                     var tokenCap = GetThinkingTokenCap(complexityScore.Value, cfg.thinkingMaxTokens);
@@ -11529,6 +11693,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         score = complexityScore.Value,
                         tokenCap,
                         maxTokens = cfg.thinkingMaxTokens,
+                        atomicSteps,
                         label = complexityScore.Value <= 10 ? "Trivial" :
                                 complexityScore.Value <= 25 ? "Simple" :
                                 complexityScore.Value <= 45 ? "Moderate" :
@@ -11723,6 +11888,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 AgentPlan? subPlanResult;
                 try
                 {
+                    // NOTE: do NOT pass the whole-card atomicStepEstimate here — this loop's
+                    // planSoFar counts only THIS sub-plan's steps, so a card-level budget would
+                    // prematurely truncate a valid multi-step stage. The budget is enforced in
+                    // the top-level interleaved loop, which is the actual execution path.
                     var (incSubPlan, updatedCtx) = await RunIncrementalPlanningLoop(
                         subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId);
                     subPlanResult = incSubPlan;
@@ -11829,7 +11998,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = discoveryContext.Length, prompt }, ct);
             }
             var (interleavedPlan, interleavedResults, updatedContext, interleavedComplete) = await RunInterleavedPlanExecutionLoop(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles);
+                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles, atomicStepEstimate);
             plan = interleavedPlan;
             discoveryContext = updatedContext;
             allSteps.AddRange(interleavedResults);
@@ -12002,7 +12171,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (anyEditsApplied || planCompleteDeclared)
         {
             (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues) =
-                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
+                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate);
         }
         else
         {
@@ -12019,7 +12188,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
                 var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate);
                 if (reverifyComplete)
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
@@ -12244,7 +12413,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     continue;
                 }
                 var (reVerified, reDetails, reIssues, reSpeculative) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate);
                 taskComplete = reVerified;
                 verificationDetails = reDetails;
                 verificationIssues = reIssues;
@@ -12732,7 +12901,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct,
-        string? discoveryContext = null)
+        string? discoveryContext = null, int? atomicStepEstimate = null)
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
@@ -12763,6 +12932,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("### ORIGINAL TASK ###");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
+        var doneEdits = allResults
+            .OfType<Dictionary<string, object?>>()
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                        r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created").ToList();
+        if (atomicStepEstimate is > 0)
+        {
+            sb.AppendLine("### STEP BUDGET ###");
+            sb.AppendLine($"The planner estimated this task needs ~{atomicStepEstimate} atomic step(s); " +
+                $"{doneEdits.Count} edit step(s) were executed. Classify every issue CONFIRMED vs SPECULATIVE " +
+                $"strictly against the ORIGINAL TASK — do NOT invent follow-up work, refactors, or best-practice " +
+                $"improvements the user never asked for, and do NOT flag 'might/could/maybe' risks as repairs. " +
+                $"If the explicit request is satisfied, complete=true even if you can imagine more.");
+            sb.AppendLine();
+        }
         var editResults = allResults
             .OfType<Dictionary<string, object?>>()
             .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
@@ -13133,15 +13316,38 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
-    /// Quick LLM call to assess task complexity (0-100). Only called when extendThinking is enabled.
-    /// Trivial tasks are scored deterministically with zero latency; larger tasks use the LLM,
-    /// anchored by the heuristic so it cannot wildly over-score small prompts.
-    /// Returns null only when even the deterministic heuristic could not be computed.
+    /// Maps a deterministic heuristic complexity score to an estimated number of atomic steps.
+    /// Used when the LLM assessor is unavailable/disabled so the step budget still exists.
     /// </summary>
-    private async Task<int?> AssessComplexityAsync(string prompt, string? cardId, CancellationToken ct, bool heuristicOnly = false)
+    private static int HeuristicAtomicStepEstimate(int heuristicScore)
     {
-        if (string.IsNullOrWhiteSpace(cardId)) return null;
-        if (_complexityScores.TryGetValue(cardId, out var cached)) return cached;
+        return heuristicScore switch
+        {
+            <= 10 => 1,
+            <= 25 => 2,
+            <= 45 => 3,
+            <= 65 => 4,
+            <= 85 => 5,
+            _ => 6
+        };
+    }
+
+    /// <summary>
+    /// Quick LLM call to assess task complexity (0-100) AND estimate how many atomic steps the
+    /// task will need. Only called when extendThinking is enabled. Trivial tasks are decided
+    /// deterministically with zero latency; larger tasks use the LLM, anchored by the heuristic
+    /// so it cannot wildly over-score small prompts. The atomic-step estimate feeds a planning
+    /// budget: once the plan reaches the estimate, the planner is strongly urged to stop rather
+    /// than add fluff steps (a hallucination guard against over-planning).
+    /// Returns (null, null) only when even the deterministic heuristic could not be computed.
+    /// </summary>
+    private async Task<(int? score, int? atomicSteps)> AssessComplexityAsync(string prompt, string? cardId, CancellationToken ct, bool heuristicOnly = false)
+    {
+        if (string.IsNullOrWhiteSpace(cardId)) return (null, null);
+        if (_complexityScores.TryGetValue(cardId, out var cached))
+        {
+            return (cached, _atomicStepEstimates.TryGetValue(cardId, out var cachedSteps) ? cachedSteps : (int?)null);
+        }
 
         try
         {
@@ -13153,7 +13359,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (heuristic <= 10)
             {
                 _complexityScores[cardId] = heuristic;
-                return heuristic;
+                var microSteps = HeuristicAtomicStepEstimate(heuristic);
+                _atomicStepEstimates[cardId] = microSteps;
+                return (heuristic, microSteps);
             }
 
             // Attached-file tasks are scoped to the attached set: the LLM assessor would read the
@@ -13162,54 +13370,67 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (heuristicOnly)
             {
                 _complexityScores[cardId] = heuristic;
-                return heuristic;
+                var scopedSteps = HeuristicAtomicStepEstimate(heuristic);
+                _atomicStepEstimates[cardId] = scopedSteps;
+                return (heuristic, scopedSteps);
             }
 
             var system = "You are a task complexity assessor. Given a coding task description, rate its complexity " +
-                "from 0 to 100. Be strict and prefer LOW scores — most small UI, styling and single-function " +
+                "from 0 to 100, AND estimate how many atomic steps (individual file edits / tool calls) it will " +
+                "take to complete. Be strict and prefer LOW scores — most small UI, styling and single-function " +
                 "changes are 0-10. Anchor points:\n" +
                 "0-10: Trivial -- a one-line change, typo/comment, renaming, changing a color/label/placeholder, " +
-                "adding auto-focus or scroll-into-view, a tiny CSS tweak.\n" +
-                "10-25: Simple -- adding a small property or field, changing a constant, a 2-5 line tweak in one file.\n" +
-                "25-45: Moderate -- adding a method with real logic, modifying several related lines in one file.\n" +
-                "45-65: Complex -- multi-file changes, new class/component, API endpoint, new route.\n" +
-                "65-85: Very complex -- architectural changes, database migrations, new subsystems.\n" +
-                "85-100: Extremely complex -- full feature implementation, system-wide refactoring.\n\n" +
-                "A task that touches a single function or a few lines of one file is never above 25. " +
-                "When in doubt, score LOWER.\n\n" +
-                "Output ONLY a single integer between 0 and 100. No explanation, no markdown.";
+                "adding auto-focus or scroll-into-view, a tiny CSS tweak. ~1 atomic step.\n" +
+                "10-25: Simple -- adding a small property or field, changing a constant, a 2-5 line tweak in one file. 1-2 steps.\n" +
+                "25-45: Moderate -- adding a method with real logic, modifying several related lines in one file. 2-3 steps.\n" +
+                "45-65: Complex -- multi-file changes, new class/component, API endpoint, new route. 3-5 steps.\n" +
+                "65-85: Very complex -- architectural changes, database migrations, new subsystems. 5-8 steps.\n" +
+                "85-100: Extremely complex -- full feature implementation, system-wide refactoring. 8+ steps.\n\n" +
+                "A task that touches a single function or a few lines of one file is never above 25 and never " +
+                "needs more than 2 steps. When in doubt, score LOWER and estimate FEWER steps — an underestimate " +
+                "is fine (it just encourages stopping early), an overestimate invites unnecessary busywork.\n\n" +
+                "Output ONLY a single JSON object, no explanation, no markdown:\n" +
+                "{\"score\": 0-100, \"atomicSteps\": N}";
 
-            var user = $"Rate the complexity of this coding task (a deterministic heuristic estimated {heuristic}/100 — " +
-                $"your score should be close to that unless the task is genuinely harder):\n\n{prompt}";
+            var user = $"Rate the complexity and estimate the atomic steps for this coding task " +
+                $"(a deterministic heuristic estimated {heuristic}/100 — your score should be close to that " +
+                $"unless the task is genuinely harder):\n\n{prompt}";
 
             var (raw, error) = await CallLlmRawText(system, user, false, ct,
-                requestTimeout: _infiniteTimeout, maxTokens: 10);
+                requestTimeout: _infiniteTimeout, maxTokens: 30);
 
             if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
             {
                 // LLM unavailable: fall back to the heuristic instead of the full thinking budget.
                 _complexityScores[cardId] = heuristic;
-                return heuristic;
+                var fallbackSteps = HeuristicAtomicStepEstimate(heuristic);
+                _atomicStepEstimates[cardId] = fallbackSteps;
+                return (heuristic, fallbackSteps);
             }
 
-            var match = Regex.Match(raw.Trim(), @"\d+");
-            if (match.Success && int.TryParse(match.Value, out var score))
+            var scoreMatch = Regex.Match(raw, @"""score""" + @"\s*:\s*(\d+)", RegexOptions.IgnoreCase);
+            var stepsMatch = Regex.Match(raw, @"""atomicSteps""" + @"\s*:\s*(\d+)", RegexOptions.IgnoreCase);
+            var score = heuristic;
+            if (scoreMatch.Success && int.TryParse(scoreMatch.Groups[1].Value, out var parsedScore))
             {
-                score = Math.Clamp(score, 0, 100);
+                score = Math.Clamp(parsedScore, 0, 100);
                 // Guard against the assessor over-scoring small prompts: the ceiling applies only
                 // when the heuristic is a *confident* low (short text or micro-task signal). The
                 // 30/38/45 defaults — and the 55 large-signal floor — release the LLM to score
                 // genuinely complex keyword-less tasks freely.
                 if (heuristic <= 20)
                     score = Math.Min(score, heuristic + 20);
-                _complexityScores[cardId] = score;
-                return score;
             }
-            return heuristic;
+            var steps = HeuristicAtomicStepEstimate(score);
+            if (stepsMatch.Success && int.TryParse(stepsMatch.Groups[1].Value, out var parsedSteps))
+                steps = Math.Clamp(parsedSteps, 1, 30);
+            _complexityScores[cardId] = score;
+            _atomicStepEstimates[cardId] = steps;
+            return (score, steps);
         }
         catch
         {
-            return null;
+            return (null, null);
         }
     }
     private static string CapThinking(string raw)
@@ -16190,7 +16411,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
     private async Task<(bool isComplete, string reason)> AssessCompletion(
         string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
-        AgentPlan? plan = null, List<string>? attachedFiles = null)
+        AgentPlan? plan = null, List<string>? attachedFiles = null, int? atomicStepEstimate = null)
     {
         var editSteps = executedSteps.OfType<Dictionary<string, object?>>()
             .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "edit")
@@ -16206,6 +16427,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         var sb = new StringBuilder();
         sb.AppendLine("## Task"); sb.AppendLine(prompt); sb.AppendLine();
+        if (atomicStepEstimate is > 0)
+        {
+            var executed = plan?.Plan?.Count ?? editSteps.Count;
+            sb.AppendLine($"## Step budget\nThe planner estimated this task needs ~{atomicStepEstimate} atomic step(s); " +
+                $"{executed} step(s) were executed. If the explicit request appears satisfied, prefer complete=true " +
+                "— do NOT invent additional requirements just because the estimate suggests more work. " +
+                "Exceeding the estimate is not a failure; an unmet EXPLICIT requirement is.\n");
+        }
         if (plan?.Plan?.Count > 0)
         {
             sb.AppendLine("## Planned steps");

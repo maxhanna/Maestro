@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
@@ -358,6 +359,396 @@ public class FormatCCorpusTests
         var (insertVerdict, insertReason) = InvokePreEditValidation(insertStep.NewString, insertStep);
         Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, insertVerdict);
         Assert.Contains("already present", insertReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  PREEDITVALIDATION FUZZ — insert/remove/replace × drift × applied states
+    // ═══════════════════════════════════════════════════════════════════════════
+    // The deterministic guard itself is now fuzzed: for seeded random steps across
+    // .html/.ts/.cs, the verdict must be Proceed EXACTLY when the edit is pending
+    // (pristine file) and AlreadyDone EXACTLY when it has been applied (pure
+    // substitution) — with survivor fragments, whitespace drift, and quote drift
+    // never causing a false skip or a double apply.
+
+    [Fact]
+    public void Fuzz_PreEditValidation_InsertRemoveReplace_DriftAndAppliedStates()
+    {
+        const int docCount = 36;
+        var checkedDocs = 0;
+        for (var i = 0; i < docCount; i++)
+        {
+            var rng = FuzzHarness.SeededRng(88_001, i, 104729);
+            var ext = (i % 3) switch { 0 => ".html", 1 => ".ts", _ => ".cs" };
+            var shape = (i / 3) % 4; // 0 insert, 1 remove, 2 replace, 3 survivor-remove
+            var content = BuildPreEditDoc(ext, rng, out var anchor, out var target, out var token);
+            // The removal-detection keyword must be something that DISAPPEARS once the
+            // edit is applied. For .html the identifier lives in the target's id attribute;
+            // for .ts/.cs it is the method name ({token} + index 1, the second block).
+            var removalKeyword = ext == ".html"
+                ? Regex.Match(target, @"id=""([\w.\-]+)""").Groups[1].Value
+                : $"{token}1";
+            var step = new PlanStep { File = $"src/file{ext}", LineNumber = 1 };
+
+            switch (shape)
+            {
+                case 0: // INSERT: anchor + new content after it
+                    step.Change = "Add a new block to the file";
+                    var newBlock = PreEditNewBlock(ext, rng.Next(10_000, 99_999));
+                    step.OldString = anchor;
+                    step.NewString = anchor + "\n" + newBlock;
+                    break;
+                case 1: // REMOVE: target block → empty
+                    step.Change = $"Remove the {removalKeyword} block from the file";
+                    step.OldString = target;
+                    step.NewString = "";
+                    break;
+                case 2: // REPLACE: target block → rewritten block
+                    step.Change = $"Rewrite the {removalKeyword} block in the file";
+                    step.OldString = target;
+                    step.NewString = PreEditNewBlock(ext, rng.Next(10_000, 99_999));
+                    break;
+                default: // SURVIVOR REMOVE: full block → its LAST line (closing tag/brace).
+                    // The survivor must NOT carry the identifier, so after apply the keyword is
+                    // gone and the removal is genuinely detectable as already-done.
+                    step.Change = $"Remove the {removalKeyword} block and its body from the file";
+                    step.OldString = target;
+                    step.NewString = SurvivorFragment(target);
+                    break;
+            }
+
+            // ── PRISTINE (edit pending) → MUST be Proceed ──
+            var (v1, r1) = InvokePreEditValidation(content, step);
+            Assert.True(v1 == AgentUtilities.PreEditVerdict.Proceed,
+                $"doc {i} ({ext} shape {shape}): pending edit must Proceed, got {v1}: {r1}");
+
+            // ── APPLIED (pure substitution) → MUST be AlreadyDone (no double-apply) ──
+            // Self-documenting generator guard: the oldString must genuinely exist in the
+            // pristine content (otherwise Proceed/AlreadyDone would be vacuous).
+            Assert.Contains(step.OldString, content, StringComparison.Ordinal);
+            var applied = content.Replace(step.OldString, step.NewString);
+            Assert.NotEqual(content, applied); // substitution actually changed the file
+            var (v2, r2) = InvokePreEditValidation(applied, step);
+            Assert.True(v2 == AgentUtilities.PreEditVerdict.AlreadyDone,
+                $"doc {i} ({ext} shape {shape}): applied edit must AlreadyDone, got {v2}: {r2}");
+
+            // ── WHITESPACE-DRIFTED oldString on PRISTINE → still Proceed (tolerant) ──
+            var wsStep = CloneStep(step);
+            wsStep.OldString = IndentLines(step.OldString, "  ");
+            if (!string.IsNullOrEmpty(step.NewString))
+                wsStep.NewString = IndentLines(step.NewString, "  ");
+            var (v3, r3) = InvokePreEditValidation(content, wsStep);
+            Assert.True(v3 == AgentUtilities.PreEditVerdict.Proceed,
+                $"doc {i} ({ext} shape {shape}): whitespace drift must not false-skip, got {v3}: {r3}");
+
+            // ── QUOTE-DRIFTED oldString (HTML only) → still Proceed ──
+            if (ext == ".html" && shape is 1 or 2 or 3)
+            {
+                var qStep = CloneStep(step);
+                qStep.OldString = step.OldString.Replace("\"", "'");
+                if (!string.IsNullOrEmpty(step.NewString))
+                    qStep.NewString = step.NewString.Replace("\"", "'");
+                var (v4, r4) = InvokePreEditValidation(content, qStep);
+                Assert.True(v4 == AgentUtilities.PreEditVerdict.Proceed,
+                    $"doc {i} ({ext} shape {shape}): quote drift must not false-skip, got {v4}: {r4}");
+            }
+
+            // ── CONTENT-SENSITIVITY proof: the same step yields Proceed on pristine and
+            // AlreadyDone on applied — the guard is not a blanket skip (that contrast is
+            // v1 vs v2 above). Re-running the APPLIED file a second time stays stable.
+            var (v5, _) = InvokePreEditValidation(applied, step);
+            Assert.True(v5 == AgentUtilities.PreEditVerdict.AlreadyDone,
+                $"doc {i}: applied re-run must stay AlreadyDone (stable, no double-apply), got {v5}");
+
+            checkedDocs++;
+        }
+        FuzzHarness.AssertAllDocsChecked(checkedDocs, docCount, "PreEditValidation insert/remove/replace fuzz");
+    }
+
+    private static PlanStep CloneStep(PlanStep step) => new()
+    {
+        File = step.File, Change = step.Change, LineNumber = step.LineNumber,
+        OldString = step.OldString, NewString = step.NewString, TargetSymbol = step.TargetSymbol,
+        Edits = step.Edits, TargetType = step.TargetType, TargetName = step.TargetName,
+        InsertAfter = step.InsertAfter, NewCode = step.NewCode, FullFile = step.FullFile
+    };
+
+    /// <summary>A random valid-ish doc with an anchor block, a target block, and a
+    /// unique token embedded in the target so the removal keyword resolves.</summary>
+    private static string BuildPreEditDoc(string ext, Random rng, out string anchor, out string target, out string token)
+    {
+        var tokenVal = $"tok{rng.Next(100, 999)}";
+        token = tokenVal;
+        var count = 2 + rng.Next(3);
+        var blocks = Enumerable.Range(0, count).Select(k => PreEditBlock(ext, tokenVal, k, rng.Next(1, 9))).ToList();
+        anchor = blocks[0];
+        target = blocks[1];
+        return ext switch
+        {
+            ".html" => "<main>\n" + string.Join("\n", blocks) + "\n</main>",
+            ".ts" => "export class Sample {\n" + string.Join("\n\n", blocks) + "\n}\n",
+            _ => "public class Sample\n{\n" + string.Join("\n\n", blocks) + "\n}\n"
+        };
+    }
+
+    private static string PreEditBlock(string ext, string token, int idx, int num) => ext switch
+    {
+        ".html" => $"  <div class=\"card\" id=\"{token}-{idx}\">\n" +
+                    $"    <span class=\"tag\">{token}-{idx}-{num}</span>\n  </div>",
+        ".ts" => $"  {token}{idx}(): void {{\n    this.count = {num};\n  }}",
+        _ => $"    public void {token}{idx}()\n    {{\n        var tmp = {num};\n    }}"
+    };
+
+    private static string PreEditNewBlock(string ext, int num) => ext switch
+    {
+        ".html" => $"  <div class=\"card\" id=\"new-{num}\">\n    <span class=\"tag\">NEW{num}</span>\n  </div>",
+        ".ts" => $"  newMethod{num}(): void {{\n    this.count = {num};\n  }}",
+        _ => $"    public void NewMethod{num}()\n    {{\n        var tmp = {num};\n    }}"
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  EXECUTOR/AUDITOR AGREEMENT — IsRemovalAlreadyApplied ≡ PreEditValidation
+    // ═══════════════════════════════════════════════════════════════════════════
+    // The plan auditor (PlanPreAuditAsync) and the executor guard (PreEditValidation)
+    // must AGREE on every deletion. Both now route through the shared
+    // IsRemovalAlreadyApplied helper; this corpus asserts the agreement is total across
+    // the same insert/remove/replace/survivor shapes and applied states as the guard fuzz
+    // above — including FORMAT D targetName carriers.
+
+    /// <summary>
+    /// Invokes the shared <c>AgentController.IsRemovalAlreadyApplied</c> (private static)
+    /// — the single source of truth for "is this deletion already applied?" used by both
+    /// PreEditValidation and PlanPreAuditAsync.
+    /// </summary>
+    private static bool InvokeIsRemovalAlreadyApplied(string content, PlanStep step)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "IsRemovalAlreadyApplied", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("IsRemovalAlreadyApplied not found");
+        return (bool)(method.Invoke(null, new object?[] { content, step }) ?? false);
+    }
+
+    [Fact]
+    public void Fuzz_IsRemovalAlreadyApplied_AgreesWithPreEditValidation()
+    {
+        const int docCount = 36;
+        var checkedDocs = 0;
+        for (var i = 0; i < docCount; i++)
+        {
+            var rng = FuzzHarness.SeededRng(88_201, i, 104729);
+            var ext = (i % 3) switch { 0 => ".html", 1 => ".ts", _ => ".cs" };
+            var shape = (i / 3) % 4;
+            var content = BuildPreEditDoc(ext, rng, out var anchor, out var target, out var token);
+            var removalKeyword = ext == ".html"
+                ? Regex.Match(target, @"id=""([\w.\-]+)""").Groups[1].Value
+                : $"{token}1";
+            var step = new PlanStep { File = $"src/file{ext}", LineNumber = 1 };
+
+            switch (shape)
+            {
+                case 0:
+                    step.Change = "Add a new block to the file";
+                    var newBlock = PreEditNewBlock(ext, rng.Next(10_000, 99_999));
+                    step.OldString = anchor;
+                    step.NewString = anchor + "\n" + newBlock;
+                    break;
+                case 1:
+                    step.Change = $"Remove the {removalKeyword} block from the file";
+                    step.OldString = target;
+                    step.NewString = "";
+                    break;
+                case 2:
+                    step.Change = $"Rewrite the {removalKeyword} block in the file";
+                    step.OldString = target;
+                    step.NewString = PreEditNewBlock(ext, rng.Next(10_000, 99_999));
+                    break;
+                default:
+                    step.Change = $"Remove the {removalKeyword} block and its body from the file";
+                    step.OldString = target;
+                    step.NewString = SurvivorFragment(target);
+                    break;
+            }
+
+            // AGREEMENT on pristine: executor says Proceed (or Irrelevant for non-removal
+            // shapes) ⇒ IsRemovalAlreadyApplied must be FALSE. For remove/survivor shapes the
+            // verdict is deterministically Proceed on the pending file.
+            var (verdict, _) = InvokePreEditValidation(content, step);
+            var applied1 = InvokeIsRemovalAlreadyApplied(content, step);
+            if (shape is 1 or 3)
+            {
+                Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, verdict);
+                Assert.False(applied1, $"doc {i} ({ext} shape {shape}): pending removal must not be 'already applied'");
+            }
+
+            // AGREEMENT on applied: PreEditValidation ⇒ AlreadyDone ⟺ IsRemovalAlreadyApplied.
+            // The helper's contract is about DELETIONS (shapes 1/2/3 carry a removal target);
+            // the insert shape (0) has no removal target, so only the double-apply guard is
+            // asserted there (newString already present ⇒ AlreadyDone).
+            var appliedContent = content.Replace(step.OldString, step.NewString);
+            var (verdict2, _) = InvokePreEditValidation(appliedContent, step);
+            var applied2 = InvokeIsRemovalAlreadyApplied(appliedContent, step);
+            if (shape is 1 or 3)
+            {
+                Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, verdict2);
+                Assert.True(applied2, $"doc {i} ({ext} shape {shape}): applied removal must be 'already applied'");
+            }
+            else if (shape == 2)
+            {
+                // Replace applied: the executor guard sees the new block present (AlreadyDone)
+                // and the helper sees the OLD target block gone (already applied) — agreement.
+                Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, verdict2);
+                Assert.True(applied2, $"doc {i} ({ext} shape 2): applied replace must be 'already applied'");
+            }
+            else
+            {
+                Assert.True(verdict2 == AgentUtilities.PreEditVerdict.AlreadyDone,
+                    $"doc {i} ({ext} shape 0): applied insert must be AlreadyDone (double-apply guard), got {verdict2}");
+            }
+
+            // FORMAT D deletion carrier: targetType=html + targetName + empty newCode must
+            // agree with the same content states. Only removal shapes (1/2/3) remove the
+            // target block — the insert shape (0) keeps it, so its applied content cannot be
+            // used to prove the FORMAT D removal is done.
+            if (ext == ".html" && shape is 1 or 2 or 3)
+            {
+                var fmtStep = new PlanStep
+                {
+                    File = "src/file.html",
+                    Change = $"Remove the {removalKeyword} card block from the page",
+                    TargetType = "html",
+                    TargetName = target
+                };
+                Assert.False(InvokeIsRemovalAlreadyApplied(content, fmtStep),
+                    $"doc {i}: FORMAT D pending removal must not be already applied");
+                Assert.True(InvokeIsRemovalAlreadyApplied(appliedContent, fmtStep),
+                    $"doc {i}: FORMAT D applied removal must be already applied");
+
+                // FORMAT D replace-with-survivor: TargetName = full block, NewCode = [survivor]
+                // (the survivor fragment). The helper must delegate to FormatDAlreadyDoneVerdict
+                // so the survivor's presence never proves the removal done — only the full
+                // TargetName block being absent does. This is the executor/auditor agreement the
+                // reviewer flagged as a gap.
+                var fmtSurvivorStep = new PlanStep
+                {
+                    File = "src/file.html",
+                    Change = $"Remove the {removalKeyword} card block from the page",
+                    TargetType = "html",
+                    TargetName = target,
+                    NewCode = new List<string> { SurvivorFragment(target) }
+                };
+                Assert.False(InvokeIsRemovalAlreadyApplied(content, fmtSurvivorStep),
+                    $"doc {i}: FORMAT D survivor pending must not be already applied");
+                Assert.True(InvokeIsRemovalAlreadyApplied(appliedContent, fmtSurvivorStep),
+                    $"doc {i}: FORMAT D survivor applied must be already applied");
+            }
+
+            checkedDocs++;
+        }
+        FuzzHarness.AssertAllDocsChecked(checkedDocs, docCount, "executor/auditor removal agreement");
+    }
+
+    [Fact]
+    public void IsRemovalAlreadyApplied_SurvivorFragment_AgreesOnBothStates()
+    {
+        // Byte-mirror of the kanban priority-badge deletion: oldString = BENCH + priority,
+        // newString = BENCH. The survivor's presence must NOT make either path declare the
+        // removal done while the FULL block still exists.
+        var survivor = "<span class=\"card-tag tag-bench\" ng-if=\"card._benchmark\" style=\"color:#e5c07b;font-weight:700;\">BENCH</span>";
+        var target = " <span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>";
+        var file = survivor + "\n" + target;
+        var step = new PlanStep
+        {
+            File = "wwwroot/kanban.html",
+            Change = "Remove priority badge from To Do column cards",
+            OldString = survivor + "\n" + target,
+            NewString = survivor
+        };
+
+        // Pending: both paths agree the removal still needs to happen.
+        var (v1, r1) = InvokePreEditValidation(file, step);
+        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, v1);
+        Assert.False(InvokeIsRemovalAlreadyApplied(file, step));
+
+        // Applied (survivor only): both paths agree the removal is done.
+        var (v2, r2) = InvokePreEditValidation(survivor, step);
+        Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, v2);
+        Assert.True(InvokeIsRemovalAlreadyApplied(survivor, step));
+    }
+
+    [Fact]
+    public void IsRemovalAlreadyApplied_ShortFormatDTarget_WhitespaceDrift_NotAlreadyDone()
+    {
+        // Reviewer-flagged blind spot: FormatDTargetBlockAbsent's collapsed fallback only
+        // trusts a negative match for blocks whose collapsed form is ≥ 15 chars. A SHORT
+        // FORMAT D target (< 15 chars collapsed) still present with intra-token whitespace
+        // drift must NOT be declared already-done — the removal hasn't applied yet, and
+        // skipping it would silently leave the drifted block in the file. The guard is
+        // conservative: short snippets that can't be confirmed absent stay "present".
+        var driftedFile = "<div class=\"wrap\">\n  <p >x</p>\n</div>";
+        var shortTarget = "<p>x</p>"; // collapsed length 8 < 15 — exact, trim, and collapsed
+                                       // containment all fail against <p >x</p>, so "absent"
+                                       // must NOT be assumed.
+        var step = new PlanStep
+        {
+            File = "src/file.html",
+            Change = "Remove the paragraph block from the page",
+            TargetType = "html",
+            TargetName = shortTarget
+        };
+
+        Assert.False(InvokeIsRemovalAlreadyApplied(driftedFile, step),
+            "short drifted target is still present — must NOT be declared already done");
+        var (verdict, _) = InvokePreEditValidation(driftedFile, step);
+        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, verdict);
+
+        // Documented tradeoff (conservative direction): a SHORT target that can't be
+        // confirmed absent — including one genuinely gone — is never declared already-done.
+        // Collapsed matching is unreliable under 15 chars (short snippets are substrings of
+        // nearly any file), so the guard prefers a spurious re-attempt over a false skip
+        // that would silently leave a drifted block behind. The executor's own anchor-fail
+        // error path then reports "block not found" for genuinely-removed short blocks.
+        var absentFile = "<div class=\"wrap\">\n  <span>kept</span>\n</div>";
+        Assert.False(InvokeIsRemovalAlreadyApplied(absentFile, step),
+            "short target: absence can't be confirmed under 15 collapsed chars — conservative 'present'");
+    }
+
+    [Fact]
+    public void IsRemovalAlreadyApplied_LongFormatDTarget_DriftedStillPresent_NotAlreadyDone()
+    {
+        // Positive control for the ≥ 15-char collapsed path: a LONG FORMAT D target present
+        // with indentation/line-break drift must be caught by the collapsed containment
+        // check (present → not already-done). Regression guard for the conservative flip.
+        var longTarget = "<div class=\"card\">\n  <span class=\"tag\">ready</span>\n</div>";
+        var driftedFile = "<main>\n    <div class=\"card\">\n        <span class=\"tag\">ready</span>\n    </div>\n</main>";
+        var step = new PlanStep
+        {
+            File = "src/file.html",
+            Change = "Remove the card block from the page",
+            TargetType = "html",
+            TargetName = longTarget
+        };
+
+        Assert.False(InvokeIsRemovalAlreadyApplied(driftedFile, step),
+            "long drifted target still present — collapsed containment must catch it");
+
+        // Genuinely gone → already done (collapsed negative match trusted for long blocks).
+        var absentFile = "<main>\n  <span>kept</span>\n</main>";
+        Assert.True(InvokeIsRemovalAlreadyApplied(absentFile, step),
+            "long target gone — collapsed negative match trusted");
+    }
+
+    /// <summary>A strict fragment (LAST line: closing tag/brace) of a block — the survivor
+    /// shape. Choosing the closing line means the removed portion carries the block's
+    /// identifier, so the already-done detection stays sound after the apply.</summary>
+    private static string SurvivorFragment(string block)
+    {
+        var nl = block.LastIndexOf('\n');
+        return nl < 0 ? block : block[(nl + 1)..];
+    }
+
+    private static string IndentLines(string s, string indent)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        return string.Join("\n", s.Replace("\r\n", "\n").Split('\n').Select(l => indent + l));
     }
 
     private static int CountOccurrences(string haystack, string needle)
