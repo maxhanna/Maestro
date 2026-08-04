@@ -113,7 +113,7 @@ partial class AgentController
             new { role = "system", content = systemPrompt },
             new { role = "user",   content = userMessage  }
         };
-        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens);
@@ -131,7 +131,7 @@ partial class AgentController
             new { role = "system", content = systemPrompt },
             new { role = "user",   content = userMessage  }
         };
-        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens, emitSse);
@@ -366,7 +366,7 @@ partial class AgentController
                          "Trace the logic. What is the exact root cause of the issue, and which methods are affected?";
         try
         {
-            var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, userPrompt, emitSse, ct, requestTimeout: TimeSpan.FromSeconds(45), maxTokens: 500);
+            var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, userPrompt, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 500);
             if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
             var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
@@ -491,7 +491,7 @@ partial class AgentController
             new { role = "system", content = systemPrompt },
             new { role = "user",   content = userMessage  }
         };
-        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var cfg = await LoadConfigAsync();

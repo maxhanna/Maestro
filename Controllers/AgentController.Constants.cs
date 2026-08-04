@@ -1,4 +1,5 @@
 namespace Weaver.Controllers;
+
 partial class AgentController
 {
     private const int MAX_INCREMENTAL_STEPS = 24;
@@ -7,8 +8,7 @@ partial class AgentController
     private const int MAX_COMMAND_ITERATIONS = 30;
     private const int PLAN_SCORE_THRESHOLD = 65;
     private const int MAX_PLANNING_ITERATIONS = 1;
-    private const int MAX_LINES_PER_DISCOVERY_FILE = 10000;
-    private const int MAX_DISCOVERY_FILES = 20;
+    private const int MAX_DISCOVERY_FILES = 40;
     public const string D_OLD = "<<<OLD>>>";
     public const string D_OLD_END = "<<<END_OLD>>>";
     public const string D_NEW = "<<<NEW>>>";

@@ -2,7 +2,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Weaver.Services;
-
 namespace Weaver.Controllers;
 
 partial class AgentController
@@ -10,7 +9,6 @@ partial class AgentController
     private static string BuildEditSystemPrompt(string editFormat)
     {
         var intro = "You are a surgical code editor. Output ONLY a JSON object.\n\n";
-
         var formatSection = editFormat switch
         {
             "format_c_insert" =>
@@ -26,7 +24,6 @@ partial class AgentController
                 "  - insertAfter MUST be true.\n" +
                 "  - newCode is the COMPLETE new method including signature and body. Can be a string or array of lines.\n" +
                 "  - Do NOT use any other format. Do NOT return alreadyDone. Do NOT use fullFile.\n\n",
-
             "delete" =>
                 "You are DELETING code. Use this format:\n" +
                 "{\n" +
@@ -36,7 +33,6 @@ partial class AgentController
                 "  - oldString = EXACT lines to remove (1-5 lines max). Copy verbatim from the file.\n" +
                 "  - newString = empty array [].\n" +
                 "  - NEVER include surrounding container lines — delete ONLY what's asked.\n\n",
-
             "format_c_class_fill" =>
                 "You MUST use FORMAT C to fill an EXISTING class body with new property/field declarations:\n" +
                 "{\n" +
@@ -49,7 +45,6 @@ partial class AgentController
                 "  - newCode MUST contain ONLY the new property/field lines to insert inside the class body — one per line.\n" +
                 "  - Do NOT repeat the class declaration or braces in newCode. Do NOT set insertAfter.\n" +
                 "  - Do NOT use oldString/newString.\n\n",
-
             _ =>
                 "Use oldString/newString targeted edit format:\n" +
                 "{\n" +
@@ -61,7 +56,6 @@ partial class AgentController
                 "But LEADING whitespace (indentation) is REQUIRED.\n" +
                 "  For single-line: {\"oldString\": \"line1\\nline2\", \"newString\": \"replacement line 1\\nreplacement line 2\"}\n\n"
         };
-
         var commonRules =
             "CRITICAL RULES:\n" +
             "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation).\n" +
@@ -83,10 +77,8 @@ partial class AgentController
                 "The endpoint method itself only contains INSERT/UPDATE/SELECT against the table.\n" +
              "14. NEVER write `{{ex.Message}}` inside an interpolated string — use `{ex.Message}` with single braces.\n" +
              "15. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form. Only add comments if the change description explicitly asks for them.\n";
-
         return intro + formatSection + commonRules;
     }
-
     private static string BuildFullFileSystemPrompt()
     {
         return
@@ -104,7 +96,6 @@ partial class AgentController
             "3. NEVER INVENT type names or property names. Every type/property you reference MUST exist in the project.\n" +
             "4. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form.\n";
     }
-
     private static string BuildVerifyEditUserPrompt() =>
             "You are a meticulous code reviewer verifying a single edit step in a larger plan. " +
             "Your job is to decide whether to KEEP the edit (it correctly implements the step " +
@@ -178,7 +169,6 @@ partial class AgentController
             " * PLACEHOLDER STUBS ARE FATAL: If the NEW code is a placeholder/stub implementation — a method body that is ONLY a console.log(...) call, contains a '// Placeholder implementation', '// TODO: implement', or '// stub' comment, an empty method body { }, or 'throw new NotImplementedException()' — ABANDON with reason 'placeholder stub — implement real logic'. The step asked for a real implementation.\n" +
             " * SYNTAX ERRORS ARE FATAL: If the edit has malformed HTML (e.g., `({ {x}}`), mismatched braces, or incorrect Angular syntax in the NEW code itself, ABANDON immediately. " +
             "  Do not create a repair step for syntax errors; the system will automatically retry the edit with the failure context.\n";
-
     private static string BuildStepExplorationSystemPrompt() =>
         "You are a senior codebase navigation agent. Before a code change is applied, " +
         "your job is to understand exactly what needs to change, which existing code owns it, " +
@@ -237,7 +227,6 @@ partial class AgentController
         "FileEntry objects by file type.' If you cannot state the data source, you are NOT ready.\n" +
         "14. SERVICE METHOD SIGNATURES (CRITICAL): If the change involves calling a service method (e.g., `this.myService.doSomething(data)`), you MUST read the service file to verify the exact method name and parameters. If the method accepts an interface/model (e.g., `UserEvent`), you MUST read that interface definition to know the exact properties required. Do NOT guess the method signature or model properties.\n" +
         "15. DEPENDENCY INJECTION SCOPE: If a service is injected into the constructor (e.g., `private userEventService: UserEventService`), you MUST call it using `this.userEventService.methodName()`. Do NOT access it via `this.parentRef?.userEventService` or other component references unless explicitly instructed.\n";
-
     private static string BuildStepExplorationPrompt(
         PlanStep step,
         string originalPrompt,
@@ -248,11 +237,9 @@ partial class AgentController
         int round)
     {
         var sb = new StringBuilder();
-
         sb.AppendLine("## ORIGINAL TASK");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
-
         if (fullPlan?.Plan?.Count > 0)
         {
             sb.AppendLine("## FULL PLAN");
@@ -266,24 +253,20 @@ partial class AgentController
             }
             sb.AppendLine();
         }
-
         sb.AppendLine("## STEP TO IMPLEMENT");
         sb.AppendLine($"File:   {step.File}");
         sb.AppendLine($"Change: {step.Change}");
         sb.AppendLine();
-
         sb.AppendLine("## FILES ALREADY READ");
         if (alreadyRead.Count > 0)
             foreach (var f in alreadyRead) sb.AppendLine($"  - {f}");
         else
             sb.AppendLine("  (none yet)");
         sb.AppendLine();
-
         sb.AppendLine("## FILE CONTENTS");
         sb.AppendLine(string.IsNullOrWhiteSpace(explorationContext)
             ? "(no files read yet)"
             : explorationContext);
-
         sb.AppendLine();
         if (round == 0)
         {
@@ -300,10 +283,8 @@ partial class AgentController
             sb.AppendLine("  YES → ready=true + refinedChange naming the exact method and code change");
             sb.AppendLine("  NO  → ready=false + list remaining files (max 3, must not repeat)");
         }
-
         return sb.ToString();
     }
-
     private static string BuildIncrementalStepSystemPrompt(string stepMode = "all", List<string>? enabledTools = null)
     {
         var enabled = enabledTools != null && enabledTools.Count > 0
@@ -447,7 +428,6 @@ partial class AgentController
         }
         return sb.ToString();
     }
-
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string? steeringContext, List<string> rejectionFeedback, string? extendedReasoning = null)
@@ -491,7 +471,6 @@ partial class AgentController
         sb.AppendLine("Propose the NEXT step now, or declare the plan complete. Output ONLY JSON.");
         return sb.ToString();
     }
-
     private static string BuildIncrementalSubPlanSystemPrompt() =>
     "You are a senior software architect building a MULTI-STAGE execution plan ONE STAGE AT A TIME.\n" +
     "Each stage ('sub-plan') is a self-contained deliverable — a concrete file (or small related set) with a " +
@@ -520,7 +499,6 @@ partial class AgentController
     "5. If the whole task fits in ONE stage, propose that single stage, then declare metaPlanComplete=true next turn.\n" +
     "6. Only split into multiple stages when the task genuinely spans multiple files/layers — never manufacture " +
     "   stages for a single-file change.\n";
-
     private static string BuildIncrementalSubPlanUserPrompt(
         string originalPrompt, string discoveryContext, List<MetaPlanSubPlan> subPlansSoFar, List<string> rejectionFeedback)
     {
@@ -529,8 +507,7 @@ partial class AgentController
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
         sb.AppendLine("### DISCOVERY CONTEXT ###");
-        var ctx = discoveryContext.Length > 8000 ? discoveryContext[..8000] + "\n...(truncated)" : discoveryContext;
-        sb.AppendLine(ctx);
+        sb.AppendLine(discoveryContext);
         sb.AppendLine();
         sb.AppendLine("### STAGES SO FAR (already committed, in execution order) ###");
         if (subPlansSoFar.Count == 0) sb.AppendLine("(none yet — this will be the first stage)");
@@ -546,7 +523,6 @@ partial class AgentController
         sb.AppendLine("Propose the NEXT stage now, or declare the meta-plan complete. Output ONLY JSON.");
         return sb.ToString();
     }
-
     private static string BuildSubPlanPrompt(
   string originalPrompt,
   MetaPlanSubPlan subPlan,
@@ -560,14 +536,12 @@ partial class AgentController
         sb.AppendLine($"### SUB-PLAN {index}/{total}: {subPlan.Title} ###");
         sb.AppendLine("⚠ CRITICAL: You MUST plan ONLY the changes described in this specific sub-plan. Do NOT plan the entire original task. Do NOT plan steps for other sub-plans.");
         sb.AppendLine(subPlan.Description);
-
         if (!string.IsNullOrWhiteSpace(subPlan.ContextNote))
         {
             sb.AppendLine();
             sb.AppendLine("### CONTEXT FROM PRIOR SUB-PLANS (planned) ###");
             sb.AppendLine(subPlan.ContextNote);
         }
-
         if (!string.IsNullOrWhiteSpace(accumulatedResults))
         {
             sb.AppendLine();
@@ -576,7 +550,6 @@ partial class AgentController
             sb.AppendLine("You MUST use these exact symbol names and file paths in your plan:");
             sb.AppendLine(accumulatedResults);
         }
-
         sb.AppendLine();
         sb.AppendLine("### CONSTRAINTS ###");
         sb.AppendLine("1. Plan ONLY the changes described in this sub-plan — do NOT add steps for other sub-plans' work");
@@ -586,10 +559,8 @@ partial class AgentController
         sb.AppendLine("4. NEW SQL tables go in a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) writing migrations/*.sql — do NOT inline CREATE TABLE in the method body");
         sb.AppendLine("5. Do NOT re-describe or re-implement work from prior sub-plans");
         sb.AppendLine("6. Each step must be atomic: one coherent edit at one location in one file");
-
         return sb.ToString();
     }
-
     private static readonly Dictionary<string, string> AllTools = new()
     {
         ["_explore"] = "\"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.",
@@ -605,51 +576,35 @@ partial class AgentController
         ["_delete_file"] = "\"_delete_file\"        — Delete a file path in \"change\"",
         ["_show"] = "\"_show\"               — Display text to the user (use last)",
     };
-
     private static readonly HashSet<string> AlwaysEnabledTools = new()
     {
         "_done", "_checkpoint"
     };
-
-    /// <summary>
-    /// Filters the enabled tools list to only those relevant to the given prompt/step context.
-    /// Uses a quick LLM call to assess relevance — more accurate than keyword heuristics.
-    /// Always includes _explore, _show, _done, _checkpoint. Falls back to full list on failure.
-    /// </summary>
     private async Task<List<string>> FilterToolsForStepAsync(string? prompt, List<string>? enabledTools, CancellationToken ct)
     {
         if (enabledTools == null || enabledTools.Count == 0)
             return enabledTools ?? new List<string>();
-
         if (string.IsNullOrWhiteSpace(prompt))
             return enabledTools;
-
         var alwaysInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { "_explore", "_show", "_done", "_checkpoint" };
-
-        // Build a compact tool list for the LLM to classify
         var toolList = new StringBuilder();
         foreach (var tool in enabledTools)
         {
             if (AllTools.TryGetValue(tool, out var desc))
                 toolList.AppendLine($"  {desc}");
         }
-
         var system = "You are a tool relevance classifier. Given a coding task and a list of available tools, " +
             "return ONLY the tool names that COULD be useful for this task. " +
             "Always include: _explore, _show, _done, _checkpoint. " +
             "Output one tool name per line, nothing else. No markdown, no explanation.";
-
         var user = $"Task:\n{prompt}\n\nAvailable tools:\n{toolList}";
-
         try
         {
             var (raw, error) = await CallLlmRawText(system, user, false, ct,
-                requestTimeout: TimeSpan.FromSeconds(10), maxTokens: 200);
-
+                requestTimeout: _infiniteTimeout, maxTokens: 200);
             if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
-                return enabledTools; // fallback on failure
-
+                return enabledTools;
             var selected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var line in raw.Split('\n'))
             {
@@ -657,26 +612,17 @@ partial class AgentController
                 if (trimmed.StartsWith('_') && trimmed.Length < 30)
                     selected.Add(trimmed);
             }
-
-            // Always include core tools
             foreach (var t in alwaysInclude) selected.Add(t);
-
-            // Unknown tools (not in AllTools dict) — can't be classified, include by default
             foreach (var t in enabledTools)
                 if (!AllTools.ContainsKey(t)) selected.Add(t);
-
             var result = enabledTools.Where(t => selected.Contains(t)).ToList();
-
-            // Conservative: if filtering produced too few tools, return full list
-            // Threshold should be higher than the 4 always-included tools
             return result.Count < 6 ? enabledTools : result;
         }
         catch
         {
-            return enabledTools; // fallback on any error
+            return enabledTools;
         }
     }
-
     private static string BuildPlanningPrompt(List<string>? enabledTools = null)
     {
         var enabled = enabledTools != null && enabledTools.Count > 0
@@ -694,7 +640,9 @@ partial class AgentController
         foreach (var kvp in AllTools)
         {
             if (enabled == null || enabled.Contains(kvp.Key))
+            {
                 sb.Append("  ").Append(kvp.Value).Append('\n');
+            }
         }
         sb.Append("  \"_done\"               — Task is already complete; put reason in \"change\"\n");
         sb.Append("  \"_checkpoint\"         — Split large refactor into phases\n\n");
@@ -846,7 +794,6 @@ partial class AgentController
         sb.Append("Schema for NEW tables goes in a _sql_migration step; the endpoint only handles data.\n");
         return sb.ToString();
     }
-
     private static string BuildFailedEditHistory(List<object> allSteps)
     {
         var sb = new StringBuilder();
@@ -863,7 +810,6 @@ partial class AgentController
         }
         return sb.ToString();
     }
-     
     private async Task<string> BuildRequirementChecklistAsync(string prompt, CancellationToken ct, List<string>? attachedFiles = null)
     {
         var sys =
@@ -875,8 +821,6 @@ partial class AgentController
             "brand voice, etc.), that is a requirement. If the task implies the change must be VISIBLE/USED/" +
             "WIRED UP — not just exist as new code — that is always a requirement, even if not stated explicitly, " +
             "because 'add X so it does Y' always implies X actually gets called somewhere that produces Y.";
-        // When the user attached specific files, the checklist must stay scoped to that set —
-        // items about other files would drag outside-file references into the planner.
         if (attachedFiles is { Count: > 0 })
         {
             var attachedList = string.Join(", ", attachedFiles.Select(f => f.Replace('\\', '/')));
@@ -884,27 +828,23 @@ partial class AgentController
                    "Only extract requirements that apply to those attached files. " +
                    "Do NOT include requirements about any other files, symbols, tests, or code not present in the attached set.";
         }
-
         var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 400);
         if (string.IsNullOrWhiteSpace(raw))
         {
             return "";
-        } 
-
+        }
         try
         {
             var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
             if (!doc.RootElement.TryGetProperty("requirements", out var arr) || arr.ValueKind != JsonValueKind.Array)
                 return "";
-
             var items = arr.EnumerateArray()
                 .Select(e => e.GetString())
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .Take(6)
                 .ToList();
             if (items.Count == 0) return "";
-
             var sb = new StringBuilder();
             sb.AppendLine("### EXPLICIT REQUIREMENTS CHECKLIST ###");
             sb.AppendLine("Verify EACH item individually against the actual code/content. A task is only complete " +
@@ -916,7 +856,6 @@ partial class AgentController
     }
     private static string PreviewForPrompt(string value, int maxChars) =>
         value.Length <= maxChars ? value : value[..maxChars] + "\n[truncated]";
-
     private static List<string> ParseBuildCommands(string buildCommands)
     {
         if (string.IsNullOrWhiteSpace(buildCommands)) return new List<string>();
@@ -924,7 +863,6 @@ partial class AgentController
         catch { }
         return new List<string> { buildCommands.Trim() };
     }
-
     private static string BuildReplanPrompt(string originalPrompt, List<string> history, string? steeringContext = null,
     AgentPlan? existingPlan = null, List<object>? executedSteps = null,
     string qualityCheckReason = "", string fileContents = "")
@@ -936,14 +874,12 @@ partial class AgentController
         sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
-
         if (existingPlan?.Plan?.Count > 0)
         {
             sb.AppendLine("## Existing plan with results");
             for (var i = 0; i < existingPlan.Plan.Count; i++)
             {
                 var step = existingPlan.Plan[i];
-
                 string? status = null;
                 string? output = null;
                 if (executedSteps != null)
@@ -978,9 +914,7 @@ partial class AgentController
             }
             sb.AppendLine();
         }
-
         sb.AppendLine("## Original task"); sb.AppendLine(originalPrompt); sb.AppendLine();
-
         if (!string.IsNullOrWhiteSpace(qualityCheckReason))
         {
             sb.AppendLine("## Quality check assessment");
@@ -988,11 +922,9 @@ partial class AgentController
             sb.AppendLine();
             sb.AppendLine("CRITICAL: The quality check above identifies specific missing implementations. You MUST create steps to implement exactly what it asks for. Do not return an empty plan if the quality check identifies missing methods or properties that need to be added.");
         }
-
         sb.AppendLine("## What went wrong");
         foreach (var h in history) sb.AppendLine(h);
         sb.AppendLine();
-
         if (!string.IsNullOrWhiteSpace(fileContents))
         {
             sb.AppendLine("## Current file contents");
@@ -1010,7 +942,6 @@ partial class AgentController
         sb.AppendLine("current file content above.");
         sb.AppendLine("⚠ CRITICAL: The Quality Check assessment below may claim something is missing. DO NOT blindly trust it.");
         sb.AppendLine("Read the file content yourself. If the code IS already there, return an EMPTY plan. The quality check LLM often hallucinates failures.");
-
         if (string.IsNullOrWhiteSpace(qualityCheckReason))
         {
             sb.AppendLine("NEVER introduce a property/variable name that does not already appear in the current file content above —");
@@ -1020,7 +951,6 @@ partial class AgentController
         {
             sb.AppendLine("If the quality check requires a new method or property, you MAY introduce it, but it must be exactly named as requested by the task or quality check.");
         }
-
         sb.AppendLine();
         sb.AppendLine("SCOPE DISCIPLINE — the #1 replan failure mode is scope drift:");
         sb.AppendLine("  * Do NOT reinterpret the original task. Read '## Original task' literally and stay on that topic.");
@@ -1038,7 +968,6 @@ partial class AgentController
         sb.AppendLine("Add at most 1 new step. If everything is done or you are unsure, return an EMPTY plan with no steps.");
         return sb.ToString();
     }
-
     private static string BuildLowScoreSteering(AgentPlan plan, string? prior)
     {
         var sb = new StringBuilder();
@@ -1052,7 +981,6 @@ partial class AgentController
         if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
         return sb.ToString();
     }
-
     private static string AppendExploreSteering(string? prior)
     {
         var sb = new StringBuilder();
@@ -1061,7 +989,6 @@ partial class AgentController
         if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
         return sb.ToString();
     }
-
     private static string BuildPlannerDiscoveryContext(string fullDiscovery)
     {
         if (string.IsNullOrWhiteSpace(fullDiscovery)) return fullDiscovery;
@@ -1086,46 +1013,24 @@ partial class AgentController
             result.AppendLine(lines[0]);
             var body = lines.Skip(1).ToArray();
             var numbered = body.Select((line, idx) => $"{idx + 1}: {line}").ToArray();
-            if (numbered.Length <= MAX_LINES_PER_DISCOVERY_FILE)
-            {
-                result.AppendLine(string.Join('\n', numbered));
-            }
-            else
-            {
-                var head = numbered.Take(MAX_LINES_PER_DISCOVERY_FILE / 2).ToArray();
-                var tail = numbered.Skip(numbered.Length - MAX_LINES_PER_DISCOVERY_FILE / 2).ToArray();
-                result.AppendLine(string.Join('\n', head));
-                result.AppendLine($"...({numbered.Length - MAX_LINES_PER_DISCOVERY_FILE} lines omitted — head and tail shown)...");
-                result.AppendLine(string.Join('\n', tail));
-                result.AppendLine($"...(truncated — full content used during execution)");
-            }
+            result.AppendLine(string.Join('\n', numbered));
             result.AppendLine();
             fileCount++;
         }
         return result.ToString();
     }
-
-    // ── EditStrategy-keyed system prompt ─────────────────────────────────────
-    // Single dispatch point: strategy → correct JSON schema for the LLM.
-    // All per-strategy text lives here. Nothing in AgentController.cs branches on
-    // "format_c_insert" / "old_new" / "delete" strings any more.
-
     internal static string BuildEditSystemPrompt(EditStrategy strategy) => strategy switch
     {
-        EditStrategy.InsertMethod  => BuildEditSystemPrompt("format_c_insert"),
+        EditStrategy.InsertMethod => BuildEditSystemPrompt("format_c_insert"),
         EditStrategy.FillClassBody => BuildEditSystemPrompt("format_c_class_fill"),
-        EditStrategy.DeleteLines   => BuildEditSystemPrompt("delete"),
+        EditStrategy.DeleteLines => BuildEditSystemPrompt("delete"),
         EditStrategy.CreateFile or EditStrategy.FullFileRewrite
                                    => BuildFullFileSystemPrompt(),
         EditStrategy.HtmlInsertAfter or EditStrategy.HtmlInsertBefore or EditStrategy.HtmlReplace
                                    => BuildEditSystemPrompt("old_new"), // FORMAT D is driven by user prompt, not system prompt
-        _                          => BuildEditSystemPrompt("old_new"),  // AnchoredEdit + ReplaceMethod
+        _ => BuildEditSystemPrompt("old_new"),  // AnchoredEdit + ReplaceMethod
     };
 }
-
-// ── Escalation state machine ─────────────────────────────────────────────────
-// Replaces the if (history.Count == 1) / (== 2) / else magic numbers.
-
 public enum EscalationLevel
 {
     /// <summary>First retry: copy oldString verbatim from displayed file content.</summary>
@@ -1135,18 +1040,14 @@ public enum EscalationLevel
     /// <summary>Third+ retry: switch format entirely (fullFile for non-HTML; HTML_PINPOINT for templates; FORMAT_C for C# method inserts).</summary>
     FormatSwitch,
 }
-
 public static class EscalationStateMachine
 {
-    /// <summary>Advance escalation level based on how many failures have occurred.</summary>
     public static EscalationLevel Level(int failureCount) => failureCount switch
     {
         0 => EscalationLevel.VerbatimCopy,
         1 => EscalationLevel.SingleLineAnchor,
         _ => EscalationLevel.FormatSwitch,
     };
-
-    /// <summary>Build the ESCALATION DIRECTIVE block for the retry prompt.</summary>
     public static void AppendEscalationDirective(
         System.Text.StringBuilder sb,
         EscalationLevel level,
@@ -1162,7 +1063,6 @@ public static class EscalationStateMachine
         sb.AppendLine("    'DoSomething', 'NewMethod', or 'PlaceholderMethod'. The method name MUST match what the task");
         sb.AppendLine("    asks for (e.g. if the task says 'add {method_name} method', use THAT exact name).");
         sb.AppendLine("    The newCode body MUST contain real implementation code — never '// body' or '// TODO'.");
-
         switch (level)
         {
             case EscalationLevel.VerbatimCopy:
@@ -1174,7 +1074,6 @@ public static class EscalationStateMachine
                 sb.AppendLine("  • If the file shows 'rgba(255, 255, 255, 0.03)' (with spaces), your oldString MUST");
                 sb.AppendLine("    contain 'rgba(255, 255, 255, 0.03)' — NOT 'rgba(255,255,255,0.03)'.");
                 break;
-
             case EscalationLevel.SingleLineAnchor:
                 sb.AppendLine("  STRATEGY: SINGLE_LINE_ANCHOR.");
                 sb.AppendLine("  • Drop your multi-line oldString. Pick the SINGLE most distinctive line in the");
@@ -1184,9 +1083,7 @@ public static class EscalationStateMachine
                 sb.AppendLine("    use `  display: flex;` as oldString and `  display: flex;\\n  flex-wrap: wrap;` as newString.");
                 sb.AppendLine("  • DO NOT include the entire rule block — that's what failed last time.");
                 break;
-
             case EscalationLevel.FormatSwitch:
-                // HTML/template: HTML_PINPOINT
                 if (fileExt is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte")
                 {
                     sb.AppendLine("  STRATEGY: HTML_PINPOINT — fullFile is BLOCKED for HTML/Angular templates.");
@@ -1194,9 +1091,8 @@ public static class EscalationStateMachine
                     sb.AppendLine("  2. Pick the SINGLE most unique line there (longest, appears only ONCE in the whole file).");
                     sb.AppendLine("  3. Use that one line VERBATIM as your entire oldString (≥20 chars).");
                     sb.AppendLine("  4. In newString: include that unchanged line, then add your new elements around it.");
-                    sb.AppendLine("  ⚠ Do NOT output fullFile — it will be rejected."); 
+                    sb.AppendLine("  ⚠ Do NOT output fullFile — it will be rejected.");
                 }
-                // C# new method insert: stay on FORMAT C
                 else if (strategy == EditStrategy.InsertMethod)
                 {
                     sb.AppendLine("  STRATEGY: FORMAT_C_INSERTION.");
@@ -1206,7 +1102,6 @@ public static class EscalationStateMachine
                     sb.AppendLine("    to the COMPLETE new method including [HttpPost] attribute, signature, and body.");
                     sb.AppendLine("  • Do NOT use fullFile and do NOT return alreadyDone — both will be rejected.");
                 }
-                // Everything else: full-file replacement (blocked for large files)
                 else
                 {
                     if (fileContent.Length > maxFullFileChars)
@@ -1230,7 +1125,6 @@ public static class EscalationStateMachine
                 }
                 break;
         }
-
         sb.AppendLine();
     }
 }

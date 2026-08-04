@@ -3296,10 +3296,29 @@ public static class AgentUtilities
         if (indentSize <= 0) return replacement;
         var lines = replacement.Split('\n');
         var depth = 0;
+        var inSingle = false;
+        var inDouble = false;
+        var inTemplate = false;
+        var inBlockComment = false;
         for (var i = 0; i < lines.Length; i++)
         {
             if (lines[i].Trim().Length == 0) continue;
             var trimmed = lines[i].TrimStart();
+            // Inside a template literal (e.g. Angular HTML templates, backtick
+            // strings): the content is verbatim text — never re-indent it and
+            // never count its braces as code. Only an UNESCAPED closing backtick
+            // matters; code after it on the same line is still scanned.
+            if (inTemplate)
+            {
+                var closeIdx = IndexOfUnescapedBacktick(trimmed);
+                if (closeIdx >= 0)
+                {
+                    inTemplate = false;
+                    ScanBraceDepth(trimmed[(closeIdx + 1)..],
+                        ref depth, ref inSingle, ref inDouble, ref inTemplate, ref inBlockComment);
+                }
+                continue;
+            }
             var lineDepth = depth;
             if (trimmed.StartsWith("}"))
                 lineDepth = Math.Max(0, lineDepth - 1);
@@ -3307,13 +3326,78 @@ public static class AgentUtilities
             var lineIndent = GetLeadingWhitespace(lines[i]);
             if (lineIndent != expectedIndent)
                 lines[i] = expectedIndent + trimmed;
-            foreach (var c in trimmed)
-            {
-                if (c == '{') depth++;
-                if (c == '}') depth = Math.Max(0, depth - 1);
-            }
+            ScanBraceDepth(trimmed,
+                ref depth, ref inSingle, ref inDouble, ref inTemplate, ref inBlockComment);
         }
         return string.Join("\n", lines);
+    }
+    /// <summary>
+    /// Finds the first backtick not preceded by an odd run of backslashes (i.e.
+    /// an unescaped closing backtick), or -1 if the template continues.
+    /// </summary>
+    private static int IndexOfUnescapedBacktick(string s)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] != '`') continue;
+            var slashes = 0;
+            for (var j = i - 1; j >= 0 && s[j] == '\\'; j--) slashes++;
+            if (slashes % 2 == 0) return i;
+        }
+        return -1;
+    }
+    /// <summary>
+    /// Counts code braces in a line while skipping braces inside single/double
+    /// quoted strings, template literals, line comments, and block comments
+    /// (including block comments that span multiple lines) — so `const s = "}";`,
+    /// `${x} {`, or a `{` on a comment continuation line never corrupts nesting.
+    /// </summary>
+    private static void ScanBraceDepth(string s,
+        ref int depth, ref bool inSingle, ref bool inDouble, ref bool inTemplate,
+        ref bool inBlockComment)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            var next = i + 1 < s.Length ? s[i + 1] : '\0';
+            if (inBlockComment)
+            {
+                if (c == '*' && next == '/') { inBlockComment = false; i++; }
+                continue;
+            }
+            if (inSingle)
+            {
+                if (c == '\\') i++;
+                else if (c == '\'') inSingle = false;
+                continue;
+            }
+            if (inDouble)
+            {
+                if (c == '\\') i++;
+                else if (c == '"') inDouble = false;
+                continue;
+            }
+            if (inTemplate)
+            {
+                if (c == '\\') i++;
+                else if (c == '`') inTemplate = false;
+                continue;
+            }
+            if (c == '/' && next == '/') return; // line comment: ignore rest
+            if (c == '/' && next == '*')
+            {
+                var end = s.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                if (end >= 0) { i = end + 1; continue; }
+                inBlockComment = true; // comment spans into following lines
+                i = s.Length;
+                continue;
+            }
+            if (c == '\'') { inSingle = true; continue; }
+            if (c == '"') { inDouble = true; continue; }
+            if (c == '`') { inTemplate = true; continue; }
+            if (c == '{') depth++;
+            else if (c == '}') depth = Math.Max(0, depth - 1);
+        }
     }
     public static int InferIndentSize(string[] fileLines, int start)
     {
@@ -4169,7 +4253,7 @@ public static class AgentUtilities
     }
     public static bool IsHtmlLikeContent(string content) =>
      content.Contains('<') && Regex.IsMatch(content, @"</?\w+[\s/>]");
-    public static string IndentReplacement(string[] fileLines, int start, string replacement)
+    public static string IndentReplacement(string[] fileLines, int start, string replacement, bool isHtmlDomFile = false)
     {
         if (string.IsNullOrEmpty(replacement) || start >= fileLines.Length)
             return replacement;
@@ -4197,7 +4281,7 @@ public static class AgentUtilities
                 }
             }
         }
-        if (IsHtmlLikeContent(replacement) && replLines.Length > 5)
+        if (isHtmlDomFile && IsHtmlLikeContent(replacement) && replLines.Length > 5)
         {
             return AgentUtilities.AutoIndentHtml(string.Join("\n", replLines), fileIndent);
         }
@@ -4210,6 +4294,55 @@ public static class AgentUtilities
         return distinctIndentDepths <= 1 && replLines.Length > 2
             ? AgentUtilities.AutoIndentFromFile(joined, fileIndent, fileLines, start)
             : joined;
+    }
+    /// <summary>
+    /// Re-indents an oldString/newString replacement snippet so it sits at the
+    /// matched block's base indentation, preserving relative nesting. HTML DOM
+    /// files (by EXTENSION, never content sniffing) get tag-depth re-indentation;
+    /// code files get brace-depth re-indentation. Content sniffing must not be
+    /// used here: TS/JS generics like `Promise&lt;void&gt;` contain '&lt;void&gt;' and
+    /// would be misdetected as HTML, flattening the entire snippet to base indent.
+    /// </summary>
+    public static List<string> ReindentReplacementSnippet(
+        List<string> newLinesArr, List<string> oldLinesArr,
+        List<string> fileLinesArr, int matchIdx, bool isHtmlDomFile)
+    {
+        var finalNewLines = new List<string>();
+        if (newLinesArr.Count == 0) return finalNewLines;
+        var baseIndent = Regex.Match(fileLinesArr[matchIdx], @"^(\s*)").Value;
+        var oldBaseIndent = Regex.Match(oldLinesArr[0], @"^(\s*)").Value;
+        foreach (var nl in newLinesArr)
+        {
+            if (string.IsNullOrWhiteSpace(nl))
+            {
+                finalNewLines.Add(nl);
+                continue;
+            }
+            var currentOldIndent = Regex.Match(nl, @"^(\s*)").Value;
+            string relativeIndent = currentOldIndent.Length >= oldBaseIndent.Length
+                ? currentOldIndent.Substring(oldBaseIndent.Length)
+                : "";
+            finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
+        }
+        var rawNew = string.Join("\n", finalNewLines);
+        if (isHtmlDomFile && IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
+        {
+            var stripped = finalNewLines
+                .Select(l => string.IsNullOrWhiteSpace(l) ? "" : l.TrimStart())
+                .ToList();
+            var fixedHtml = AutoIndentHtml(string.Join("\n", stripped), baseIndent);
+            finalNewLines = fixedHtml.Split('\n').ToList();
+        }
+        var rawAfter = string.Join("\n", finalNewLines);
+        if (!isHtmlDomFile && (rawAfter.Contains('{') || rawAfter.Contains('}')) &&
+            finalNewLines.Count > 2)
+        {
+            var fixedBraces = AutoIndentFromFile(
+                string.Join("\n", finalNewLines), baseIndent,
+                fileLinesArr.ToArray(), matchIdx);
+            finalNewLines = fixedBraces.Split('\n').ToList();
+        }
+        return finalNewLines;
     }
     public static string? BuildExactMatchHint(string content, string oldString)
     {

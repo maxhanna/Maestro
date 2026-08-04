@@ -67,7 +67,7 @@ public partial class AgentController : ControllerBase
             llmCaller: async (sys, usr, ct) =>
             {
                 var (raw, _, err) = await CallLlmRawStreaming(sys, usr, false, ct,
-                    requestTimeout: TimeSpan.FromMinutes(1), maxTokens: 512);
+                    requestTimeout: _infiniteTimeout, maxTokens: 512);
                 return (raw, err);
             },
             logger: (lvl, msg) =>
@@ -2456,7 +2456,7 @@ public partial class AgentController : ControllerBase
                         }
                         else
                         {
-                            sb.AppendLine(content[..6000] + $"\n... (truncated, full file is {content.Length} chars)");
+                            sb.AppendLine(content);
                         }
                     }
                     else
@@ -3233,7 +3233,7 @@ public partial class AgentController : ControllerBase
                 var (filterRaw, _, _) = await CallLlmRaw(
                     "You are a file relevance filter. Be concise and accurate.",
                     filterPrompt.ToString(),
-                    ct, TimeSpan.FromSeconds(15), maxTokens: 512);
+                    ct, _infiniteTimeout, maxTokens: 512);
                 if (!string.IsNullOrWhiteSpace(filterRaw))
                 {
                     var toRemove = filterRaw.Split('\n')
@@ -3384,7 +3384,7 @@ public partial class AgentController : ControllerBase
             + "Produce a crisp, specific, one-sentence re-description of this step's code change:";
         var (raw, _, _) = await CallLlmRaw(
             sysPrompt, userPrompt, ct,
-            TimeSpan.FromSeconds(20), maxTokens: 256);
+            _infiniteTimeout, maxTokens: 256);
         if (string.IsNullOrWhiteSpace(raw)) return null;
         var cleaned = raw.Trim().Trim('"').Trim();
         if (cleaned.Length > 250) cleaned = cleaned[..250] + "…";
@@ -3843,7 +3843,7 @@ public partial class AgentController : ControllerBase
             : EditIntentClassifier.ClassifyAsync(step.Change ?? "", relPath,
                 async (sys, usr, c) =>
                 {
-                    var (raw, _, err) = await CallLlmRaw(sys, usr, c, TimeSpan.FromSeconds(15), maxTokens: 128);
+                    var (raw, _, err) = await CallLlmRaw(sys, usr, c, _infiniteTimeout, maxTokens: 128);
                     return (raw, err);
                 }, ct);
         var fe = System.IO.File.Exists(fullPath);
@@ -4192,7 +4192,6 @@ public partial class AgentController : ControllerBase
             string? matchError = null;
             string? snippet = null;
             bool bypassVerify = false;
-            bool wasFormattedByLib = false;
             int oldLines = oldStr?.Split('\n').Length ?? 0;
             int newLines = newStr?.Split('\n').Length ?? 0;
             string? sqlMigrationNote = null;
@@ -4345,7 +4344,6 @@ public partial class AgentController : ControllerBase
                     newStr = (await CodeFormatterService.FormatAsync(relPath, newStr, ct)).TrimEnd('\n', '\r');
                     if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
                     {
-                        wasFormattedByLib = true;
                         var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
                         if (oldFirstLine != null)
                         {
@@ -4479,44 +4477,9 @@ public partial class AgentController : ControllerBase
                             normOld = AgentUtilities.NormalizeLineEndings(oldStr).Trim('\n', '\r');
                             oldLinesArr = normOld.Split('\n').ToList();
                         }
-                        var finalNewLines = new List<string>();
-                        if (newLinesArr.Count > 0)
-                        {
-                            var baseIndent = Regex.Match(fileLinesArr[matchIdx], @"^(\s*)").Value;
-                            var oldBaseIndent = Regex.Match(oldLinesArr[0], @"^(\s*)").Value;
-                            foreach (var nl in newLinesArr)
-                            {
-                                if (string.IsNullOrWhiteSpace(nl))
-                                {
-                                    finalNewLines.Add(nl);
-                                    continue;
-                                }
-                                var currentOldIndent = Regex.Match(nl, @"^(\s*)").Value;
-                                string relativeIndent = currentOldIndent.Length >= oldBaseIndent.Length
-                                    ? currentOldIndent.Substring(oldBaseIndent.Length)
-                                    : "";
-                                finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
-                            }
-                            var rawNew = string.Join("\n", finalNewLines);
-                            if (!wasFormattedByLib && IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
-                            {
-                                var stripped = finalNewLines
-                                    .Select(l => string.IsNullOrWhiteSpace(l) ? "" : l.TrimStart())
-                                    .ToList();
-                                var fixedHtml = AgentUtilities.AutoIndentHtml(
-                                    string.Join("\n", stripped), baseIndent);
-                                finalNewLines = fixedHtml.Split('\n').ToList();
-                            }
-                            var rawAfter = string.Join("\n", finalNewLines);
-                            if (!wasFormattedByLib && (rawAfter.Contains('{') || rawAfter.Contains('}')) &&
-                                !IsHtmlLikeContent(rawAfter) && finalNewLines.Count > 2)
-                            {
-                                var fixedBraces = AgentUtilities.AutoIndentFromFile(
-                                    string.Join("\n", finalNewLines), baseIndent,
-                                    fileLinesArr.ToArray(), matchIdx);
-                                finalNewLines = fixedBraces.Split('\n').ToList();
-                            }
-                        }
+                        var finalNewLines = AgentUtilities.ReindentReplacementSnippet(
+                            newLinesArr, oldLinesArr, fileLinesArr, matchIdx,
+                            HtmlDomEditor.IsHtmlDomFile(relPath));
                         fileLinesArr.RemoveRange(matchIdx, oldLinesArr.Count);
                         fileLinesArr.InsertRange(matchIdx, finalNewLines);
                         newContent = string.Join("\n", fileLinesArr);
@@ -4763,7 +4726,8 @@ public partial class AgentController : ControllerBase
                         {
                             var allFileLines = fileContent.Split('\n');
                             var lineIdx2 = fileContent[..corrIdx2].Count(c => c == '\n');
-                            indentNewStr = IndentReplacement(allFileLines, lineIdx2, indentNewStr);
+                            indentNewStr = IndentReplacement(allFileLines, lineIdx2, indentNewStr,
+                                isHtmlDomFile: HtmlDomEditor.IsHtmlDomFile(relPath));
                             indentNewStr = AgentUtilities.ReconstructFromVerbatimDiff(correctedBlock, indentNewStr);
                         }
                         var (replaced2, newContent2, _, _) =
@@ -5916,7 +5880,7 @@ public partial class AgentController : ControllerBase
         var userMsg = $"### FILE ###\n{relPath}\n\n### EXCERPT WITH SPACING ISSUES ###\n```\n{excerpt}\n```\n\n" +
                       "Fix spacing issues. Return JSON with oldString/newString pairs.";
         var (raw, _, error) = await CallLlmRawStreaming(sysPrompt, userMsg, emitSse, ct,
-            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 1024);
+            requestTimeout: _infiniteTimeout, maxTokens: 1024);
         if (string.IsNullOrWhiteSpace(raw))
             return content;
         try
@@ -6662,7 +6626,7 @@ public partial class AgentController : ControllerBase
         {
             var (raw, _, error) = await CallLlmRawStreaming(
                 sysPrompt, userMsg, emitSse, ct,
-                requestTimeout: TimeSpan.FromMinutes(2),
+                requestTimeout: _infiniteTimeout,
                 maxTokens: 256);
             if (string.IsNullOrWhiteSpace(raw))
                 return ("error", $"LLM returned empty response. {error}", 0, false);
@@ -6836,7 +6800,7 @@ public partial class AgentController : ControllerBase
         var userPrompt = $"File: {relPath}\n\nSnippets found:\n{string.Join("\n---\n", matchExcerpts)}\n\nDo these snippets contain actual SQL statements executing against a database table?";
         try
         {
-            var (raw, _, err) = await CallLlmRaw(sysPrompt, userPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 64);
+            var (raw, _, err) = await CallLlmRaw(sysPrompt, userPrompt, ct, _infiniteTimeout, maxTokens: 64);
             if (!string.IsNullOrWhiteSpace(raw))
             {
                 var cleaned = raw.Trim();
@@ -6878,7 +6842,7 @@ public partial class AgentController : ControllerBase
             var sys = "You write SQLite/MySQL CREATE TABLE statements. Output ONLY the SQL, no markdown, no explanation.";
             var usr = $"Write a CREATE TABLE IF NOT EXISTS statement for table `{tableName}`. Context: {description}. " +
                       $"Use sensible column types (INTEGER/INT, TEXT/VARCHAR, TIMESTAMP) and a PRIMARY KEY. End with ';'.";
-            var (raw, _, _) = await CallLlmRaw(sys, usr, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
+            var (raw, _, _) = await CallLlmRaw(sys, usr, ct, _infiniteTimeout, maxTokens: 256);
             if (!string.IsNullOrWhiteSpace(raw))
             {
                 var cleaned = raw.Trim();
@@ -7146,7 +7110,9 @@ public partial class AgentController : ControllerBase
             var content = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
             sb.AppendLine($"### {step.File} (current — before this plan runs)");
             sb.AppendLine("```");
-            sb.AppendLine(content.Length > 4000 ? content[..4000] + "\n// ... truncated" : content);
+            // Full file content — the coherence check must see the whole file to judge whether
+            // a prior step's symbols really landed.
+            sb.AppendLine(content);
             sb.AppendLine("```");
             sb.AppendLine();
         }
@@ -7201,7 +7167,7 @@ public partial class AgentController : ControllerBase
         sb.AppendLine("Output ONLY JSON — no markdown, no explanation.");
         var (raw, _, err) = await CallLlmRaw(
             "You check code-change plan coherence across steps. Output ONLY valid JSON.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(45), maxTokens: 2048);
+            sb.ToString(), ct, _infiniteTimeout, maxTokens: 2048);
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Plan coherence check skipped: {err ?? "empty response"}", ct: ct);
@@ -7813,7 +7779,7 @@ If no call sites need updating, output an empty array [].
 Reply ONLY with the JSON array — no explanation, no markdown.";
             var (callSitesJson, _, _) = await CallLlmRaw(
                 "You are a code refactoring assistant. Update method call sites to match a changed signature. Output only JSON.",
-                callSitePrompt, ct, TimeSpan.FromSeconds(30), maxTokens: 4096);
+                callSitePrompt, ct, _infiniteTimeout, maxTokens: 4096);
             if (string.IsNullOrWhiteSpace(callSitesJson))
                 continue;
             var cleanJson = callSitesJson.Trim();
@@ -8257,7 +8223,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Output ONLY JSON: {\"valid\": true|false, \"reason\": \"short reason, only if invalid\"}");
         var (raw, _, err) = await CallLlmRaw(
             "You are a strict plan-coherence validator. Output ONLY the requested JSON.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(25), maxTokens: 200);
+            sb.ToString(), ct, _infiniteTimeout, maxTokens: 200);
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Coherence validator call failed ({err}) — accepting step by default.", ct: ct);
@@ -9425,53 +9391,49 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // Before proposing yet ANOTHER step, verify whether the WHOLE task is now satisfied
                 // by the original prompt + all applied changes. If it is, declare the plan complete
                 // instead of blindly planning a redundant follow-up step.
-                if (stepSucceeded && !hadFailure)
+                if (stepSucceeded && !hadFailure && IsLastEditVerifiedComplete(newResults))
                 {
-                    var lastVerifiedComplete = newResults
-                        .OfType<Dictionary<string, object?>>()
-                        .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
-                                  r.GetValueOrDefault("status")?.ToString() is "modified" or "done" or "created" &&
-                                  r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("needsExtraStep") is false);
-                    if (lastVerifiedComplete)
+                    await EmitLog(emitSse, "info",
+                        "🔍 Between-steps verification: last edit verified complete — checking whether the whole task is done…", ct: ct);
+                    if (emitSse)
+                        await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                            "_verifying", $"Verifying whole task — checking if the plan is complete after Step {planSoFar.Count}…",
+                            $"Verifying whole task after Step {planSoFar.Count}…", planSoFar.Count - 1, ct);
+                    var (isComplete, assessReason) = await AssessCompletion(
+                        prompt, allResults, projectRoot, ct,
+                        new AgentPlan { Plan = planSoFar.ToList(), Summary = "Interleaved verification", Score = 90 },
+                        attachedFiles: attachedFiles);
+                    // AssessCompletion now uses the configurable LLM timeout and retries once,
+                    // so a slow local model can actually finish the assessment. If the assessment
+                    // is STILL unavailable (LLM down / unparseable response), do NOT treat that
+                    // as a hard "NOT complete" verdict that forces a redundant follow-up step:
+                    // the per-step verifier already confirmed the last edit is complete
+                    // (needsExtraStep=false) and no step failed — declare the plan complete
+                    // instead of planning a meaningless step 2.
+                    var shouldDeclareComplete = ShouldDeclarePlanCompleteAfterAssessment(
+                        isComplete, assessReason, out var completeReason, out var assessFailed);
+                    if (shouldDeclareComplete)
                     {
-                        await EmitLog(emitSse, "info",
-                            "🔍 Between-steps verification: last edit verified complete — checking whether the whole task is done…", ct: ct);
+                        planCompleteDeclared = true;
+                        await EmitLog(emitSse, assessFailed ? "warn" : "success",
+                            $"✓ Plan complete after step {planSoFar.Count} — {completeReason}", ct: ct);
+                        thinkingLog.AppendLine($"\n[Plan complete — {completeReason}]");
                         if (emitSse)
-                            await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
-                                "_verifying", $"Verifying whole task — checking if the plan is complete after Step {planSoFar.Count}…",
-                                $"Verifying whole task after Step {planSoFar.Count}…", planSoFar.Count - 1, ct);
-                        var (isComplete, assessReason) = await AssessCompletion(
-                            prompt, allResults, projectRoot, ct,
-                            new AgentPlan { Plan = planSoFar.ToList(), Summary = "Interleaved verification", Score = 90 },
-                            attachedFiles: attachedFiles);
-                        // AssessCompletion defaults to complete=true on LLM timeout / parse
-                        // failure — never trust that here, or we'd strand a half-finished task.
-                        var assessFailed = string.IsNullOrWhiteSpace(assessReason) ||
-                            assessReason.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
-                            assessReason.Contains("Could not parse", StringComparison.OrdinalIgnoreCase);
-                        if (isComplete && !assessFailed)
-                        {
-                            planCompleteDeclared = true;
-                            await EmitLog(emitSse, "success",
-                                $"✓ Plan complete after step {planSoFar.Count} — {assessReason}", ct: ct);
-                            thinkingLog.AppendLine($"\n[Plan complete — {assessReason}]");
-                            if (emitSse)
-                                await SendSse(Response, "plan", new
+                            await SendSse(Response, "plan", new
+                            {
+                                thinking = thinkingLog.ToString(),
+                                summary = $"Plan complete — {completeReason}",
+                                items = planSoFar.Select((s, idx) => new
                                 {
-                                    thinking = thinkingLog.ToString(),
-                                    summary = $"Plan complete — {assessReason}",
-                                    items = planSoFar.Select((s, idx) => new
-                                    {
-                                        File = s.File, Change = s.Change, Line = s.LineNumber,
-                                        OldString = s.OldString, NewString = s.NewString, done = true
-                                    }).ToList(),
-                                    incremental = true
-                                }, ct);
-                            break;
-                        }
-                        await EmitLog(emitSse, "metric",
-                            $"🔍 Between-steps verification: task NOT complete yet — {assessReason}", ct: ct);
+                                    File = s.File, Change = s.Change, Line = s.LineNumber,
+                                    OldString = s.OldString, NewString = s.NewString, done = true
+                                }).ToList(),
+                                incremental = true
+                            }, ct);
+                        break;
                     }
+                    await EmitLog(emitSse, "metric",
+                        $"🔍 Between-steps verification: task NOT complete yet — {assessReason}", ct: ct);
                 }
             }
         }
@@ -9559,7 +9521,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             "diff text. Keep it under ~1800 chars. Output ONLY the summary text; no markdown fences, no JSON.";
         var user = $"### ACCUMULATED DIFFS ###\n{accumulatedDiffs}";
         var (raw, error) = await CallLlmRawText(system, user, false, ct,
-            requestTimeout: TimeSpan.FromMinutes(1), maxTokens: 512);
+            requestTimeout: _infiniteTimeout, maxTokens: 512);
         if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw)) return null;
         var cleaned = raw.Trim();
         if (cleaned.Length < 20) return null;
@@ -9581,7 +9543,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             "remains to do. Keep it under ~1800 chars. Output ONLY the recap prose; no markdown fences, no JSON.";
         var user = $"### ACCUMULATED PREVIOUS REASONING (compact this) ###\n{accumulatedThinking}";
         var (raw, error) = await CallLlmRawText(system, user, false, ct,
-            requestTimeout: TimeSpan.FromMinutes(1), maxTokens: 512);
+            requestTimeout: _infiniteTimeout, maxTokens: 512);
         if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw)) return null;
         var cleaned = raw.Trim();
         if (cleaned.Length < 20) return null;
@@ -9594,7 +9556,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         var sys = BuildIncrementalSubPlanSystemPrompt();
         var user = BuildIncrementalSubPlanUserPrompt(originalPrompt, discoveryContext, subPlansSoFar, rejectionFeedback);
-        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, TimeSpan.FromMinutes(2), maxTokens: 500);
+        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, _infiniteTimeout, maxTokens: 500);
         if (string.IsNullOrWhiteSpace(raw)) return null;
         try
         {
@@ -9659,7 +9621,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Output ONLY JSON: {\"valid\": true|false, \"reason\": \"short reason if invalid\"}");
         var (raw, _, _) = await CallLlmRaw(
             "You are a strict meta-plan coherence validator. Output ONLY the requested JSON.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(25), maxTokens: 200);
+            sb.ToString(), ct, _infiniteTimeout, maxTokens: 200);
         if (string.IsNullOrWhiteSpace(raw)) return (true, null);
         try
         {
@@ -9958,7 +9920,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine(JsonSerializer.Serialize(plan!.Plan, new JsonSerializerOptions { WriteIndented = true }));
         var (raw, _, err) = await CallLlmRaw(
             "You validate code-change plans. Output ONLY a JSON object with a \"valid\" boolean and optional \"reason\". No extra text, no markdown fences.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(30), maxTokens: 256);
+            sb.ToString(), ct, _infiniteTimeout, maxTokens: 256);
         if (!string.IsNullOrWhiteSpace(err) || string.IsNullOrWhiteSpace(raw))
             return null;
         var cleaned = raw.Trim();
@@ -10288,9 +10250,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var output = d.GetValueOrDefault("output")?.ToString();
                 if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(output)) continue;
                 if (d.GetValueOrDefault("status")?.ToString() != "done") continue;
-                var snippet = output.Length > fileCharBudget
-                    ? output[..fileCharBudget] + "\n…[truncated]…"
-                    : output;
+                // THINKING MUST NEVER SEE TRUNCATED CONTEXT: keep the auto-read file whole.
+                // The per-file cap below silently clipped large components (e.g. a globe
+                // component) so the planner could not see the method it had to edit. Rely on
+                // the aggregate budget to drop whole files instead of slicing them.
+                var snippet = output;
                 if (usedChars + snippet.Length > totalBudget) break;
                 usedChars += snippet.Length;
                 sb.AppendLine($"### read {path}");
@@ -10520,7 +10484,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             "CRITICAL: a keyword match in the filename is NOT enough — the word must be used in the SAME SENSE as the file's purpose. For example, if the task says \"let the user increase\", 'user' is a generic person, NOT the user.component. Ignore incidental matches. " +
             "Output ONLY valid JSON, no markdown: {\"files\": [\"path1\", \"path2\"]}";
         var user = $"Task: {prompt}\n\nCandidate files:\n{string.Join("\n", candidates)}\n\nDeterministic keyword-matched files (already counted below — include ONLY if genuinely relevant to the task, not just because a word matches):\n{string.Join("\n", deterministic)}\n\nSelect 3-7 max.";
-        var (raw, _, err) = await CallLlmRaw(system, user, ct, TimeSpan.FromSeconds(25));
+        var (raw, _, err) = await CallLlmRaw(system, user, ct, _infiniteTimeout);
         if (string.IsNullOrWhiteSpace(raw))
             return deterministic.Concat(candidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
         try
@@ -10711,11 +10675,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 else text = System.IO.File.ReadAllText(full);
             }
             catch { text = "(unreadable)"; }
-            if (text.Length > 8000) text = text[..8000] + "\n...(truncated)";
+            // Full file content — this evaluator decides whether a file matters to the task;
+            // an 8k-char slice could hide the very code the file is relevant for.
             sb.AppendLine($"\n=== {rel} ===\n```\n{text}\n```");
         }
         if (existing.Count == 0) return new List<string>();
-        var (raw, _, _) = await CallLlmRaw(system, sb.ToString(), ct, TimeSpan.FromSeconds(30), maxTokens: 600);
+        var (raw, _, _) = await CallLlmRaw(system, sb.ToString(), ct, _infiniteTimeout, maxTokens: 600);
         if (string.IsNullOrWhiteSpace(raw)) return new List<string>();
         try
         {
@@ -10838,7 +10803,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             "Architecture note: mention the platform, testing framework, and any notable conventions. Max 200 characters.\n" +
             "Output ONLY valid JSON, no markdown: {\"files\": [\"path1\", \"path2\"], \"architectureNote\": \"...\"}";
         var user = $"Task: {prompt}\n\nCandidates:\n{string.Join("\n", candidates)}\n\nSelect 3-7 files and write the architecture note.";
-        return await StreamLlmThinking(system, user, ct, TimeSpan.FromSeconds(30), 500);
+        return await StreamLlmThinking(system, user, ct, _infiniteTimeout, 500);
     }
 
     private async Task<(string raw, string? error)> StreamLlmThinking(
@@ -10854,7 +10819,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             new { role = "system", content = systemPrompt },
             new { role = "user",   content = userMessage  }
         };
-        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var cfg = await LoadConfigAsync();
@@ -10950,7 +10915,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var compact = string.Join("\n", lines);
         var system = "You are a project architect. Given a project file tree and the user's task, write ONE short sentence about the project's architecture that would help a developer new to this codebase. Mention the platform (e.g. Angular/.NET/Python), testing framework, and any notable conventions you observe. Max 200 characters. Output ONLY the sentence, no markdown, no JSON.";
         var user = $"Task: {prompt}\n\nFile tree (first 100 lines):\n{compact}";
-        var (raw, err) = await StreamLlmThinking(system, user, ct, TimeSpan.FromSeconds(20), 100);
+        var (raw, err) = await StreamLlmThinking(system, user, ct, _infiniteTimeout, 100);
         if (string.IsNullOrWhiteSpace(raw)) return "";
         return TruncateArchitectureNote(raw);
     }
@@ -12577,7 +12542,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             "isBuildRepair = false if the user is asking for a new feature, a UI change, a refactor, or " +
             "any request that happens to mention words like 'build', 'error', 'warning' in an unrelated " +
             "sense (e.g. 'build out this feature', 'wire it up like X', 'add a popup panel').";
-        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, TimeSpan.FromSeconds(10), maxTokens: 32);
+        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, _infiniteTimeout, maxTokens: 32);
         if (string.IsNullOrWhiteSpace(raw)) return false;
         try
         {
@@ -12603,7 +12568,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var cfg = await LoadConfigAsync();
         var (raw, _, _) = await CallLlmRawStreaming(
             BuildPlanningPrompt(await FilterToolsForStepAsync(ramblingRaw, cfg.enabledTools, ct)), recoveryPrompt, emitSse, ct,
-            requestTimeout: TimeSpan.FromMinutes(3), maxTokens: 2048);
+            requestTimeout: _infiniteTimeout, maxTokens: 2048);
         if (string.IsNullOrWhiteSpace(raw)) return null;
         var plan = AgentUtilities.ParsePlan(raw);
         if (plan == null && raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase))
@@ -12742,7 +12707,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 $"your score should be close to that unless the task is genuinely harder):\n\n{prompt}";
 
             var (raw, error) = await CallLlmRawText(system, user, false, ct,
-                requestTimeout: TimeSpan.FromSeconds(15), maxTokens: 10);
+                requestTimeout: _infiniteTimeout, maxTokens: 10);
 
             if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
             {
@@ -12835,8 +12800,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var related = "";
             if (hasAttached)
             {
-                const int attachedMaxChars = 24000;
-                const int perFileTruncate = 6000;
+                // THINKING MUST NEVER SEE TRUNCATED CONTEXT: attached files are user-chosen and
+                // are exactly what the reasoning engine has to work on (e.g. the ngOnInit body a
+                // step asks about). Cutting them at a small per-file cap starved the engine of the
+                // very method it needed (globe.component.ts was clipped before ngOnInit). Keep the
+                // FULL file contents; a single generous guard only protects against pathological
+                // attachment sets, never against a normal component file.
+                const int attachedMaxChars = 200000;
                 var attachedSb = new StringBuilder();
                 foreach (var af in attachedFiles!)
                 {
@@ -12846,8 +12816,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         Path.Combine(projectRoot, afRel.TrimStart('/').Replace('/', Path.DirectorySeparatorChar)));
                     if (!System.IO.File.Exists(afFull)) continue;
                     var afContent = await System.IO.File.ReadAllTextAsync(afFull, Encoding.UTF8, ct);
-                    if (afContent.Length > perFileTruncate)
-                        afContent = afContent[..perFileTruncate] + "\n…[truncated]…";
                     var block = $"### read {afRel}\n```\n{afContent}\n```\n";
                     if (attachedSb.Length + block.Length > attachedMaxChars) break;
                     attachedSb.Append(block);
@@ -12987,7 +12955,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// All sections up to the budget are included (ordered by relevance), because a
     /// cross-directory reference file is often exactly what the step must copy from.
     /// </summary>
-    private static string SelectRelatedFilesForThinking(string discoveryContext, string prompt, string? targetPath, int maxChars = 24000)
+    private static string SelectRelatedFilesForThinking(string discoveryContext, string prompt, string? targetPath, int maxChars = 200000)
     {
         if (string.IsNullOrWhiteSpace(discoveryContext)) return "";
         var sections = new List<(string path, string content)>();
@@ -13061,7 +13029,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         foreach (var s in scored)
         {
             if (sb.Length >= maxChars) break;
-            var content = s.content.Length > 6000 ? s.content[..6000] + "\n…[truncated]…" : s.content;
+            // Full file contents — thinking must reason over the complete file, not a 6k-char
+            // prefix that hides the very methods/structure the next step depends on.
+            var content = s.content;
             var chunk = $"### read {s.path}\n```\n{content}\n```\n";
             if (sb.Length + chunk.Length > maxChars)
                 sb.Append(chunk[..Math.Min(chunk.Length, maxChars - sb.Length)]);
@@ -13341,7 +13311,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         planItemIndex = itemIdx
                     }, ct);
                 var extractSysPrompt = "You extract file paths from instructions. Output ONLY the relative file path (e.g., 'folder/file.ext'). No quotes, no markdown, no explanation.";
-                var (extractedPath, _, _) = await CallLlmRaw(extractSysPrompt, changeDesc, ct, TimeSpan.FromSeconds(15), maxTokens: 64);
+                var (extractedPath, _, _) = await CallLlmRaw(extractSysPrompt, changeDesc, ct, _infiniteTimeout, maxTokens: 64);
                 var newFileRelPath = extractedPath.Trim().Trim('"', '\'', '`', ' ');
                 if (string.IsNullOrWhiteSpace(newFileRelPath) || newFileRelPath.Contains(' ') || !newFileRelPath.Contains('.'))
                 {
@@ -14511,7 +14481,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             AgentUtilities.CompactConversation(conversation);
             var (raw, _, err) = await CallLlmRaw(
                 "You are a terminal agent. Output only JSON.",
-                conversation.ToString(), ct, TimeSpan.FromSeconds(30));
+                conversation.ToString(), ct, _infiniteTimeout);
             if (string.IsNullOrWhiteSpace(raw)) { summary ??= "Completed with issues"; break; }
             var cleaned = raw.Trim();
             if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
@@ -14575,7 +14545,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}).\nThe working directory (project root) is: {projectRoot}\nALL files and folders must be created INSIDE this working directory — translate desktop paths to this directory.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
                     var (cmdRaw, _, _) = await CallLlmRaw(
                         "You are a terminal command translator. Output only the command, no markdown, no explanation.",
-                        translatePrompt, ct, TimeSpan.FromSeconds(20));
+                        translatePrompt, ct, _infiniteTimeout);
                     if (string.IsNullOrWhiteSpace(cmdRaw)) continue;
                     var cmdClean = cmdRaw.Trim();
                     if (cmdClean.StartsWith("```")) cmdClean = cmdClean.Split('\n').LastOrDefault()?.Replace("```", "").Trim() ?? cmdClean;
@@ -15373,7 +15343,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("{\"steps\": [{\"file\": \"rel/path.ext\", \"change\": \"precise description\"}]}");
         var (raw, _, _) = await CallLlmRaw(
             "You detect missing code implementations after an edit. Output ONLY JSON.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(25), maxTokens: 512);
+            sb.ToString(), ct, _infiniteTimeout, maxTokens: 512);
         if (string.IsNullOrWhiteSpace(raw)) return new List<PlanStep>();
         try
         {
@@ -15542,7 +15512,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Output ONLY valid JSON. No markdown. No explanations.");
         var (raw, _, _) = await CallLlmRaw(
             "You detect code cohesion issues after an edit. Output ONLY JSON.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(20), maxTokens: 512);
+            sb.ToString(), ct, _infiniteTimeout, maxTokens: 512);
         var issues = new List<string>();
         if (!string.IsNullOrWhiteSpace(raw))
         {
@@ -15711,6 +15681,37 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return violations;
     }
+    /// <summary>
+    /// True when the most recent executed result is an edit/create the per-step
+    /// verifier marked complete (needsExtraStep=false) — the gate that triggers
+    /// between-steps whole-task verification. Extracted so the interleaved loop's
+    /// decision is unit-testable without an LLM.
+    /// </summary>
+    private static bool IsLastEditVerifiedComplete(List<Dictionary<string, object?>> newResults)
+    {
+        return newResults
+            .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+                      r.GetValueOrDefault("status")?.ToString() is "modified" or "done" or "created" &&
+                      r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("needsExtraStep") is false);
+    }
+    /// <summary>
+    /// The between-steps verdict after AssessCompletion returns. If the assessment
+    /// LLM was unavailable (empty / timed out / unparseable), do NOT force a
+    /// redundant follow-up step — the per-step verifier already confirmed the last
+    /// edit is complete (needsExtraStep=false) and no step failed, so the plan is
+    /// declared complete. A real "not complete" assessment still keeps planning.
+    /// </summary>
+    private static bool ShouldDeclarePlanCompleteAfterAssessment(
+        bool isComplete, string? assessReason, out string completeReason, out bool assessFailed)
+    {
+        assessFailed = string.IsNullOrWhiteSpace(assessReason) ||
+            assessReason.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
+            assessReason.Contains("Could not parse", StringComparison.OrdinalIgnoreCase);
+        completeReason = assessFailed
+            ? "last edit verified complete (needsExtraStep=false) — assessment LLM unavailable, stopping instead of planning a redundant step"
+            : assessReason ?? "";
+        return assessFailed || (isComplete && !assessFailed);
+    }
     private async Task<(bool isComplete, string reason)> AssessCompletion(
         string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
         AgentPlan? plan = null, List<string>? attachedFiles = null)
@@ -15797,7 +15798,15 @@ Respond with JSON only:
 }
 ```");
         const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, and syntax mistakes that would break the requested change. Judge completion ONLY against what the user explicitly requested — never invent new requirements, features, or scope the user did not ask for. When the explicit request is met, mark complete=true even if further improvements are imaginable. Output ONLY valid JSON in the format specified.";
-        var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, TimeSpan.FromSeconds(30));
+        // Use the configurable LLM timeout (not a hard 30s cap): on slow local models a 30s
+        // deadline turns a healthy completion assessment into a fake "timed out" verdict,
+        // which then forces the interleaved loop to plan a redundant follow-up step.
+        var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, _infiniteTimeout);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            // One retry — transient endpoint slowness shouldn't veto a verified-complete task.
+            (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, _infiniteTimeout);
+        }
         if (string.IsNullOrWhiteSpace(raw)) return (failed.Count == 0, "Assessment timed out");
         try
         {
@@ -16057,7 +16066,7 @@ Respond with JSON only:
                 "Output ONLY the remaining lines needed to complete the file. " +
                 "Do NOT repeat any already-output content. The file uses brace-based indentation (C#/JS/TS style).";
             var (raw, _, _) = await CallLlmRaw(continuationSystem, continuationPrompt, ct,
-                TimeSpan.FromSeconds(45), maxTokens: 8192);
+                _infiniteTimeout, maxTokens: 8192);
             if (string.IsNullOrWhiteSpace(raw))
             {
                 await EmitLog(emitSse, "warn",
@@ -16716,7 +16725,7 @@ done = build OK; command = run this to fix; ask_user = need input";
             sb.AppendLine();
         }
         var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, sb.ToString(), emitSse, ct,
-            requestTimeout: TimeSpan.FromSeconds(45), maxTokens: 512);
+            requestTimeout: _infiniteTimeout, maxTokens: 512);
         if (string.IsNullOrWhiteSpace(raw)) return null;
         try
         {
