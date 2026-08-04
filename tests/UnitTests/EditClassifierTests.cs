@@ -54,9 +54,11 @@ public class EditClassifierTests
     [Fact]
     public void Classify_HtmlDeletion_ReturnsDeleteLines_NotInsertBefore()
     {
-        // HTML removals now route to DeleteLines (oldString → empty newString) instead
-        // of the insert-before default — FORMAT D rejects empty newCode, so the delete
-        // route is the ONLY executable path for stripping an HTML block.
+        // HTML removals route to DeleteLines (oldString → empty newString) instead of
+        // the insert-before default. FORMAT D now ALSO supports deletion payloads
+        // (replace:true + empty newCode resolves the anchor and strips the block), so
+        // both the resolution-driven chain AND the FORMAT D compose branch can remove
+        // an HTML block; the classifier still reports DeleteLines for the chain.
         var result = EditClassifier.Classify(
             Step("index.html", "Remove the split button from the card"),
             fileExists: true, ext: ".html");

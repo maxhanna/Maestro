@@ -1732,3 +1732,14 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
     }
   };
 });
+
+// Select the full text of an input when it gains focus (used by the inline
+// file-tree rename box so the basename is ready to be typed over).
+angular.module('kanbanApp').directive('selectOnFocus', function () {
+  return {
+    restrict: 'A',
+    link: function (scope, el) {
+      el.on('focus', function () { el[0].select(); });
+    }
+  };
+});

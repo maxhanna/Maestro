@@ -161,6 +161,77 @@
     text-overflow: ellipsis;
 }
 
+/* Inline rename input inside a tree entry */
+.ide-tree-rename-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--input-bg, #1a1a2e);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 0 4px;
+    outline: none;
+}
+
+/* Drag & drop move */
+.ide-tree-entry[draggable="true"] {
+    cursor: grab;
+}
+
+.ide-tree-entry--dragging {
+    opacity: 0.45;
+}
+
+.ide-tree-entry--drop-target {
+    background: rgba(98, 114, 255, 0.22);
+    outline: 1px dashed var(--accent);
+    outline-offset: -1px;
+}
+
+/* Right-click context menu */
+.ide-context-menu {
+    position: fixed;
+    z-index: 20000;
+    min-width: 170px;
+    background: var(--surface2, #1e1e2e);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+    padding: 4px;
+    font-size: 12px;
+    user-select: none;
+}
+
+.ide-ctx-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.ide-ctx-item:hover {
+    background: rgba(98, 114, 255, 0.18);
+}
+
+.ide-ctx-danger {
+    color: #e06c75;
+}
+
+.ide-ctx-danger:hover {
+    background: rgba(224, 108, 117, 0.16);
+}
+
+.ide-ctx-sep {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 6px;
+}
+
 /* Editor Container */
 .ide-editor-container {
     flex: 1;

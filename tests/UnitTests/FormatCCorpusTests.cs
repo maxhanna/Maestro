@@ -304,6 +304,62 @@ public class FormatCCorpusTests
         FuzzHarness.AssertAllDocsChecked(checkedDocs, docCount, "FORMAT C re-run already-done guard");
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  REMOVAL-WITH-SURVIVOR — deletion expressed as survivor + target → survivor
+    // ═══════════════════════════════════════════════════════════════════════════
+    // The planner often emits a deletion as oldString = <surviving context + target>
+    // → newString = <surviving context>. The survivor is necessarily ALREADY present in
+    // the file, so the generic "code already present in file" insert-guard must NOT fire
+    // (that guard is for insertions). This regression locks the bug seen in the wild:
+    // "Remove the priority badge" produced oldString = BENCH span + priority span,
+    // newString = BENCH span, and PreEditValidation wrongly declared it AlreadyDone,
+    // skipping the removal entirely. Also covers the whitespace-collapsed survivor.
+
+    [Fact]
+    public void PreEditValidation_RemovalWithSurvivor_IsProceedNotAlreadyDone()
+    {
+        var survivor = "<span class=\"card-tag tag-bench\" ng-if=\"card._benchmark\" style=\"color:#e5c07b;font-weight:700;\">BENCH</span>";
+        var target = " <span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>";
+        var file = survivor + "\n" + target;
+
+        // 1. The exact wild shape: removal step on a file that STILL contains both spans.
+        //    The survivor's presence must not trip the insert guard → Proceed, so the
+        //    resolver actually applies the deletion.
+        var step = new PlanStep
+        {
+            File = "wwwroot/kanban.html",
+            Change = "Remove priority badge from To Do column cards",
+            OldString = survivor + "\n" + target,
+            NewString = survivor
+        };
+        var (verdict, reason) = InvokePreEditValidation(file, step);
+        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, verdict);
+
+        // 2. Once the removal HAS been applied (file holds only the survivor), the same
+        //    step must be AlreadyDone — the full oldString is gone, nothing left to remove.
+        var (doneVerdict, _) = InvokePreEditValidation(survivor, step);
+        Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, doneVerdict);
+
+        // 3. Whitespace-collapsed survivor (drifted indentation between oldString and the
+        //    actual file bytes): still Proceed on the pristine file.
+        var drifted = survivor.Replace("  ", " ") + "\n" + target;
+        var (driftVerdict, _) = InvokePreEditValidation(drifted, step);
+        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, driftVerdict);
+
+        // 4. NEGATIVE CONTROL — the generic insert guard is NOT disabled: a genuine
+        //    insertion whose newString is present in the file still trips AlreadyDone.
+        var insertStep = new PlanStep
+        {
+            File = "src/app/app.component.html",
+            Change = "Add a loading banner",
+            OldString = "<div class=\"app\">",
+            NewString = "<div class=\"app\">\n<div class=\"loading-banner\">Loading…</div>"
+        };
+        var (insertVerdict, insertReason) = InvokePreEditValidation(insertStep.NewString, insertStep);
+        Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, insertVerdict);
+        Assert.Contains("already present", insertReason, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         var count = 0;

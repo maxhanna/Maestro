@@ -233,6 +233,28 @@ public class BenchmarkScore
     public List<string> FailedSteps { get; set; } = new();
     public string? ErrorReason { get; set; }
     public double DurationMs { get; set; }
+    public List<BenchmarkEditRecord> Edits { get; set; } = new();
+}
+
+/// <summary>A single file edit the agent made during a benchmark run.</summary>
+public class BenchmarkEditRecord
+{
+    public string Path { get; set; } = "";
+    public string Type { get; set; } = ""; // "edit", "create", "rename"
+    public string Status { get; set; } = "";
+    public string EditAction { get; set; } = "";
+    public int LinesAdded { get; set; }
+    public int LinesRemoved { get; set; }
+    public string ToPath { get; set; } = "";
+    public string? Error { get; set; }
+    public List<BenchmarkDiffLine> Diff { get; set; } = new();
+}
+
+/// <summary>One line pair of a captured edit diff (old vs new).</summary>
+public class BenchmarkDiffLine
+{
+    public string Old { get; set; } = "";
+    public string New { get; set; } = "";
 }
 
 public class SystemInfo

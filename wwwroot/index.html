@@ -604,7 +604,8 @@
           <div>
             <details ng-attr-open="{{vm.streamingActive ? 'open' : undefined}}">
               <summary>💻 Commands ({{vm.streamingSteps.length}})</summary>
-              <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length">
+              <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length"
+                ng-style="{'font-size': vm.planFontSize + 'px'}">
                 <details class="agent-step-panel" ng-repeat="s in vm.streamingSteps track by s.index"
                   ng-class="s.status || 'pending'"
                   ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
@@ -677,14 +678,14 @@
                           <span ng-if="s._applyingDiff">Applying...</span>
                         </button>
                         <span class="diff-applied" ng-if="s._diffApplied || (s._previews && s._previews[d] && s._previews[d].deleted)">✓</span>
-                        <button ng-click="vm.deleteDiff(d, s, $event)" ng-disabled="s._applyingDiff || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:9px;padding:0 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
-                        <button ng-click="vm.openDiffInIde(d, s, $event)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:9px;padding:0 4px;color:#61afef;" title="Open diff in IDE">📄</button>
-                        <span ng-if="s._previews && s._previews[d] && s._previews[d].deleting" style="color:#e06c75;font-size:9px;">deleting…</span>
+                        <button ng-click="vm.deleteDiff(d, s, $event)" ng-disabled="s._applyingDiff || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:0.64em;padding:0 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <button ng-click="vm.openDiffInIde(d, s, $event)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:0.64em;padding:0 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                        <span ng-if="s._previews && s._previews[d] && s._previews[d].deleting" style="color:#e06c75;font-size:0.64em;">deleting…</span>
                         <span class="step-err" ng-if="s._diffError && d === s._diffPath">({{s._diffError}})</span>
-                        <div ng-if="s._previews && s._previews[d] && s._previews[d].show" style="margin-top:4px;padding:4px;background:var(--bg2);border-radius:3px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:10px;white-space:pre-wrap;word-break:break-all;">
+                        <div ng-if="s._previews && s._previews[d] && s._previews[d].show" style="margin-top:4px;padding:4px;background:var(--bg2);border-radius:3px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:0.71em;white-space:pre-wrap;word-break:break-all;">
                           <pre style="margin:0;line-height:1.4;">{{s._previews[d].content}}</pre>
                         </div>
-                        <div ng-if="s._previews && s._previews[d] && s._previews[d].error" style="color:#e06c75;font-size:9px;">{{s._previews[d].error}}</div>
+                        <div ng-if="s._previews && s._previews[d] && s._previews[d].error" style="color:#e06c75;font-size:0.64em;">{{s._previews[d].error}}</div>
                         <span class="step-err" ng-if="s._previews && s._previews[d] && s._previews[d].deleteError">({{s._previews[d].deleteError}})</span>
                       </div>
                     </div>
@@ -1182,20 +1183,23 @@
                   <span>{{vm.maxFileContextChars | formatNumber}}</span>
                 </div>
                 <input type="range" id="ctx-maxFileContextChars" ng-model="vm.maxFileContextChars" min="4000" max="64000" step="1000" style="width:100%;" />
+                <span class="settings-note">💡 Higher lets the agent read bigger files, but each request costs more tokens.</span>
               </div>
               <div>
                 <div style="display:flex;justify-content:space-between;">
-                  <label for="ctx-maxFullFileTokens">Max Full File Tokens</label>
+                  <label for="ctx-maxFullFileTokens">Max Full File Tokens<span class="settings-tip" ng-click="$event.preventDefault()" title="Files larger than this are truncated before the agent sees them — edits may miss code beyond the cut-off.">?</span></label>
                   <span>{{vm.maxFullFileTokens | formatNumber}}</span>
                 </div>
                 <input type="range" id="ctx-maxFullFileTokens" ng-model="vm.maxFullFileTokens" min="512" max="16384" step="512" style="width:100%;" />
+                <span class="settings-note warn">⚠ Truncated files can cause wrong or incomplete edits — keep this high enough for your largest files.</span>
               </div>
               <div>
                 <div style="display:flex;justify-content:space-between;">
-                  <label for="ctx-maxContextChars">Max Context Chars</label>
+                  <label for="ctx-maxContextChars">Max Context Chars<span class="settings-tip" ng-click="$event.preventDefault()" title="Total context budget per request. Too low and the agent forgets earlier steps mid-task.">?</span></label>
                   <span>{{vm.maxContextChars | formatNumber}}</span>
                 </div>
                 <input type="range" id="ctx-maxContextChars" ng-model="vm.maxContextChars" min="4000" max="64000" step="1000" style="width:100%;" />
+                <span class="settings-note warn">⚠ Very low values can make the agent lose track of the task and produce sloppy edits.</span>
               </div>
               <div>
                 <div style="display:flex;justify-content:space-between;">
@@ -1203,6 +1207,7 @@
                   <span>{{vm.fileBodyTruncationChars | formatNumber}}</span>
                 </div>
                 <input type="range" id="ctx-fileBodyTruncation" ng-model="vm.fileBodyTruncationChars" min="1000" max="32000" step="500" style="width:100%;" />
+                <span class="settings-note warn">⚠ Small values hide most of a file's body — the agent will edit blind and can break code.</span>
               </div>
               <div>
                 <div style="display:flex;justify-content:space-between;">
@@ -1210,13 +1215,15 @@
                   <span>{{vm.buildOutputTailChars | formatNumber}}</span>
                 </div>
                 <input type="range" id="ctx-buildOutputTail" ng-model="vm.buildOutputTailChars" min="1000" max="32000" step="500" style="width:100%;" />
+                <span class="settings-note warn">⚠ Too short and compiler errors scroll out of view — the agent can't see why the build failed.</span>
               </div>
               <div>
                 <div style="display:flex;justify-content:space-between;">
-                  <label for="ctx-defaultMaxTokens">Default Max Tokens</label>
+                  <label for="ctx-defaultMaxTokens">Default Max Tokens<span class="settings-tip" ng-click="$event.preventDefault()" title="Maximum tokens per LLM response. Too low and the agent is cut off mid-edit.">?</span></label>
                   <span>{{vm.defaultMaxTokens | formatNumber}}</span>
                 </div>
                 <input type="range" id="ctx-defaultMaxTokens" ng-model="vm.defaultMaxTokens" min="256" max="16384" step="256" style="width:100%;" />
+                <span class="settings-note warn">⚠ Very low values truncate responses mid-step and lead to broken edits.</span>
               </div>
               <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
                 <input type="checkbox" id="ctx-includeProjectSkeleton" ng-model="vm.includeProjectSkeleton" />
@@ -1239,17 +1246,25 @@
                   <span>{{vm.thinkingMaxTokens | formatNumber}}</span>
                 </div>
                 <input type="range" id="ctx-thinkingMaxTokens" ng-model="vm.thinkingMaxTokens" min="256" max="16384" step="256" style="width:100%;" />
+                <span class="settings-note" ng-class="{warn: vm.thinkingMaxTokens > 4096}">
+                  <span ng-if="vm.thinkingMaxTokens <= 4096">💡 <strong>4096</strong> is the recommended default for thinking.</span>
+                  <span ng-if="vm.thinkingMaxTokens > 4096">⚠ More than <strong>4096</strong> tends to produce weaker results with more hallucinations.
+                    <a href="javascript:void(0)" ng-click="vm.thinkingMaxTokens = 4096" style="font-weight:600;text-decoration:underline;margin-left:6px;cursor:pointer;white-space:nowrap;">↺ Reset to 4096</a>
+                  </span>
+                </span>
               </div>
               <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
                 <input type="checkbox" id="ctx-compactThinkingContext" ng-model="vm.compactThinkingContext" />
                 <label for="ctx-compactThinkingContext">Compact Thinking Context</label>
                 <span class="settings-help" style="margin-left:auto;font-size:11px;">summarize carried thinking once it exceeds the budget above</span>
               </div>
+              <span class="settings-note" ng-if="vm.compactThinkingContext">💡 Compacting summarizes reasoning away — for hard tasks this can remove the trail the agent uses to stay correct.</span>
               <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
                 <input type="checkbox" id="ctx-summarizeDiffContext" ng-model="vm.summarizeDiffContext" />
                 <label for="ctx-summarizeDiffContext">Summarize Diff Context</label>
                 <span class="settings-help" style="margin-left:auto;font-size:11px;">compact accumulated step diffs into one summary past the threshold</span>
               </div>
+              <span class="settings-note" ng-if="vm.summarizeDiffContext">💡 Summarized diffs lose exact old/new content — the agent may re-edit blindly after a summary kicks in.</span>
               <div ng-if="vm.summarizeDiffContext">
                 <div style="display:flex;justify-content:space-between;">
                   <label for="ctx-diffContextSummaryChars">Diff Summary Threshold Chars</label>
@@ -1262,6 +1277,7 @@
                 <label for="ctx-llmInfiniteTimeout">Infinite LLM Timeout</label>
                 <span class="settings-help" style="margin-left:auto;font-size:11px;">never time out agent LLM requests (default)</span>
               </div>
+              <span class="settings-note warn" ng-if="!vm.llmInfiniteTimeout">⚠ A short timeout can kill a long agent run mid-edit, leaving the card stuck in Doing.</span>
               <div ng-if="!vm.llmInfiniteTimeout">
                 <div style="display:flex;justify-content:space-between;">
                   <label for="ctx-llmTimeoutMinutes">LLM Timeout (minutes, min 5)</label>
@@ -1278,6 +1294,7 @@
               <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
                 Uncheck to remove a tool from the agent's available step types.
               </div>
+              <span class="settings-note warn">⚠ Disabling <strong>edit</strong>, <strong>create</strong>, or <strong>explore</strong> tools makes the agent unable to change or inspect files — most tasks will stall.</span>
               <div class="form-row" ng-repeat="tool in vm.toolList" style="display:flex;align-items:center;gap:6px;padding:4px 0;">
                 <input type="checkbox" ng-model="tool.enabled" id="tool-{{$index}}" />
                 <label for="tool-{{$index}}" ng-bind="tool.label" style="flex:1;"></label>
@@ -1308,6 +1325,10 @@
             <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
               <input type="checkbox" ng-model="vm.showIDE" />
               <span>📝 IDE</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showNotes" />
+              <span>📒 Notes</span>
             </label>
           </div>
           <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
@@ -1416,6 +1437,15 @@
                   <option value="approveRoot">Approve command roots</option>
                   <option value="approveAll">Approve all commands</option>
                 </select>
+                <span class="settings-note danger" ng-if="vm.terminalApprovalMode === 'approveAll'">
+                  ⛔ <strong>Approve all</strong> lets the agent run any command without asking — destructive commands like <code>rm -rf</code>, <code>git push</code>, or <code>DROP TABLE</code> will execute immediately.
+                </span>
+                <span class="settings-note" ng-if="vm.terminalApprovalMode === 'approveRoot'">
+                  💡 Only the exact executables listed in <strong>Approved Roots</strong> run without prompting.
+                </span>
+                <span class="settings-note" ng-if="vm.terminalApprovalMode === 'approveEach'">
+                  💡 Safest mode: every command waits for your approval before running.
+                </span>
               </div>
               <div style="display:flex;flex-direction:column;gap:8px;">
                 <div>
@@ -1471,191 +1501,343 @@
 
   <!-- BENCHMARKS PANEL -->
   <div class="popup-overlay" ng-if="vm.showBenchmarksPanel" ng-click="vm.closeBenchmarksPanel()">
-    <div class="popup-panel" style="max-width:80vw;max-width:80dvw;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel bench-panel" style="max-width:80vw;max-width:80dvw;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>📊 Benchmarks</strong>
         <button ng-click="vm.closeBenchmarksPanel()">✕</button>
       </div>
       <div class="popup-body">
-        <div style="margin-bottom:16px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <strong style="font-size:13px;">Plans</strong>
+
+        <!-- Summary strip -->
+        <div class="bench-summary" ng-init="benchStats = vm.benchmarkStats(); benchTrend = vm.benchmarkTrendData()" ng-if="benchStats">
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.runs}}</span>
+            <span class="bench-stat-label">Runs</span>
+          </div>
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.avgPass}}%</span>
+            <span class="bench-stat-label">Edit success</span>
+          </div>
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.ok}}<small> / {{benchStats.ok + benchStats.fail}}</small></span>
+            <span class="bench-stat-label">Edits ok / total</span>
+          </div>
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.points}}</span>
+            <span class="bench-stat-label">Points</span>
+          </div>
+        </div>
+
+        <!-- Score trend chart -->
+        <div class="bench-trend" ng-if="benchTrend">
+          <div class="bench-trend-head">
+            <span class="bench-trend-title">Score trend</span>
+            <span class="bench-trend-meta">
+              <span class="bench-trend-chip">Latest <strong>{{benchTrend.last != null ? benchTrend.last.toFixed(1) + '%' : '—'}}</strong></span>
+              <span class="bench-trend-chip">Best <strong>{{benchTrend.best != null ? benchTrend.best.toFixed(1) + '%' : '—'}}</strong></span>
+            </span>
+          </div>
+          <svg class="bench-trend-svg" ng-attr-viewBox="0 0 {{benchTrend.w}} {{benchTrend.h}}" preserveAspectRatio="none"
+            role="img" aria-label="Benchmark score percentage trend across runs">
+            <polygon class="bench-trend-area" ng-attr-points="{{benchTrend.area}}"></polygon>
+            <polyline class="bench-trend-line" ng-attr-points="{{benchTrend.line}}"></polyline>
+            <circle ng-repeat="pt in benchTrend.pts track by $index" class="bench-trend-dot"
+              ng-attr-cx="{{pt.x}}" ng-attr-cy="{{pt.y}}" r="3"
+              ng-attr-title="Run {{$index + 1}}: {{pt.pct}}%"></circle>
+          </svg>
+        </div>
+
+        <!-- Run a benchmark -->
+        <div class="bench-section">
+          <div class="bench-section-head">
+            <div>
+              <div class="bench-section-title">Run a benchmark</div>
+              <div class="bench-section-sub">Each run sends a coding task through the agent and scores the edits it makes.</div>
+            </div>
             <button ng-click="vm.startBenchmarkAll()" class="primary small nowrap"
-              ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Benchmark All</button>
+              ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run All</button>
           </div>
+
+          <div ng-if="vm.benchmarkRunning" class="bench-running">
+            <span class="bench-spinner"></span>
+            Benchmark <strong>{{vm.benchmarkLevelName(vm.benchmarkLevel)}}</strong> running
+            <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>…
+          </div>
+
           <div ng-if="vm.benchmarkPlans.length > 0">
-            <div ng-repeat="plan in vm.benchmarkPlans"
-              style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:4px;">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <div>
-                  <strong>{{plan.name}}</strong>
-                  <span class="text-sm muted" style="margin-left:8px;">{{plan.description}}</span>
-                </div>
-                <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
-                  ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run</button>
+            <div ng-repeat="plan in vm.benchmarkPlans" class="bench-plan-card">
+              <span class="bench-plan-chip">L{{plan.level}}</span>
+              <div class="bench-plan-body">
+                <div class="bench-plan-name">{{plan.name}}</div>
+                <div class="bench-plan-desc">{{plan.description}}</div>
               </div>
+              <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
+                ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run</button>
             </div>
           </div>
-          <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark
-            {{vm.benchmarkLevelName(vm.benchmarkLevel)}} running...
-            <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>
+          <div ng-if="vm.benchmarkPlans.length === 0" class="bench-empty">
+            No benchmark plans available.
           </div>
         </div>
+
         <!-- Final Benchmark Score (benchmark-all) -->
-        <div ng-if="vm.benchmarkAllResult" style="margin-bottom:16px;padding:10px;border:1px solid var(--border);border-radius:4px;">
-          <strong style="font-size:13px;">Final Benchmark Score</strong>
-          <div style="margin-top:6px;font-size:12px;line-height:1.7;">
-            <div>Reached <strong>{{vm.benchmarkAllResult.completedLevels}}</strong> of <strong>{{vm.benchmarkPlans.length}}</strong> benchmarks</div>
-            <div ng-if="vm.benchmarkAllResult.failedLevel !== null">
-              <span style="color:var(--danger);">Stopped at {{vm.benchmarkLevelName(vm.benchmarkAllResult.failedLevel)}} — error steps detected</span>
+        <div class="bench-section" ng-if="vm.benchmarkAllResult">
+          <div class="bench-section-title">Final score</div>
+          <div class="bench-final" ng-class="{bad: vm.benchmarkAllResult.failedLevel !== null}">
+            <div class="bench-final-row">
+              <span class="bench-final-icon">{{vm.benchmarkAllResult.failedLevel === null ? '✅' : '⚠️'}}</span>
+              <span>
+                Reached <strong>{{vm.benchmarkAllResult.completedLevels}}</strong> of <strong>{{vm.benchmarkPlans.length}}</strong> benchmarks
+              </span>
             </div>
-            <div ng-if="vm.benchmarkAllResult.failedLevel === null" style="color:var(--success);">All benchmarks completed — passed</div>
-            <div>Total: <strong>{{vm.benchmarkAllResult.totalSuccessful}}</strong> ok / <strong>{{vm.benchmarkAllResult.totalFailed}}</strong> fail — <strong>{{vm.benchmarkAllResult.totalPoints}}</strong> pts</div>
+            <div class="bench-final-row" ng-if="vm.benchmarkAllResult.failedLevel !== null">
+              <span class="bench-final-note">Stopped at {{vm.benchmarkLevelName(vm.benchmarkAllResult.failedLevel)}} — error steps detected</span>
+            </div>
+            <div class="bench-final-row" ng-if="vm.benchmarkAllResult.failedLevel === null">
+              <span class="bench-final-note">All benchmarks completed — passed</span>
+            </div>
+            <div class="bench-final-row">
+              <span class="bench-final-note"><strong>{{vm.benchmarkAllResult.totalSuccessful}}</strong> ok / <strong>{{vm.benchmarkAllResult.totalFailed}}</strong> fail — <strong>{{vm.benchmarkAllResult.totalPoints}}</strong> pts</span>
+            </div>
           </div>
-        </div>
-        <!-- Server Benchmarks (fetched) -->
-        <div ng-if="vm.serverBenchmarks.length > 0" style="margin-bottom:16px;">
-          <strong style="font-size:13px;">Server Benchmarks</strong>
-          <table style="width:100%;border-collapse:collapse;margin-top:4px;">
-            <thead>
-              <tr style="border-bottom:1px solid var(--border);">
-                <th style="text-align:left;padding:4px 8px;">Benchmark</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr ng-repeat="s in vm.serverBenchmarks" style="border-bottom:1px solid var(--border);">
-                <td style="padding:4px 8px;font-size:12px;">
-                  <div style="font-weight: bold;">
-                    <span style="font-size: small">{{s.timestamp ? (s.timestamp | date:'short') : '—'}}</span> - 
-                    {{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}} - 
-                    {{s.successfulEdits || 0}} ok<span ng-if="s.failedEdits"> / {{s.failedEdits}} fail</span> - 
-                    {{s.points || 0}}pts - 
-                    {{s.scorePercent != null ? (s.scorePercent.toFixed(1) + '%') : '—'}} - 
-                    {{s.status || '—'}} - 
-                    {{vm.formatBenchmarkDuration(s.durationMs)}}
-                  </div>
-                  <div>
-                    Model: {{(s.modelUsed || '') | limitTo:50}} - 
-                    OS : {{s.os || '—'}}
-                  </div>
-                  <div>
-                    {{(s.cpu || '') | limitTo:40}} - 
-                    {{s.ram || '—'}}GB RAM - 
-                    {{(s.gpu || '') | limitTo:50}}
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
         </div>
 
         <!-- Local Scores -->
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-          <strong style="font-size:13px;">Local Scores</strong>
-          <div style="display:flex;gap:4px;">
-            <button ng-click="vm.fetchBenchmarksFromServer()" class="small" ng-disabled="vm.fetchingBenchmarks"
-              style="font-size:11px;">
-              {{vm.fetchingBenchmarks ? 'Fetching...' : '📥 Fetch from Server'}}
-            </button>
+        <div class="bench-section">
+          <div class="bench-section-head">
+            <div>
+              <div class="bench-section-title">Local scores</div>
+              <div class="bench-section-sub" ng-if="vm.benchmarkScores.length > 0 && !vm.compareMode">Click a card for details, send, or delete.</div>
+              <div class="bench-section-sub" ng-if="vm.benchmarkScores.length > 0 && vm.compareMode">Pick two cards — the comparison panel shows which edits differed.</div>
+              <div class="bench-section-sub" ng-if="vm.benchmarkScores.length === 0">No local scores yet — run a benchmark above.</div>
+            </div>
+            <div class="bench-section-actions">
+              <button ng-if="!vm.compareMode" ng-click="vm.startCompareMode()" class="small nowrap"
+                ng-disabled="vm.benchmarkScores.length < 2"
+                title="Compare two runs side-by-side">⚖ Compare</button>
+              <button ng-if="vm.compareMode" ng-click="vm.exitCompareMode()" class="small nowrap"
+                title="Exit compare mode">✕ Exit compare</button>
+              <button ng-click="vm.fetchBenchmarksFromServer()" class="small nowrap" ng-disabled="vm.fetchingBenchmarks">
+                {{vm.fetchingBenchmarks ? 'Fetching…' : '📥 Fetch from Server'}}
+              </button>
+            </div>
+          </div>
+
+          <!-- Comparison panel -->
+          <div class="bench-compare" ng-if="vm.compareResult">
+            <div class="bench-compare-cards">
+              <div class="bench-compare-card" ng-class="{selected: vm.compareA === vm.compareResult.a}">
+                <div class="bench-compare-card-head">
+                  <span class="bench-compare-letter">A</span>
+                  <span class="bench-badge {{vm.benchmarkStatusInfo(vm.compareResult.a.status).cls}}">{{vm.benchmarkStatusInfo(vm.compareResult.a.status).label}}</span>
+                  <span class="bench-score-name">{{vm.benchmarkLevelName(vm.compareResult.a.level) || 'BM ' + vm.compareResult.a.level}}</span>
+                </div>
+                <div class="bench-compare-card-body">
+                  <span class="bench-compare-pct">{{vm.benchmarkPct(vm.compareResult.a.scorePercent)}}</span>
+                  <span class="bench-chip ok">{{vm.compareResult.a.successfulEdits || 0}} ok</span>
+                  <span class="bench-chip bad" ng-if="vm.compareResult.a.failedEdits">{{vm.compareResult.a.failedEdits}} fail</span>
+                  <span class="bench-chip neutral">{{vm.compareResult.a.points || 0}} pts</span>
+                  <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(vm.compareResult.a.durationMs)}}</span>
+                </div>
+              </div>
+              <div class="bench-compare-vs">vs</div>
+              <div class="bench-compare-card" ng-class="{selected: vm.compareB === vm.compareResult.b}">
+                <div class="bench-compare-card-head">
+                  <span class="bench-compare-letter">B</span>
+                  <span class="bench-badge {{vm.benchmarkStatusInfo(vm.compareResult.b.status).cls}}">{{vm.benchmarkStatusInfo(vm.compareResult.b.status).label}}</span>
+                  <span class="bench-score-name">{{vm.benchmarkLevelName(vm.compareResult.b.level) || 'BM ' + vm.compareResult.b.level}}</span>
+                </div>
+                <div class="bench-compare-card-body">
+                  <span class="bench-compare-pct">{{vm.benchmarkPct(vm.compareResult.b.scorePercent)}}</span>
+                  <span class="bench-chip ok">{{vm.compareResult.b.successfulEdits || 0}} ok</span>
+                  <span class="bench-chip bad" ng-if="vm.compareResult.b.failedEdits">{{vm.compareResult.b.failedEdits}} fail</span>
+                  <span class="bench-chip neutral">{{vm.compareResult.b.points || 0}} pts</span>
+                  <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(vm.compareResult.b.durationMs)}}</span>
+                </div>
+              </div>
+            </div>
+            <div class="bench-compare-summary" ng-if="vm.compareResult.differs">
+              ⚠ <strong>{{vm.compareResult.differs}}</strong> edit(s) differ between the two runs — highlighted below.
+            </div>
+            <div class="bench-compare-summary ok" ng-if="!vm.compareResult.differs">
+              ✓ No differing edits — both runs agreed on every file.
+            </div>
+            <div class="bench-compare-rows">
+              <div class="bench-compare-row" ng-repeat="r in vm.compareResult.rows track by $index"
+                ng-class="r.state">
+                <span class="bench-compare-path" title="{{r.path}}">{{r.path}}</span>
+                <span class="bench-compare-cell">
+                  <span class="bench-change-status {{vm.benchEditStatusClass(r.a)}}">{{vm.benchEditGlyph(r.a)}}</span>
+                  <span class="bench-compare-cell-label" ng-if="r.a">{{r.a.editAction || r.a.type}}</span>
+                  <span class="bench-compare-cell-label muted" ng-if="!r.a">—</span>
+                </span>
+                <span class="bench-compare-cell">
+                  <span class="bench-change-status {{vm.benchEditStatusClass(r.b)}}">{{vm.benchEditGlyph(r.b)}}</span>
+                  <span class="bench-compare-cell-label" ng-if="r.b">{{r.b.editAction || r.b.type}}</span>
+                  <span class="bench-compare-cell-label muted" ng-if="!r.b">—</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div ng-if="vm.benchmarkScores.length > 0">
+            <div ng-repeat="s in vm.benchmarkScores" class="bench-score-card"
+              ng-class="{open: vm.selectedBenchmarkScore === s, 'compare-a': vm.compareMode && vm.compareA === s, 'compare-b': vm.compareMode && vm.compareB === s}"
+              ng-click="vm.compareMode ? vm.toggleCompareScore(s) : (vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s))">
+              <div class="bench-score-head">
+                <span class="bench-compare-tag" ng-if="vm.compareMode && vm.compareA === s">A</span>
+                <span class="bench-compare-tag tag-b" ng-if="vm.compareMode && vm.compareB === s">B</span>
+                <span class="bench-badge {{vm.benchmarkStatusInfo(s.status).cls}}">{{vm.benchmarkStatusInfo(s.status).label}}</span>
+                <span class="bench-score-name">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</span>
+                <span class="bench-score-date" title="{{s.timestamp | date:'short'}}">{{s.timestamp | date:'short'}}</span>
+                <span class="bench-score-chevron">{{vm.compareMode ? (vm.compareA === s || vm.compareB === s ? '●' : '○') : (vm.selectedBenchmarkScore === s ? '▾' : '▸')}}</span>
+              </div>
+              <div class="bench-score-body">
+                <div class="bench-progress" title="{{vm.benchmarkPct(s.scorePercent)}}">
+                  <div class="bench-progress-fill" ng-style="{width: vm.benchmarkPctNum(s.scorePercent) + '%'}"></div>
+                </div>
+                <span class="bench-score-pct">{{vm.benchmarkPct(s.scorePercent)}}</span>
+              </div>
+              <div class="bench-chips">
+                <span class="bench-chip ok">{{s.successfulEdits || 0}} ok</span>
+                <span class="bench-chip bad" ng-if="s.failedEdits">{{s.failedEdits}} fail</span>
+                <span class="bench-chip neutral">{{s.points || 0}} pts</span>
+                <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(s.durationMs)}}</span>
+                <span class="bench-chip neutral" ng-if="s.modelUsed" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:24}}</span>
+              </div>
+              <div class="bench-score-details" ng-if="vm.selectedBenchmarkScore === s">
+                <div class="bench-detail-grid">
+                  <div><span class="muted">Status</span> {{s.status}}</div>
+                  <div><span class="muted">Duration</span> {{vm.formatBenchmarkDuration(s.durationMs) || '—'}}</div>
+                  <div><span class="muted">Model</span> {{s.modelUsed || '—'}}</div>
+                  <div><span class="muted">Edits</span> {{s.successfulEdits || 0}} ok / {{s.failedEdits || 0}} fail</div>
+                  <div ng-if="s.errorReason"><span class="muted">Error</span> {{s.errorReason}}</div>
+                </div>
+                <div class="bench-score-actions">
+                  <button ng-click="s._showChanges = !s._showChanges; $event.stopPropagation()" class="btn btn-small"
+                    ng-if="s.edits && s.edits.length"
+                    title="Inspect the file edits the agent made in this run">
+                    {{s._showChanges ? 'Hide changes' : 'View changes'}} ({{s.edits.length}})
+                  </button>
+                  <button ng-click="vm.sendBenchmarkToServer(s); $event.stopPropagation()" class="btn btn-small"
+                    ng-disabled="vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]">{{vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id] ? 'Sending…' : 'Send to server'}}</button>
+                  <button ng-click="vm.deleteBenchmarkScore(s); $event.stopPropagation()" class="btn btn-small danger" title="Delete this score">Delete</button>
+                </div>
+                <div class="bench-changes" ng-if="s._showChanges">
+                  <div class="bench-change" ng-repeat="e in s.edits track by $index">
+                    <div class="bench-change-head">
+                      <span class="bench-change-status {{vm.benchEditStatusClass(e)}}">{{vm.benchEditGlyph(e)}}</span>
+                      <span class="bench-change-action" title="{{e.editAction}}">{{e.editAction}}</span>
+                      <span class="bench-change-path" title="{{e.path}}">{{e.path}}</span>
+                      <span class="bench-change-lines" ng-if="e.linesAdded || e.linesRemoved">
+                        <span class="bench-chip ok" ng-if="e.linesAdded">+{{e.linesAdded}}</span>
+                        <span class="bench-chip bad" ng-if="e.linesRemoved">−{{e.linesRemoved}}</span>
+                      </span>
+                    </div>
+                    <div class="bench-change-error" ng-if="e.error">{{e.error}}</div>
+                    <div class="bench-change-diff" ng-if="e.diff && e.diff.length">
+                      <div class="bench-change-row" ng-repeat="l in e.diff track by $index"
+                        ng-class="{'old': l.old && !l.new, 'new': l.new && !l.old, 'mod': l.old && l.new && l.old !== l.new}">
+                        <span class="bench-change-mark">{{l.old && !l.new ? '−' : (l.new && !l.old ? '+' : ' ' )}}</span>
+                        <span class="bench-change-old" ng-if="l.old">{{l.old}}</span>
+                        <span class="bench-change-new" ng-if="l.new">{{l.new}}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-        <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
-          No local benchmark scores yet. Run a benchmark above.
+
+        <!-- Server Benchmarks (fetched) -->
+        <div class="bench-section" ng-if="vm.serverBenchmarks.length > 0">
+          <div class="bench-section-head">
+            <div>
+              <div class="bench-section-title">Server benchmarks</div>
+              <div class="bench-section-sub">Scores shared from other machines. Click a card for system details.</div>
+            </div>
+          </div>
+          <div ng-repeat="s in vm.serverBenchmarks" class="bench-score-card server"
+            ng-click="vm.selectedServerBenchmark = (vm.selectedServerBenchmark === s ? null : s)">
+            <div class="bench-score-head">
+              <span class="bench-badge {{vm.benchmarkStatusInfo(s.status).cls}}">{{vm.benchmarkStatusInfo(s.status).label}}</span>
+              <span class="bench-score-name">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</span>
+              <span class="bench-score-date" title="{{s.timestamp | date:'short'}}">{{s.timestamp ? (s.timestamp | date:'short') : '—'}}</span>
+              <span class="bench-score-chevron">{{vm.selectedServerBenchmark === s ? '▾' : '▸'}}</span>
+            </div>
+            <div class="bench-score-body">                <div class="bench-progress" title="{{vm.benchmarkPct(s.scorePercent)}}">
+                  <div class="bench-progress-fill" ng-style="{width: vm.benchmarkPctNum(s.scorePercent) + '%'}"></div>
+                </div>
+                <span class="bench-score-pct">{{vm.benchmarkPct(s.scorePercent)}}</span>
+            </div>
+            <div class="bench-chips">
+              <span class="bench-chip ok">{{s.successfulEdits || 0}} ok</span>
+              <span class="bench-chip bad" ng-if="s.failedEdits">{{s.failedEdits}} fail</span>
+              <span class="bench-chip neutral">{{s.points || 0}} pts</span>
+              <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(s.durationMs)}}</span>
+              <span class="bench-chip neutral" ng-if="s.modelUsed" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:24}}</span>
+            </div>
+            <div class="bench-score-details" ng-if="vm.selectedServerBenchmark === s">
+              <div class="bench-detail-grid">
+                <div><span class="muted">Model</span> {{s.modelUsed || '—'}}</div>
+                <div><span class="muted">OS</span> {{s.os || '—'}}</div>
+                <div><span class="muted">CPU</span> {{s.cpu || '—'}}</div>
+                <div><span class="muted">RAM</span> {{s.ram || '—'}} GB</div>
+                <div><span class="muted">GPU</span> {{s.gpu || '—'}}</div>
+              </div>
+            </div>
+          </div>
         </div>
-        <table ng-if="vm.benchmarkScores.length > 0" style="width:100%;border-collapse:collapse;">
-          <thead>
-            <tr style="border-bottom:1px solid var(--border);">
-              <th style="text-align:left;padding:4px 8px;">Date</th>
-              <th style="text-align:left;padding:4px 8px;">Benchmark</th>
-              <th style="text-align:left;padding:4px 8px;">Edits</th>
-              <th style="text-align:left;padding:4px 8px;">Points</th>
-              <th style="text-align:left;padding:4px 8px;">%</th>
-              <th style="text-align:left;padding:4px 8px;">Status</th>
-              <th style="text-align:left;padding:4px 8px;">Duration</th>
-              <th style="text-align:left;padding:4px 8px;">Model</th>
-              <th style="width:24px;"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr ng-repeat="s in vm.benchmarkScores" style="border-bottom:1px solid var(--border);cursor:pointer;"
-              ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
-              <td style="padding:4px 8px;font-size:12px;" title="{{s.timestamp | date:'short'}}">{{s.timestamp | date:'short'}}</td>
-              <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
-              <td style="padding:4px 8px;font-size:11px;">
-                <span style="color:var(--success);">{{s.successfulEdits || 0}} ok</span>
-                <span ng-if="s.failedEdits" style="color:var(--danger);"> / {{s.failedEdits}} fail</span>
-              </td>
-              <td style="padding:4px 8px;font-weight:700;">{{s.points || 0}}</td>
-              <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
-              <td style="padding:4px 8px;">{{s.status}}</td>
-              <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>
-              <td style="padding:4px 8px;font-size:11px;max-width:20%" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}
-              </td>
-              <td style="padding:4px 8px;">
-                <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"
-                  style="color:var(--danger);font-size:11px;" title="Delete">✕</button>
-                <button class="btn btn-small" ng-click="vm.sendBenchmarkToServer(s)" ng-disabled="vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]">{{vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id] ? 'Sending...' : 'Send'}}</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <strong style="font-size:13px;">System Specs</strong>
-            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor" class="small"
-              style="font-size:11px;">{{vm.showSystemInfoEditor ? 'Done' : '✎ Edit'}}</button>
+
+        <!-- System Specs -->
+        <div class="bench-section">
+          <div class="bench-section-head">
+            <div>
+              <div class="bench-section-title">System specs</div>
+              <div class="bench-section-sub">Reported with your scores so results are comparable.</div>
+            </div>
+            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor" class="small nowrap"
+              ng-if="!vm.showSystemInfoEditor">✎ Edit</button>
+            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor" class="small nowrap"
+              ng-if="vm.showSystemInfoEditor">✔ Done</button>
           </div>
-          <div ng-if="!vm.showSystemInfoEditor" style="font-size:12px;">
-            <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
-              <span class="muted">OS:</span><span>{{vm.systemInfoCustom.os || vm.systemInfoDetected.os || '—'}}</span>
-              <span class="muted">CPU:</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu ||
-                '—'}}</span>
-              <span class="muted">RAM:</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') :
-                (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') :
-                '—')}}</span>
-              <span class="muted">GPU:</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu ||
-                '—'}}</span>
-            </div>
+
+          <div ng-if="!vm.showSystemInfoEditor" class="bench-spec-grid">
+            <div class="bench-spec-item"><span class="muted">OS</span><span>{{vm.systemInfoCustom.os || vm.systemInfoDetected.os || '—'}}</span></div>
+            <div class="bench-spec-item"><span class="muted">CPU</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '—'}}</span></div>
+            <div class="bench-spec-item"><span class="muted">RAM</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') : (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') : '—')}}</span></div>
+            <div class="bench-spec-item"><span class="muted">GPU</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '—'}}</span></div>
+            <div class="bench-spec-item" ng-if="vm.systemInfoCustom.model"><span class="muted">Model</span><span>{{vm.systemInfoCustom.model}}</span></div>
           </div>
-          <div ng-if="vm.showSystemInfoEditor" style="font-size:12px;">
-            <div style="margin-bottom:6px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">OS</label>
-              <input type="text" ng-model="vm.systemInfoCustom.os" placeholder="{{vm.systemInfoDetected.os}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+
+          <div ng-if="vm.showSystemInfoEditor" class="bench-spec-editor">
+            <div class="form-row"><label class="muted">OS</label>
+              <input type="text" ng-model="vm.systemInfoCustom.os" placeholder="{{vm.systemInfoDetected.os}}" />
             </div>
-            <div style="margin-bottom:6px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">CPU</label>
-              <input type="text" ng-model="vm.systemInfoCustom.cpu" placeholder="{{vm.systemInfoDetected.cpu}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">CPU</label>
+              <input type="text" ng-model="vm.systemInfoCustom.cpu" placeholder="{{vm.systemInfoDetected.cpu}}" />
             </div>
-            <div style="margin-bottom:6px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">RAM (GB)</label>
-              <input type="number" step="0.1" ng-model="vm.systemInfoCustom.ramGb" placeholder="e.g. 32"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">RAM (GB)</label>
+              <input type="number" step="0.1" ng-model="vm.systemInfoCustom.ramGb" placeholder="e.g. 32" />
             </div>
-            <div style="margin-bottom:8px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">GPU</label>
-              <input type="text" ng-model="vm.systemInfoCustom.gpu" placeholder="{{vm.systemInfoDetected.gpu}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">GPU</label>
+              <input type="text" ng-model="vm.systemInfoCustom.gpu" placeholder="{{vm.systemInfoDetected.gpu}}" />
             </div>
-            <div style="margin-bottom:8px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">Model</label>
-              <input type="text" ng-model="vm.systemInfoCustom.model" placeholder="e.g. GPT-4, Claude 3.5 Sonnet"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">Model</label>
+              <input type="text" ng-model="vm.systemInfoCustom.model" placeholder="e.g. GPT-4, Claude 3.5 Sonnet" />
             </div>
-            <div style="margin-bottom:8px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">Benchmark Project Root</label>
-              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot"
-                placeholder="{{vm.defaultBenchmarkRoot}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;font-family:monospace;" />
+            <div class="form-row"><label class="muted">Benchmark Project Root</label>
+              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot" placeholder="{{vm.defaultBenchmarkRoot}}" class="bench-mono" />
             </div>
-            <div style="display:flex;gap:6px;">
+            <div class="bench-spec-actions">
               <button ng-click="vm.saveSystemInfo()" class="primary small">Save</button>
               <button ng-click="vm.resetSystemInfo()" class="small">Reset to Detected</button>
+              <span ng-if="vm.systemInfoSaved" class="bench-saved">✓ Saved</span>
             </div>
-            <div ng-if="vm.systemInfoSaved" style="margin-top:6px;color:var(--accent);font-size:11px;">✓ Saved</div>
           </div>
         </div>
+
       </div>
       <div class="popup-footer">
         <button ng-click="vm.closeBenchmarksPanel()">Close</button>

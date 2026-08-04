@@ -163,7 +163,7 @@ angular.module('kanbanApp')
                 ];
 
                 // Benchmarks State
-                vm.benchmarkScores = []; vm.serverBenchmarks = []; vm.benchmarkPlans = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
+                vm.benchmarkScores = []; vm.serverBenchmarks = []; vm.benchmarkPlans = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.selectedServerBenchmark = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
 
                 // Methods
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
@@ -557,7 +557,8 @@ angular.module('kanbanApp')
                                                                             status: status,
                                                                             modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
                                                                             durationMs: bmElapsed,
-                                                                            errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || ''
+                                                                            errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || '',
+                                                                            edits: collectBenchmarkEdits(stepsForScoring)
                                                                         }
                                                                     );
                                                                     vm._advanceBenchmarkAll(card._benchmarkLevel != null ? card._benchmarkLevel : 1, successful, failed, totalAttempts, status, points, scorePercent);
@@ -870,7 +871,7 @@ angular.module('kanbanApp')
                     });
                 };
 
-                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
+                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
                 vm.benchmarkLevelName = function (level) {
                     if (level === undefined || level === null) return '';
@@ -950,6 +951,207 @@ angular.module('kanbanApp')
                     return (hours > 0 ? hours + 'h ' : '') + (minutes > 0 ? minutes + 'm ' : '') + seconds + 's';
                 }
 
+                // Null-safe percentage helper (server scores may arrive as strings).
+                // Compact edit records captured when a benchmark run finishes, so
+                // the saved score can show what the agent actually changed.
+                function collectBenchmarkEdits(steps) {
+                    if (!steps || !steps.length) return [];
+                    var out = [];
+                    var seen = {};
+                    steps.forEach(function (s) {
+                        if (s.type !== 'edit' && s.type !== 'create' && s.type !== 'rename') return;
+                        if (!s.path) return;
+                        // Keep every distinct step: key on index when present, else path+type+status.
+                        var key = (s.index != null && s.index !== undefined ? s.index + '|' : '') + s.path + '|' + s.type + '|' + (s.type === 'rename' ? (s.toPath || '') : s.status);
+                        if (seen[key]) return;
+                        seen[key] = true;
+                        var action = s.editAction || (s.type === 'create' ? 'created' : (s.type === 'rename' ? 'renamed → ' + (s.toPath || '') : 'modified'));
+                        var rec = {
+                            path: s.path,
+                            type: s.type,
+                            status: s.status || 'pending',
+                            editAction: action,
+                            linesAdded: s.linesAdded || 0,
+                            linesRemoved: s.linesRemoved || 0,
+                            toPath: s.toPath || '',
+                            error: s.error || '',
+                            index: s.index != null && s.index !== undefined ? s.index : null
+                        };
+                        // Best-effort line-level diff: prefer structured diffLines, else old/new arrays, else raw strings.
+                        var diff = [];
+                        if (Array.isArray(s.diffLines) && s.diffLines.length) {
+                            s.diffLines.forEach(function (l) {
+                                if (l && (l.oldLine != null || l.newLine != null)) diff.push({ old: l.oldLine || '', new: l.newLine || '' });
+                            });
+                        } else if (Array.isArray(s.oldLines) || Array.isArray(s.newLines)) {
+                            var oldA = s.oldLines || [], newA = s.newLines || [];
+                            var m = Math.max(oldA.length, newA.length);
+                            for (var i = 0; i < m; i++) diff.push({ old: i < oldA.length ? oldA[i] : '', new: i < newA.length ? newA[i] : '' });
+                        } else if (s.oldString || s.newString) {
+                            var o = (s.oldString || '').replace(/\r\n/g, '\n').split('\n');
+                            var n = (s.newString || '').replace(/\r\n/g, '\n').split('\n');
+                            var mm = Math.max(o.length, n.length);
+                            for (var j = 0; j < mm; j++) diff.push({ old: j < o.length ? o[j] : '', new: j < n.length ? n[j] : '' });
+                        }
+                        rec.diff = diff.slice(0, 60);
+                        out.push(rec);
+                    });
+                    return out;
+                }
+
+                vm.benchmarkPct = function (scorePercent) {
+                    if (scorePercent === null || scorePercent === undefined || scorePercent === '') return '—';
+                    var n = Number(scorePercent);
+                    return isNaN(n) ? '—' : n.toFixed(1) + '%';
+                };
+                vm.benchmarkPctNum = function (scorePercent) {
+                    if (scorePercent === null || scorePercent === undefined) return 0;
+                    var n = Number(scorePercent);
+                    return isNaN(n) ? 0 : n;
+                };
+
+                // Friendly label + CSS class for a benchmark score's status.
+                vm.benchmarkStatusInfo = function (status) {
+                    var s = String(status || '').toLowerCase();
+                    if (s === 'completed' || s === 'passed' || s === 'ok' || s === 'success') return { label: 'Passed', cls: 'good' };
+                    if (s === 'partial') return { label: 'Partial', cls: 'warn' };
+                    if (s === 'failed' || s === 'error' || s === 'fail') return { label: 'Failed', cls: 'bad' };
+                    return { label: status || '—', cls: 'neutral' };
+                };
+
+                // SVG line-chart data for score% trend across runs (oldest → newest).
+                // Returns null when there aren't enough points, else { w, h, pts, line, area, last, best }.
+                vm.benchmarkTrendData = function () {
+                    var scores = (vm.benchmarkScores || []).slice()
+                        .sort(function (a, b) { return new Date(a.timestamp || 0) - new Date(b.timestamp || 0); });
+                    var pts = [];
+                    scores.forEach(function (s) {
+                        var p = s.scorePercent;
+                        if (p === null || p === undefined || p === '') return;
+                        var n = Number(p);
+                        if (!isNaN(n)) pts.push(n);
+                    });
+                    if (pts.length < 2) return null;
+                    var w = 300, h = 80, padX = 6, padY = 6, minY = 0, maxY = 100;
+                    var stepX = (w - padX * 2) / (pts.length - 1);
+                    var coords = pts.map(function (p, i) {
+                        var x = padX + i * stepX;
+                        var y = h - padY - ((p - minY) / (maxY - minY)) * (h - padY * 2);
+                        return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, pct: p };
+                    });
+                    var line = coords.map(function (c) { return c.x + ',' + c.y; }).join(' ');
+                    var area = line + ' ' + (w - padX) + ',' + (h - padY) + ' ' + padX + ',' + (h - padY);
+                    var best = Math.max.apply(null, pts);
+                    return { w: w, h: h, pts: coords, line: line, area: area, last: pts[pts.length - 1], best: best };
+                };
+
+                // Lightweight aggregates over local scores for the summary strip.
+                vm.benchmarkStats = function () {
+                    var scores = vm.benchmarkScores || [];
+                    if (!scores.length) return null;
+                    var ok = 0, fail = 0, pts = 0, total = 0;
+                    scores.forEach(function (s) {
+                        ok += (s.successfulEdits || 0);
+                        fail += (s.failedEdits || 0);
+                        pts += (s.points || 0);
+                        total++;
+                    });
+                    var avg = total ? Math.round((ok / (ok + fail || 1)) * 100) : 0;
+                    return { runs: total, ok: ok, fail: fail, points: pts, avgPass: avg };
+                };
+
+                // ── Compare two local scores side-by-side ────────────────────────
+                vm.compareMode = false;
+                vm.compareA = null;
+                vm.compareB = null;
+                vm.compareResult = null;
+
+                vm.startCompareMode = function () {
+                    vm.compareMode = true;
+                    vm.compareA = null;
+                    vm.compareB = null;
+                    vm.compareResult = null;
+                    vm.selectedBenchmarkScore = null;
+                };
+                vm.exitCompareMode = function () {
+                    vm.compareMode = false;
+                    vm.compareA = null;
+                    vm.compareB = null;
+                    vm.compareResult = null;
+                };
+
+                vm.toggleCompareScore = function (s) {
+                    if (vm.compareA === s) { vm.compareA = null; }
+                    else if (vm.compareB === s) { vm.compareB = null; }
+                    else if (!vm.compareA) { vm.compareA = s; }
+                    else if (!vm.compareB) { vm.compareB = s; }
+                    else { vm.compareA = s; }
+                    vm.compareResult = vm.compareData();
+                };
+
+                vm.benchEditOk = function (e) { return !!(e && (e.status === 'done' || e.status === 'created' || e.status === 'applied')); };
+                vm.benchEditFail = function (e) { return !!(e && (e.status === 'error' || e.status === 'failed' || e.status === 'rejected')); };
+                vm.benchEditStatusClass = function (e) {
+                    if (vm.benchEditOk(e)) return 'ok';
+                    if (vm.benchEditFail(e)) return 'bad';
+                    return 'neutral';
+                };
+                vm.benchEditGlyph = function (e) {
+                    if (vm.benchEditOk(e)) return '✓';
+                    if (vm.benchEditFail(e)) return '✕';
+                    return '○';
+                };
+
+                // Matches the two scores' edit records by normalized path + type
+                // (+ step index when present, so distinct edits to the same file
+                // — e.g. create then append — surface as separate rows) and
+                // classifies each row so the UI can highlight where they differ.
+                vm.compareData = function () {
+                    var a = vm.compareA, b = vm.compareB;
+                    if (!a || !b) return null;
+                    var norm = function (p) { return String(p || '').replace(/\\/g, '/').toLowerCase(); };
+                    var editKey = function (e) {
+                        var k = norm(e.path);
+                        if (e.index != null && e.index !== undefined && e.index !== null) return k + '|' + (e.type || 'edit') + '|' + e.index;
+                        return k + '|' + (e.type || 'edit') + '|' + (e.status || '');
+                    };
+                    var byKey = {};
+                    (a.edits || []).forEach(function (e) {
+                        var k = editKey(e);
+                        byKey[k] = byKey[k] || { a: null, b: null };
+                        byKey[k].a = e;
+                    });
+                    (b.edits || []).forEach(function (e) {
+                        var k = editKey(e);
+                        byKey[k] = byKey[k] || { a: null, b: null };
+                        byKey[k].b = e;
+                    });
+                    var rows = Object.keys(byKey).map(function (k) {
+                        var pair = byKey[k];
+                        var ea = pair.a, eb = pair.b;
+                        var okA = vm.benchEditOk(ea), okB = vm.benchEditOk(eb);
+                        var failA = vm.benchEditFail(ea), failB = vm.benchEditFail(eb);
+                        var state;
+                        if (ea && eb) {
+                            if (okA && okB) state = 'both-ok';
+                            else if (failA && failB) state = 'both-fail';
+                            else if (okA && failB) state = 'a-ok-b-fail';
+                            else if (failA && okB) state = 'a-fail-b-ok';
+                            else if (okA) state = 'a-ok-b-mixed';
+                            else if (okB) state = 'a-mixed-b-ok';
+                            else state = 'both-mixed';
+                        } else if (ea) {
+                            state = okA ? 'only-a-ok' : (failA ? 'only-a-fail' : 'only-a');
+                        } else {
+                            state = okB ? 'only-b-ok' : (failB ? 'only-b-fail' : 'only-b');
+                        }
+                        var label = (ea && ea.path) || (eb && eb.path) || k;
+                        return { path: label, a: ea, b: eb, okA: okA, okB: okB, failA: failA, failB: failB, state: state };
+                    }).sort(function (x, y) { return x.path.localeCompare(y.path); });
+                    var differs = rows.filter(function (r) { return r.state === 'a-ok-b-fail' || r.state === 'a-fail-b-ok'; });
+                    return { a: a, b: b, rows: rows, differs: differs.length };
+                };
+
                 vm.sendBenchmarkToServer = function (s) {
                     if (!s || !s.id || vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]) return;
                     vm._sendingBenchmarkIds = vm._sendingBenchmarkIds || {};
@@ -1011,7 +1213,7 @@ angular.module('kanbanApp')
                 };
                 vm.saveSystemInfo = function () { $http.post('/api/benchmark/system-info', vm.systemInfoCustom).then(function () { vm.systemInfoSaved = true; $timeout(function () { vm.systemInfoSaved = false; }, 2000); }); };
                 vm.resetSystemInfo = function () { vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: '' }; vm.saveSystemInfo(); };
-                vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); }).catch(function () { }); };
+                vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); if (vm.compareA === score) vm.compareA = null; if (vm.compareB === score) vm.compareB = null; vm.compareResult = vm.compareData(); }).catch(function () { }); };
             }
         };
     }]);

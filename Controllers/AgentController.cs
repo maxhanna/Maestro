@@ -1335,8 +1335,40 @@ public partial class AgentController : ControllerBase
                                         ? string.Join("\n", cNcEl.EnumerateArray().Select(e => AgentUtilities.UnescapeString(e.GetString() ?? "")))
                                         : null;
                             }
-                            if (string.IsNullOrWhiteSpace(candTargetName) || string.IsNullOrWhiteSpace(candNewCodeStr))
+                            if (string.IsNullOrWhiteSpace(candTargetName))
                                 continue;
+                            var candHasReplace = candRoot.TryGetProperty("replace", out var cRpEl);
+                            var candReplaceSection = candHasReplace && cRpEl.GetBoolean();
+                            var candHasInsertAfter = candRoot.TryGetProperty("insertAfter", out var cIaEl);
+                            var candInsertAfter = candHasInsertAfter && cIaEl.GetBoolean();
+                            var candWantsReplace = candReplaceSection ||
+                                (candHasInsertAfter && !candInsertAfter && !candHasReplace) ||
+                                (!candHasInsertAfter && !candHasReplace);
+                            // DELETION INTENT: replace with an EMPTY newCode means "remove the matched
+                            // block". Previously this candidate was skipped BEFORE ResolveHtmlAnchor ran,
+                            // so a deletion payload ("replace":true, "newCode":[]) reported
+                            // "targetName block not found" even when the block existed verbatim — the
+                            // exact-match/normalized/fuzzy chain never got a chance. Resolve the anchor
+                            // first and return a deletion edit (old=block, new="").
+                            if (string.IsNullOrWhiteSpace(candNewCodeStr) && candWantsReplace)
+                            {
+                                var (delBlock, _, delErr) = HtmlDomEditor.ResolveHtmlAnchor(
+                                    sourceText, candTargetName, step.Change, step.LineNumber,
+                                    expandToClosingTags: false, true);
+                                if (delBlock == null)
+                                {
+                                    lastErr = delErr;
+                                    continue;
+                                }
+                                await EmitLog(emitSse, "info",
+                                    $"🗑 FORMAT D deletion: empty newCode + replace intent resolved anchor in {relPath} — removing matched block", ct: ct);
+                                return (delBlock, "", false, null, false, null, true);
+                            }
+                            if (string.IsNullOrWhiteSpace(candNewCodeStr))
+                            {
+                                lastErr = "FORMAT D failed: newCode is empty. You MUST provide the full replacement HTML in newCode, not an empty array.";
+                                continue;
+                            }
                             var candRawNewCode = candNewCodeStr;
                             candNewCodeStr = HtmlDomEditor.StripLeadingClosingDivs(candNewCodeStr, candTargetName);
                             if (candNewCodeStr != candRawNewCode)
@@ -1359,10 +1391,6 @@ public partial class AgentController : ControllerBase
                                 await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
                                 return (null, null, false, null, true, null, false);
                             }
-                            var candHasReplace = candRoot.TryGetProperty("replace", out var cRpEl);
-                            var candReplaceSection = candHasReplace && cRpEl.GetBoolean();
-                            var candHasInsertAfter = candRoot.TryGetProperty("insertAfter", out var cIaEl);
-                            var candInsertAfter = candHasInsertAfter && cIaEl.GetBoolean();
                             var (matchedBlock, _, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, candTargetName, step.Change, step.LineNumber, expandToClosingTags: false, true);
                             if (matchedBlock == null)
                             {
@@ -1953,6 +1981,26 @@ public partial class AgentController : ControllerBase
                             if (!System.IO.File.Exists(fullPath))
                                 return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
                             var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                            var wantsReplace = replaceSection ||
+                                (hasInsertAfter && !insertAfter && !hasReplace) ||
+                                (!hasInsertAfter && !hasReplace);
+                            // DELETION INTENT: replace with empty newCode removes the matched block.
+                            // Resolve the anchor (exact → normalized → collapsed → fuzzy chain) BEFORE
+                            // rejecting, so a deletion payload never reports "targetName not found"
+                            // for a block that exists verbatim.
+                            if (string.IsNullOrWhiteSpace(newCodeStr) && wantsReplace)
+                            {
+                                var (delBlock, _, delErr) = HtmlDomEditor.ResolveHtmlAnchor(
+                                    sourceText, tn, step.Change, step.LineNumber,
+                                    expandToClosingTags: false, true);
+                                if (delBlock == null)
+                                {
+                                    return (null, null, false, null, false,
+                                        $"FORMAT D failed: targetName block not found in {relPath}. " +
+                                        $"Copy the exact code block from the file as targetName.", false);
+                                }
+                                return (delBlock, "", false, null, false, null, true);
+                            }
                             newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr, tn);
                             if (string.IsNullOrWhiteSpace(newCodeStr))
                             {
@@ -2246,10 +2294,25 @@ public partial class AgentController : ControllerBase
         if (!string.IsNullOrWhiteSpace(step.NewString))
         {
             var newStr = AgentUtilities.NormalizeLineEndings(step.NewString);
-            if (content.Contains(newStr, StringComparison.Ordinal))
+            // REMOVAL-WITH-SURVIVOR guard: the planner can express a deletion as
+            // oldString = <survivor + target> → newString = <survivor> (the surviving context
+            // fragment is emitted as the replacement). The survivor is trivially present in the
+            // file even BEFORE the removal is applied — so finding newString here proves NOTHING
+            // about whether the deletion already happened. Only the FULL oldString being absent
+            // proves the removal is done. Skipping the survivor check here also lets the removal
+            // branches above (remove/delete-prefixed changes) and the oldString-not-found path
+            // below make the correct AlreadyDone decision against the actual removal target.
+            var isSurvivorFragment = !string.IsNullOrWhiteSpace(step.OldString) &&
+                AgentUtilities.NormalizeLineEndings(step.OldString).Contains(newStr, StringComparison.Ordinal);
+            if (!isSurvivorFragment && content.Contains(newStr, StringComparison.Ordinal))
                 return (PreEditVerdict.AlreadyDone, "code already present in file");
             var collapsedNew = CollapseWhitespace(newStr);
-            if (collapsedNew.Length >= 15 &&
+            var collapsedOld = string.IsNullOrWhiteSpace(step.OldString)
+                ? null
+                : CollapseWhitespace(AgentUtilities.NormalizeLineEndings(step.OldString));
+            var isSurvivorFragmentCollapsed = collapsedOld != null && collapsedNew.Length < collapsedOld.Length &&
+                collapsedOld.Contains(collapsedNew, StringComparison.Ordinal);
+            if (!isSurvivorFragment && !isSurvivorFragmentCollapsed && collapsedNew.Length >= 15 &&
                 CollapseWhitespace(content).Contains(collapsedNew, StringComparison.Ordinal))
                 return (PreEditVerdict.AlreadyDone, "code already present in file (whitespace differences only)");
         }
@@ -11930,6 +11993,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ? "Planner declared plan complete — post-execution verification skipped."
             : (string?)null;
         List<string>? verificationIssues = null;
+        List<string>? speculativeVerificationIssues = null;
 
         var anyEditsApplied = allSteps.OfType<Dictionary<string, object?>>().Any(r =>
             r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
@@ -11937,7 +12001,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (anyEditsApplied || planCompleteDeclared)
         {
-            (taskComplete, verificationDetails, verificationIssues) =
+            (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues) =
                  await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
         }
         else
@@ -11954,7 +12018,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "warn",
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
-                var (reverifyComplete, reverifyDetails, reverifyIssues) =
+                var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative) =
                     await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
                 if (reverifyComplete)
                 {
@@ -11965,14 +12029,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 else if (reverifyIssues.Count == 0)
                 {
                     await EmitLog(emitSse, "warn",
-                        $"Re-verification still vague with no concrete issues — trusting step truth. ({reverifyDetails})", ct: ct);
+                        $"Re-verification still vague with no CONFIRMED issues — trusting step truth. ({reverifyDetails})", ct: ct);
                     taskComplete = true;
-                    verificationDetails = reverifyDetails + " (overridden: all steps completed, verifier gave no actionable issues)";
+                    verificationDetails = reverifyDetails + " (overridden: all steps completed, verifier gave no confirmed actionable issues)";
                 }
                 else
                 {
                     verificationDetails = reverifyDetails;
                     verificationIssues = reverifyIssues;
+                    speculativeVerificationIssues = reverifySpeculative;
                 }
             }
         }
@@ -11996,7 +12061,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var stepCount = needsExtraStepResults.Count;
                 await EmitLog(emitSse, "info",
                     $"All {stepCount} step(s) had needsExtraStep=false (step-level verifier confirmed completion) and " +
-                    $"post-execution verifier gave no specific issues — overriding rejection. Details: {verificationDetails}", ct: ct);
+                    $"post-execution verifier gave no CONFIRMED issues — overriding rejection. Details: {verificationDetails}", ct: ct);
                 taskComplete = true;
                 allSteps.Add(new Dictionary<string, object?>
                 {
@@ -12011,12 +12076,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             const int MaxPostVerifyRepairIterations = 3;
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
+            var partialEditFeedback = new StringBuilder();
             while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)
             {
                 repairIteration++;
                 await EmitLog(emitSse, "warn",
                     $"Post-execution verification incomplete (repair pass {repairIteration}/{MaxPostVerifyRepairIterations}): " +
                     $"{verificationDetails}", ct: ct);
+                if (speculativeVerificationIssues is { Count: > 0 })
+                {
+                    await EmitLog(emitSse, "bypass",
+                        $"🔎 {speculativeVerificationIssues.Count} speculative verifier concern(s) excluded from repair (logged only): " +
+                        $"{string.Join("; ", speculativeVerificationIssues)}", ct: ct);
+                }
                 var allFailures = allSteps.OfType<Dictionary<string, object?>>()
                     .Where(s => s.GetValueOrDefault("status")?.ToString() is "error" or "verify-abandoned")
                     .ToList();
@@ -12034,6 +12106,39 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         failureContextForReplan.AppendLine($"  Context: {TruncateForLlm(failureCtx, 1000)}");
                     failureContextForReplan.AppendLine();
                 }
+                // TRIAGE: validate each CONFIRMED issue against the actual file contents before
+                // feeding it to the replanner. Phantom claims (symbol present despite 'missing'),
+                // event-gated initialization concerns, and 'might/could' wording are dropped with
+                // a log entry instead of forcing a repair.
+                if (verificationIssues is { Count: > 0 })
+                {
+                    var triageFiles = LoadFilesForTriage(projectRoot, allSteps, prompt);
+                    var keptIssues = new List<string>();
+                    foreach (var issue in verificationIssues)
+                    {
+                        var (keep, reason) = TriageVerifierIssue(issue, triageFiles);
+                        if (keep)
+                        {
+                            keptIssues.Add(issue);
+                        }
+                        else
+                        {
+                            await EmitLog(emitSse, "bypass",
+                                $"🛡️ Verifier issue triaged out (not fed to replanner): \"{TruncateForLlm(issue, 200)}\" — {reason}", ct: ct);
+                        }
+                    }
+                    verificationIssues = keptIssues;
+                    if (verificationIssues.Count == 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            "All verifier issues were triaged out as speculative/phantom — treating verification as complete (changes kept).", ct: ct);
+                        // Do NOT add a verified_complete entry here — the post-loop
+                        // `if (taskComplete)` block records the single entry with this reason.
+                        verificationDetails += " — all verifier issues triaged as non-actionable (speculative/phantom)";
+                        taskComplete = true;
+                        break;
+                    }
+                }
                 var qualityCheckReason = new StringBuilder();
                 if (verificationIssues != null && verificationIssues.Count > 0)
                 {
@@ -12049,6 +12154,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 else
                 {
                     qualityCheckReason.AppendLine(verificationDetails);
+                }
+                if (partialEditFeedback.Length > 0)
+                {
+                    qualityCheckReason.AppendLine();
+                    qualityCheckReason.AppendLine("## PREVIOUS REPAIR STEPS REJECTED AS PARTIAL EDITS — do not repeat these ##");
+                    qualityCheckReason.Append(partialEditFeedback);
                 }
                 var enhancedSteering = (steeringContext ?? "") +
                     "\n\n## PRIOR FAILURES — avoid repeating these approaches ##\n" +
@@ -12067,6 +12178,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     break;
                 }
                 var singleStep = replanSteps[0];
+                // PARTIAL-EDIT GATE: verify the repair step's concrete edit actually implements
+                // what its Change description claims. An edit that touches far less than the
+                // description (e.g. adding an unused AfterViewInit import while describing a full
+                // lifecycle implementation) is rejected and retried with feedback instead of
+                // being accepted.
+                var (isPartialEdit, partialEditReason) = DetectPartialEdit(singleStep);
+                if (isPartialEdit)
+                {
+                    if (repairIteration >= MaxPostVerifyRepairIterations)
+                    {
+                        // Final repair pass: a false-positive here would hard-fail the card, which
+                        // is worse than the status quo (accept + let PostExecuteVerify judge).
+                        // Accept with a visible warning and let the re-verify below decide.
+                        await EmitLog(emitSse, "warn",
+                            $"⚠️ Final repair pass still produced a PARTIAL EDIT — accepting with warning, " +
+                            $"letting verification judge: {partialEditReason}. Change: \"{TruncateForLlm(singleStep.Change, 200)}\"", ct: ct);
+                    }
+                    else
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"✂️ Repair step rejected as PARTIAL EDIT — {partialEditReason}. " +
+                            $"Change: \"{TruncateForLlm(singleStep.Change, 200)}\". Retrying the repair with feedback.", ct: ct);
+                        partialEditFeedback.AppendLine(
+                            $"- Rejected partial edit \"{TruncateForLlm(singleStep.Change, 160)}\": {partialEditReason}. " +
+                            "Produce a concrete oldString/newString that fully implements the described change (a single import/one-line edit is not enough).");
+                        continue;
+                    }
+                }
                 var originalStepCount = plan?.Plan?.Count ?? 0;
                 plan = MergePlans(plan ?? new AgentPlan(),
                     new AgentPlan { Plan = new List<PlanStep> { singleStep }, Summary = "Repair: " + singleStep.Change, Score = 0 });
@@ -12089,16 +12228,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 // If repair step was "already done", the verifier issue was a phantom —
                 // remove it and skip re-verify so the next pass tries the next issue.
-                var repairStep = allSteps.OfType<Dictionary<string, object?>>().LastOrDefault();
-                var stepWasAlreadyDone = repairStep != null
-                    && repairStep.GetValueOrDefault("status")?.ToString() == "skipped"
-                    && repairStep.GetValueOrDefault("reason")?.ToString() == "already done";
-                if (stepWasAlreadyDone && verificationIssues != null && verificationIssues.Count > 0)
+                var (isPhantomIssue, phantomText, remainingIssues) =
+                    TrySkipPhantomIssue(allSteps, verificationIssues);
+                if (isPhantomIssue)
                 {
-                    var phantom = verificationIssues[0];
-                    verificationIssues.RemoveAt(0);
+                    verificationIssues = remainingIssues;
                     await EmitLog(emitSse, "info",
-                        $"Repair step was already done — issue \"{phantom}\" was a phantom. " +
+                        $"Repair step was already done — issue \"{phantomText}\" was a phantom. " +
                         $"Remaining issues: {verificationIssues.Count}", ct: ct);
                     if (verificationIssues.Count == 0)
                     {
@@ -12107,11 +12243,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                     continue;
                 }
-                var (reVerified, reDetails, reIssues) =
+                var (reVerified, reDetails, reIssues, reSpeculative) =
                     await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
                 taskComplete = reVerified;
                 verificationDetails = reDetails;
                 verificationIssues = reIssues;
+                speculativeVerificationIssues = reSpeculative;
                 if (taskComplete)
                     await EmitLog(emitSse, "success", $"Repair pass {repairIteration}: verification now complete.", ct: ct);
             }
@@ -12260,7 +12397,339 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return enriched.ToString();
     }
-    private async Task<(bool complete, string details, List<string> issues)> PostExecuteVerify(
+    /// <summary>
+    /// Splits the verifier response's 'issues' array into CONFIRMED (actionable — used to drive repair steps)
+    /// and SPECULATIVE (hypothetical risks — logged but never repaired) buckets. Tolerates both
+    /// object items ({type, text}) and legacy plain-string items (treated as CONFIRMED for
+    /// backward compatibility with older verifier output). Accepts the verifier JSON root object
+    /// and reads its 'issues' property.
+    /// </summary>
+    private static (List<string> confirmed, List<string> speculative) ParseVerifyIssues(JsonElement rootEl)
+    {
+        var confirmed = new List<string>();
+        var speculative = new List<string>();
+        if (rootEl.ValueKind != JsonValueKind.Object) return (confirmed, speculative);
+        if (!rootEl.TryGetProperty("issues", out var issuesEl) || issuesEl.ValueKind != JsonValueKind.Array)
+            return (confirmed, speculative);
+        foreach (var issueEl in issuesEl.EnumerateArray())
+        {
+            if (issueEl.ValueKind == JsonValueKind.Object)
+            {
+                var type = issueEl.TryGetProperty("type", out var tEl) ? tEl.GetString() : null;
+                var text = issueEl.TryGetProperty("text", out var xEl) ? xEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(text)) text = issueEl.TryGetProperty("issue", out var iEl) ? iEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(text)) continue;
+                if (string.Equals(type, "SPECULATIVE", StringComparison.OrdinalIgnoreCase))
+                    speculative.Add(text);
+                else
+                    confirmed.Add(text);
+            }
+            else
+            {
+                var text = issueEl.GetString();
+                if (!string.IsNullOrWhiteSpace(text)) confirmed.Add(text);
+            }
+        }
+        return (confirmed, speculative);
+    }
+
+    /// <summary>Claim words that assert a concrete missing/undefined defect (as opposed to a risk).</summary>
+    private static readonly Regex PhantomClaimRegex = new(
+        @"\b(missing|not found|doesn't exist|does not exist|not defined|undefined|not present|absent|never used|unused|not declared)\b",
+        RegexOptions.IgnoreCase);
+
+    /// <summary>Hedge words that mark an issue as speculative ('might/could/maybe') rather than a proven defect.</summary>
+    private static readonly Regex SpeculativeHedgeRegex = new(
+        @"\b(might|could|maybe|possibly|potentially|may|likely|probably|perhaps|risk|risks|concern|concerns|worried|unsure|unclear|not sure|seems|appears)\b",
+        RegexOptions.IgnoreCase);
+
+    /// <summary>Timing/lifecycle words that trigger the event-gated reachability check.</summary>
+    private static readonly Regex TimingConcernRegex = new(
+        @"\b(initialized|initialization|render cycle|lifecycle|not yet available|not available|at runtime|before.*(?:load|render|init))\b",
+        RegexOptions.IgnoreCase);
+
+    /// <summary>Code-shaped identifiers — camelCase/PascalCase/snake_case tokens that look like
+    /// real symbols rather than English prose words.</summary>
+    private static readonly Regex CodeSymbolTokenRegex = new(
+        @"[a-z][a-zA-Z0-9]{2,}|[A-Z][a-zA-Z0-9]*|_[a-z][a-zA-Z0-9_]*",
+        RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Triage a verifier issue against the ACTUAL current file contents before it is fed to the
+    /// replanner. Returns (keep, reason). Drops, with a reason, issues that are:
+    ///  1. PHANTOM — the issue claims a symbol is missing/undefined but the symbol IS present in
+    ///     a relevant file (the verifier hallucinated; e.g. 'centerCurrentLocation not found' when
+    ///     the method exists).
+    ///  2. EVENT-GATED — the concern is about initialization timing of a symbol that is only ever
+    ///     referenced from event handlers in the template (a ViewChild used solely inside a
+    ///     (click) handler is inherently safe at click time).
+    ///  3. SPECULATIVE WORDING — the issue is phrased with 'might/could/maybe' and contains no
+    ///     concrete defect claim (e.g. 'globeComponent might not be initialized').
+    /// Everything else is kept and treated as actionable.
+    /// </summary>
+    /// <summary>
+    /// Implements the repair-loop skip-phantom rule: when the most recent executed step was
+    /// skipped with reason 'already done', the verifier issue that drove it was a phantom — it
+    /// is dropped and re-verification is SKIPPED so the next pass moves to the next issue.
+    /// Returns (isPhantom, droppedIssueText, remainingIssues).
+    /// </summary>
+    private static (bool isPhantom, string? phantom, List<string> remainingIssues) TrySkipPhantomIssue(
+        IEnumerable<object> allSteps, List<string>? verificationIssues)
+    {
+        var repairStep = allSteps.OfType<Dictionary<string, object?>>().LastOrDefault();
+        var stepWasAlreadyDone = repairStep != null
+            && repairStep.GetValueOrDefault("status")?.ToString() == "skipped"
+            && repairStep.GetValueOrDefault("reason")?.ToString() == "already done";
+        if (!stepWasAlreadyDone || verificationIssues == null || verificationIssues.Count == 0)
+            return (false, null, verificationIssues ?? new List<string>());
+        var phantom = verificationIssues[0];
+        var remaining = new List<string>(verificationIssues);
+        remaining.RemoveAt(0);
+        return (true, phantom, remaining);
+    }
+
+    private static (bool keep, string reason) TriageVerifierIssue(
+        string issue, IReadOnlyDictionary<string, string> filesByPath)
+    {
+        if (string.IsNullOrWhiteSpace(issue)) return (false, "empty issue");
+
+        // 1) PHANTOM: claim + high-confidence symbol (backticked / vm.this.-qualified / #ref /
+        //    method-call) present in a real file → verifier hallucinated. Bare prose tokens are
+        //    NOT used here: 'centerCurrentLocation is missing' must not be excused just because
+        //    the class name 'GlobeComponent' happens to appear in the file.
+        if (PhantomClaimRegex.IsMatch(issue))
+        {
+            foreach (var symbol in ExtractCodeSymbols(issue, includeBareTokens: false))
+            {
+                if (filesByPath.Values.Any(content =>
+                        Regex.IsMatch(content, @"\b" + Regex.Escape(symbol) + @"\b")))
+                {
+                    return (false, $"phantom: symbol '{symbol}' IS present in the file despite the claim");
+                }
+            }
+        }
+
+        // 1b) HALLUCINATED REFERENCE: the issue REFERENCES high-confidence symbol(s) that exist
+        //     in NO provided file → the verifier named code that isn't in the workspace (and
+        //     there is no 'present despite claim' phantom evidence to catch it). Drop as
+        //     speculative/unverifiable. Bare prose tokens are not used, and the rule only fires
+        //     when files were actually loaded (an empty files map must not nuke everything).
+        //     CRITICAL: an explicit ABSENCE CLAIM ('X is missing', 'does not exist') suppresses
+        //     this rule — reporting a genuinely-missing symbol is the verifier's core job and
+        //     must stay actionable, even when the symbol is truly absent.
+        if (filesByPath.Count > 0 && !PhantomClaimRegex.IsMatch(issue))
+        {
+            var referenced = ExtractCodeSymbols(issue, includeBareTokens: false).ToList();
+            if (referenced.Count > 0 && referenced.All(symbol =>
+                    !filesByPath.Values.Any(content =>
+                        Regex.IsMatch(content, @"\b" + Regex.Escape(symbol) + @"\b"))))
+            {
+                return (false, $"references symbol(s) [{string.Join(", ", referenced)}] not present in any file — unverifiable/hallucinated");
+            }
+        }
+
+        // 2) EVENT-GATED: timing concern about a symbol only referenced from event handlers.
+        if (TimingConcernRegex.IsMatch(issue))
+        {
+            foreach (var symbol in ExtractCodeSymbols(issue, includeBareTokens: true))
+            {
+                foreach (var (path, content) in filesByPath)
+                {
+                    if (!IsHtmlLikePath(path)) continue;
+                    if (IsSymbolOnlyEventGated(content, symbol))
+                        return (false, $"event-gated: '{symbol}' is only referenced from event handlers — inherently safe at trigger time");
+                }
+            }
+        }
+
+        // 3) SPECULATIVE WORDING: hedged risk with no concrete defect claim. A concrete claim
+        //    (missing/undefined/not found) suppresses the hedge — 'The concern is that saveCards
+        //    is missing' is a real defect, not speculation, and must stay actionable even though
+        //    it contains the word 'concern'.
+        if (SpeculativeHedgeRegex.IsMatch(issue) && !PhantomClaimRegex.IsMatch(issue))
+            return (false, "speculative wording (might/could/maybe) with no concrete defect");
+
+        return (true, "");
+    }
+
+    /// <summary>Extracts code-shaped identifiers from an issue (backticked, vm./this.-qualified,
+    /// #template-refs, method calls, and — when <paramref name="includeBareTokens"/> is set —
+    /// bare camelCase/PascalCase tokens).</summary>
+    private static IEnumerable<string> ExtractCodeSymbols(string issue, bool includeBareTokens)
+    {
+        var symbols = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(issue, @"`([A-Za-z_$][\w$]*)`"))
+            symbols.Add(m.Groups[1].Value);
+        foreach (Match m in Regex.Matches(issue, @"\b(?:vm|this)\s*\.\s*([A-Za-z_$][\w$]*)"))
+            symbols.Add(m.Groups[1].Value);
+        foreach (Match m in Regex.Matches(issue, @"#([A-Za-z_$][\w$]*)"))
+            symbols.Add(m.Groups[1].Value);
+        foreach (Match m in Regex.Matches(issue, @"\b([A-Za-z_$][\w$]*)\s*\("))
+            symbols.Add(m.Groups[1].Value);
+        if (includeBareTokens)
+        {
+            // Bare code-shaped tokens (camelCase/PascalCase/snake_case), excluding common prose words.
+            var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "the", "this", "that", "with", "from", "have", "has", "been", "should", "would",
+                "could", "might", "will", "there", "their", "which", "when", "where", "what", "does",
+                "not", "but", "also", "only", "code", "file", "files", "method", "function", "class",
+                "button", "task", "card", "issue", "issues", "error", "reason", "missing", "found",
+                "expected", "location", "review", "check", "verify", "verifier", "reference", "referenced"
+            };
+            foreach (Match m in CodeSymbolTokenRegex.Matches(issue))
+            {
+                var tok = m.Value;
+                if (tok.Length >= 3 && !stopwords.Contains(tok))
+                    symbols.Add(tok);
+            }
+        }
+        return symbols;
+    }
+
+    private static bool IsHtmlLikePath(string path) =>
+        path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+        path.EndsWith(".htm", StringComparison.OrdinalIgnoreCase) ||
+        path.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase);
+
+/// <summary>True when every occurrence of <paramref name="symbol"/> in the HTML sits inside an
+    /// event-binding attribute value (e.g. (click)="...symbol...", ng-click="..."). Counts
+    /// symbol occurrences inside each event-attribute value span (not whole-attribute matches),
+    /// so a single handler referencing the symbol multiple times still counts every occurrence.</summary>
+    private static bool IsSymbolOnlyEventGated(string html, string symbol)
+    {
+        var word = @"\b" + Regex.Escape(symbol) + @"\b";
+        var total = Regex.Matches(html, word, RegexOptions.IgnoreCase).Count;
+        if (total == 0) return false;
+        var eventBound = 0;
+        foreach (Match attr in Regex.Matches(html,
+            "(?:\\([a-z][a-z0-9.\\-]*\\)|ng-[a-z0-9\\-]+)=\\s*[\"'][^\"']*[\"']",
+            RegexOptions.IgnoreCase))
+        {
+            var value = attr.Value;
+            var eq = value.IndexOf('=');
+            if (eq < 0) continue;
+            var v = value[(eq + 1)..].Trim();
+            if (v.Length >= 2) v = v[1..^1]; // strip surrounding quote
+            eventBound += Regex.Matches(v, word, RegexOptions.IgnoreCase).Count;
+        }
+        return eventBound == total;
+    }
+
+    /// <summary>High-confidence symbol anchors extracted from a change description: backticked
+    /// identifiers, vm./this.-qualified names, #template refs, and method calls (foo().</summary>
+    private static readonly Regex[] PartialEditAnchorPatterns =
+    {
+        new(@"`([A-Za-z_$][\w$]*)`"),
+        new(@"\b(?:vm|this)\s*\.\s*([A-Za-z_$][\w$]*)"),
+        new(@"#([A-Za-z_$][\w$]*)"),
+        new(@"\b([A-Za-z_$][\w$]*)\s*\(")
+    };
+
+    /// <summary>Control-flow / generic call words that a method-call anchor regex must not
+    /// treat as claimed symbols (e.g. 'if (', 'for (', 'function (').</summary>
+    private static readonly HashSet<string> PartialEditAnchorStopwords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "if", "for", "while", "switch", "function", "return", "catch", "throw", "with",
+        "call", "called", "calls", "calling", "add", "remove", "use", "using", "check", "see", "click"
+    };
+
+    /// <summary>
+    /// Deterministic consistency gate for REPAIR steps: compares the step's concrete
+    /// oldString/newString (or newCode) edit payload against its Change description and flags
+    /// PARTIAL edits — where the LLM delivered far less than it described (e.g. claiming to
+    /// "initialize a ViewChild with an AfterViewInit lifecycle hook and check for existence"
+    /// but only adding an unused AfterViewInit import). Returns (isPartial, reason).
+    /// Never flags deletions (empty payload) or resolution-driven steps.
+    /// </summary>
+    private static (bool isPartial, string reason) DetectPartialEdit(PlanStep? step)
+    {
+        if (step == null) return (false, "");
+        var change = step.Change ?? "";
+        if (string.IsNullOrWhiteSpace(change)) return (false, "");
+
+        var payload = step.NewString ?? "";
+        if (string.IsNullOrWhiteSpace(payload) && step.NewCode is { Count: > 0 })
+            payload = string.Join("\n", step.NewCode);
+        if (string.IsNullOrWhiteSpace(payload)) return (false, ""); // deletion / no concrete payload
+
+        // Rule A compares claimed symbols against the FULL touched text (old context + new
+        // payload): a refactor that changes a method's body without re-uttering the symbol
+        // name (e.g. 'render()' body rewrite) must NOT be flagged, and a claimed symbol that
+        // legitimately lives in the untouched old context is not 'missing'.
+        var touchedText = payload;
+        if (!string.IsNullOrWhiteSpace(step.OldString))
+            touchedText = step.OldString + "\n" + payload;
+
+        var changeLower = change.ToLowerInvariant();
+
+        // Rule A — claimed symbol anchors missing from the edit's touched text.
+        var claimed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var pattern in PartialEditAnchorPatterns)
+            foreach (Match m in pattern.Matches(change))
+                if (!PartialEditAnchorStopwords.Contains(m.Groups[1].Value))
+                    claimed.Add(m.Groups[1].Value);
+        if (claimed.Count > 0)
+        {
+            var missing = claimed.Where(s =>
+                !Regex.IsMatch(touchedText, @"\b" + Regex.Escape(s) + @"\b", RegexOptions.IgnoreCase)).ToList();
+            var allMissing = missing.Count == claimed.Count;
+            var majorityMissing = claimed.Count >= 3 && missing.Count * 2 > claimed.Count; // strict majority
+            if (allMissing)
+                return (true, $"edit implements NONE of the claimed symbol(s): {string.Join(", ", missing)}");
+            if (majorityMissing)
+                return (true, $"edit omits most claimed symbol(s): {string.Join(", ", missing)}");
+        }
+
+        // Rule B — structural: the description claims a SUBSTANTIVE implementation (a lifecycle
+        // hook / ngAfterViewInit / a named method-function-handler being created, or an explicit
+        // 'check for existence before calling X') but the payload is a single trivial line with
+        // no method body and no guard. Trigger words are deliberately STRONG (not bare
+        // 'initialize'/'guard'/'check') and the description must be reasonably long, so genuinely
+        // small but complete edits (e.g. 'this.counter = 0;') are never flagged.
+        var descriptionWordCount = change.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        var claimsImplementation =
+            Regex.IsMatch(changeLower, @"\b(ngafterviewinit|ngoninit|ngaftercontentinit|ngafterviewchecked|lifecycle hook|implements\b.*\b(?:afterviewinit|oninit))\b") ||
+            Regex.IsMatch(changeLower, @"\b(create|add|write|implement)\b.{0,40}\b(method|function|handler|hook)\b") ||
+            Regex.IsMatch(changeLower, @"\bcheck for existence\b.{0,40}\b(before calling|before using|guard)\b");
+        var isImportTask = changeLower.Contains("import");
+        var payloadIsImportLine = Regex.IsMatch(payload.Trim(), @"^import\b");
+        var payloadTrivial = !payload.Contains('{') && !payload.Contains("if (") &&
+                             payload.Trim().IndexOf('\n') < 0 && payload.Trim().Length <= 200;
+        if (descriptionWordCount >= 6 && claimsImplementation && payloadTrivial && !(isImportTask && payloadIsImportLine))
+            return (true, "description claims implementation work but the edit is a single trivial line (no method body / guard)");
+
+        return (false, "");
+    }
+
+    /// <summary>Loads the current on-disk contents of all files touched by the run plus files
+    /// referenced by the prompt, for verifier-issue triage.</summary>
+    private static Dictionary<string, string> LoadFilesForTriage(
+        string projectRoot, IEnumerable<object> allSteps, string prompt)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in allSteps.OfType<Dictionary<string, object?>>())
+        {
+            var p = s.GetValueOrDefault("path")?.ToString();
+            if (!string.IsNullOrWhiteSpace(p)) paths.Add(p.Replace('\\', '/'));
+        }
+        foreach (Match m in Regex.Matches(prompt, @"[\w/]+\.(html|css|ts|tsx|js|jsx|scss|less|cs)\b", RegexOptions.IgnoreCase))
+            paths.Add(m.Value.Replace('\\', '/'));
+        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rel in paths)
+        {
+            try
+            {
+                var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
+                if (System.IO.File.Exists(full))
+                    files[rel] = System.IO.File.ReadAllText(full);
+            }
+            catch { }
+        }
+        return files;
+    }
+
+    private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct,
         string? discoveryContext = null)
@@ -12286,7 +12755,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .ToList();
             if (exploredPaths.Count == 0)
             {
-                return (true, "", new List<string>());
+                return (true, "", new List<string>(), new List<string>());
             }
             modifiedPaths = exploredPaths;
         }
@@ -12434,22 +12903,32 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("5. Would the code compile without errors?");
         sb.AppendLine();
         sb.AppendLine("Answer with a single JSON object:");
-        sb.AppendLine("{ \"complete\": true|false, \"reason\": \"short explanation\", \"issues\": [\"issue1\", \"issue2\"] }");
+        sb.AppendLine("{ \"complete\": true|false, \"reason\": \"short explanation\", \"issues\": [{\"type\": \"CONFIRMED\" | \"SPECULATIVE\", \"text\": \"issue description\"}] }");
         sb.AppendLine("Set complete=true only if the task is fully implemented AND the code would compile.");
         sb.AppendLine("Set complete=false if anything is missing, broken, or would cause compilation errors.");
-        sb.AppendLine("Include a brief list of specific issues in the 'issues' array when complete=false.");
+        sb.AppendLine("Classify EVERY item in the 'issues' array as exactly one of:");
+        sb.AppendLine("  - CONFIRMED: the requirement is objectively unmet right now — the code is physically missing/incorrect,");
+        sb.AppendLine("    or there is a reproducible defect you can point to in the actual file content above (a missing symbol,");
+        sb.AppendLine("    a broken reference, a syntax error). CONFIRMED issues are acted on.");
+        sb.AppendLine("  - SPECULATIVE: a hypothetical risk phrased with 'might/could/maybe/possibly' or a general best-practice concern");
+        sb.AppendLine("    with no evidence of an actual problem in the code shown (e.g. 'this could be null at runtime').");
+        sb.AppendLine("    SPECULATIVE issues are logged for the user but are NEVER used to generate repair steps.");
+        sb.AppendLine("Include a brief list of specific issues in the 'issues' array when complete=false; each issue MUST carry");
+        sb.AppendLine("a type. If the only concerns you have are speculative, set complete=true and list them as SPECULATIVE so they are not acted on.");
         var verifySystemPrompt = "You are a meticulous code reviewer verifying if a task is fully complete based ONLY on the original task prompt. " +
        "Do NOT invent new requirements or check for things not explicitly mentioned in the task. " +
        "If the original task asked to modify a specific method, and that method was modified, the task is complete. " +
        "Check if the code would compile (no syntax errors, missing brackets, or undefined variables). " +
-       "Output ONLY a JSON object: {\"complete\": true/false, \"reason\": \"...\", \"issues\": [\"...\"]}.";
+       "Distinguish CONFIRMED issues (objectively unmet requirements you can see broken in the code above) from SPECULATIVE ones " +
+       "(hypothetical risks like 'might not be initialized' with no evidence of an actual bug). ONLY CONFIRMED issues cause a repair. " +
+       "Output ONLY a JSON object: {\"complete\": true/false, \"reason\": \"...\", \"issues\": [{\"type\": \"CONFIRMED\" | \"SPECULATIVE\", \"text\": \"...\"}]}.";
         var (raw, _, error) = await CallLlmRawStreaming(
             verifySystemPrompt, sb.ToString(), emitSse, ct,
-            requestTimeout: _infiniteTimeout, maxTokens: 512);
+            requestTimeout: _infiniteTimeout, maxTokens: 1024);
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Verification LLM returned empty: {error}", ct: ct);
-            return (false, $"Verification LLM call failed: {error}", new List<string>());
+            return (false, $"Verification LLM call failed: {error}", new List<string>(), new List<string>());
         }
         try
         {
@@ -12465,24 +12944,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 var isComplete = completeEl.GetBoolean();
                 var reason = doc.RootElement.TryGetProperty("reason", out var rEl) ? rEl.GetString() : "";
-                var issuesList = new List<string>();
-                if (doc.RootElement.TryGetProperty("issues", out var iEl) && iEl.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var issueEl in iEl.EnumerateArray())
-                    {
-                        var issueText = issueEl.GetString();
-                        if (!string.IsNullOrWhiteSpace(issueText)) issuesList.Add(issueText);
-                    }
-                }
-                var issuesJoined = string.Join("; ", issuesList);
+                var (confirmedIssues, speculativeIssues) = ParseVerifyIssues(doc.RootElement);
+                var issuesJoined = string.Join("; ", confirmedIssues);
                 var details = reason + (string.IsNullOrWhiteSpace(issuesJoined) ? "" : $"\nIssues: {issuesJoined}");
                 await EmitLog(emitSse, isComplete ? "info" : "warn",
                     $"Verification: complete={isComplete}, reason={reason}{(string.IsNullOrWhiteSpace(issuesJoined) ? "" : $", issues=[{issuesJoined}]")}", ct: ct);
-                return (isComplete, details, issuesList);
+                if (speculativeIssues.Count > 0)
+                {
+                    await EmitLog(emitSse, "bypass",
+                        $"🔎 Speculative verifier concern(s) — logged, NOT acted on: {string.Join("; ", speculativeIssues)}", ct: ct);
+                }
+                return (isComplete, details, confirmedIssues, speculativeIssues);
             }
         }
         catch { }
-        return (true, "", new List<string>());
+        return (true, "", new List<string>(), new List<string>());
     }
     private async Task<List<PlanStep>> TryReplanAfterStep(
         string prompt, List<object> allResults, AgentPlan plan,

@@ -731,12 +731,15 @@ public class FormatDPayloadCorpusTests
     // the SAME duplicate-similar-card docs and anti-over-match guarantees, but the step is
     // composed through the REAL ParseStepFromJson with targetType=html + targetName and an
     // EMPTY/ABSENT newCode — the exact shape a planner emits for a deletion intent. The
-    // routing claim locked here: HasConcreteEdit(step) is FALSE for such a payload (the
-    // FORMAT D compose branch rejects empty newCode, AgentController ~1960), so the step
-    // MUST flow through the resolution-driven DeleteLines chain — Classify → ClassifyIntent
-    // → Decide → ResolveHtmlAnchor(TargetSymbol, Change) → TryReplaceSafe(block, "",
-    // LineNumber, Change) — never the compose. Every field of the chain is sourced from the
-    // composed step (TargetSymbol = targetName via the targetName→TargetSymbol mapping),
+    // routing claim locked here: HasConcreteEdit(step) is FALSE for such a payload (no
+    // concrete oldString/newString/newCode fields surface), so the plan path MUST flow
+    // through the resolution-driven DeleteLines chain — Classify → ClassifyIntent → Decide
+    // → ResolveHtmlAnchor(TargetSymbol, Change) → TryReplaceSafe(block, "", LineNumber,
+    // Change). (Separately, the RAW LLM-payload compose branches — AgentController ~1317 /
+    // ~1954 — now ALSO resolve a replace intent with empty newCode as a deletion; see
+    // FormatD_EmptyNewCodeReplace_* below. Both routes must strip exactly the target block.)
+    // Every field of the chain is sourced from the composed step (TargetSymbol = targetName
+    // via the targetName→TargetSymbol mapping),
     // and the same five variants + invariants are asserted: byte-length delta == exactly the
     // target block, the &lt;div class="card"&gt; count drops by exactly 1, all siblings
     // byte-identical, and the no-context variant refuses.
@@ -846,9 +849,10 @@ public class FormatDPayloadCorpusTests
             Assert.Null(step.FullFile);
 
             // 2. ROUTING GATE: HasConcreteEdit(step) must be FALSE — with no newCode the
-            //    payload is NOT a concrete FORMAT D edit (the compose branch rejects empty
-            //    newCode, AgentController ~1960), so the executor must take the
-            //    resolution-driven deletion path below, never the compose.
+            //    payload is NOT a concrete FORMAT D edit, so the executor takes the
+            //    resolution-driven deletion path below. (The compose branches handle empty
+            //    newCode deletions for RAW LLM payloads; this plan-level step has no concrete
+            //    fields and routes through the chain.)
             Assert.False(InvokeHasConcreteEdit(step),
                 $"doc #{i}: empty-newCode payload must not be a concrete edit");
 
@@ -938,6 +942,109 @@ public class FormatDPayloadCorpusTests
         FuzzHarness.AssertExercised(lineRemovals, "no doc exercised the target-line-disambiguated payload deletion path");
         FuzzHarness.AssertExercised(refusals, "no doc exercised the payload duplicate-refusal path");
         FuzzHarness.AssertExercised(shortAnchorRemovals, "no doc exercised the short-anchor keyword payload deletion path");
+    }
+
+    // ── FORMAT D DELETION-INTENT REGRESSION (compose branch) ───────────────────
+    // BUG (fixed): an LLM deletion payload — {"targetType":"html","targetName":"…",
+    // "replace":true,"newCode":[]} — was rejected by the FORMAT D compose branch BEFORE
+    // ResolveHtmlAnchor ran, so it logged "FORMAT D: targetName block not found — no
+    // candidates" even when the target block existed byte-verbatim in the file (the
+    // kanban.html priority-badge failure: targetName was the exact
+    // <span class="card-tag" ng-if="card.priority" …>{{card.priority}}</span> at line 65,
+    // but the agent reported it unfindable). The compose branch must treat empty newCode +
+    // replace intent as a DELETION: resolve the anchor first, return (block, "").
+
+    /// <summary>
+    /// The compose-branch deletion decision, mirroring the production fix: when the payload
+    /// requests replace (or defaults to it) with an EMPTY newCode, resolve the anchor through
+    /// the real <c>HtmlDomEditor.ResolveHtmlAnchor</c> fallback chain (exact → normalized →
+    /// collapsed → fuzzy) and, if found, produce a deletion edit (old=block, new="") instead of
+    /// reporting "targetName block not found". Asserted for the exact log scenario: a targetName
+    /// with a leading space + the priority-badge markup, which only the normalized/fuzzy chain
+    /// can match — the regression that the old skip-before-resolve order masked.
+    /// </summary>
+    [Fact]
+    public void FormatD_EmptyNewCodeReplace_ResolvesAnchorAndDeletesBlock()
+    {
+        // Byte-mirror of wwwroot/kanban.html's To Do card section (line ~65): the priority
+        // badge span inside a card-tags div, plus sibling spans that must survive.
+        const string todoCard = "  <div class=\"card\" id=\"c1\">\n" +
+            "    <textarea>text</textarea>\n" +
+            "    <div class=\"card-tags\">\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.ready\">READY</span>\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.flagged\">FLAGGED</span>\n" +
+            "    </div>\n" +
+            "  </div>";
+        const string siblingCard = "  <div class=\"card\" id=\"c2\">\n" +
+            "    <textarea>other</textarea>\n" +
+            "    <div class=\"card-tags\">\n" +
+            "      <span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>\n" +
+            "    </div>\n" +
+            "  </div>";
+        var html = "<main>\n" + todoCard + "\n" + siblingCard + "\n</main>";
+        // The LLM emitted the targetName WITH a leading space — only the whitespace-normalized
+        // chain can match it against the 6-space-indented file line.
+        const string targetName = " <span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>";
+        const string change = "Remove priority badge span element from card tags section in To Do column only";
+
+        // 1. The anchor MUST resolve through the real fallback chain — never "not found".
+        var (matchedBlock, _, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(html, targetName, change);
+        Assert.NotNull(matchedBlock);
+        Assert.Null(htmlErr);
+        // expandToClosingTags:false + expandToLineStart:true matches exactly the span line.
+        var span = matchedBlock!.Trim();
+        Assert.Contains("card.priority", span, StringComparison.Ordinal);
+        Assert.StartsWith("<span class=\"card-tag\"", span, StringComparison.Ordinal);
+
+        // 2. The compose-branch deletion decision: replace intent + empty newCode → (block, "").
+        //    Applying it must remove EXACTLY the target span — siblings survive byte-identical.
+        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matchedBlock, "", 0, change);
+        Assert.True(replaced, $"deletion must apply: {matchError}");
+        // The todo card's badge line was deleted; the sibling card's identical badge
+        // survives — so exactly ONE full priority-badge span remains.
+        Assert.Contains("READY", applied, StringComparison.Ordinal);
+        Assert.Contains("FLAGGED", applied, StringComparison.Ordinal);
+        Assert.Contains("id=\"c2\"", applied, StringComparison.Ordinal);
+        Assert.Contains("<textarea>other</textarea>", applied, StringComparison.Ordinal);
+        // Exactly ONE priority badge span remains (the sibling card's) — the todo card's
+        // badge was removed. Count whole spans, not the "card.priority" substring (which
+        // appears 3x inside each surviving span: ng-if, ng-class, interpolation).
+        Assert.Equal(1, CountOccurrences(applied, "<span class=\"card-tag\" ng-if=\"card.priority\""));
+    }
+
+    /// <summary>
+    /// The fuzzy-chain half of the same regression: a deletion payload whose targetName drifts
+    /// (whitespace + hallucinated attribute order) must STILL resolve to the intended span via
+    /// the normalized → collapsed → fuzzy fallback, then delete only that span.
+    /// </summary>
+    [Fact]
+    public void FormatD_EmptyNewCodeReplace_AnchorDrift_StillDeletes()
+    {
+        const string span = "<span class=\"card-tag\" ng-if=\"card.priority\" ng-class=\"'priority-'+card.priority\">{{card.priority}}</span>";
+        var html = "<main>\n" +
+            "  <div class=\"card\">\n" +
+            "    <div class=\"card-tags\">\n" +
+            "      " + span + "\n" +
+            "    </div>\n" +
+            "  </div>\n" +
+            "  <div class=\"card\">\n" +
+            "    <div class=\"card-tags\">\n" +
+            "      " + span + "\n" +
+            "    </div>\n" +
+            "  </div>\n" +
+            "</main>";
+        // Drift: extra whitespace between attributes + reordered ng-if/ng-class — byte-exact
+        // fails, the normalized \S+-token path (or fuzzy attribute keys) must still match.
+        const string driftedTarget = "<span  class=\"card-tag\"  ng-class=\"'priority-'+card.priority\"  ng-if=\"card.priority\">{{card.priority}}</span>";
+        var (matchedBlock, _, err) = HtmlDomEditor.ResolveHtmlAnchor(html, driftedTarget, "remove the priority badge");
+        Assert.NotNull(matchedBlock);
+        Assert.Null(err);
+        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matchedBlock!, "", 0, "remove the priority badge");
+        Assert.True(replaced, $"deletion must apply: {matchError}");
+        // Exactly ONE priority badge span survives (the second card's) after the drifted
+        // anchor deleted only the first — count whole spans, not the substring (3x/span).
+        Assert.Equal(1, CountOccurrences(applied, "<span class=\"card-tag\" ng-if=\"card.priority\""));
     }
 
     private static int CountOccurrences(string content, string block)
