@@ -247,16 +247,14 @@ public class LlmCssCleanerPipelineTests : IDisposable
 
         for (var i = 0; i < docCount; i++)
         {
-            var rng = new Random(20260803 + i * 7919);
+            var rng = FuzzHarness.SeededRng(20260803, i, 7919);
             var css = GenerateValidCss(rng);
 
             var cleaned = LlmCssCleaner.Clean(css);
-            Assert.True(string.Equals(css, cleaned, StringComparison.Ordinal),
-                $"Clean() corrupted valid CSS in fuzz doc #{i}:\n{css}\n--- cleaned ---\n{cleaned}");
+            FuzzHarness.AssertByteIdenticalNoOp(css, cleaned, "Clean()", i, "cleaned");
 
             var fixedStructure = LlmCssCleaner.FixCssStructure(css);
-            Assert.True(string.Equals(css, fixedStructure, StringComparison.Ordinal),
-                $"FixCssStructure() corrupted valid CSS in fuzz doc #{i}:\n{css}\n--- fixed ---\n{fixedStructure}");
+            FuzzHarness.AssertByteIdenticalNoOp(css, fixedStructure, "FixCssStructure()", i, "fixed");
         }
     }
 
@@ -267,12 +265,11 @@ public class LlmCssCleanerPipelineTests : IDisposable
 
         for (var i = 0; i < docCount; i++)
         {
-            var rng = new Random(4021 + i * 104729);
+            var rng = FuzzHarness.SeededRng(4021, i, 104729);
             var css = GenerateValidCss(rng);
 
             var throughPipeline = LlmCssCleaner.FixCssStructure(LlmCssCleaner.Clean(css));
-            Assert.True(string.Equals(css, throughPipeline, StringComparison.Ordinal),
-                $"full pipeline corrupted valid CSS in fuzz doc #{i}:\n{css}\n--- pipeline ---\n{throughPipeline}");
+            FuzzHarness.AssertByteIdenticalNoOp(css, throughPipeline, "full pipeline", i, "pipeline");
         }
     }
 
@@ -330,7 +327,7 @@ public class LlmCssCleanerPipelineTests : IDisposable
 
         for (var i = 0; i < docCount; i++)
         {
-            var rng = new Random(90210 + i * 7919);
+            var rng = FuzzHarness.SeededRng(90210, i, 7919);
             var css = GenerateValidCss(rng);
 
             // Pick a unique top-level rule block as the edit anchor.
@@ -356,8 +353,7 @@ public class LlmCssCleanerPipelineTests : IDisposable
             // THE core guarantee: final file equals the pure substitution — no cleaner
             // drift, no apply fuzz, no resolver surprise anywhere in the chain.
             var expected = css.Replace(oldString, newString);
-            Assert.True(string.Equals(expected, finalContent, StringComparison.Ordinal),
-                $"full edit chain corrupted corpus doc #{i}:\n{expected}\n--- final ---\n{finalContent}");
+            FuzzHarness.AssertByteIdenticalNoOp(expected, finalContent, "full edit chain", i, "final");
 
             // Post-edit structural verify: braces balanced.
             Assert.Equal(finalContent.Count(c => c == '{'), finalContent.Count(c => c == '}'));
@@ -365,8 +361,7 @@ public class LlmCssCleanerPipelineTests : IDisposable
 
         // Corpus degradation (a doc with no unique anchor) must be a hard failure,
         // not a silent pass that checked nothing.
-        Assert.True(checkedDocs == docCount,
-            $"Only {checkedDocs}/{docCount} corpus docs had a usable anchor");
+        FuzzHarness.AssertAllDocsChecked(checkedDocs, docCount, "CSS corpus full-chain (pure substitution)");
     }
 
     [Fact]
@@ -377,7 +372,7 @@ public class LlmCssCleanerPipelineTests : IDisposable
 
         for (var i = 0; i < docCount; i++)
         {
-            var rng = new Random(314159 + i * 65537);
+            var rng = FuzzHarness.SeededRng(314159, i, 65537);
             var css = GenerateValidCss(rng);
 
             var anchor = PickUniqueRuleAnchor(css, startOffset: i + 1);
@@ -418,8 +413,7 @@ public class LlmCssCleanerPipelineTests : IDisposable
             Assert.Equal(finalContent.Count(c => c == '{'), finalContent.Count(c => c == '}'));
         }
 
-        Assert.True(checkedDocs == docCount,
-            $"Only {checkedDocs}/{docCount} corpus docs had a usable anchor");
+        FuzzHarness.AssertAllDocsChecked(checkedDocs, docCount, "CSS corpus full-chain (squish repair)");
     }
 
     /// <summary>

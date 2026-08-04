@@ -52,14 +52,15 @@ public class EditClassifierTests
     }
 
     [Fact]
-    public void Classify_HtmlDeletion_ReturnsHtmlInsertBefore_NotDeleteLines()
+    public void Classify_HtmlDeletion_ReturnsDeleteLines_NotInsertBefore()
     {
-        // HTML is sub-classified before the deletion check, so "remove" lands on the
-        // safe HTML default — the applier still handles the empty-newString deletion.
+        // HTML removals now route to DeleteLines (oldString → empty newString) instead
+        // of the insert-before default — FORMAT D rejects empty newCode, so the delete
+        // route is the ONLY executable path for stripping an HTML block.
         var result = EditClassifier.Classify(
             Step("index.html", "Remove the split button from the card"),
             fileExists: true, ext: ".html");
-        Assert.Equal(EditStrategy.HtmlInsertBefore, result);
+        Assert.Equal(EditStrategy.DeleteLines, result);
     }
 
     // ── Deletion ─────────────────────────────────────────────────────────────

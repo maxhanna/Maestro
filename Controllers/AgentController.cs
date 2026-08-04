@@ -2376,13 +2376,12 @@ public partial class AgentController : ControllerBase
         sb.AppendLine("   ([HttpGet], @app.get, @RequestMapping, etc.) ARE part of the method declaration at the same");
         sb.AppendLine("   location — they are NOT a separate 'endpoint registration'. 'Add GetBenchmarks method with [HttpGet]'");
         sb.AppendLine("   is ONE step, not two.");
-        sb.AppendLine("   i) CREATE TABLE IS NOT A SEPARATE STEP: If a step mentions adding a method/endpoint that");
-        sb.AppendLine("      inserts/updates data AND also mentions creating the table, that is ONE step.");
-        sb.AppendLine("      The CREATE TABLE IF NOT EXISTS statement MUST be inline inside the method body,");
-        sb.AppendLine("      BEFORE the INSERT/UPDATE/SELECT. Do NOT split the table creation into its own");
-        sb.AppendLine("      step — they belong at the same location (inside the method body).");
-        sb.AppendLine("      BAD: Step 1: \"Create Benchmarks table\", Step 2: \"Add PostBenchmarks method with INSERT\"");
-        sb.AppendLine("      GOOD: \"Add PostBenchmarks method with inline CREATE TABLE IF NOT EXISTS and INSERT\"");
+        sb.AppendLine("   i) NEW SQL TABLES GO IN A _sql_migration STEP: If a step mentions adding a method/endpoint that");
+        sb.AppendLine("      inserts/updates data AND the table does not exist yet, add a separate _sql_migration step");
+        sb.AppendLine("      FIRST (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...). The DDL is written");
+        sb.AppendLine("      to migrations/*.sql for the user to apply manually — do NOT inline CREATE TABLE inside the");
+        sb.AppendLine("      method body. The endpoint method only contains INSERT/UPDATE/SELECT.");
+        sb.AppendLine("      GOOD: Step 1: \"_sql_migration: benchmark_scores table\", Step 2: \"Add PostBenchmarks method with INSERT\"");
         sb.AppendLine();
         sb.AppendLine("SPECIAL RULE FOR REMOVAL/DELETE STEPS:");
         sb.AppendLine("  For steps that say 'Remove X' or 'Delete X':");
@@ -4196,6 +4195,50 @@ public partial class AgentController : ControllerBase
             bool wasFormattedByLib = false;
             int oldLines = oldStr?.Split('\n').Length ?? 0;
             int newLines = newStr?.Split('\n').Length ?? 0;
+            string? sqlMigrationNote = null;
+            // NEW TABLE ENFORCEMENT: if the LLM still inlined a CREATE TABLE statement (old
+            // behavior), move it into a migrations/*.sql file and strip it from the applied
+            // code — the user applies the migration manually, the endpoint stays clean, and
+            // the SQL guard sees the table as covered by the migration file. NOTE: batch
+            // steps (step.Edits) compose newContent independently below and bypass this
+            // hook — inline DDL there is an accepted edge case since the planner is trained
+            // to emit _sql_migration steps for new tables anyway.
+            if (!string.IsNullOrWhiteSpace(newStr) &&
+                !string.Equals(Path.GetExtension(relPath), ".sql", StringComparison.OrdinalIgnoreCase))
+            {
+                var inlineTables = SqlMigrationService.ExtractCreateTableStatements(newStr);
+                if (inlineTables.Count > 0)
+                {
+                    var writtenMigrations = new List<string>();
+                    foreach (var (table, sql) in inlineTables)
+                    {
+                        var rel = SqlMigrationService.WriteMigration(projectRoot, table, sql);
+                        if (rel != null) writtenMigrations.Add(rel);
+                    }
+                    var strippedNewStr = SqlMigrationService.StripCreateTableStatements(
+                        newStr, inlineTables.Select(t => t.Sql).ToList());
+                    if (strippedNewStr != newStr)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"Auto-migrated {inlineTables.Count} inline CREATE TABLE statement(s) out of {relPath} " +
+                            $"into migrations/ — the method body now only references the table", ct: ct);
+                        newStr = strippedNewStr;
+                        newLines = newStr.Split('\n').Length;
+                        // Tell the verifier WHY the CREATE TABLE is gone so it doesn't
+                        // reject the edit as missing schema: the DDL moved to migrations/*.sql
+                        // and the user applies it manually.
+                        sqlMigrationNote =
+                            "NOTE: The edit's inline CREATE TABLE statement(s) were automatically moved to " +
+                            $"migrations/*.sql files (e.g. {string.Join(", ", writtenMigrations.Take(3))}). " +
+                            "The user applies the migration to their database manually, then deletes the file. " +
+                            "The method body intentionally contains ONLY INSERT/UPDATE/SELECT. " +
+                            "Do NOT reject this edit for a missing CREATE TABLE — the schema lives in the migration file.";
+                    }
+                    foreach (var rel in writtenMigrations)
+                        await EmitLog(emitSse, "success",
+                            $"📦 SQL migration written: {rel} — apply it to your database manually, then delete the file", ct: ct);
+                }
+            }
             if (step.Edits is { Count: > 0 } && !replaced)
             {
                 // Reject overlapping edits within the same batch — each edit must target a different area
@@ -4612,7 +4655,7 @@ public partial class AgentController : ControllerBase
                 }
                 if (wipeReason == null)
                 {
-                    wipeReason = await DetectMissingCreateTableAsync(oldStr!, newStr!, fileContent, relPath, emitSse, ct);
+                    wipeReason = await DetectMissingCreateTableAsync(oldStr!, newStr!, fileContent, relPath, projectRoot, emitSse, ct);
                 }
                 var changeLower = (step.Change ?? "").ToLowerInvariant();
                 if (wipeReason == null && (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete ")))
@@ -5250,7 +5293,9 @@ public partial class AgentController : ControllerBase
                         explorationContext: explorationContext,
                         fullPlan: plan,
                         currentStepIndex: planItemIndex,
-                        causalContext: causalContext);
+                        causalContext: sqlMigrationNote == null
+                            ? causalContext
+                            : (causalContext ?? "") + "\n\n" + sqlMigrationNote);
                     decisions.Add(d);
                     reasons.Add(reason);
                     scores.Add(score);
@@ -6743,7 +6788,7 @@ public partial class AgentController : ControllerBase
         return (double)intersection / Math.Min(tokensA.Count, tokensB.Count);
     }
     private async Task<string?> DetectMissingCreateTableAsync(
-        string oldStr, string newStr, string fileContent, string relPath, bool emitSse, CancellationToken ct)
+        string oldStr, string newStr, string fileContent, string relPath, string projectRoot, bool emitSse, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(newStr) || string.IsNullOrWhiteSpace(fileContent))
             return null;
@@ -6779,6 +6824,10 @@ public partial class AgentController : ControllerBase
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
         foreach (Match m in tableMentionRegex.Matches(fileContent))
             existingTables.Add(m.Groups[1].Value);
+        // Tables covered by a migrations/*.sql file count as existing — the user applies
+        // the migration manually, then deletes the file, so the code never inlines DDL.
+        foreach (var t in SqlMigrationService.FindMigratedTables(projectRoot))
+            existingTables.Add(t);
         var missingTables = referencedTables
             .Where(t => !existingTables.Contains(t))
             .ToList();
@@ -6809,12 +6858,42 @@ public partial class AgentController : ControllerBase
         }
         catch { }
         var preview = string.Join(", ", missingTables.Take(5));
-        return $"MISSING CREATE TABLE — newString contains INSERT/UPDATE statements referencing table(s) [{preview}] " +
-               "that do NOT appear to exist in the current file (no CREATE TABLE, FROM, JOIN, or other reference found). " +
-               "You MUST add a CREATE TABLE IF NOT EXISTS statement for each missing table, placed BEFORE the INSERT/UPDATE " +
-               "statements that reference it. Define all columns referenced by the INSERT/UPDATE with appropriate MySQL data types " +
-               "(INT, VARCHAR, TEXT, TIMESTAMP, etc.). Place the CREATE TABLE strategically at the beginning of the new code block, " +
-               "before any INSERT/UPDATE that depends on it. Do NOT emit INSERT/UPDATE for a table that has not been created yet.";
+        return $"MISSING SQL TABLE — newString contains INSERT/UPDATE statements referencing table(s) [{preview}] " +
+               "that do NOT exist in the file and are NOT covered by a migrations/*.sql file. " +
+               "Add a _sql_migration step (file=\"_sql_migration\") whose newString is the CREATE TABLE IF NOT EXISTS statement " +
+               "for EACH missing table — the system writes migrations/<timestamp>_create_<table>.sql so the user can apply it " +
+               "to their database manually. Do NOT inline CREATE TABLE inside the method body — the endpoint only does " +
+               "INSERT/UPDATE/SELECT. Do NOT emit INSERT/UPDATE for a table that has not been created yet.";
+    }
+
+    /// <summary>
+    /// Drafts a CREATE TABLE IF NOT EXISTS statement for a table name when a
+    /// _sql_migration step arrives without DDL content. Best-effort: falls back to a
+    /// generic skeleton when the LLM call fails so the user still gets a usable file.
+    /// </summary>
+    private async Task<string> DraftCreateTableAsync(string tableName, string description, CancellationToken ct)
+    {
+        try
+        {
+            var sys = "You write SQLite/MySQL CREATE TABLE statements. Output ONLY the SQL, no markdown, no explanation.";
+            var usr = $"Write a CREATE TABLE IF NOT EXISTS statement for table `{tableName}`. Context: {description}. " +
+                      $"Use sensible column types (INTEGER/INT, TEXT/VARCHAR, TIMESTAMP) and a PRIMARY KEY. End with ';'.";
+            var (raw, _, _) = await CallLlmRaw(sys, usr, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                var cleaned = raw.Trim();
+                if (cleaned.StartsWith("```"))
+                {
+                    var m = Regex.Match(cleaned, @"```(?:sql)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                    if (m.Success) cleaned = m.Groups[1].Value.Trim();
+                }
+                if (cleaned.StartsWith("CREATE TABLE", StringComparison.OrdinalIgnoreCase) ||
+                    cleaned.StartsWith("create table", StringComparison.OrdinalIgnoreCase))
+                    return cleaned;
+            }
+        }
+        catch { }
+        return $"CREATE TABLE IF NOT EXISTS {tableName} (\n    id INTEGER PRIMARY KEY AUTOINCREMENT\n);";
     }
 
     private static string? CheckMethodExistsInFile(string fileContent, string newStr)
@@ -8007,6 +8086,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
         }
         // Reject _create_file steps with no actual content (hallucinated file creation)
+        if (string.Equals(step.File, "_sql_migration", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(step.NewString) ||
+                !step.NewString.Contains("CREATE TABLE", StringComparison.OrdinalIgnoreCase))
+                return (false, "_sql_migration step must carry the CREATE TABLE IF NOT EXISTS statement in newString — " +
+                                "provide the full DDL (e.g. \"CREATE TABLE IF NOT EXISTS benchmark_scores (...);\") or edit an existing file instead.");
+            var tables = SqlMigrationService.ExtractCreateTableStatements(step.NewString);
+            if (tables.Count == 0)
+                return (false, "_sql_migration step's newString does not contain a parseable CREATE TABLE statement — " +
+                                "include the complete DDL with column definitions and a trailing ';'.");
+        }
         if (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase))
         {
             if (string.IsNullOrWhiteSpace(step.NewString))
@@ -9843,8 +9933,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     return $"Steps {i + 1} and {i + 2} both target {s1.File} and share {overlap} overlapping keywords " +
                            $"({string.Join(", ", words1.Intersect(words2, StringComparer.OrdinalIgnoreCase).Take(5))}). " +
                            "They describe the same endpoint/feature and should be one step. " +
-                           "If one step is a setup/prerequisite (e.g. CREATE TABLE), inline it inside the other step " +
-                           "instead of making it a separate endpoint.";
+                           "If one step is a setup/prerequisite, keep it as its own _sql_migration step for schema " +
+                           "(CREATE TABLE goes in a migrations/*.sql file) instead of making it a separate endpoint.";
                 }
             }
         }
@@ -13178,6 +13268,62 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     allResults.Add(errResult);
                     await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                 }
+                stepIndex++;
+                continue;
+            }
+            if (planFile.Equals("_sql_migration", StringComparison.OrdinalIgnoreCase))
+            {
+                // New SQL table → write a migrations/*.sql file the user applies manually.
+                // The CREATE TABLE statement comes from newString; the table name is parsed
+                // out of it (falling back to a name token in the change description).
+                await EmitLog(emitSse, "info", $"SQL migration: {changeDesc}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex,
+                        type = "sql_migration",
+                        status = "running",
+                        path = "migrations/",
+                        description = item.Change,
+                        planItemIndex = itemIdx
+                    }, ct);
+                var statements = SqlMigrationService.ExtractCreateTableStatements(item.NewString ?? "");
+                var written = new List<string>();
+                if (statements.Count == 0)
+                {
+                    // No DDL supplied — draft one from the description so the user still gets a usable file.
+                    var tableName = Regex.Match(changeDesc, @"\b(?:create\s+)?(?:table\s+)?([\w_]+)\b", RegexOptions.IgnoreCase).Groups[1].Value;
+                    if (string.IsNullOrWhiteSpace(tableName) || tableName.Length < 2) tableName = "new_table";
+                    var draft = await DraftCreateTableAsync(tableName, changeDesc, ct);
+                    var rel = SqlMigrationService.WriteMigration(projectRoot, tableName, draft);
+                    if (rel != null) written.Add(rel);
+                }
+                else
+                {
+                    foreach (var (table, sql) in statements)
+                    {
+                        var rel = SqlMigrationService.WriteMigration(projectRoot, table, sql);
+                        if (rel != null) written.Add(rel);
+                    }
+                }
+                if (written.Count == 0)
+                {
+                    await EmitLog(emitSse, "warn", $"SQL migration skipped — table already covered by an existing migrations/*.sql file: {changeDesc}", ct: ct);
+                }
+                foreach (var rel in written)
+                    await EmitLog(emitSse, "success", $"📦 SQL migration written: {rel} — apply it to your database manually, then delete the file", ct: ct);
+                var migResult = new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex,
+                    ["type"] = "sql_migration",
+                    ["status"] = "done",
+                    ["path"] = written.Count > 0 ? string.Join(", ", written) : "(already migrated)",
+                    ["description"] = item.Change,
+                    ["planItemIndex"] = itemIdx
+                };
+                if (emitSse) await SendSse(Response, "step", migResult, ct);
+                allResults.Add(migResult);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                 stepIndex++;
                 continue;
             }

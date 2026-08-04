@@ -763,14 +763,21 @@ public static class AgentUtilities
             var curLower = (cur.Change ?? "").ToLowerInvariant();
             var isTableCreationStep = Regex.IsMatch(curLower, @"\bcreate\s+table\b") &&
                                        !Regex.IsMatch(curLower, @"\binsert\b|\bupdate\b");
-            if (isTableCreationStep && i + 1 < steps.Count &&
-                string.Equals(cur.File, steps[i + 1].File, StringComparison.OrdinalIgnoreCase))
+            if (isTableCreationStep)
             {
-                var next = steps[i + 1];
-                next.Change = $"{next.Change} Include an inline CREATE TABLE IF NOT EXISTS statement " +
-                               $"at the top of the method body before any INSERT/UPDATE/SELECT.";
-                merged.Add(next);
-                i++;
+                // Table creation is no longer merged into the endpoint edit. Instead it
+                // becomes its own _sql_migration step: the executor writes a migrations/*.sql
+                // file the user applies to their database manually, keeping CREATE TABLE out
+                // of the method body. If the step already carries the DDL in NewString, keep
+                // it; otherwise the executor drafts the CREATE TABLE from the description.
+                var migrationStep = new PlanStep
+                {
+                    File = "_sql_migration",
+                    Change = cur.Change ?? "create new SQL table",
+                    NewString = cur.NewString,
+                    Priority = cur.Priority
+                };
+                merged.Add(migrationStep);
                 continue;
             }
             merged.Add(cur);
@@ -1283,6 +1290,7 @@ public static class AgentUtilities
         file.Equals("_package_install", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_create_directory", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_sql_migration", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_command", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||

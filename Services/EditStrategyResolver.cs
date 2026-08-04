@@ -76,13 +76,17 @@ public static class EditStrategyResolver
         // ── HTML/template family → delegate to HtmlDomEditor ─────────────────
         if (HtmlDomEditor.IsHtmlDomFile(relPath))
         {
-            var htmlStrategy = intent.Kind == EditIntentKind.InsertNearSymbol
-                ? EditStrategy.HtmlInsertAfter
-                : intent.Kind == EditIntentKind.ReplaceSymbol
-                    ? EditStrategy.HtmlReplace
-                    : EditStrategy.HtmlInsertBefore;
-            return new EditPlanDecision(htmlStrategy, null, intent.Symbol, null,
-                $"HTML/template file — using DOM edit strategy {htmlStrategy}");
+            var htmlStrategy = intent.Kind switch
+            {
+                EditIntentKind.DeleteContent => EditStrategy.DeleteLines,
+                EditIntentKind.InsertNearSymbol => EditStrategy.HtmlInsertAfter,
+                EditIntentKind.ReplaceSymbol => EditStrategy.HtmlReplace,
+                _ => EditStrategy.HtmlInsertBefore
+            };
+            var reason = htmlStrategy == EditStrategy.DeleteLines
+                ? "HTML/template file — removal routes to oldString → empty newString (DeleteLines)"
+                : $"HTML/template file — using DOM edit strategy {htmlStrategy}";
+            return new EditPlanDecision(htmlStrategy, null, intent.Symbol, null, reason);
         }
 
         // ── Deletion ─────────────────────────────────────────────────────────

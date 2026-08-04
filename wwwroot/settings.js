@@ -155,6 +155,7 @@ angular.module('kanbanApp')
                     { key: '_discover', label: 'Project-wide context search (BM25 + AI)', enabled: true },
                     { key: '_command', label: 'Run terminal commands', enabled: true },
                     { key: '_create_file', label: 'Create new files', enabled: true },
+                    { key: '_sql_migration', label: 'SQL migration files', enabled: true },
                     { key: '_web_search', label: 'Web search', enabled: true },
                     { key: '_web_fetch', label: 'Fetch URLs', enabled: true },
                     { key: '_git', label: 'Git operations', enabled: true },

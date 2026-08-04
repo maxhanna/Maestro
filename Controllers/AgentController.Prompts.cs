@@ -77,7 +77,10 @@ partial class AgentController
             "10. NEVER INVENT type names or property names. Every type/property you reference MUST exist in the project.\n" +
             "11. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. Verify EVERY token boundary.\n" +
             "12. ATOMIC STEPS: Execute EXACTLY what the CHANGE REQUIRED asks for — no more, no less.\n" +
-            "13. If your change introduces a new SQL table, include a CREATE TABLE IF NOT EXISTS statement BEFORE any INSERT/UPDATE.\n" +
+            "13. If your change introduces a NEW SQL table, do NOT inline CREATE TABLE in the method body. " +
+                "Add a _sql_migration step (file=\"_sql_migration\", change describes the table, newString = the CREATE TABLE IF NOT EXISTS statement) " +
+                "so the user can apply it to their database manually from migrations/*.sql. " +
+                "The endpoint method itself only contains INSERT/UPDATE/SELECT against the table.\n" +
              "14. NEVER write `{{ex.Message}}` inside an interpolated string — use `{ex.Message}` with single braces.\n" +
              "15. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form. Only add comments if the change description explicitly asks for them.\n";
 
@@ -315,6 +318,7 @@ partial class AgentController
         {
             if (enabled == null || enabled.Contains("_create_directory")) markers.Add("_create_directory");
             if (enabled == null || enabled.Contains("_create_file")) markers.Add("_create_file");
+            if (enabled == null || enabled.Contains("_sql_migration")) markers.Add("_sql_migration");
             if (enabled == null || enabled.Contains("_command")) markers.Add("_command");
             if (enabled == null || enabled.Contains("_web_search")) markers.Add("_web_search");
             if (enabled == null || enabled.Contains("_web_fetch")) markers.Add("_web_fetch");
@@ -347,7 +351,7 @@ partial class AgentController
         else
             sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: ").Append(markerStr).Append("\",\n");
         sb.Append("    \"change\": \"SHORT natural-language description — e.g. 'Add ElementRef import' or 'Add escape key handler in ngOnInit'. ");
-        sb.Append("NEVER put code here. For markers: the path (_create_directory/_create_file/_delete_file), command (_command/_git), ");
+        sb.Append("NEVER put code here. For markers: the path (_create_directory/_create_file/_delete_file), SQL table (_sql_migration), command (_command/_git), ");
         sb.Append("query (_web_search), or URL (_web_fetch) — not a description.\",\n");
         sb.Append("    \"targetSymbol\": \"getTimedGreetingMessage\",\n");
         sb.Append("    \"oldString\": \"EXACT text to replace — KEEP THIS SHORT (1-3 lines MAX). See RULE 17 below.\",\n");
@@ -389,7 +393,8 @@ partial class AgentController
         {
             sb.Append("6. Respect dependency order: DTOs/models before endpoints that use them, backend before frontend, ");
             sb.Append("   services before UI code that calls them.\n");
-            sb.Append("7. CREATE TABLE IF NOT EXISTS belongs INSIDE the method body that needs it — never its own step.\n");
+            sb.Append("7. NEW SQL tables are added via a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) " +
+                "that writes a migrations/*.sql file — never an inline CREATE TABLE inside the method body, and never a separate edit step on a code file.\n");
         }
         else
         {
@@ -578,7 +583,7 @@ partial class AgentController
         sb.AppendLine("2. Use the EXACT symbol names, property names, and file paths from the context above");
         sb.AppendLine("3. If context says a prior sub-plan added 'OS, CPU, RAM, GPU properties to BenchmarkDataDTO',");
         sb.AppendLine("   your INSERT statement MUST reference those exact property names (benchmark.OS, benchmark.CPU, etc.)");
-        sb.AppendLine("4. CREATE TABLE IF NOT EXISTS goes INSIDE the method body, before the INSERT — NOT as a separate step");
+        sb.AppendLine("4. NEW SQL tables go in a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) writing migrations/*.sql — do NOT inline CREATE TABLE in the method body");
         sb.AppendLine("5. Do NOT re-describe or re-implement work from prior sub-plans");
         sb.AppendLine("6. Each step must be atomic: one coherent edit at one location in one file");
 
@@ -592,6 +597,7 @@ partial class AgentController
         ["_command"] = "\"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_directory or _create_file instead.",
         ["_create_directory"] = "\"_create_directory\"   — Create a folder/directory. Put the RELATIVE folder path in \"change\" (e.g. \"benchmark_test_1\"), not a description. Leave everything else empty. Deep/nested paths are created automatically. Do NOT use mkdir.",
         ["_create_file"] = "\"_create_file\"        — Create a new file: put the RELATIVE file path in \"change\", put the FULL file content in \"newString\", leave \"oldString\" empty. The file path should be just the path (e.g. \"benchmark_test_1/test.md\"), not a description. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.",
+        ["_sql_migration"] = "\"_sql_migration\"      — Write a SQL migration file for a NEW database table: put a short description in \"change\" (e.g. \"benchmark_scores table\"), put the full CREATE TABLE IF NOT EXISTS statement in \"newString\". The system writes migrations/<timestamp>_create_<table>.sql so the user can apply the table to their database manually, then delete the file. Do NOT inline CREATE TABLE in method bodies.",
         ["_web_search"] = "\"_web_search\"         — Search the web; put the query in \"change\"",
         ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
         ["_git"] = "\"_git\"                — Git operation (commit/pull/push/branch/revert)",
@@ -751,11 +757,11 @@ partial class AgentController
         sb.Append("GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" ");
         sb.Append("(describes only the missing logic). ");
         sb.Append("Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n");
-        sb.Append("18. CREATE TABLE MUST BE INLINE (CRITICAL): If the task involves creating a new database table and inserting/updating data into it, ");
-        sb.Append("the CREATE TABLE IF NOT EXISTS statement MUST be placed INSIDE the method body, BEFORE the INSERT/UPDATE statement. ");
-        sb.Append("Do NOT create a separate 'table creation' method or step — the table creation is an inline guard clause, not a separate concern. ");
-        sb.Append("BAD: Step 1: 'Add CreateBenchmarksTable method', Step 2: 'Add PostBenchmarks endpoint with INSERT' — WRONG, these should be ONE step. ");
-        sb.Append("GOOD: 'Add PostBenchmarks endpoint with inline CREATE TABLE IF NOT EXISTS and INSERT statement inside the method body'.\n\n");
+        sb.Append("18. NEW SQL TABLES GO IN A MIGRATION FILE (CRITICAL): If the task involves creating a new database table and inserting/updating data into it, ");
+        sb.Append("the CREATE TABLE IF NOT EXISTS statement goes in a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) ");
+        sb.Append("that writes a migrations/*.sql file the user applies manually. Do NOT inline CREATE TABLE inside the method body — the method body only has the INSERT/UPDATE. ");
+        sb.Append("BAD: Step 1: 'Add PostBenchmarks endpoint with inline CREATE TABLE inside the method body' — WRONG, inline DDL pollutes the code. ");
+        sb.Append("GOOD: Step 1: '_sql_migration creating benchmark_scores table', Step 2: 'Add PostBenchmarks endpoint with INSERT statement'.\n\n");
         sb.Append("### OUTPUT FORMAT ###\n");
         sb.Append("{\n");
         sb.Append("  \"thinking\": \"1-2 lines: which file needs changing and why\",\n");
@@ -823,25 +829,21 @@ partial class AgentController
         sb.Append("29. METHOD CREATION IS ONE STEP (CRITICAL): Creating a new method includes its signature, parameters, and body — ");
         sb.Append("all in ONE step. Do NOT split into \"Create method signature\" and \"Implement method body\". ");
         sb.Append("A method is ONE coherent block at ONE location. ");
-        sb.Append("If the method body needs inline SQL (CREATE TABLE IF NOT EXISTS + INSERT/UPDATE/SELECT), ");
-        sb.Append("that SQL belongs INSIDE the method body in the same step. ");
-        sb.Append("BAD: Step 1: \"Create Benchmarks table\", Step 2: \"Add PostBenchmarks method with INSERT\"\n");
-        sb.Append("GOOD: \"Add PostBenchmarks method with CREATE TABLE IF NOT EXISTS and INSERT logic\"\n");
-        sb.Append("BAD: Step 1: \"Add Benchmarks schema\", Step 2: \"Add INSERT endpoint\"\n");
-        sb.Append("GOOD: \"Add PostBenchmarks endpoint method with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT\"\n");
-        sb.Append("RATIONALE: The CREATE TABLE IF NOT EXISTS runs at the START of the method body, ");
-        sb.Append("before any INSERT/UPDATE/SELECT. It is NOT a separate schema definition — ");
-        sb.Append("it is an inline guard clause that ensures the table exists. ");
-        sb.Append("Treating it as a separate step forces the editor to insert the CREATE TABLE into ");
-        sb.Append("a random unrelated location instead of inside the method where it belongs.\n");
+        sb.Append("If the method body needs a NEW SQL table, add a SEPARATE _sql_migration step BEFORE the method step ");
+        sb.Append("(file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) — the table DDL lives in a migrations/*.sql file, ");
+        sb.Append("not inside the method body. ");
+        sb.Append("BAD: Step 1: \"Add PostBenchmarks method with inline CREATE TABLE inside the body\" — WRONG, inline DDL.\n");
+        sb.Append("GOOD: Step 1: \"_sql_migration: benchmark_scores table\", Step 2: \"Add PostBenchmarks method with parameterized INSERT\"\n");
+        sb.Append("RATIONALE: Migrations/*.sql files let the user apply the CREATE TABLE to their database manually and delete the file ");
+        sb.Append("once applied — the endpoint method stays clean and only does INSERT/UPDATE/SELECT.\n");
         sb.Append("30. DO NOT CREATE SEPARATE SETUP ENDPOINTS: When a single new endpoint needs both ");
-        sb.Append("infrastructure setup (CREATE TABLE, connection check) and business logic (INSERT/UPDATE/SELECT), ");
+        sb.Append("infrastructure setup (connection check) and business logic (INSERT/UPDATE/SELECT), ");
         sb.Append("put the setup INSIDE the endpoint method as inline code at the top. ");
         sb.Append("Do NOT create a separate \"PostXxxTable\" or \"InitializeXxx\" endpoint as a separate step. ");
         sb.Append("BAD: Step 1: \"Add PostBenchmarksTable endpoint (creates table)\", Step 2: \"Add AddBenchmark endpoint (inserts data)\"\n");
-        sb.Append("GOOD: \"Add AddBenchmark endpoint with CREATE TABLE IF NOT EXISTS at the top and parameterized INSERT below\"\n");
+        sb.Append("GOOD: \"Add AddBenchmark endpoint with a connection check at the top and parameterized INSERT below\"\n");
         sb.Append("RATIONALE: A separate setup endpoint creates unnecessary public API surface. ");
-        sb.Append("Table creation is an implementation detail that belongs inside the method that needs it.\n");
+        sb.Append("Schema for NEW tables goes in a _sql_migration step; the endpoint only handles data.\n");
         return sb.ToString();
     }
 

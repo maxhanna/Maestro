@@ -350,10 +350,13 @@ public class AstCodeEditorServiceTests
         return string.Join("\n", lines);
     }
 
+    /// <summary>JS/TS grammar name — single source of truth so a future .tsx corpus can't drift one of three copies.</summary>
+    private static string JsLangName(string ext) => ext == ".ts" ? "TypeScript" : "JavaScript";
+
     /// <summary>Direct Tree-sitter parse check — the generator's docs must be genuinely valid.</summary>
     private static bool HasParseError(string content, string ext)
     {
-        var langName = ext == ".ts" ? "TypeScript" : "JavaScript";
+        var langName = JsLangName(ext);
         try
         {
             using var language = new Language(langName);
@@ -397,7 +400,7 @@ public class AstCodeEditorServiceTests
 
         for (var i = 0; i < docCount; i++)
         {
-            var rng = new Random(20261103 + i * 7919);
+            var rng = FuzzHarness.SeededRng(20261103, i, 7919);
             var ext = rng.Next(2) == 0 ? ".js" : ".ts";
             var doc = GenerateValidSnippet(rng, ext);
 
@@ -407,8 +410,7 @@ public class AstCodeEditorServiceTests
                 $"fuzz doc #{i} ({ext}) is NOT code the parser accepts (or the grammar failed to load):\n{doc}");
 
             var result = AstCodeEditorService.AutoFixSyntaxErrors(doc, ext);
-            Assert.True(string.Equals(doc, result, StringComparison.Ordinal),
-                $"AutoFixSyntaxErrors corrupted valid {ext} in fuzz doc #{i}:\n{doc}\n--- result ---\n{result}");
+            FuzzHarness.AssertByteIdenticalNoOp(doc, result, $"AutoFixSyntaxErrors ({ext})", i);
         }
     }
 
@@ -420,7 +422,7 @@ public class AstCodeEditorServiceTests
 
         for (var i = 0; i < docCount; i++)
         {
-            var rng = new Random(4242 + i * 104729);
+            var rng = FuzzHarness.SeededRng(4242, i, 104729);
             var ext = rng.Next(2) == 0 ? ".js" : ".ts";
             var broken = GenerateBrokenSnippet(rng, ext);
 
@@ -451,7 +453,87 @@ public class AstCodeEditorServiceTests
 
         // The guaranteed-repair path must have actually fired (corpus degradation would
         // otherwise let this test pass having asserted nothing about real repairs).
-        Assert.True(knownRepairChecked > 0,
+        FuzzHarness.AssertExercised(knownRepairChecked,
             "the known missing-; repair path was never exercised by the corpus");
+    }
+
+    /// <summary>
+    /// Counts ERROR + MISSING nodes in a direct Tree-sitter parse — the progress metric
+    /// for the differential test. A MISSING node (e.g. an omitted `;`) is a recoverable
+    /// syntax defect the inserter can fix; an ERROR node is unrecovered garbage. Returns
+    /// -1 when the grammar is unavailable so a corpus failure is auditable, never silent.
+    /// </summary>
+    private static int CountErrorAndMissingNodes(string content, string ext)
+    {
+        var langName = JsLangName(ext);
+        try
+        {
+            using var language = new Language(langName);
+            using var parser = new Parser(language);
+            using var tree = parser.Parse(content);
+            if (tree == null) return -1;
+            return CountErrorNodes(tree.RootNode);
+        }
+        catch
+        {
+            return -1; // grammar unavailable → treat as failure so the corpus is auditable
+        }
+    }
+
+    private static int CountErrorNodes(Node node)
+    {
+        var count = (node.IsError || node.IsMissing) ? 1 : 0;
+        if (node.Children == null) return count;
+        foreach (var child in node.Children)
+            count += CountErrorNodes(child);
+        return count;
+    }
+
+    [Fact]
+    public void Fuzz_AutoFixSyntaxErrors_BrokenSnippets_RepairsAreStrictProgress()
+    {
+        const int docCount = 60;
+        var repairedChecked = 0;
+
+        for (var i = 0; i < docCount; i++)
+        {
+            var rng = FuzzHarness.SeededRng(90909, i, 65537);
+            var ext = rng.Next(2) == 0 ? ".js" : ".ts";
+            var broken = GenerateBrokenSnippet(rng, ext);
+
+            // Input error count — the baseline the repair must beat.
+            var beforeCount = CountErrorAndMissingNodes(broken, ext);
+            Assert.True(beforeCount >= 0,
+                $"fuzz doc #{i} ({ext}): baseline parse failed (grammar unavailable?):\n{broken}");
+
+            var result = AstCodeEditorService.AutoFixSyntaxErrors(broken, ext);
+
+            // Only repaired snippets make a progress claim. The service repairs iff the
+            // input has errors (it short-circuits on a clean tree), so a change here
+            // always means the input was defective.
+            if (result == broken) continue;
+            repairedChecked++;
+
+            var afterCount = CountErrorAndMissingNodes(result!, ext);
+            Assert.True(afterCount >= 0,
+                $"fuzz doc #{i} ({ext}): re-parse of repaired output failed (grammar unavailable?):\n{result}");
+
+            // THE differential claim: a repair must be GENUINE progress — strictly fewer
+            // error/missing nodes than the input, never a lateral move that reshuffles
+            // the same defect count into a different shape. NOTE: this is STRICTER than
+            // the service's own contract (insertion-only, not monotonic recovery) — a
+            // future grammar edge could in theory convert one MISSING into one ERROR
+            // (equal total); if that ever trips legitimately, relax to "no more ERROR
+            // nodes AND strictly fewer MISSING nodes" rather than the combined total.
+            Assert.True(afterCount < beforeCount,
+                $"fuzz doc #{i} ({ext}): repair was NOT strict progress — " +
+                $"errors+missing before={beforeCount}, after={afterCount}.\n" +
+                $"--- broken input ---\n{broken}\n--- repaired output ---\n{result}");
+        }
+
+        // The corpus must have actually exercised the repair path — otherwise this test
+        // passes having asserted nothing (corpus degradation guard).
+        FuzzHarness.AssertExercised(repairedChecked,
+            "no broken snippet was repaired — differential progress claim never exercised");
     }
 }

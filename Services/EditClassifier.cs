@@ -71,6 +71,11 @@ public static class EditClassifier
     private static EditStrategy ClassifyHtml(string change)
     {
         var lower = change.ToLowerInvariant();
+        // HTML removal: FORMAT D rejects empty newCode, so the ONLY executable route
+        // for stripping an HTML block is oldString → empty newString (DeleteLines).
+        // Route removals here explicitly instead of the insert-before default.
+        if (IsDeletion(lower))
+            return EditStrategy.DeleteLines;
         if (Regex.IsMatch(lower, @"\b(replace|update|modify|change)\b"))
             return EditStrategy.HtmlReplace;
         if (Regex.IsMatch(lower, @"\b(after|below|append|append after)\b"))

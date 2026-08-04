@@ -33,6 +33,7 @@ public class EditStrategyResolverTests
     [InlineData(EditIntentKind.ReplaceSymbol, EditStrategy.HtmlReplace)]
     [InlineData(EditIntentKind.TargetedEdit, EditStrategy.HtmlInsertBefore)]
     [InlineData(EditIntentKind.AddProperty, EditStrategy.HtmlInsertBefore)]
+    [InlineData(EditIntentKind.DeleteContent, EditStrategy.DeleteLines)]
     public void Decide_HtmlFile_MapsIntentToDomStrategy(EditIntentKind kind, EditStrategy expected)
     {
         var intent = new EditIntent(kind, "card", null);
