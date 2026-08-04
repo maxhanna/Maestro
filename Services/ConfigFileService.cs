@@ -30,6 +30,12 @@ public class LlamaEndpoint
     public string model { get; set; } = "";
 }
 
+public class SavedThemeConfig
+{
+    public string name { get; set; } = "";
+    public Dictionary<string, string> colors { get; set; } = new();
+}
+
 public class FrontendConfig
 {
     public List<ProjectDto> projects { get; set; } = new();
@@ -65,6 +71,7 @@ public class FrontendConfig
     public string? bughostedPassword { get; set; }
     public bool bughostedHeartbeatEnabled { get; set; } = false;
     public Dictionary<string, string>? themeColors { get; set; }
+    public List<SavedThemeConfig> savedThemes { get; set; } = new();
     public List<string> enabledTools { get; set; } = new();
     public bool includeProjectSkeleton { get; set; } = true;
     public bool includeEditKnowledge { get; set; } = false;

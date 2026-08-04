@@ -114,19 +114,29 @@ angular.module('kanbanApp')
                 vm.prByDefault = false;
                 vm.themeColors = {};
                 vm.presetThemeList = Object.keys(PRESET_THEMES);
+                vm.savedThemes = [];
+                vm.newThemeName = '';
+                vm.ideThemeFilter = '';
                 vm.ideTheme = 'weaver-dark';
                 vm.ideThemeList = [
-                    { name: 'Default (Weaver Dark)', value: 'weaver-dark' },
-                    { name: 'Monokai', value: 'monokai' },
-                    { name: 'Dracula', value: 'dracula' },
-                    { name: 'Material', value: 'material' },
-                    { name: 'Darcula', value: 'darcula' },
-                    { name: 'Seti', value: 'seti' },
-                    { name: 'Tomorrow Night Eighties', value: 'tomorrow-night-eighties' },
-                    { name: 'Ambiance', value: 'ambiance' },
-                    { name: 'Eclipse (light)', value: 'eclipse' },
-                    { name: 'Neo (light)', value: 'neo' }
+                    { name: 'Default (Weaver Dark)', value: 'weaver-dark', preview: { bg: '#0d1117', fg: '#c792ea', accent: '#06b6d4', light: false } },
+                    { name: 'Monokai', value: 'monokai', preview: { bg: '#272822', fg: '#a6e22e', accent: '#e6db74', light: false } },
+                    { name: 'Dracula', value: 'dracula', preview: { bg: '#282a36', fg: '#ff79c6', accent: '#bd93f9', light: false } },
+                    { name: 'Material', value: 'material', preview: { bg: '#263238', fg: '#82aaff', accent: '#80cbc4', light: false } },
+                    { name: 'Darcula', value: 'darcula', preview: { bg: '#2b2b2b', fg: '#a9b7c6', accent: '#6897bb', light: false } },
+                    { name: 'Seti', value: 'seti', preview: { bg: '#151718', fg: '#55b5db', accent: '#a074c4', light: false } },
+                    { name: 'Tomorrow Night Eighties', value: 'tomorrow-night-eighties', preview: { bg: '#2d2d2d', fg: '#f2777a', accent: '#6699cc', light: false } },
+                    { name: 'Ambiance', value: 'ambiance', preview: { bg: '#202020', fg: '#ffa500', accent: '#e0e0e0', light: false } },
+                    { name: 'Eclipse (light)', value: 'eclipse', preview: { bg: '#ffffff', fg: '#7f0055', accent: '#3f7f5f', light: true } },
+                    { name: 'Neo (light)', value: 'neo', preview: { bg: '#ffffff', fg: '#75438a', accent: '#3a6ea5', light: true } }
                 ];
+                vm.ideThemePreviewStyle = function (t) {
+                    return {
+                        'background': t.preview.bg,
+                        'color': t.preview.fg,
+                        'border-color': t.preview.accent
+                    };
+                };
 
                 // Settings tab state
                 vm.settingsTab = 'appearance';
@@ -274,6 +284,7 @@ angular.module('kanbanApp')
                             vm.bughostedPassword = cfg.bughostedPassword || '';
                             vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
                             vm.themeColors = mergeTheme(cfg.themeColors);
+                            vm.savedThemes = (cfg.savedThemes || []).map(function (t) { return { name: t.name || 'Untitled', colors: mergeTheme(t.colors), _editing: false, _editName: '' }; });
                             applyTheme(null, vm.themeColors);
                             // Auto-load file picker if IDE sidebar is already open
                             if (vm.ide && vm.ide.showSidebar && vm.loadFilePickerEntries) {
@@ -323,6 +334,7 @@ angular.module('kanbanApp')
                         cfg.bughostedPassword = vm.bughostedPassword || '';
                         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
                         cfg.themeColors = vm.themeColors;
+                        cfg.savedThemes = vm.savedThemes.map(function (t) { return { name: t.name || 'Untitled', colors: t.colors || {} }; });
                         cfg.enabledTools = vm.toolList.filter(function (t) { return t.enabled; }).map(function (t) { return t.key; });
                         return $http.post('/api/config/save', cfg);
                     }).then(function () {
@@ -486,6 +498,8 @@ angular.module('kanbanApp')
 
                 vm.openSettingsPanel = function () {
                     vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.showSettingsPanel = true;
+                    vm.loadIdeThemeStylesheets();
+                    $timeout(function () { vm.renderThemePreviews(); }, 150);
                     vm.fileHintsData = (vm.projects || []).map(function (p) { return { projectPath: p.Path, hints: [] }; });
                     $http.get('/api/filehints').then(function (resp) {
                         try {
@@ -522,6 +536,75 @@ angular.module('kanbanApp')
                     applyTheme(null, vm.themeColors);
                     vm.saveSettings(true);
                 };
+
+                // ── Named theme presets ───────────────────────────────────────────
+                vm.themeEquals = function (a, b) {
+                    return Object.keys(DEFAULT_THEME).every(function (k) {
+                        return (a[k] || '').toLowerCase() === (b[k] || '').toLowerCase();
+                    });
+                };
+                vm.isPresetActive = function (name) {
+                    var preset = PRESET_THEMES[name];
+                    return preset ? vm.themeEquals(vm.themeColors, preset) : false;
+                };
+                vm.isSavedThemeActive = function (t) {
+                    return t && t.colors ? vm.themeEquals(vm.themeColors, t.colors) : false;
+                };
+                vm.themeSwatches = function (colors) {
+                    return [colors['--bg'], colors['--surface'], colors['--accent'], colors['--success'], colors['--error']];
+                };
+                vm.presetSwatches = function (name) {
+                    var p = PRESET_THEMES[name];
+                    return p ? vm.themeSwatches(p) : [];
+                };
+                vm.saveCurrentTheme = function () {
+                    var name = (vm.newThemeName || '').trim();
+                    if (!name) { $window.alert('Enter a name for this theme first.'); return; }
+                    var existing = vm.savedThemes.find(function (t) { return t.name.toLowerCase() === name.toLowerCase(); });
+                    if (existing) {
+                        if (!$window.confirm('A theme named "' + name + '" already exists. Replace it?')) return;
+                        existing.colors = angular.copy(vm.themeColors);
+                    } else {
+                        vm.savedThemes.push({ name: name, colors: angular.copy(vm.themeColors), _editing: false, _editName: '' });
+                    }
+                    vm.newThemeName = '';
+                    vm.saveSettings(true);
+                };
+                vm.applySavedTheme = function (t) {
+                    if (!t || !t.colors) return;
+                    Object.keys(t.colors).forEach(function (k) { vm.themeColors[k] = t.colors[k]; });
+                    applyTheme(null, vm.themeColors);
+                    vm.saveSettings(true);
+                };
+                vm.startRenameTheme = function (t) {
+                    t._editing = true;
+                    t._editName = t.name;
+                };
+                vm.commitRenameTheme = function (t) {
+                    var name = (t._editName || '').trim();
+                    if (name && name.toLowerCase() !== t.name.toLowerCase()) {
+                        var clash = vm.savedThemes.find(function (x) { return x !== t && x.name.toLowerCase() === name.toLowerCase(); });
+                        if (clash) {
+                            $window.alert('Another theme is already named "' + name + '".');
+                            t._editName = t.name; // revert input
+                            t._editing = false;   // exit edit mode so blur stops re-alerting
+                            return;
+                        }
+                        t.name = name;
+                        vm.saveSettings(true);
+                    }
+                    t._editing = false;
+                };
+                vm.cancelRenameTheme = function (t) {
+                    t._editName = t.name;
+                    t._editing = false;
+                };
+                vm.deleteSavedTheme = function (t) {
+                    if (!t) return;
+                    if (!$window.confirm('Delete theme "' + t.name + '"? Your current colors are not changed.')) return;
+                    vm.savedThemes = vm.savedThemes.filter(function (x) { return x !== t; });
+                    vm.saveSettings(true);
+                };
                 vm.applyIdeTheme = function (name) {
                     if (!name) name = 'weaver-dark';
                     vm.ideTheme = name;
@@ -540,11 +623,80 @@ angular.module('kanbanApp')
                     }
                     vm.saveSettings(true);
                 };
+
+                // ── Real CodeMirror previews on the IDE theme cards ─────────────────
+                var _previewCssLoaded = false;
+                var _previewSample =
+                    'const fib = (n) => {\n' +
+                    '  if (n <= 1) return n; // base case\n' +
+                    '  return fib(n - 1) + fib(n - 2);\n' +
+                    '};\n' +
+                    'console.log(fib(10));\n';
+
+                vm.loadIdeThemeStylesheets = function () {
+                    if (_previewCssLoaded || !vm.ideThemeList) return;
+                    _previewCssLoaded = true;
+                    vm.ideThemeList.forEach(function (t) {
+                        if (t.value === 'weaver-dark') return; // built-in styles already loaded
+                        var id = 'cm-theme-css-' + t.value;
+                        if (document.getElementById(id)) return;
+                        var link = document.createElement('link');
+                        link.id = id;
+                        link.rel = 'stylesheet';
+                        link.href = 'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/theme/' + t.value + '.min.css';
+                        link.onload = function () { vm.renderThemePreviews(); };
+                        document.head.appendChild(link);
+                    });
+                };
+
+                vm.renderThemePreviews = function () {
+                    if (!window.CodeMirror) return;
+                    var nodes = document.querySelectorAll('.theme-card-preview[data-theme]');
+                    for (var i = 0; i < nodes.length; i++) {
+                        (function (el) {
+                            var theme = el.getAttribute('data-theme');
+                            if (!theme) return;
+                            if (el._cmPreview) {
+                                if (el._cmPreview.getOption('theme') !== theme) el._cmPreview.setOption('theme', theme);
+                                el._cmPreview.refresh();
+                                return;
+                            }
+                            el._cmPreview = CodeMirror(el, {
+                                value: _previewSample,
+                                mode: 'javascript',
+                                theme: theme,
+                                readOnly: true,
+                                cursorBlinkRate: -1,
+                                lineNumbers: false,
+                                foldGutter: false,
+                                gutters: [],
+                                indentUnit: 2,
+                                tabSize: 2
+                            });
+                            el._cmPreview.setOption('readOnly', true);
+                            el._cmPreview.refresh();
+                        })(nodes[i]);
+                    }
+                };
+
+                vm.destroyThemePreviews = function () {
+                    var nodes = document.querySelectorAll('.theme-card-preview[data-theme]');
+                    for (var i = 0; i < nodes.length; i++) {
+                        var el = nodes[i];
+                        if (el._cmPreview) {
+                            var wrapper = el._cmPreview.getWrapperElement();
+                            if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+                            el._cmPreview = null;
+                        }
+                        el.innerHTML = '';
+                    }
+                };
                 vm.closeSettingsPanel = function (event) {
                     if (_themeSaveDebounce) { $timeout.cancel(_themeSaveDebounce); _themeSaveDebounce = null; }
                     if (event && event.target.tagName === 'INPUT') return;
                     if (event) event.stopPropagation();
                     vm.showSettingsPanel = false;
+                    vm.destroyThemePreviews();
                     var backdrop = document.getElementById('backdrop'); if (backdrop) backdrop.style.display = 'none';
                 };
 

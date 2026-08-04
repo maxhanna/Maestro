@@ -1010,61 +1010,124 @@
         <!-- ===== TAB: Appearance ===== -->
         <div ng-show="vm.settingsTab === 'appearance'">
           <details open>
-            <summary class="settings-header">IDE CSS Theme (CodeMirror)</summary>
-            <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
-              <div style="display:flex;flex-wrap:wrap;gap:4px;">
-                <button ng-repeat="t in vm.ideThemeList" ng-click="vm.applyIdeTheme(t.value)"
-                  ng-class="{'active': vm.ideTheme === t.value}" class="theme-btn"
-                  style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
-                  {{t.name}}
+            <summary class="settings-header">IDE Editor Theme (CodeMirror)</summary>
+            <div class="form-row theme-picker">
+              <input ng-model="vm.ideThemeFilter" placeholder="Search themes…" class="theme-search" />
+              <div class="theme-card-grid">
+                <button ng-repeat="t in vm.ideThemeList | filter:vm.ideThemeFilter"
+                  ng-click="vm.applyIdeTheme(t.value)" class="theme-card"
+                  ng-class="{'active': vm.ideTheme === t.value}" title="{{t.name}}">
+                  <span class="theme-card-preview" ng-style="vm.ideThemePreviewStyle(t)">
+                    <span class="theme-card-code">fn foo(</span>
+                    <span class="theme-card-code cm-string">'hi'</span>
+                    <span class="theme-card-code cm-keyword">return 1</span>
+                  </span>
+                  <span class="theme-card-label">
+                    <span class="theme-card-name">{{t.name}}</span>
+                    <span class="theme-card-check" ng-if="vm.ideTheme === t.value">✓</span>
+                  </span>
                 </button>
               </div>
             </div>
           </details>
+
           <details open>
-            <summary class="settings-header">Overall CSS Theme</summary>
-            <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                <div><label style="font-size:12px;">Background (--bg)</label>
-                  <input type="color" ng-model="vm.themeColors['--bg']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Surface (--surface)</label>
-                  <input type="color" ng-model="vm.themeColors['--surface']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Panel (--panel)</label>
-                  <input type="color" ng-model="vm.themeColors['--panel']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Text (--text)</label>
-                  <input type="color" ng-model="vm.themeColors['--text']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Muted (--muted)</label>
-                  <input type="color" ng-model="vm.themeColors['--muted']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Accent (--accent)</label>
-                  <input type="color" ng-model="vm.themeColors['--accent']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Accent 2 (--accent-2)</label>
-                  <input type="color" ng-model="vm.themeColors['--accent-2']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Success (--success)</label>
-                  <input type="color" ng-model="vm.themeColors['--success']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Warning (--warning)</label>
-                  <input type="color" ng-model="vm.themeColors['--warning']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-                </div>
-                <div><label style="font-size:12px;">Error (--error)</label>
-                  <input type="color" ng-model="vm.themeColors['--error']" ng-change="vm.applyThemeColors(null, vm.themeColors)" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+            <summary class="settings-header">Overall App Theme</summary>
+            <div class="form-row theme-picker">
+              <!-- Preset quick themes as visual cards -->
+              <div class="theme-section-label">Preset themes</div>
+              <div class="theme-card-grid">
+                <button ng-repeat="name in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
+                  class="theme-card theme-card-preset" ng-class="{'active': vm.isPresetActive(name)}"
+                  title="Apply {{name}}">
+                  <span class="theme-swatches">
+                    <i ng-repeat="c in vm.presetSwatches(name)" ng-style="{'background': c}"></i>
+                  </span>
+                  <span class="theme-card-label">
+                    <span class="theme-card-name">{{name}}</span>
+                    <span class="theme-card-check" ng-if="vm.isPresetActive(name)">✓</span>
+                  </span>
+                </button>
+              </div>
+
+              <!-- Save current colors under a name -->
+              <div class="theme-section-label">Save current colors as a theme</div>
+              <div class="theme-save-row">
+                <input ng-model="vm.newThemeName" placeholder="Name, e.g. Ocean Night"
+                  ng-keydown="$event.key === 'Enter' && vm.saveCurrentTheme()" />
+                <button ng-click="vm.saveCurrentTheme()" class="small primary" ng-disabled="!vm.newThemeName.trim()">💾 Save theme</button>
+              </div>
+
+              <!-- Saved named themes: apply / rename / delete -->
+              <div class="theme-section-label" ng-if="vm.savedThemes.length">Your saved themes</div>
+              <div class="theme-card-grid theme-saved-grid" ng-if="vm.savedThemes.length">
+                <div ng-repeat="t in vm.savedThemes" class="theme-card theme-card-saved"
+                  ng-class="{'active': vm.isSavedThemeActive(t)}" ng-click="vm.applySavedTheme(t)"
+                  title="Click to apply">
+                  <span class="theme-swatches">
+                    <i ng-repeat="c in vm.themeSwatches(t.colors)" ng-style="{'background': c}"></i>
+                  </span>
+                  <span class="theme-card-label">
+                    <span class="theme-card-name" ng-if="!t._editing">{{t.name}}</span>
+                    <input ng-if="t._editing" ng-model="t._editName" class="theme-rename-input"
+                      ng-click="$event.stopPropagation()"
+                      ng-keydown="$event.key === 'Enter' && vm.commitRenameTheme(t); $event.key === 'Escape' && vm.cancelRenameTheme(t)"
+                      ng-blur="vm.commitRenameTheme(t)" />
+                    <span class="theme-card-check" ng-if="vm.isSavedThemeActive(t)">✓</span>
+                  </span>
+                  <span class="theme-card-actions">
+                    <button ng-click="$event.stopPropagation(); vm.startRenameTheme(t)" title="Rename theme">✏️</button>
+                    <button ng-click="$event.stopPropagation(); vm.deleteSavedTheme(t)" title="Delete theme">🗑</button>
+                  </span>
                 </div>
               </div>
-              <button ng-click="vm.resetThemeColors()" style="margin-top:4px;padding:4px 12px;font-size:12px;">Reset to defaults</button>
-              <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
-                <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">Quick Themes</div>
-                <div style="display:flex;flex-wrap:wrap;gap:4px;">
-                  <button ng-repeat="name in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
-                    style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
-                    {{name}}
-                  </button>
+
+              <!-- Fine-grained color pickers -->
+              <div class="theme-section-label">Fine-tune colors</div>
+              <div class="theme-color-grid">
+                <div class="theme-color-item"><label>Background</label>
+                  <input type="color" ng-model="vm.themeColors['--bg']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--bg']}}</code>
                 </div>
+                <div class="theme-color-item"><label>Surface</label>
+                  <input type="color" ng-model="vm.themeColors['--surface']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--surface']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Panel</label>
+                  <input type="color" ng-model="vm.themeColors['--panel']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--panel']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Text</label>
+                  <input type="color" ng-model="vm.themeColors['--text']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--text']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Muted</label>
+                  <input type="color" ng-model="vm.themeColors['--muted']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--muted']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Accent</label>
+                  <input type="color" ng-model="vm.themeColors['--accent']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--accent']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Accent 2</label>
+                  <input type="color" ng-model="vm.themeColors['--accent-2']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--accent-2']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Success</label>
+                  <input type="color" ng-model="vm.themeColors['--success']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--success']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Warning</label>
+                  <input type="color" ng-model="vm.themeColors['--warning']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--warning']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Error</label>
+                  <input type="color" ng-model="vm.themeColors['--error']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--error']}}</code>
+                </div>
+              </div>
+              <div class="theme-reset-row">
+                <button ng-click="vm.resetThemeColors()" class="small ghost">↺ Reset to defaults</button>
               </div>
             </div>
           </details>
