@@ -116,27 +116,22 @@ angular.module('kanbanApp')
                 vm.presetThemeList = Object.keys(PRESET_THEMES);
                 vm.savedThemes = [];
                 vm.newThemeName = '';
+                vm.themeImportText = '';
+                vm.themeTransferMsg = '';
                 vm.ideThemeFilter = '';
                 vm.ideTheme = 'weaver-dark';
                 vm.ideThemeList = [
-                    { name: 'Default (Weaver Dark)', value: 'weaver-dark', preview: { bg: '#0d1117', fg: '#c792ea', accent: '#06b6d4', light: false } },
-                    { name: 'Monokai', value: 'monokai', preview: { bg: '#272822', fg: '#a6e22e', accent: '#e6db74', light: false } },
-                    { name: 'Dracula', value: 'dracula', preview: { bg: '#282a36', fg: '#ff79c6', accent: '#bd93f9', light: false } },
-                    { name: 'Material', value: 'material', preview: { bg: '#263238', fg: '#82aaff', accent: '#80cbc4', light: false } },
-                    { name: 'Darcula', value: 'darcula', preview: { bg: '#2b2b2b', fg: '#a9b7c6', accent: '#6897bb', light: false } },
-                    { name: 'Seti', value: 'seti', preview: { bg: '#151718', fg: '#55b5db', accent: '#a074c4', light: false } },
-                    { name: 'Tomorrow Night Eighties', value: 'tomorrow-night-eighties', preview: { bg: '#2d2d2d', fg: '#f2777a', accent: '#6699cc', light: false } },
-                    { name: 'Ambiance', value: 'ambiance', preview: { bg: '#202020', fg: '#ffa500', accent: '#e0e0e0', light: false } },
-                    { name: 'Eclipse (light)', value: 'eclipse', preview: { bg: '#ffffff', fg: '#7f0055', accent: '#3f7f5f', light: true } },
-                    { name: 'Neo (light)', value: 'neo', preview: { bg: '#ffffff', fg: '#75438a', accent: '#3a6ea5', light: true } }
+                    { name: 'Default (Weaver Dark)', value: 'weaver-dark' },
+                    { name: 'Monokai', value: 'monokai' },
+                    { name: 'Dracula', value: 'dracula' },
+                    { name: 'Material', value: 'material' },
+                    { name: 'Darcula', value: 'darcula' },
+                    { name: 'Seti', value: 'seti' },
+                    { name: 'Tomorrow Night Eighties', value: 'tomorrow-night-eighties' },
+                    { name: 'Ambiance', value: 'ambiance' },
+                    { name: 'Eclipse (light)', value: 'eclipse' },
+                    { name: 'Neo (light)', value: 'neo' }
                 ];
-                vm.ideThemePreviewStyle = function (t) {
-                    return {
-                        'background': t.preview.bg,
-                        'color': t.preview.fg,
-                        'border-color': t.preview.accent
-                    };
-                };
 
                 // Settings tab state
                 vm.settingsTab = 'appearance';
@@ -605,6 +600,80 @@ angular.module('kanbanApp')
                     vm.savedThemes = vm.savedThemes.filter(function (x) { return x !== t; });
                     vm.saveSettings(true);
                 };
+                // ── Theme export / import (share JSON between machines) ───────────
+                vm._copyFallback = function (text) {
+                    var ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    try { document.execCommand('copy'); } catch (e) { }
+                    document.body.removeChild(ta);
+                };
+                vm.exportThemeJson = function () {
+                    var json = JSON.stringify(vm.themeColors, null, 2);
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(json).then(function () {
+                            vm.themeTransferMsg = '✓ Theme copied to clipboard as JSON';
+                            $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
+                        }, function () {
+                            vm._copyFallback(json);
+                            vm.themeTransferMsg = '✓ Theme copied to clipboard';
+                            $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
+                        });
+                    } else {
+                        vm._copyFallback(json);
+                        vm.themeTransferMsg = '✓ Theme copied to clipboard';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
+                    }
+                };
+                vm.importThemeJson = function (json) {
+                    if (!json || !json.trim()) return;
+                    var parsed = null;
+                    try {
+                        parsed = JSON.parse(json);
+                    } catch (e) {
+                        vm.themeTransferMsg = '✗ Invalid JSON — could not import';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3000);
+                        return;
+                    }
+                    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                        vm.themeTransferMsg = '✗ Expected a JSON object of colors';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3000);
+                        return;
+                    }
+                    var isHex = function (v) { return typeof v === 'string' && /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8})$/i.test(v.trim()); };
+                    // Validate the SOURCE keys before merging — mergeTheme backfills defaults,
+                    // so checking merged alone would always pass.
+                    var sourceKeys = Object.keys(parsed).filter(function (k) { return /^--[a-z0-9-]+$/i.test(k) && isHex(parsed[k]); });
+                    if (sourceKeys.length === 0) {
+                        vm.themeTransferMsg = '✗ No valid color variables found (expected "--bg": "#071025")';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3500);
+                        return;
+                    }
+                    var merged = mergeTheme(parsed);
+                    vm.themeColors = merged;
+                    applyTheme(null, vm.themeColors);
+                    vm.saveSettings(true);
+                    vm.themeImportText = '';
+                    vm.themeTransferMsg = '✓ Theme imported (' + sourceKeys.length + ' colors)';
+                    $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
+                };
+                vm.importThemeFromClipboard = function () {
+                    if (navigator.clipboard && navigator.clipboard.readText) {
+                        navigator.clipboard.readText().then(function (text) {
+                            vm.importThemeJson(text);
+                        }, function () {
+                            vm.themeTransferMsg = '⚠ Clipboard blocked — paste the JSON below instead';
+                            $timeout(function () { vm.themeTransferMsg = ''; }, 3000);
+                        });
+                    } else {
+                        vm.themeTransferMsg = '⚠ Clipboard API unavailable — paste the JSON below instead';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3000);
+                    }
+                };
+
                 vm.applyIdeTheme = function (name) {
                     if (!name) name = 'weaver-dark';
                     vm.ideTheme = name;
@@ -673,7 +742,6 @@ angular.module('kanbanApp')
                                 indentUnit: 2,
                                 tabSize: 2
                             });
-                            el._cmPreview.setOption('readOnly', true);
                             el._cmPreview.refresh();
                         })(nodes[i]);
                     }
@@ -691,6 +759,14 @@ angular.module('kanbanApp')
                         el.innerHTML = '';
                     }
                 };
+
+                // Re-render previews whenever the IDE theme search filter changes or the
+                // user switches back to the Appearance tab (ng-repeat rebuilds the cards).
+                $scope.$watch(function () { return vm.ideThemeFilter + '|' + vm.settingsTab; }, function () {
+                    if (vm.showSettingsPanel) {
+                        $timeout(function () { vm.renderThemePreviews(); }, 0);
+                    }
+                });
                 vm.closeSettingsPanel = function (event) {
                     if (_themeSaveDebounce) { $timeout.cancel(_themeSaveDebounce); _themeSaveDebounce = null; }
                     if (event && event.target.tagName === 'INPUT') return;

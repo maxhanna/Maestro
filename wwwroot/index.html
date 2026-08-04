@@ -1014,19 +1014,17 @@
             <div class="form-row theme-picker">
               <input ng-model="vm.ideThemeFilter" placeholder="Search themes…" class="theme-search" />
               <div class="theme-card-grid">
-                <button ng-repeat="t in vm.ideThemeList | filter:vm.ideThemeFilter"
+                <div ng-repeat="t in vm.ideThemeList | filter:vm.ideThemeFilter track by t.value"
                   ng-click="vm.applyIdeTheme(t.value)" class="theme-card"
-                  ng-class="{'active': vm.ideTheme === t.value}" title="{{t.name}}">
-                  <span class="theme-card-preview" ng-style="vm.ideThemePreviewStyle(t)">
-                    <span class="theme-card-code">fn foo(</span>
-                    <span class="theme-card-code cm-string">'hi'</span>
-                    <span class="theme-card-code cm-keyword">return 1</span>
-                  </span>
+                  ng-class="{'active': vm.ideTheme === t.value}" title="{{t.name}}"
+                  role="button" tabindex="0"
+                  ng-keydown="$event.key === 'Enter' && vm.applyIdeTheme(t.value)">
+                  <div class="theme-card-preview theme-card-preview-cm" data-theme="{{t.value}}"></div>
                   <span class="theme-card-label">
                     <span class="theme-card-name">{{t.name}}</span>
                     <span class="theme-card-check" ng-if="vm.ideTheme === t.value">✓</span>
                   </span>
-                </button>
+                </div>
               </div>
             </div>
           </details>
@@ -1057,6 +1055,19 @@
                   ng-keydown="$event.key === 'Enter' && vm.saveCurrentTheme()" />
                 <button ng-click="vm.saveCurrentTheme()" class="small primary" ng-disabled="!vm.newThemeName.trim()">💾 Save theme</button>
               </div>
+
+              <!-- Export / import theme JSON -->
+              <div class="theme-section-label">Share theme (export / import)</div>
+              <div class="theme-transfer-row">
+                <button ng-click="vm.exportThemeJson()" class="small" title="Copy the current colors to the clipboard as JSON">📤 Copy as JSON</button>
+                <button ng-click="vm.importThemeFromClipboard()" class="small" title="Read a theme JSON from the clipboard and apply it">📥 Paste from clipboard</button>
+              </div>
+              <div class="theme-transfer-paste">
+                <textarea ng-model="vm.themeImportText" rows="4" placeholder='Paste a theme JSON here, e.g. {"--bg":"#071025","--accent":"#06b6d4"}'></textarea>
+                <button ng-click="vm.importThemeJson(vm.themeImportText)" class="small primary"
+                  ng-disabled="!vm.themeImportText.trim()">Apply pasted theme</button>
+              </div>
+              <div class="theme-transfer-msg" ng-if="vm.themeTransferMsg">{{vm.themeTransferMsg}}</div>
 
               <!-- Saved named themes: apply / rename / delete -->
               <div class="theme-section-label" ng-if="vm.savedThemes.length">Your saved themes</div>

@@ -37,9 +37,17 @@
           <div ng-if="!vm.ide.filePickerLoading && !vm.ide.filePickerError && vm.ide.filePickerEntries.length === 0" class="ide-file-empty"
             style="padding:12px; color:#666; font-size:11px; text-align:center;">No files found.</div>
           <div ng-repeat="e in vm.ide.filePickerEntries track by e.path" class="ide-tree-entry"
-            ng-class="{'ide-tree-entry--selected': vm.ide.currentFile === e.path}"
+            ng-class="{'ide-tree-entry--selected': vm.ide.currentFile === e.path,
+                       'ide-tree-entry--drop-target': vm._treeDropPath && e.isDirectory && e.path === vm._treeDropPath,
+                       'ide-tree-entry--dragging': vm._treeDragPath === e.path}"
             ng-style="{paddingLeft: (5 + e.depth * 5) + 'px'}"
-            ng-click="vm.toggleTreeDir(e)">
+            ng-click="vm.toggleTreeDir(e)"
+            ng-mousedown="vm.onTreeEntryMouseDown($event, e)"
+            ng-dragstart="vm.onTreeDragStart($event, e)"
+            ng-dragover="vm.onTreeDragOver($event, e)"
+            ng-drop="vm.onTreeDrop($event, e)"
+            ng-dragend="vm.onTreeDragEnd($event)"
+            draggable="true">
             <span class="ide-tree-toggle" ng-if="e.isDirectory">
               <span ng-if="vm._expandedDirs[e.path]">▾</span>
               <span ng-if="!vm._expandedDirs[e.path]">▸</span>
@@ -48,7 +56,11 @@
             <span ng-if="e.isDirectory && vm._expandedDirs[e.path]">📂</span>
             <span ng-if="e.isDirectory && !vm._expandedDirs[e.path]">📁</span>
             <span ng-if="!e.isDirectory">📄</span>
-            <span class="ide-tree-name">{{e.name}}</span>
+            <input ng-if="vm.ide.renamingPath === e.path" ng-model="vm.ide.renameDraft"
+              class="ide-tree-rename-input" ng-click="$event.stopPropagation()"
+              ng-keydown="vm.onTreeRenameKey($event, e)"
+              ng-blur="vm.commitTreeRename(e)" select-on-focus />
+            <span ng-if="vm.ide.renamingPath !== e.path" class="ide-tree-name">{{e.name}}</span>
             <span class="ide-remote-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).remoteEditing"
               title="Remote user also has this file open">👥</span>
             <span class="ide-conflict-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).conflict"
@@ -56,6 +68,19 @@
           </div>
         </div>
       </div>
+    </div>
+    <div class="ide-context-menu" ng-if="vm.ide.treeMenu.visible"
+      ng-style="{left: vm.ide.treeMenu.x + 'px', top: vm.ide.treeMenu.y + 'px'}"
+      ng-mousedown="$event.stopPropagation()">
+      <div class="ide-ctx-item" ng-click="vm.treeMenuAction('edit')">📄 Edit</div>
+      <div class="ide-ctx-item" ng-if="vm.ide.treeMenu.entry.isDirectory" ng-click="vm.treeMenuAction('newfile')">📝 New File</div>
+      <div class="ide-ctx-item" ng-if="vm.ide.treeMenu.entry.isDirectory" ng-click="vm.treeMenuAction('newfolder')">📁 New Folder</div>
+      <div class="ide-ctx-sep"></div>
+      <div class="ide-ctx-item" ng-click="vm.treeMenuAction('rename')">✏️ Rename</div>
+      <div class="ide-ctx-item" ng-click="vm.treeMenuAction('copy')">📋 Copy Path</div>
+      <div class="ide-ctx-sep"></div>
+      <div class="ide-ctx-item ide-ctx-danger" ng-click="vm.treeMenuAction('delete')">🗑 Delete</div>
+      <div class="ide-ctx-item" ng-click="vm.treeMenuAction('refresh')">↻ Refresh</div>
     </div>
     <div class="ide-editor-container" ng-class="{'ide-editor-container--full': !vm.ide.showSidebar}">
       <div class="ide-editor-header" ng-if="vm.ide.openTabs.length > 0">

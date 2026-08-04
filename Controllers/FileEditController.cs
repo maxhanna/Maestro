@@ -823,6 +823,133 @@ public class FileEditController : ControllerBase
             return Ok(new { success = false, error = ex.Message });
         }
     }
+    public class FileOpRequest
+    {
+        public string Project { get; set; } = "";
+        public string Path { get; set; } = "";
+        public string NewName { get; set; } = "";
+        public string TargetPath { get; set; } = "";
+    }
+    [HttpPost("rename")]
+    public IActionResult Rename([FromBody] FileOpRequest req)
+    {
+        if (req == null || string.IsNullOrWhiteSpace(req.Path))
+            return BadRequest(new { error = "Path required" });
+        var projectRoot = ResolveProjectRoot(req.Project ?? "");
+        var srcFull = Path.GetFullPath(Path.Combine(projectRoot, req.Path.Trim().TrimStart('/', '\\')));
+        if (!IsPathWithinWorkspace(srcFull, projectRoot))
+            return BadRequest(new { error = "Path outside project root is not allowed." });
+        if (!System.IO.File.Exists(srcFull) && !Directory.Exists(srcFull))
+            return NotFound(new { error = "File or folder not found." });
+        var newName = (req.NewName ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(newName) || newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            return BadRequest(new { error = "Invalid name." });
+        var parent = Path.GetDirectoryName(srcFull)!;
+        var dstFull = Path.Combine(parent, newName);
+        if (string.Equals(srcFull, dstFull, StringComparison.OrdinalIgnoreCase))
+            return Ok(new { success = true, path = req.Path });
+        if (System.IO.File.Exists(dstFull) || Directory.Exists(dstFull))
+            return Conflict(new { error = $"'{newName}' already exists." });
+        try
+        {
+            if (System.IO.File.Exists(srcFull))
+                System.IO.File.Move(srcFull, dstFull);
+            else
+                Directory.Move(srcFull, dstFull);
+            return Ok(new { success = true, path = Path.GetRelativePath(projectRoot, dstFull).Replace('\\', '/') });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+    [HttpPost("delete")]
+    public IActionResult Delete([FromBody] FileOpRequest req)
+    {
+        if (req == null || string.IsNullOrWhiteSpace(req.Path))
+            return BadRequest(new { error = "Path required" });
+        var projectRoot = ResolveProjectRoot(req.Project ?? "");
+        var srcFull = Path.GetFullPath(Path.Combine(projectRoot, req.Path.Trim().TrimStart('/', '\\')));
+        if (!IsPathWithinWorkspace(srcFull, projectRoot))
+            return BadRequest(new { error = "Path outside project root is not allowed." });
+        if (!System.IO.File.Exists(srcFull) && !Directory.Exists(srcFull))
+            return NotFound(new { error = "File or folder not found." });
+        try
+        {
+            if (System.IO.File.Exists(srcFull))
+                System.IO.File.Delete(srcFull);
+            else
+                Directory.Delete(srcFull, true);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+    [HttpPost("mkdir")]
+    public IActionResult Mkdir([FromBody] FileOpRequest req)
+    {
+        if (req == null || string.IsNullOrWhiteSpace(req.Path))
+            return BadRequest(new { error = "Path required" });
+        var projectRoot = ResolveProjectRoot(req.Project ?? "");
+        var dirFull = Path.GetFullPath(Path.Combine(projectRoot, req.Path.Trim().TrimStart('/', '\\')));
+        if (!IsPathWithinWorkspace(dirFull, projectRoot))
+            return BadRequest(new { error = "Path outside project root is not allowed." });
+        if (Directory.Exists(dirFull))
+            return Conflict(new { error = "Folder already exists." });
+        try
+        {
+            Directory.CreateDirectory(dirFull);
+            return Ok(new { success = true, path = Path.GetRelativePath(projectRoot, dirFull).Replace('\\', '/') });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+    [HttpPost("move")]
+    public IActionResult Move([FromBody] FileOpRequest req)
+    {
+        if (req == null || string.IsNullOrWhiteSpace(req.Path))
+            return BadRequest(new { error = "Path required" });
+        var projectRoot = ResolveProjectRoot(req.Project ?? "");
+        var srcFull = Path.GetFullPath(Path.Combine(projectRoot, req.Path.Trim().TrimStart('/', '\\')));
+        var dstDirFull = Path.GetFullPath(Path.Combine(projectRoot, (req.TargetPath ?? "").Trim().TrimStart('/', '\\')));
+        if (!IsPathWithinWorkspace(srcFull, projectRoot) || !IsPathWithinWorkspace(dstDirFull, projectRoot))
+            return BadRequest(new { error = "Path outside project root is not allowed." });
+        if (!System.IO.File.Exists(srcFull) && !Directory.Exists(srcFull))
+            return NotFound(new { error = "File or folder not found." });
+        if (!Directory.Exists(dstDirFull))
+            return NotFound(new { error = "Target folder not found." });
+        // Prevent moving a folder into itself or one of its own descendants.
+        if (Directory.Exists(srcFull))
+        {
+            var srcPrefix = srcFull.EndsWith(Path.DirectorySeparatorChar.ToString())
+                ? srcFull : srcFull + Path.DirectorySeparatorChar;
+            if (dstDirFull.Equals(srcFull, StringComparison.OrdinalIgnoreCase) ||
+                dstDirFull.StartsWith(srcPrefix, StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { error = "Cannot move a folder into itself." });
+        }
+        var name = Path.GetFileName(srcFull);
+        var dstFull = Path.Combine(dstDirFull, name);
+        if (string.Equals(srcFull, dstFull, StringComparison.OrdinalIgnoreCase))
+            return Ok(new { success = true, path = req.Path });
+        if (System.IO.File.Exists(dstFull) || Directory.Exists(dstFull))
+            return Conflict(new { error = $"'{name}' already exists in the destination." });
+        try
+        {
+            if (System.IO.File.Exists(srcFull))
+                System.IO.File.Move(srcFull, dstFull);
+            else
+                Directory.Move(srcFull, dstFull);
+            return Ok(new { success = true, path = Path.GetRelativePath(projectRoot, dstFull).Replace('\\', '/') });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
     private string ResolveProjectRoot(string project)
     {
         var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");

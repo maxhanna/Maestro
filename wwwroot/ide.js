@@ -25,6 +25,10 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         searchMatches: [],
         searchCurrentIdx: -1,
         searchVisible: false,
+        // File-tree context menu + rename + drag-move state
+        treeMenu: { visible: false, x: 0, y: 0, entry: null },
+        renamingPath: null,
+        renameDraft: '',
         // Restored from the settings localStorage store (stashed by SettingsMixin)
         // so the on/off state survives a page reload; defaults to visible.
         minimapVisible: vm._savedIdeMinimapVisible === undefined ? true : vm._savedIdeMinimapVisible,
@@ -241,6 +245,238 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       vm.idePickerUpDir = function() {
         vm.refreshFileTree();
       };
+
+      // ── File-tree context menu (right-click) ───────────────────────────────
+      vm._treeDragPath = null;   // path being dragged
+      vm._treeDropPath = null;   // directory currently hovered as drop target
+
+      vm.onTreeEntryMouseDown = function($event, e) {
+        if ($event.button !== 2) return; // left/middle click: normal behavior
+        $event.preventDefault();
+        $event.stopPropagation();
+        vm._treeDragPath = null;
+        vm._treeDropPath = null;
+        vm.ide.treeMenu.visible = false;
+        // Position menu clamped to viewport
+        var menuW = 190, menuH = 210;
+        var x = Math.min($event.clientX, window.innerWidth - menuW);
+        var y = Math.min($event.clientY, window.innerHeight - menuH);
+        vm.ide.treeMenu = { visible: true, x: Math.max(0, x), y: Math.max(0, y), entry: e };
+      };
+
+      vm.closeTreeMenu = function() {
+        vm.ide.treeMenu.visible = false;
+      };
+
+      vm.treeMenuAction = function(action) {
+        var entry = vm.ide.treeMenu.entry;
+        var menuPath = entry ? entry.path : '';
+        var isDir = entry ? entry.isDirectory : false;
+        vm.ide.treeMenu.visible = false;
+        if (action === 'refresh') { vm.refreshFileTree(); return; }
+        if (action === 'edit') {
+          if (entry) { if (isDir) vm.toggleTreeDir(entry); else vm.openFile(entry.path); }
+          return;
+        }
+        if (action === 'copy') {
+          if (!menuPath) return;
+          var text = menuPath;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+              if (vm.showSideToast) vm.showSideToast('Copied: ' + text);
+            });
+          } else {
+            var ta = document.createElement('textarea');
+            ta.value = text; document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+          }
+          return;
+        }
+        if (action === 'delete') {
+          if (!menuPath) return;
+          if (!confirm('Delete ' + (isDir ? 'folder' : 'file') + ' "' + menuPath + '"' + (isDir ? ' and all its contents?' : '?'))) return;
+          $http.post('/api/editor/delete', { project: vm.selectedProject || '', path: menuPath }).then(function() {
+            // Close any open tabs under the deleted path
+            var prefix = isDir ? menuPath + '/' : menuPath;
+            var removed = false;
+            for (var i = vm.ide.openTabs.length - 1; i >= 0; i--) {
+              var t = vm.ide.openTabs[i];
+              if (t.path === menuPath || (isDir && t.path.indexOf(prefix) === 0)) {
+                vm.ide.openTabs.splice(i, 1); removed = true;
+              }
+            }
+            if (removed && vm.ide.openTabs.length === 0) {
+              vm.ide.currentFile = null; vm.ide.currentTab = null; vm.ide.dirty = false;
+            } else if (removed && vm.ide.currentFile && vm.ide.currentFile.indexOf(prefix) === 0) {
+              vm.switchTab(vm.ide.openTabs[0].path);
+            }
+            vm.refreshFileTree();
+          }, function(err) {
+            alert((err.data && err.data.error) || 'Delete failed');
+          });
+          return;
+        }
+        if (action === 'rename') {
+          if (!menuPath) return;
+          vm.ide.renamingPath = menuPath;
+          vm.ide.renameDraft = (entry && entry.name) || menuPath.split('/').pop() || '';
+          vm.ide.treeMenu.visible = false;
+          return;
+        }
+        if (action === 'newfile' || action === 'newfolder') {
+          var base = isDir ? menuPath : '';
+          var isFile = action === 'newfile';
+          var name = prompt((isFile ? 'New file name' : 'New folder name') + (base ? ' in ' + base : ' (project root)') + ':');
+          if (!name) return;
+          name = name.trim();
+          if (!name) return;
+          var fullPath = base ? base + '/' + name : name;
+          if (isFile) {
+            $http.post('/api/editor/write', { project: vm.selectedProject || '', path: fullPath, content: '', createIfMissing: true }).then(function() {
+              vm.refreshFileTree();
+              vm.openFile(fullPath);
+            }, function(err) {
+              alert((err.data && err.data.error) || 'Create file failed');
+            });
+          } else {
+            $http.post('/api/editor/mkdir', { project: vm.selectedProject || '', path: fullPath }).then(function() {
+              vm.refreshFileTree();
+            }, function(err) {
+              alert((err.data && err.data.error) || 'Create folder failed');
+            });
+          }
+          return;
+        }
+      };
+
+      // ── Inline rename ───────────────────────────────────────────────────────
+      vm.onTreeRenameKey = function($event, e) {
+        if ($event.key === 'Enter') {
+          $event.preventDefault();
+          vm.commitTreeRename(e);
+        } else if ($event.key === 'Escape') {
+          $event.preventDefault();
+          vm.ide.renamingPath = null;
+          vm.ide.renameDraft = '';
+        }
+      };
+
+      vm.commitTreeRename = function(e) {
+        var oldPath = vm.ide.renamingPath;
+        if (!oldPath) return;
+        var draft = (vm.ide.renameDraft || '').trim();
+        vm.ide.renamingPath = null;
+        vm.ide.renameDraft = '';
+        if (!draft || draft === (e && e.name)) return;
+        var parent = oldPath.indexOf('/') >= 0 ? oldPath.slice(0, oldPath.lastIndexOf('/') + 1) : '';
+        var newPath = parent + draft;
+        var isDir = e ? e.isDirectory : false;
+        $http.post('/api/editor/rename', { project: vm.selectedProject || '', path: oldPath, newName: draft }).then(function(resp) {
+          var finalPath = (resp.data && resp.data.path) || newPath;
+          // Update open tabs that referenced the old path
+          for (var i = 0; i < vm.ide.openTabs.length; i++) {
+            var t = vm.ide.openTabs[i];
+            if (t.path === oldPath) {
+              t.path = finalPath;
+              t.displayName = draft;
+            } else if (isDir && t.path.indexOf(oldPath + '/') === 0) {
+              t.path = finalPath + t.path.slice(oldPath.length);
+            }
+          }
+          if (vm.ide.currentFile === oldPath) vm.ide.currentFile = finalPath;
+          if (vm.ide.currentFile && isDir && vm.ide.currentFile.indexOf(oldPath + '/') === 0) {
+            vm.ide.currentFile = finalPath + vm.ide.currentFile.slice(oldPath.length);
+          }
+          vm.refreshFileTree();
+        }, function(err) {
+          alert((err.data && err.data.error) || 'Rename failed');
+          vm.refreshFileTree();
+        });
+      };
+
+      // ── Drag & drop move ────────────────────────────────────────────────────
+      vm.onTreeDragStart = function($event, e) {
+        if (vm.ide.renamingPath === e.path) { $event.preventDefault(); return; }
+        vm._treeDragPath = e.path;
+        vm._treeDropPath = null;
+        if ($event.dataTransfer) {
+          $event.dataTransfer.effectAllowed = 'move';
+          $event.dataTransfer.setData('text/plain', e.path);
+        }
+      };
+
+      vm.onTreeDragOver = function($event, e) {
+        if (!vm._treeDragPath) return;
+        if (!e.isDirectory) {
+          if (vm._treeDropPath) { vm._treeDropPath = null; }
+          return;
+        }
+        // Reject dropping a folder into itself or a descendant
+        if (vm._treeDragPath === e.path ||
+            (vm._treeDragPath && e.path.indexOf(vm._treeDragPath + '/') === 0)) {
+          if (vm._treeDropPath) { vm._treeDropPath = null; }
+          return;
+        }
+        $event.preventDefault();
+        if ($event.dataTransfer) $event.dataTransfer.dropEffect = 'move';
+        vm._treeDropPath = e.path;
+      };
+
+      vm.onTreeDrop = function($event, e) {
+        var src = vm._treeDragPath;
+        vm._treeDragPath = null;
+        vm._treeDropPath = null;
+        if (!src) return;
+        if (!e || !e.isDirectory) return;
+        if (src === e.path || e.path.indexOf(src + '/') === 0) return;
+        $event.preventDefault();
+        $event.stopPropagation();
+        var dest = e.path || '';
+        $http.post('/api/editor/move', { project: vm.selectedProject || '', path: src, targetPath: dest }).then(function(resp) {
+          var finalPath = (resp.data && resp.data.path) || (dest ? dest + '/' + src.split('/').pop() : src);
+          var isDir = !!(resp.data && resp.data.isDirectory);
+          // Update open tabs for moved paths
+          for (var i = 0; i < vm.ide.openTabs.length; i++) {
+            var t = vm.ide.openTabs[i];
+            if (t.path === src) {
+              t.path = finalPath;
+            } else if (t.path.indexOf(src + '/') === 0) {
+              t.path = finalPath + t.path.slice(src.length);
+            }
+          }
+          if (vm.ide.currentFile === src) vm.ide.currentFile = finalPath;
+          else if (vm.ide.currentFile && vm.ide.currentFile.indexOf(src + '/') === 0) {
+            vm.ide.currentFile = finalPath + vm.ide.currentFile.slice(src.length);
+          }
+          vm.refreshFileTree();
+        }, function(err) {
+          alert((err.data && err.data.error) || 'Move failed');
+          vm.refreshFileTree();
+        });
+      };
+
+      vm.onTreeDragEnd = function($event) {
+        vm._treeDragPath = null;
+        vm._treeDropPath = null;
+      };
+
+      // Close the context menu when clicking anywhere else
+      document.addEventListener('mousedown', function(ev) {
+        if (vm.ide.treeMenu && vm.ide.treeMenu.visible) {
+          var menuEl = ev.target && ev.target.closest ? ev.target.closest('.ide-context-menu') : null;
+          if (!menuEl) {
+            vm.ide.treeMenu.visible = false;
+            $scope.$digest();
+          }
+        }
+      });
+      document.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Escape' && vm.ide.treeMenu && vm.ide.treeMenu.visible) {
+          vm.ide.treeMenu.visible = false;
+          $scope.$digest();
+        }
+      });
 
       // Navigate file explorer to show a file's parent directory if sidebar is open
       function _navigateExplorerToFile(path) {
