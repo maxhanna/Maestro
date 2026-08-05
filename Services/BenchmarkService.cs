@@ -10,14 +10,25 @@ public class BenchmarkService
 {
     public const int BenchmarkSchemaVersion = 2;
     private static readonly object ScoresLock = new();
+    private const string RunMarkerFileName = ".weaver-benchmark-run.json";
+    private static readonly object RunsLock = new();
     private readonly string _scoresPath;
     private readonly string _systemInfoPath;
+    private readonly string _runsPath;
+    private readonly string _sandboxRoot;
+    private readonly IBenchmarkCommandRunner _commandRunner;
 
-    public BenchmarkService(string weaverDataDir)
+    public BenchmarkService(string weaverDataDir, string? benchmarkSandboxRoot = null, IBenchmarkCommandRunner? commandRunner = null)
     {
-        _scoresPath = Path.Combine(weaverDataDir, "benchmark_scores.json");
-        _systemInfoPath = Path.Combine(weaverDataDir, "system_info.json");
+        var dataRoot = Path.GetFullPath(weaverDataDir);
+        _scoresPath = Path.Combine(dataRoot, "benchmark_scores.json");
+        _systemInfoPath = Path.Combine(dataRoot, "system_info.json");
+        _runsPath = Path.Combine(dataRoot, "benchmark_runs.json");
+        _sandboxRoot = Path.GetFullPath(benchmarkSandboxRoot ?? Path.Combine(dataRoot, "benchmark_sandbox"));
+        _commandRunner = commandRunner ?? new DockerBenchmarkCommandRunner();
     }
+
+    public string SandboxRoot => _sandboxRoot;
 
     public static SystemInfo DetectSystemInfo()
     {
@@ -171,6 +182,11 @@ public class BenchmarkService
         lock (ScoresLock)
         {
             var scores = LoadScores();
+            if (!string.IsNullOrWhiteSpace(score.RunId) &&
+                (scores.Any(existing => string.Equals(existing.RunId, score.RunId, StringComparison.Ordinal)) || IsRunEvaluated(score.RunId)))
+                throw new BenchmarkRunAlreadyEvaluatedException($"Benchmark run {score.RunId} has already been evaluated.");
+            if (!string.IsNullOrWhiteSpace(score.RunId))
+                MarkRunEvaluated(score.RunId);
             scores.Add(score);
             WriteScores(scores);
         }
@@ -182,7 +198,7 @@ public class BenchmarkService
     {
         var plan = GetBenchmarkPlans().SingleOrDefault(p => p.Level == level)
             ?? throw new ArgumentOutOfRangeException(nameof(level), $"Unknown benchmark level {level}.");
-        var root = ValidateBenchmarkRoot(sandboxRoot);
+        var root = ResolveBenchmarkRunRoot(sandboxRoot);
         var results = new List<BenchmarkCheckResult>();
 
         foreach (var check in plan.AcceptanceChecks)
@@ -206,6 +222,7 @@ public class BenchmarkService
         var score = new BenchmarkScore
         {
             Level = level,
+            RunId = Path.GetFileName(root),
             StepsCompleted = results.Count(r => r.Passed),
             TotalSteps = results.Count,
             ScorePercent = overall,
@@ -258,12 +275,18 @@ public class BenchmarkService
     {
         var plan = GetBenchmarkPlans().SingleOrDefault(p => p.Level == level)
             ?? throw new ArgumentOutOfRangeException(nameof(level), $"Unknown benchmark level {level}.");
-        var baseRoot = ValidateBenchmarkRoot(sandboxRoot);
+        var baseRoot = ValidateSandboxRoot(sandboxRoot);
         Directory.CreateDirectory(baseRoot);
-        CleanupOldRuns(Path.Combine(baseRoot, ".runs"));
+        var runsRoot = Path.Combine(baseRoot, ".runs");
+        if (Directory.Exists(runsRoot) && HasReparsePointBetween(baseRoot, runsRoot))
+            throw new InvalidOperationException("The benchmark runs directory uses an unsafe filesystem link.");
+        Directory.CreateDirectory(runsRoot);
+        CleanupOldRuns(runsRoot);
         var runId = $"bm{level}-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..6]}";
-        var root = Path.Combine(baseRoot, ".runs", runId);
+        var root = Path.Combine(runsRoot, runId);
         Directory.CreateDirectory(root);
+        await WriteRunMarkerAsync(root, runId, level, ct);
+        RegisterRun(runId, level);
         if (plan.SetupFiles.Count == 0) return new(runId, root);
 
         if (!string.IsNullOrWhiteSpace(plan.WorkspacePath))
@@ -285,7 +308,7 @@ public class BenchmarkService
         return new(runId, root);
     }
 
-    private static async Task<BenchmarkCheckResult> EvaluateCheckAsync(
+    private async Task<BenchmarkCheckResult> EvaluateCheckAsync(
         BenchmarkAcceptanceCheck check, string root, CancellationToken ct)
     {
         var result = new BenchmarkCheckResult { Name = check.Name, Type = check.Type, Weight = check.Weight, Category = check.Category };
@@ -368,18 +391,171 @@ public class BenchmarkService
         var candidate = Path.GetFullPath(Path.Combine(root, relativePath ?? ""));
         var prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
-        if (candidate != root && !candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        if (candidate != root && !candidate.StartsWith(prefix, PathComparison))
             throw new InvalidOperationException("Acceptance check path escapes the benchmark sandbox.");
+        if (HasReparsePointBetween(root, candidate))
+            throw new InvalidOperationException("Acceptance check path uses an unsafe filesystem link.");
         return candidate;
     }
 
-    private static string ValidateBenchmarkRoot(string root)
+    public string ResolveBenchmarkRun(string? runId)
     {
-        if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("Benchmark root is required.");
+        if (string.IsNullOrWhiteSpace(runId) || runId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            runId.Contains(Path.DirectorySeparatorChar) || runId.Contains(Path.AltDirectorySeparatorChar))
+            throw new InvalidOperationException("Invalid benchmark run id.");
+        return ResolveBenchmarkRunRoot(Path.Combine(_sandboxRoot, ".runs", runId));
+    }
+
+    public BenchmarkRunInfo GetBenchmarkRunInfo(string? runId)
+    {
+        var root = ResolveBenchmarkRun(runId);
+        lock (RunsLock)
+        {
+            var registration = LoadRegisteredRuns().SingleOrDefault(run => string.Equals(run.RunId, runId, StringComparison.Ordinal));
+            if (registration == null)
+                throw new InvalidOperationException("The benchmark run was not prepared by the server.");
+            return new BenchmarkRunInfo(registration.RunId, registration.Level, registration.CreatedUtc, root);
+        }
+    }
+
+    public bool HasScoreForRun(string runId) =>
+        LoadScores().Any(score => string.Equals(score.RunId, runId, StringComparison.Ordinal));
+
+    public string ResolveBenchmarkRunRoot(string? root)
+    {
+        if (string.IsNullOrWhiteSpace(root))
+            throw new InvalidOperationException("A prepared benchmark run is required.");
+
         var full = Path.GetFullPath(root);
-        if (string.Equals(full.TrimEnd(Path.DirectorySeparatorChar), Path.GetPathRoot(full)?.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("A filesystem root cannot be used as the benchmark root.");
+        var runsRoot = Path.Combine(_sandboxRoot, ".runs");
+        if (!IsSamePath(Path.GetDirectoryName(full) ?? "", runsRoot))
+            throw new InvalidOperationException("Benchmark runs must be located under the server-owned sandbox.");
+        var runId = Path.GetFileName(full);
+        if (string.IsNullOrWhiteSpace(runId) || !IsRegisteredRun(runId))
+            throw new InvalidOperationException("The benchmark run was not prepared by the server.");
+        if (!Directory.Exists(full) || HasReparsePointBetween(_sandboxRoot, full))
+            throw new InvalidOperationException("The benchmark run is missing or uses an unsafe filesystem link.");
+        if (!File.Exists(Path.Combine(full, RunMarkerFileName)))
+            throw new InvalidOperationException("The benchmark run metadata is missing.");
         return full;
+    }
+
+    private string ValidateSandboxRoot(string? root)
+    {
+        if (string.IsNullOrWhiteSpace(root))
+            throw new InvalidOperationException("The benchmark sandbox root is required.");
+
+        var full = Path.GetFullPath(root);
+        if (!IsSamePath(full, _sandboxRoot))
+            throw new InvalidOperationException("Benchmark preparation is restricted to the server-owned sandbox.");
+        if (string.Equals(full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetPathRoot(full)?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("A filesystem root cannot be used as the benchmark root.");
+        if (HasReparsePointBetween(_sandboxRoot, full))
+            throw new InvalidOperationException("The benchmark sandbox uses an unsafe filesystem link.");
+        return full;
+    }
+
+    private static StringComparison PathComparison =>
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    private static bool IsSamePath(string left, string right) =>
+        string.Equals(Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            PathComparison);
+
+    private static bool HasReparsePointBetween(string root, string candidate)
+    {
+        var current = new DirectoryInfo(candidate);
+        var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        while (current != null)
+        {
+            if ((File.Exists(current.FullName) || Directory.Exists(current.FullName)) &&
+                (File.GetAttributes(current.FullName) & FileAttributes.ReparsePoint) != 0)
+                return true;
+            if (IsSamePath(current.FullName, fullRoot))
+                return false;
+            current = current.Parent;
+        }
+        return true;
+    }
+
+    private static async Task WriteRunMarkerAsync(string root, string runId, int level, CancellationToken ct)
+    {
+        var marker = JsonSerializer.Serialize(new { runId, level, createdUtc = DateTime.UtcNow });
+        await File.WriteAllTextAsync(Path.Combine(root, RunMarkerFileName), marker, Encoding.UTF8, ct);
+    }
+
+    private void RegisterRun(string runId, int level)
+    {
+        lock (RunsLock)
+        {
+            var runs = LoadRegisteredRuns();
+            runs.RemoveAll(run => string.Equals(run.RunId, runId, StringComparison.Ordinal));
+            runs.Add(new BenchmarkRunRegistration { RunId = runId, Level = level, CreatedUtc = DateTime.UtcNow });
+            WriteRegisteredRuns(runs);
+        }
+    }
+
+    private bool IsRegisteredRun(string runId)
+    {
+        lock (RunsLock)
+            return LoadRegisteredRuns().Any(run => string.Equals(run.RunId, runId, StringComparison.Ordinal));
+    }
+
+    private bool IsRunEvaluated(string runId)
+    {
+        lock (RunsLock)
+            return LoadRegisteredRuns().Any(run => string.Equals(run.RunId, runId, StringComparison.Ordinal) && run.EvaluatedUtc.HasValue);
+    }
+
+    private void MarkRunEvaluated(string runId)
+    {
+        lock (RunsLock)
+        {
+            var runs = LoadRegisteredRuns();
+            var run = runs.SingleOrDefault(item => string.Equals(item.RunId, runId, StringComparison.Ordinal))
+                ?? throw new InvalidOperationException("The benchmark run was not prepared by the server.");
+            if (run.EvaluatedUtc.HasValue)
+                throw new BenchmarkRunAlreadyEvaluatedException($"Benchmark run {runId} has already been evaluated.");
+            run.EvaluatedUtc = DateTime.UtcNow;
+            WriteRegisteredRuns(runs);
+        }
+    }
+
+    private void WriteRegisteredRuns(List<BenchmarkRunRegistration> runs)
+    {
+        var directory = Path.GetDirectoryName(_runsPath);
+        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+        var json = JsonSerializer.Serialize(runs, new JsonSerializerOptions { WriteIndented = true });
+        var temp = _runsPath + ".tmp";
+        File.WriteAllText(temp, json, Encoding.UTF8);
+        if (File.Exists(_runsPath)) File.Replace(temp, _runsPath, null);
+        else File.Move(temp, _runsPath);
+    }
+
+    private List<BenchmarkRunRegistration> LoadRegisteredRuns()
+    {
+        try
+        {
+            if (!File.Exists(_runsPath)) return [];
+            var raw = File.ReadAllText(_runsPath, Encoding.UTF8);
+            return JsonSerializer.Deserialize<List<BenchmarkRunRegistration>>(raw,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private sealed class BenchmarkRunRegistration
+    {
+        public string RunId { get; set; } = "";
+        public int Level { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public DateTime? EvaluatedUtc { get; set; }
     }
 
     private static void CleanupOldRuns(string runsRoot)
@@ -408,39 +584,13 @@ public class BenchmarkService
         };
     }
 
-    private static async Task<CommandCheckOutcome> RunCheckCommandAsync(
+    private async Task<CommandCheckOutcome> RunCheckCommandAsync(
         BenchmarkAcceptanceCheck check, string root, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(check.Command)) return CommandCheckOutcome.Failed("No verification command configured.");
         var workingDir = ResolveSandboxPath(root, check.Path);
         if (!Directory.Exists(workingDir)) return CommandCheckOutcome.Failed($"Missing working directory: {check.Path}");
-        var psi = OperatingSystem.IsWindows()
-            ? new ProcessStartInfo("cmd.exe", $"/d /s /c \"{check.Command}\"")
-            : new ProcessStartInfo("/bin/sh", $"-c \"{check.Command.Replace("\"", "\\\"")}\"");
-        psi.WorkingDirectory = workingDir;
-        psi.RedirectStandardOutput = true;
-        psi.RedirectStandardError = true;
-        psi.UseShellExecute = false;
-        var stopwatch = Stopwatch.StartNew();
-        using var process = Process.Start(psi);
-        if (process == null) return CommandCheckOutcome.Failed("Verification process could not be started.");
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-        var stderrTask = process.StandardError.ReadToEndAsync(ct);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(check.TimeoutSeconds, 1, 120)));
-        var timedOut = false;
-        try { await process.WaitForExitAsync(timeout.Token); }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            timedOut = true;
-            try { process.Kill(true); } catch { }
-            try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
-        }
-        var stdout = TruncateOutput(await stdoutTask);
-        var stderr = TruncateOutput(await stderrTask);
-        stopwatch.Stop();
-        return new(process.HasExited ? process.ExitCode : -1, timedOut, stopwatch.Elapsed.TotalMilliseconds,
-            stdout, stderr, timedOut ? "Verification command timed out." : $"Command exited with code {process.ExitCode}.");
+        return await _commandRunner.RunAsync(check.Command, workingDir, check.TimeoutSeconds, ct);
     }
 
     private static async Task<(bool passed, string message, double durationMs)> RunHttpCheckAsync(
@@ -464,8 +614,6 @@ public class BenchmarkService
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return (false, "HTTP assertion timed out.", started.Elapsed.TotalMilliseconds); }
         catch (Exception ex) { return (false, $"HTTP assertion failed: {ex.Message}", started.Elapsed.TotalMilliseconds); }
     }
-
-    private static string TruncateOutput(string value) => value.Length <= 2000 ? value : value[..2000] + "…";
 
     public bool DeleteScore(string id)
     {
@@ -820,6 +968,12 @@ public class BenchmarkPlanDefinition
 
 public record BenchmarkSetupFile(string Path, string Content);
 public record BenchmarkPreparationResult(string RunId, string RunRoot);
+public sealed record BenchmarkRunInfo(string RunId, int Level, DateTime CreatedUtc, string RunRoot)
+{
+    public double ElapsedMs => Math.Max(0, (DateTime.UtcNow - CreatedUtc).TotalMilliseconds);
+}
+
+public sealed class BenchmarkRunAlreadyEvaluatedException(string message) : InvalidOperationException(message);
 
 public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, CommandSucceeds, HttpResponse }
 
@@ -861,6 +1015,7 @@ public class BenchmarkStep
 public class BenchmarkScore
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
+    public string RunId { get; set; } = "";
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     public int Level { get; set; }
     public int StepsCompleted { get; set; }

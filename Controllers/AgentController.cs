@@ -25,6 +25,8 @@ public partial class AgentController : ControllerBase
     private readonly EmailService _emailService;
     private readonly BoardDataService _boardData;
     private readonly EditKnowledgeService _editKnowledge;
+    private readonly IBenchmarkTerminalRunner _benchmarkTerminal;
+    private bool _isBenchmark;
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
     private async Task<FrontendConfig> LoadConfigAsync()
@@ -46,9 +48,10 @@ public partial class AgentController : ControllerBase
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
-        ConfigFileService configFile, EmailService emailService, BoardDataService boardData)
+        ConfigFileService configFile, EmailService emailService, BoardDataService boardData,
+        IBenchmarkTerminalRunner benchmarkTerminal)
     {
-        _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
+        _clientFactory = cf; _config = config; _env = env; _terminal = terminal; _benchmarkTerminal = benchmarkTerminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
         _boardData = boardData;
         var weaverDataDir = Path.Combine(_env.ContentRootPath, "data");
@@ -11413,7 +11416,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (!string.IsNullOrWhiteSpace(cmd))
                 {
                     await EmitLog(emitSse, "info", $"Command: {cmd}", ct: ct);
-                    _terminal.Start();
+                    if (!_isBenchmark) _terminal.Start();
                     var cs = new AgentStep { Index = 0, Type = "command", Command = cmd, Description = cmd };
                     var prevCount = allResults.Count;
                     var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
@@ -11857,7 +11860,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (!gitCmd.StartsWith("git ", StringComparison.OrdinalIgnoreCase)) gitCmd = "git " + gitCmd;
         }
         await EmitLog(emitSse, "info", $"Git: {gitCmd}", ct: ct);
-        _terminal.Start();
+        if (!_isBenchmark) _terminal.Start();
         var gs = new AgentStep { Index = 0, Type = "command", Command = gitCmd, Description = gitCmd };
         var gr = await ExecuteSteps(new List<AgentStep> { gs }, projectRoot, stepIndex, emitSse, ct);
         stepIndex += gr.Count; allResults.AddRange(gr);
@@ -11877,7 +11880,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 : $"nc -zv -w 2 {uri.Host} {uri.Port} 2>&1";
         }
         await EmitLog(emitSse, "info", $"Ping: {pingCmd}", ct: ct);
-        _terminal.Start();
+        if (!_isBenchmark) _terminal.Start();
         var cs = new AgentStep { Index = 0, Type = "command", Command = pingCmd, Description = pingCmd };
         var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
         stepIndex += cr.Count; allResults.AddRange(cr);
@@ -11889,7 +11892,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         var installCmd = changeDesc.Trim().Trim('`', '"', '\'');
         await EmitLog(emitSse, "info", $"Package install: {installCmd}", ct: ct);
-        _terminal.Start();
+        if (!_isBenchmark) _terminal.Start();
         var cs = new AgentStep { Index = 0, Type = "command", Command = installCmd, Description = installCmd };
         var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
         stepIndex += cr.Count; allResults.AddRange(cr);
@@ -12316,9 +12319,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             return (steps, fastPlan);
         }
         await EmitLog(emitSse, "info", "CommandExecution (agentic): LLM has terminal control", ct: ct);
-        _terminal.Start();
-        var isWindows = OperatingSystem.IsWindows();
-        var shellName = isWindows ? "PowerShell" : "Bash";
+        if (!_isBenchmark) _terminal.Start();
+        var isWindows = OperatingSystem.IsWindows() && !_isBenchmark;
+        var shellName = _isBenchmark ? "sandboxed POSIX /bin/sh" : isWindows ? "PowerShell" : "Bash";
         var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
         var baseInstructions = new StringBuilder();
         baseInstructions.AppendLine("You are a senior terminal automation agent. You have full terminal access and must complete the user's task end-to-end.");
@@ -12331,15 +12334,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         baseInstructions.AppendLine("  {\"plan\": [{\"file\": \"command/web_search/web_fetch\", \"change\": \"description\"}]}  # First: create a plan of steps");
         baseInstructions.AppendLine("  {\"done\": true, \"summary\": \"what was accomplished\"}");
         baseInstructions.AppendLine($"Desktop: {desktopPath}");
-        baseInstructions.AppendLine($"Project: {projectRoot}");
-        baseInstructions.AppendLine("CRITICAL: Each cmd runs in a separate PowerShell session — state does NOT persist between commands. If you read data in one cmd and need it in the next, save to a temp file: Get-Content ... | Set-Content _temp_step1.txt");
+        baseInstructions.AppendLine($"Project: {(_isBenchmark ? "/workspace" : projectRoot)}");
+        if (_isBenchmark)
+        {
+            baseInstructions.AppendLine("SECURITY: You are inside a disposable sandbox. The only persistent workspace is /workspace; do not use host paths.");
+            baseInstructions.AppendLine("Each command runs in a fresh POSIX /bin/sh process. Use mkdir, printf/cat, cp, mv, python, and other tools available in the container.");
+        }
+        else
+        {
+            baseInstructions.AppendLine("CRITICAL: Each cmd runs in a separate PowerShell session — state does NOT persist between commands. If you read data in one cmd and need it in the next, save to a temp file: Get-Content ... | Set-Content _temp_step1.txt");
+        }
         baseInstructions.AppendLine("If this task's results will feed into a subsequent code-editing step, save output files INSIDE the project directory (use a temp path like \"_temp_data.json\") so the next pipeline can read them. The file will be attached to the card automatically.");
-        baseInstructions.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
-        baseInstructions.AppendLine("NEVER use cd/Set-Location — use absolute paths");
-        baseInstructions.AppendLine("Inspect before acting: for repository questions use fast file commands first. Prefer `rg --files` to enumerate files, `rg -n \"pattern\" <path>` to search text, and `Get-Content -TotalCount/-Tail` for bounded reads. If `rg` is unavailable, use PowerShell equivalents.");
+        if (_isBenchmark)
+        {
+            baseInstructions.AppendLine("Use POSIX commands only: mkdir -p for directories, printf/cat or Python for files, and absolute paths under /workspace. Do not use PowerShell, Windows paths, or host paths.");
+            baseInstructions.AppendLine("Inspect before acting with rg, find, head, tail, and Python; keep command output bounded.");
+        }
+        else
+        {
+            baseInstructions.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
+            baseInstructions.AppendLine("NEVER use cd/Set-Location — use absolute paths");
+            baseInstructions.AppendLine("Inspect before acting: for repository questions use fast file commands first. Prefer `rg --files` to enumerate files, `rg -n \"pattern\" <path>` to search text, and `Get-Content -TotalCount/-Tail` for bounded reads. If `rg` is unavailable, use PowerShell equivalents.");
+        }
         baseInstructions.AppendLine("Keep outputs small and useful. Limit broad searches, exclude bin/obj/node_modules/.git/dist, and save large raw outputs to a project temp file instead of dumping them into the conversation.");
         baseInstructions.AppendLine("After every command, decide what new fact was learned and what exact next step follows. Do not repeat failed commands without changing the hypothesis or command.");
-        baseInstructions.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
+        baseInstructions.AppendLine(_isBenchmark
+            ? "For well-known REST APIs, use Python only if needed; network access is disabled in the benchmark sandbox. Do not use web_search for filesystem work."
+            : "For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
         baseInstructions.AppendLine("BEFORE planning the first step, assess the full task end-to-end. What data do you need? What files will be created? What merge/transform/verification steps are needed? Plan the smallest complete chain, usually 1-4 steps.");
         baseInstructions.AppendLine("KEEP THE ORIGINAL TASK AS YOUR NORTH STAR. After each step, check: does this complete the user's request yet? If the planned steps do not add up to finishing the task, add the remaining steps. If your plan covers the full task, execute the steps — do NOT keep planning new steps.");
         if (isWindows)
@@ -12352,7 +12373,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            baseInstructions.AppendLine("You are on LINUX/MAC Bash. Use curl + jq.");
+            baseInstructions.AppendLine(_isBenchmark
+                ? "You are in a Linux-compatible POSIX sandbox. Use the tools available in the pinned container."
+                : "You are on LINUX/MAC Bash. Use curl + jq.");
         }
         if (!string.IsNullOrWhiteSpace(steeringContext)) { baseInstructions.AppendLine("### Steering ###"); baseInstructions.AppendLine(steeringContext); }
         baseInstructions.AppendLine($"Task: {prompt}");
@@ -12438,27 +12461,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         changeLower.StartsWith("validate") ||
                         changeLower.StartsWith("confirm") ||
                         changeLower.StartsWith("ensure");
-                    var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}).\nThe working directory (project root) is: {projectRoot}\nALL files and folders must be created INSIDE this working directory — translate desktop paths to this directory.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
+                    var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}).\nThe working directory (project root) is: {(_isBenchmark ? "/workspace" : projectRoot)}\nALL files and folders must be created INSIDE this working directory — translate desktop paths to this directory.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
                     var (cmdRaw, _, _) = await CallLlmRaw(
                         "You are a terminal command translator. Output only the command, no markdown, no explanation.",
                         translatePrompt, ct, TimeSpan.FromSeconds(20));
                     if (string.IsNullOrWhiteSpace(cmdRaw)) continue;
                     var cmdClean = cmdRaw.Trim();
                     if (cmdClean.StartsWith("```")) cmdClean = cmdClean.Split('\n').LastOrDefault()?.Replace("```", "").Trim() ?? cmdClean;
-                    var beforeLen = _terminal.ReadAll().Length;
-                    await _terminal.SendCommandAsync(cmdClean, projectRoot);
-                    var marker = "__DONE_" + Guid.NewGuid().ToString("N") + "__";
-                    await _terminal.WriteStdinAsync("echo '" + marker + "'");
-                    var timeout2 = DateTime.UtcNow.AddMinutes(5);
-                    while (!ct.IsCancellationRequested && DateTime.UtcNow < timeout2)
-                    { await Task.Delay(500); if (_terminal.ReadAll().Contains(marker)) break; }
-                    var fullOut = _terminal.ReadAll();
-                    var freshOut = beforeLen < fullOut.Length ? fullOut[beforeLen..] : "";
-                    freshOut = string.Join("\n", (freshOut ?? "").Split('\n').Where(l => !l.Contains("__DONE_")));
+                    var commandOutcome = await RunAgentCommandAsync(cmdClean, projectRoot, 300, ct);
+                    var freshOut = string.Join("\n", new[] { commandOutcome.StandardOutput, commandOutcome.StandardError }
+                        .Where(s => !string.IsNullOrWhiteSpace(s)));
                     if (string.IsNullOrWhiteSpace(freshOut)) freshOut = "(ok)";
-                    var isError = !string.IsNullOrWhiteSpace(freshOut) &&
+                    var isError = commandOutcome.ExitCode != 0 || commandOutcome.TimedOut ||
+                        (!string.IsNullOrWhiteSpace(freshOut) &&
                         Regex.IsMatch(freshOut.ToLowerInvariant(),
-                            @"not recognized|not found|cannot find|terminate|error|exception|failed|access denied|permission denied");
+                            @"not recognized|not found|cannot find|terminate|error|exception|failed|access denied|permission denied"));
                     if (isVerification)
                     {
                         conversation.AppendLine($"→ Verified step {pi + 1}: {cmdClean}");
@@ -12578,17 +12595,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 { conversation.AppendLine("REJECTED: mkdir creates DIRECTORIES. Use: New-Item -ItemType File -Path \"<path>\" -Force"); continue; }
                 if (cmdLower == "cd" || cmdLower.StartsWith("cd ") || cmdLower.Contains("set-location"))
                 { conversation.AppendLine("REJECTED: cd/Set-Location not supported. Use absolute paths."); continue; }
-                var beforeLen = _terminal.ReadAll().Length;
-                await _terminal.SendCommandAsync(cmd, projectRoot);
-                var marker = "__DONE_" + Guid.NewGuid().ToString("N") + "__";
-                await _terminal.WriteStdinAsync("echo '" + marker + "'");
-                var timeout2 = DateTime.UtcNow.AddMinutes(10);
-                while (!ct.IsCancellationRequested && DateTime.UtcNow < timeout2)
-                { await Task.Delay(500); if (_terminal.ReadAll().Contains(marker)) break; }
-                var fullOut = _terminal.ReadAll();
-                var freshOut = beforeLen < fullOut.Length ? fullOut[beforeLen..] : "";
-                freshOut = string.Join("\n", (freshOut ?? "").Split('\n').Where(l => !l.Contains("__DONE_")));
-                var isError = !string.IsNullOrWhiteSpace(freshOut) &&
+                var commandOutcome = await RunAgentCommandAsync(cmd, projectRoot, 300, ct);
+                var freshOut = string.Join("\n", new[] { commandOutcome.StandardOutput, commandOutcome.StandardError }
+                    .Where(s => !string.IsNullOrWhiteSpace(s)));
+                if (string.IsNullOrWhiteSpace(freshOut)) freshOut = "(ok)";
+                var isError = commandOutcome.ExitCode != 0 || commandOutcome.TimedOut ||
                     Regex.IsMatch(freshOut.ToLowerInvariant(),
                         @"not recognized|not found|cannot find|terminate|error|exception|failed|access denied|permission denied");
                 var result = new Dictionary<string, object?>
@@ -12680,39 +12691,79 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         if (string.IsNullOrWhiteSpace(req.Prompt)) return BadRequest("Prompt is required");
         var projectRoot = AgentUtilities.GetProjectRoot(req.Project, _config, _env);
-        await EmitLog(true, "info", "Orchestrating Request.", new { projectRoot, task = req.Prompt });
-        var (allSteps, plan, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
-        return Ok(new
+        if (req.IsBenchmark)
         {
-            summary = plan?.Summary ?? "",
-            thinking = plan?.Thinking ?? "",
-            complete,
-            steps = allSteps,
-            filesEdited = ExtractFilesEdited(allSteps)
-        });
+            var benchmarkService = new BenchmarkService(Path.Combine(_env.ContentRootPath, "data"));
+            projectRoot = !string.IsNullOrWhiteSpace(req.BenchmarkRunId)
+                ? benchmarkService.ResolveBenchmarkRun(req.BenchmarkRunId)
+                : benchmarkService.ResolveBenchmarkRunRoot(req.BenchmarkProjectRoot);
+        }
+        _isBenchmark = req.IsBenchmark;
+        try
+        {
+            await EmitLog(true, "info", "Orchestrating Request.", new { projectRoot, task = req.Prompt });
+            var (allSteps, plan, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
+            return Ok(new
+            {
+                summary = plan?.Summary ?? "",
+                thinking = plan?.Thinking ?? "",
+                complete,
+                steps = allSteps,
+                filesEdited = ExtractFilesEdited(allSteps)
+            });
+        }
+        finally { _isBenchmark = false; }
     }
     [HttpPost("apply")]
     public async Task<IActionResult> ApplyEdits([FromBody] ApplyEditsRequest req)
     {
         if (req.Edits == null || req.Edits.Count == 0) return BadRequest(new { error = "No edits provided" });
         var projectRoot = AgentUtilities.GetProjectRoot(req.Project, _config, _env);
-        var editResults = await ApplyEditsDirect(req.Edits, projectRoot);
-        var commandResults = new List<object>();
-        if (req.Commands != null && req.Commands.Count > 0)
+        if (req.IsBenchmark)
         {
-            _terminal.Start();
-            foreach (var cmd in req.Commands)
-            {
-                try
-                {
-                    await _terminal.SendCommandAsync(cmd.Command, projectRoot);
-                    await Task.Delay(800);
-                    commandResults.Add(new { command = cmd.Command, status = "done", output = _terminal.ReadLastLines(50) });
-                }
-                catch (Exception ex) { commandResults.Add(new { command = cmd.Command, status = "error", error = ex.Message }); }
-            }
+            var benchmarkService = new BenchmarkService(Path.Combine(_env.ContentRootPath, "data"));
+            projectRoot = !string.IsNullOrWhiteSpace(req.BenchmarkRunId)
+                ? benchmarkService.ResolveBenchmarkRun(req.BenchmarkRunId)
+                : benchmarkService.ResolveBenchmarkRunRoot(req.BenchmarkProjectRoot);
         }
-        return Ok(new { edits = editResults, commands = commandResults });
+        _isBenchmark = req.IsBenchmark;
+        try
+        {
+            var editResults = await ApplyEditsDirect(req.Edits, projectRoot);
+            var commandResults = new List<object>();
+            if (req.Commands != null && req.Commands.Count > 0)
+            {
+                if (!_isBenchmark) _terminal.Start();
+                foreach (var cmd in req.Commands)
+                {
+                    try
+                    {
+                        if (_isBenchmark)
+                        {
+                            var outcome = await _benchmarkTerminal.RunAsync(
+                                cmd.Command, projectRoot, Request.HttpContext.RequestAborted);
+                            commandResults.Add(new
+                            {
+                                command = cmd.Command,
+                                status = outcome.ExitCode == 0 && !outcome.TimedOut ? "done" : "error",
+                                output = string.Join("\n", new[] { outcome.StandardOutput, outcome.StandardError }
+                                    .Where(s => !string.IsNullOrWhiteSpace(s))),
+                                error = outcome.ExitCode == 0 && !outcome.TimedOut ? null : outcome.Message
+                            });
+                        }
+                        else
+                        {
+                            await _terminal.SendCommandAsync(cmd.Command, projectRoot);
+                            await Task.Delay(800);
+                            commandResults.Add(new { command = cmd.Command, status = "done", output = _terminal.ReadLastLines(50) });
+                        }
+                    }
+                    catch (Exception ex) { commandResults.Add(new { command = cmd.Command, status = "error", error = ex.Message }); }
+                }
+            }
+            return Ok(new { edits = editResults, commands = commandResults });
+        }
+        finally { _isBenchmark = false; }
     }
     [HttpPost("execute-stream")]
     public async Task ExecuteStream([FromBody] AgentRequest req)
@@ -12757,12 +12808,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (isBenchmark)
             {
-                projectRoot = !string.IsNullOrWhiteSpace(req.BenchmarkProjectRoot)
-                    ? Path.GetFullPath(req.BenchmarkProjectRoot)
-                    : AgentUtilities.GetBenchmarkSandboxPath();
+                var benchmarkService = new BenchmarkService(Path.Combine(_env.ContentRootPath, "data"));
+                projectRoot = !string.IsNullOrWhiteSpace(req.BenchmarkRunId)
+                    ? benchmarkService.ResolveBenchmarkRun(req.BenchmarkRunId)
+                    : benchmarkService.ResolveBenchmarkRunRoot(req.BenchmarkProjectRoot);
                 await EmitLog(true, "info", "Benchmark sandbox active", new { sandbox = projectRoot });
                 await SendSse(Response, "phase", new { phase = "sandbox", sandbox = projectRoot }, ct: Response.HttpContext.RequestAborted);
             }
+            _isBenchmark = isBenchmark;
             var (allSteps, plan, complete) = await Orchestrate(
                 req.Prompt, projectRoot, emitSse: true,
                 ct: Response.HttpContext.RequestAborted,
@@ -12815,6 +12868,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             keepaliveCts.Cancel(); try { await keepaliveTask; } catch { }
             if (!string.IsNullOrWhiteSpace(req.CardId))
                 _cancelledSteps.TryRemove(req.CardId, out _);
+            _isBenchmark = false;
         }
     }
     [HttpGet("questions/pending")]
@@ -12867,6 +12921,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         var uri = new Uri(baseUrl);
         await EmitLog(emitSse, "info", $"Connectivity check: {uri.Host}:{uri.Port}", ct: ct);
+        if (_isBenchmark)
+        {
+            try
+            {
+                var client = _clientFactory.CreateClient();
+                client.Timeout = TimeSpan.FromSeconds(10);
+                var resp = await client.GetAsync(baseUrl + "/api/tags", ct);
+                _lastConnectionCheckResult = resp.IsSuccessStatusCode || (int)resp.StatusCode < 500;
+            }
+            catch { _lastConnectionCheckResult = false; }
+            return _lastConnectionCheckResult;
+        }
         var tcpCmd = OperatingSystem.IsWindows()
             ? $"powershell -Command \"Test-NetConnection {uri.Host} -Port {uri.Port} -WarningAction SilentlyContinue | Select-Object TcpTestSucceeded | Format-List\""
             : $"nc -zv -w 2 {uri.Host} {uri.Port} 2>&1";
@@ -12950,7 +13016,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 switch (step.Type?.ToLowerInvariant())
                 {
                     case "edit": await ExecuteEditStep(step, projectRoot, result, editContentCache); break;
-                    case "command": if (!terminalStarted) { _terminal.Start(); terminalStarted = true; } await ExecuteCommandStep(step, projectRoot, result); break;
+                    case "command": if (!_isBenchmark && !terminalStarted) { _terminal.Start(); terminalStarted = true; } await ExecuteCommandStep(step, projectRoot, result, ct); break;
                     case "rename": await ExecuteRenameStep(step, projectRoot, result); break;
                     case "read": await ExecuteReadStep(step, projectRoot, result); break;
                     case "list": await ExecuteListStep(step, projectRoot, result); break;
@@ -13851,24 +13917,43 @@ Respond with JSON only:
         }, CancellationToken.None);
         return stepIndex + 1;
     }
-    private async Task ExecuteCommandStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
+    private async Task<CommandCheckOutcome> RunAgentCommandAsync(
+        string command, string projectRoot, int timeoutSeconds, CancellationToken ct)
+    {
+        if (_isBenchmark)
+            return await _benchmarkTerminal.RunAsync(command, projectRoot, ct);
+
+        _terminal.Start();
+        var beforeLen = _terminal.ReadAll().Length;
+        await _terminal.SendCommandAsync(command, projectRoot);
+        var marker = "__DONE_" + Guid.NewGuid().ToString("N") + "__";
+        await _terminal.WriteStdinAsync("echo '" + marker + "'");
+        var deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(timeoutSeconds, 1, 600));
+        while (!ct.IsCancellationRequested && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(250, ct);
+            if (_terminal.ReadAll().Contains(marker, StringComparison.Ordinal)) break;
+        }
+        var fullOutput = _terminal.ReadAll();
+        var output = beforeLen < fullOutput.Length ? fullOutput[beforeLen..] : "";
+        output = string.Join("\n", output.Split('\n').Where(line => !line.Contains("__DONE_", StringComparison.Ordinal)));
+        var isError = Regex.IsMatch(output.ToLowerInvariant(),
+            @"not recognized|not found|cannot find|terminate|error|exception|failed|access denied|permission denied");
+        var timedOut = !fullOutput.Contains(marker, StringComparison.Ordinal);
+        return new(isError ? -1 : 0, timedOut, 0, output, "", isError ? "Terminal command failed." : "Terminal command completed.");
+    }
+
+    private async Task ExecuteCommandStep(AgentStep step, string projectRoot, Dictionary<string, object?> result, CancellationToken ct)
     {
         var command = step.Command ?? "";
         if (string.IsNullOrWhiteSpace(command)) { result["status"] = "error"; result["error"] = "No command"; return; }
-        var beforeLen = _terminal.ReadAll().Length;
-        await _terminal.SendCommandAsync(command, projectRoot);
-        var prevLen = beforeLen; var stableMs = 0;
-        for (var i = 0; i < 40; i++)
-        {
-            await Task.Delay(500);
-            var curLen = _terminal.ReadAll().Length;
-            if (curLen == prevLen) { stableMs += 500; if (stableMs >= 3000) break; }
-            else { stableMs = 0; prevLen = curLen; }
-        }
-        result["status"] = "done"; result["command"] = command;
-        var fullOutput = _terminal.ReadAll();
-        result["output"] = beforeLen >= 0 && beforeLen < fullOutput.Length ? fullOutput[beforeLen..] : "";
-        result["snippet"] = result["output"] as string ?? "";
+        var outcome = await RunAgentCommandAsync(command, projectRoot, 300, ct);
+        var output = string.Join("\n", new[] { outcome.StandardOutput, outcome.StandardError }.Where(s => !string.IsNullOrWhiteSpace(s)));
+        result["status"] = outcome.ExitCode == 0 && !outcome.TimedOut ? "done" : "error";
+        result["command"] = command;
+        result["output"] = output;
+        result["snippet"] = output;
+        if (result["status"]?.ToString() == "error") result["error"] = outcome.Message;
     }
     private async Task<(string output, string? error)> WebSearchAsync(string query, CancellationToken ct)
     {
@@ -13993,13 +14078,14 @@ Respond with JSON only:
         string? buildOutput = null;
         if (cmds.Count > 0)
         {
-            _terminal.Start();
+            var outputs = new List<string>();
             foreach (var cmd in cmds)
             {
-                await _terminal.SendCommandAsync(cmd, projectRoot);
-                await Task.Delay(3000);
+                var outcome = await RunAgentCommandAsync(cmd, projectRoot, 300, ct);
+                outputs.Add(string.Join("\n", new[] { outcome.StandardOutput, outcome.StandardError }
+                    .Where(s => !string.IsNullOrWhiteSpace(s))));
             }
-            buildOutput = _terminal.ReadAll();
+            buildOutput = string.Join("\n", outputs);
         }
         var resultSteps = new List<object>();
         await RunRepairPlan(projectRoot, emitSse, ct, prompt, buildOutput ?? "", resultSteps);
@@ -14129,18 +14215,15 @@ Respond with JSON only:
 Output ONLY valid JSON (no markdown):
 {""decision"": ""done""|""command""|""ask_user"", ""summary"": ""brief"", ""command"": ""cmd if needed"", ""userQuestion"": ""question if needed""}
 done = build OK; command = run this to fix; ask_user = need input";
-        _terminal.Start();
+        if (!_isBenchmark) _terminal.Start();
         await EmitLog(emitSse, "info", $"Build check: {buildCmd}", ct: ct);
         var iteration = 0; const int maxIter = 5;
         while (iteration < maxIter)
         {
             iteration++;
-            var beforeLen = _terminal.ReadAll().Length;
-            await _terminal.SendCommandAsync(buildCmd, projectRoot);
-            var prevLen = beforeLen;
-            for (var i = 0; i < 30; i++) { await Task.Delay(500); var cl = _terminal.ReadAll().Length; if (cl == prevLen) break; prevLen = cl; }
-            var output = _terminal.ReadAll();
-            var fresh = beforeLen < output.Length ? output[beforeLen..] : output;
+            var buildOutcome = await RunAgentCommandAsync(buildCmd, projectRoot, 300, ct);
+            var fresh = string.Join("\n", new[] { buildOutcome.StandardOutput, buildOutcome.StandardError }
+                .Where(s => !string.IsNullOrWhiteSpace(s)));
             var userPrompt = $"Build command: {buildCmd}\nOutput:\n```\n{fresh}\n```\nIteration: {iteration}/{maxIter}";
             var (raw, err) = await CallLlmRawText(systemPrompt, userPrompt, emitSse, ct);
             if (string.IsNullOrWhiteSpace(raw)) { await EmitLog(emitSse, "warn", $"Build check LLM failed: {err}", new { raw }, ct: ct); break; }
@@ -14153,8 +14236,7 @@ done = build OK; command = run this to fix; ask_user = need input";
                     if (!string.IsNullOrWhiteSpace(decision.Command))
                     {
                         await EmitLog(emitSse, "info", $"Build fix: {decision.Command}", ct: ct);
-                        await _terminal.SendCommandAsync(decision.Command, projectRoot);
-                        await Task.Delay(2000);
+                        await RunAgentCommandAsync(decision.Command, projectRoot, 300, ct);
                     }
                     continue;
                 case "ask_user":
@@ -14174,8 +14256,13 @@ done = build OK; command = run this to fix; ask_user = need input";
                             await EmitLog(emitSse, "warn", "User skipped build check.", ct: ct);
                             return true;
                         }
-                        await _terminal.WriteStdinAsync(userResponse);
-                        await Task.Delay(1000);
+                        if (_isBenchmark)
+                            await RunAgentCommandAsync(userResponse, projectRoot, 300, ct);
+                        else
+                        {
+                            await _terminal.WriteStdinAsync(userResponse);
+                            await Task.Delay(1000);
+                        }
                         continue;
                     }
                     return false;
@@ -14209,7 +14296,8 @@ done = build OK; command = run this to fix; ask_user = need input";
         string projectRoot, bool emitSse, CancellationToken ct,
         string originalPrompt, string? steeringContext, string? buildCommands)
     {
-        var buildOutput = _terminal.ReadAll();
+        // Benchmark builds run in the disposable runner; never read output from the host shell.
+        var buildOutput = _isBenchmark ? "" : _terminal.ReadAll();
         var resultSteps = new List<object>();
         await RunRepairPlan(projectRoot, emitSse, ct, originalPrompt, buildOutput, resultSteps, steeringContext);
         var cmds = !string.IsNullOrWhiteSpace(buildCommands) ? ParseBuildCommands(buildCommands) : new List<string>();

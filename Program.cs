@@ -6,6 +6,7 @@ using Weaver.Hubs;
 WeaverLogo.DisplayLogo();
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<TerminalService>();
+builder.Services.AddSingleton<IBenchmarkTerminalRunner, DockerBenchmarkTerminalRunner>();
 builder.Services.AddSingleton<ConfigFileService>();
 builder.Services.AddSingleton<EmailService>();
 var basePath = builder.Environment.ContentRootPath;

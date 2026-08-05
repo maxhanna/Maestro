@@ -17,4 +17,7 @@ public class ApplyEditsRequest
     public string Project { get; set; } = "";
     public List<EditAction> Edits { get; set; } = new();
     public List<CommandAction> Commands { get; set; } = new();
+    public bool IsBenchmark { get; set; }
+    public string? BenchmarkRunId { get; set; }
+    public string? BenchmarkProjectRoot { get; set; }
 }

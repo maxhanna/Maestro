@@ -10,13 +10,14 @@ public sealed class BenchmarkServiceTests : IDisposable
     [Fact]
     public async Task EvaluateAsync_UsesArtifactChecksInsteadOfReportedPlanProgress()
     {
-        var sandbox = Path.Combine(_root, "sandbox");
         var data = Path.Combine(_root, "data");
-        Directory.CreateDirectory(Path.Combine(sandbox, "benchmark_test_1"));
-        await File.WriteAllTextAsync(Path.Combine(sandbox, "benchmark_test_1", "test.md"),
+        var service = new BenchmarkService(data);
+        var prepared = await service.PrepareAsync(1, service.SandboxRoot);
+        Directory.CreateDirectory(Path.Combine(prepared.RunRoot, "benchmark_test_1"));
+        await File.WriteAllTextAsync(Path.Combine(prepared.RunRoot, "benchmark_test_1", "test.md"),
             "Hello world\nThe capital of France is Paris");
 
-        var result = await new BenchmarkService(data).EvaluateAsync(1, sandbox, "test-model", 1234);
+        var result = await service.EvaluateAsync(1, prepared.RunRoot, "test-model", 1234);
 
         Assert.Equal("completed", result.Status);
         Assert.Equal(100, result.ScorePercent);
@@ -30,12 +31,12 @@ public sealed class BenchmarkServiceTests : IDisposable
     [Fact]
     public async Task EvaluateAsync_ReportsIndependentFailedAssertions()
     {
-        var sandbox = Path.Combine(_root, "sandbox");
-        Directory.CreateDirectory(Path.Combine(sandbox, "benchmark_test_1"));
-        await File.WriteAllTextAsync(Path.Combine(sandbox, "benchmark_test_1", "test.md"), "Hello world");
+        var service = new BenchmarkService(Path.Combine(_root, "data"));
+        var prepared = await service.PrepareAsync(1, service.SandboxRoot);
+        Directory.CreateDirectory(Path.Combine(prepared.RunRoot, "benchmark_test_1"));
+        await File.WriteAllTextAsync(Path.Combine(prepared.RunRoot, "benchmark_test_1", "test.md"), "Hello world");
 
-        var result = await new BenchmarkService(Path.Combine(_root, "data"))
-            .EvaluateAsync(1, sandbox, "test-model", 50);
+        var result = await service.EvaluateAsync(1, prepared.RunRoot, "test-model", 50);
 
         Assert.Equal("partial", result.Status);
         Assert.Equal(85, result.ScorePercent);
@@ -70,9 +71,8 @@ public sealed class BenchmarkServiceTests : IDisposable
     [Fact]
     public async Task Evaluation_RecordsVersionStrategyAndCommandTelemetry()
     {
-        var sandbox = Path.Combine(_root, "sandbox");
-        var service = new BenchmarkService(Path.Combine(_root, "data"));
-        var prepared = await service.PrepareAsync(15, sandbox);
+        var service = new BenchmarkService(Path.Combine(_root, "data"), commandRunner: new SuccessfulCommandRunner());
+        var prepared = await service.PrepareAsync(15, service.SandboxRoot);
         var file = Path.Combine(prepared.RunRoot, "edit_strategy", "json", "settings.json");
         await File.WriteAllTextAsync(file, (await File.ReadAllTextAsync(file)).Replace("\"pageSize\": 20", "\"pageSize\": 50"));
 
@@ -120,13 +120,18 @@ public sealed class BenchmarkServiceTests : IDisposable
     [Fact]
     public async Task HistorySummary_AggregatesPersistedRuns()
     {
-        var sandbox = Path.Combine(_root, "sandbox");
-        Directory.CreateDirectory(Path.Combine(sandbox, "benchmark_test_1"));
-        await File.WriteAllTextAsync(Path.Combine(sandbox, "benchmark_test_1", "test.md"),
-            "Hello world\nThe capital of France is Paris");
         var service = new BenchmarkService(Path.Combine(_root, "data"));
-        await service.EvaluateAsync(1, sandbox, "model-a", 100);
-        await service.EvaluateAsync(1, sandbox, "model-a", 200);
+        var prepared = await service.PrepareAsync(1, service.SandboxRoot);
+        Directory.CreateDirectory(Path.Combine(prepared.RunRoot, "benchmark_test_1"));
+        await File.WriteAllTextAsync(Path.Combine(prepared.RunRoot, "benchmark_test_1", "test.md"),
+            "Hello world\nThe capital of France is Paris");
+        await service.EvaluateAsync(1, prepared.RunRoot, "model-a", 100);
+
+        var second = await service.PrepareAsync(1, service.SandboxRoot);
+        Directory.CreateDirectory(Path.Combine(second.RunRoot, "benchmark_test_1"));
+        await File.WriteAllTextAsync(Path.Combine(second.RunRoot, "benchmark_test_1", "test.md"),
+            "Hello world\nThe capital of France is Paris");
+        await service.EvaluateAsync(1, second.RunRoot, "model-a", 200);
 
         var summary = service.BuildHistorySummary(1, "model-a");
 
@@ -139,10 +144,9 @@ public sealed class BenchmarkServiceTests : IDisposable
     [Fact]
     public async Task PrepareAsync_CreatesDeterministicEditFixture()
     {
-        var sandbox = Path.Combine(_root, "sandbox");
         var service = new BenchmarkService(Path.Combine(_root, "data"));
 
-        var prepared = await service.PrepareAsync(8, sandbox);
+        var prepared = await service.PrepareAsync(8, service.SandboxRoot);
         var fixture = Path.Combine(prepared.RunRoot, "edit_strategy", "property-update", "CacheOptions.cs");
         var fixtureContent = await File.ReadAllTextAsync(fixture);
         Assert.Contains("MaxEntries { get; set; } = 100;", fixtureContent);
@@ -150,7 +154,7 @@ public sealed class BenchmarkServiceTests : IDisposable
         Assert.Contains("\n", fixtureContent);
 
         await File.AppendAllTextAsync(fixture, "\nBROKEN");
-        var preparedAgain = await service.PrepareAsync(8, sandbox);
+        var preparedAgain = await service.PrepareAsync(8, service.SandboxRoot);
         var freshFixture = Path.Combine(preparedAgain.RunRoot, "edit_strategy", "property-update", "CacheOptions.cs");
         Assert.DoesNotContain("BROKEN", await File.ReadAllTextAsync(freshFixture));
         Assert.NotEqual(prepared.RunId, preparedAgain.RunId);
@@ -159,9 +163,8 @@ public sealed class BenchmarkServiceTests : IDisposable
     [Fact]
     public async Task OccurrenceCheck_DetectsDuplicateProperty()
     {
-        var sandbox = Path.Combine(_root, "sandbox");
         var service = new BenchmarkService(Path.Combine(_root, "data"));
-        var prepared = await service.PrepareAsync(8, sandbox);
+        var prepared = await service.PrepareAsync(8, service.SandboxRoot);
         var fixture = Path.Combine(prepared.RunRoot, "edit_strategy", "property-update", "CacheOptions.cs");
         var content = await File.ReadAllTextAsync(fixture);
         content = content.Replace("= 100;", "= 250;\n    public int MaxEntries { get; set; } = 250;");
@@ -176,5 +179,11 @@ public sealed class BenchmarkServiceTests : IDisposable
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+    }
+
+    private sealed class SuccessfulCommandRunner : IBenchmarkCommandRunner
+    {
+        public Task<CommandCheckOutcome> RunAsync(string command, string workingDirectory, int timeoutSeconds, CancellationToken ct) =>
+            Task.FromResult(new CommandCheckOutcome(0, false, 1, "", "", "Command succeeded inside test runner."));
     }
 }

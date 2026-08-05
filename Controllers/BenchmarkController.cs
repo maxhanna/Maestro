@@ -41,15 +41,25 @@ public class BenchmarkController : ControllerBase
     }
 
     [HttpPost("save-score")]
-    public IActionResult SaveScore([FromBody] BenchmarkScore score)
+    public async Task<IActionResult> SaveScore([FromBody] BenchmarkScoreSubmission submission, CancellationToken ct)
     {
-        if (score == null)
-            return BadRequest("Invalid score data");
-        score.Timestamp = DateTime.UtcNow;
-        var overrides = _benchmark.LoadCustomSystemInfo();
-        score.SystemInfo = _benchmark.ResolveSystemInfo(overrides);
-        _benchmark.SaveScore(score);
-        return Ok(new { message = "Score saved", id = score.Id });
+        if (submission == null || submission.Level < 1 || string.IsNullOrWhiteSpace(submission.RunId))
+            return BadRequest("A valid benchmark level and run id are required.");
+        try
+        {
+            var score = await EvaluateTrustedAsync(new BenchmarkEvaluationRequest
+            {
+                Level = submission.Level,
+                RunId = submission.RunId,
+                ModelUsed = submission.ModelUsed,
+                ActualStrategies = submission.ActualStrategies
+            }, ct);
+            return Ok(score);
+        }
+        catch (BenchmarkRunAlreadyEvaluatedException ex) { return Conflict(ex.Message); }
+        catch (ArgumentOutOfRangeException ex) { return BadRequest(ex.Message); }
+        catch (InvalidOperationException ex) { return BadRequest(ex.Message); }
+        catch (Exception ex) { return StatusCode(500, new { error = "Benchmark score could not be saved", detail = ex.Message }); }
     }
 
     [HttpGet("summary")]
@@ -89,36 +99,42 @@ public class BenchmarkController : ControllerBase
     {
         if (request == null || request.Level < 1)
             return BadRequest("Invalid benchmark evaluation request");
-        var custom = _benchmark.LoadCustomSystemInfo();
-        var root = !string.IsNullOrWhiteSpace(request.BenchmarkProjectRoot)
-            ? request.BenchmarkProjectRoot
-            : !string.IsNullOrWhiteSpace(custom?.BenchmarkProjectRoot)
-                ? custom.BenchmarkProjectRoot
-                : AgentUtilities.GetBenchmarkSandboxPath();
         try
         {
-            var score = await _benchmark.EvaluateAsync(request.Level, root!, request.ModelUsed ?? "", request.DurationMs, request.ActualStrategies, ct);
+            var score = await EvaluateTrustedAsync(request, ct);
             return Ok(score);
         }
+        catch (BenchmarkRunAlreadyEvaluatedException ex) { return Conflict(ex.Message); }
         catch (ArgumentOutOfRangeException ex) { return BadRequest(ex.Message); }
+        catch (InvalidOperationException ex) { return BadRequest(ex.Message); }
         catch (Exception ex) { return StatusCode(500, new { error = "Benchmark evaluation failed", detail = ex.Message }); }
+    }
+
+    private async Task<BenchmarkScore> EvaluateTrustedAsync(BenchmarkEvaluationRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.RunId))
+            throw new InvalidOperationException("A server-issued benchmark run id is required.");
+        var run = _benchmark.GetBenchmarkRunInfo(request.RunId);
+        if (run.Level != request.Level)
+            throw new InvalidOperationException($"Run {run.RunId} was prepared for benchmark level {run.Level}, not {request.Level}.");
+        if (_benchmark.HasScoreForRun(run.RunId))
+            throw new BenchmarkRunAlreadyEvaluatedException($"Benchmark run {run.RunId} has already been evaluated.");
+        return await _benchmark.EvaluateAsync(run.Level, run.RunRoot, request.ModelUsed ?? "", run.ElapsedMs, request.ActualStrategies, ct);
     }
 
     [HttpPost("prepare/{level:int}")]
     public async Task<IActionResult> Prepare(int level, [FromBody] BenchmarkPrepareRequest? request, CancellationToken ct)
     {
-        var custom = _benchmark.LoadCustomSystemInfo();
-        var root = !string.IsNullOrWhiteSpace(request?.BenchmarkProjectRoot)
-            ? request.BenchmarkProjectRoot
-            : !string.IsNullOrWhiteSpace(custom?.BenchmarkProjectRoot)
-                ? custom.BenchmarkProjectRoot
-                : AgentUtilities.GetBenchmarkSandboxPath();
         try
         {
+            var root = !string.IsNullOrWhiteSpace(request?.BenchmarkProjectRoot)
+                ? request.BenchmarkProjectRoot
+                : _benchmark.SandboxRoot;
             var prepared = await _benchmark.PrepareAsync(level, root!, ct);
             return Ok(new { benchmarkProjectRoot = prepared.RunRoot, runId = prepared.RunId });
         }
         catch (ArgumentOutOfRangeException ex) { return BadRequest(ex.Message); }
+        catch (InvalidOperationException ex) { return BadRequest(ex.Message); }
         catch (Exception ex) { return StatusCode(500, new { error = "Benchmark preparation failed", detail = ex.Message }); }
     }
 
@@ -127,7 +143,7 @@ public class BenchmarkController : ControllerBase
     {
         var custom = _benchmark.LoadCustomSystemInfo();
         var detected = BenchmarkService.DetectSystemInfo();
-        var defaultRoot = AgentUtilities.GetBenchmarkSandboxPath();
+        var defaultRoot = _benchmark.SandboxRoot;
         return Ok(new { detected, custom, defaultBenchmarkRoot = defaultRoot });
     }
 
@@ -155,6 +171,7 @@ public class BenchmarkController : ControllerBase
 public class BenchmarkEvaluationRequest
 {
     public int Level { get; set; }
+    public string? RunId { get; set; }
     public string? BenchmarkProjectRoot { get; set; }
     public string? ModelUsed { get; set; }
     public double DurationMs { get; set; }
@@ -164,4 +181,12 @@ public class BenchmarkEvaluationRequest
 public class BenchmarkPrepareRequest
 {
     public string? BenchmarkProjectRoot { get; set; }
+}
+
+public class BenchmarkScoreSubmission
+{
+    public int Level { get; set; }
+    public string? RunId { get; set; }
+    public string? ModelUsed { get; set; }
+    public List<string> ActualStrategies { get; set; } = new();
 }
