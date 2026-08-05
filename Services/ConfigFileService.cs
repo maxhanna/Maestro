@@ -56,6 +56,7 @@ public class FrontendConfig
     public bool showNotes { get; set; } = false;
     public bool showMeeting { get; set; } = false;
     public bool meetingMuted { get; set; } = false;
+    public int meetingVolume { get; set; } = 70;
     public bool prByDefault { get; set; } = false;
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";

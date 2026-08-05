@@ -85,6 +85,17 @@ public partial class AgentController : ControllerBase
         if (!emit) return;
         await SendSse(Response, "log", new { ts = DateTime.UtcNow.ToString("o"), level, message, detail }, ct);
     }
+
+    /// <summary>
+    /// Emits a distinct 'rejected' log entry for a rejected step/proposal. Renders as its
+    /// own styled row in the card's agent log with the corrective feedback attached as
+    /// detail, so users see WHY a step was blocked instead of a generic warn/skip line.
+    /// </summary>
+    private async Task EmitRejectedLog(bool emitSse, string message, string feedback, CancellationToken ct)
+    {
+        if (!emitSse) return;
+        await EmitLog(true, "rejected", message, feedback, ct);
+    }
     private static readonly SemaphoreSlim SseWriteLock = new(1, 1);
     private static async Task SendSse(HttpResponse response, string eventName, object data, CancellationToken ct = default)
     {
@@ -2222,6 +2233,11 @@ public partial class AgentController : ControllerBase
     /// Covers all three deletion carriers: oldString/newString, FORMAT D
     /// (targetType=html + targetName + empty/absent newCode), and description-quoted code.
     /// </summary>
+    // Shared reason produced by PreEditValidation/IsRemovalAlreadyApplied for a removal
+    // whose target is absent. The hallucinated-removal guard matches on this exact text,
+    // so it lives as a named constant — a reword breaks the guard's Contains() check.
+    private const string RemovalTargetAbsentReason = "code to be removed is already absent from file";
+
     private static bool IsRemovalAlreadyApplied(string content, PlanStep step)
     {
         // FORMAT D payload: delegate to FormatDAlreadyDoneVerdict (the resolver's own
@@ -2273,6 +2289,29 @@ public partial class AgentController : ControllerBase
                 return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Quick line-based inventory of the member/function names in a source file, used to
+    /// feed corrective feedback when the planner tries to remove a symbol that doesn't
+    /// exist (first-step hallucinated-removal guard). Best-effort regex — good enough to
+    /// list real methods so the model can re-ground; not a parser.
+    /// </summary>
+    private static string ExtractMemberInventory(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return "";
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var rx = new Regex(
+            @"(?m)^\s*(?:(?:export|public|private|protected|internal|async|static|get|set|readonly|override|abstract|virtual|function)\s+)*(?:[\w<>\[\],.?$]+\s+)*(?<name>[A-Za-z_$][\w$]*)\s*\(");
+        foreach (Match m in rx.Matches(content))
+        {
+            var n = m.Groups["name"].Value;
+            if (n.Length < 2) continue;
+            if (n is "if" or "for" or "while" or "switch" or "catch" or "return" or "function" or "new" or "case" or "else" or "using" or "import" or "from" or "typeof" or "delete" or "void") continue;
+            names.Add(n);
+        }
+        var list = names.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(24).ToList();
+        return list.Count == 0 ? "" : string.Join(", ", list);
     }
 
     private static bool HasConcreteEdit(PlanStep? step)
@@ -2409,7 +2448,7 @@ public partial class AgentController : ControllerBase
             // gone. A survivor fragment (oldString = survivor + target → newString = survivor)
             // is NOT evidence of a completed removal — the executor and the auditor agree.
             if (IsRemovalAlreadyApplied(content, step))
-                return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
+                return (PreEditVerdict.AlreadyDone, RemovalTargetAbsentReason);
         }
         if (changeLower.StartsWith("move ") || changeLower.StartsWith("insert "))
         {
@@ -4328,7 +4367,7 @@ public partial class AgentController : ControllerBase
                     if (!fromFormatC && !alreadyDone && HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(newStr))
                     {
                         var err = "HTML files: use FORMAT D (targetType=\"html\", targetName, insertAfter, newCode). Do NOT use oldString/newString.";
-                        await EmitLog(emitSse, "warn", $"HTML edit rejected — {err}", ct: ct);
+                        await EmitRejectedLog(emitSse, $"HTML edit rejected — {err}", err, ct);
                         history.Add((oldStr ?? "", newStr ?? "", err));
                         continue;
                     }
@@ -8382,6 +8421,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var (verdict, reason) = PreEditValidation(content, step);
                 if (verdict == PreEditVerdict.AlreadyDone)
                 {
+                    // HALLUCINATED-REMOVAL GUARD: when NO prior step has touched this file,
+                    // "code to be removed is already absent from file" cannot mean "already done"
+                    // — it means the planner invented a symbol that is NOT in the file (e.g. it
+                    // decided a method was 'broken' and tried to delete it although no such method
+                    // exists). Reject with corrective feedback that names the file's actual
+                    // members, so the next proposal re-grounds in the real content instead of
+                    // retrying the same fiction (which previously degraded into a loop of
+                    // hallucinated edits). If an earlier step DID touch this file, a removal can
+                    // legitimately be a no-op and is left to the resolver. Never intercept
+                    // special markers (_command etc.).
+                    if (reason.Contains(RemovalTargetAbsentReason, StringComparison.OrdinalIgnoreCase) &&
+                        !AgentUtilities.IsSpecialMarker(step.File) &&
+                        !planSoFar.Any(p =>
+                            !AgentUtilities.IsSpecialMarker(p.File) &&
+                            string.Equals(p.File.Replace('\\', '/'), step.File.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var inventory = ExtractMemberInventory(content);
+                        return (false,
+                            $"The removal target in '{step.File}' does NOT exist in the file" +
+                            (inventory.Length > 0 ? $" — its members are: {inventory}" : "") +
+                            ". Re-read the ATTACHED FILES / DISCOVERY CONTEXT above and propose a step grounded " +
+                            "in those exact members. NEVER delete or reference a symbol that is not present in the file. " +
+                            "If the task's work is already complete in the file, return planComplete=true instead of proposing further edits.");
+                    }
                     // FROZEN-PLAN RULE: once the planner has produced a concrete edit
                     // (oldString/newString) for this step, the plan is frozen — a heuristic
                     // AlreadyDone verdict (often a false positive from oldString drift, e.g.
@@ -8493,9 +8556,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 atomicStepEstimate: atomicStepEstimate);
             if (proposal == null)
             {
-                await EmitLog(emitSse, "warn", "Incremental planning: rejected — response was not valid JSON; retrying with parse feedback", ct: ct);
-                rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
-                    "Output ONLY the JSON object described in the system prompt.");
+                var jsonFb = "Your previous response could not be parsed as valid JSON. " +
+                    "Output ONLY the JSON object described in the system prompt.";
+                await EmitRejectedLog(emitSse, "Incremental planning: rejected — response was not valid JSON; retrying with parse feedback", jsonFb, ct);
+                rejectionFeedback.Add(jsonFb);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
@@ -8546,8 +8610,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         var contextMsg = $"STOP — '{proposal.ExploreFile}' is ALREADY in the DISCOVERY CONTEXT above (its full content is already shown). " +
                             "Do NOT request it again. Read the file content from the DISCOVERY CONTEXT and propose the actual edit step now.";
-                        await EmitLog(emitSse, "warn",
-                            $"Incremental planning: skipped explore — {proposal.ExploreFile} already in discovery context", ct: ct);
+                        await EmitRejectedLog(emitSse,
+                            $"Incremental planning: rejected explore — '{proposal.ExploreFile}' already in discovery context", contextMsg, ct);
                         rejectionFeedback.Add(contextMsg);
                         if (emitSse)
                             await SendSse(Response, "step", new
@@ -8584,12 +8648,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 else
                 {
-                    await EmitLog(emitSse, "warn",
-                        $"Incremental planning: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", ct: ct);
-                    rejectionFeedback.Add(
+                    var exploreFb =
                         $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full in the " +
                         "DISCOVERY CONTEXT above. Do not re-request it. Read it carefully and propose the actual next " +
-                        "step now, using the exact symbol/method names visible there.");
+                        "step now, using the exact symbol/method names visible there.";
+                    await EmitRejectedLog(emitSse,
+                        $"Incremental planning: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", exploreFb, ct);
+                    rejectionFeedback.Add(exploreFb);
                     if (emitSse)
                     {
                         await SendSse(Response, "step", new
@@ -8607,8 +8672,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.Step == null)
             {
-                await EmitLog(emitSse, "warn", "Incremental planning: rejected — returned neither planComplete, exploreFile, nor a step; retrying", ct: ct);
-                rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
+                var neitherFb = "You returned neither planComplete=true, exploreFile, nor a step — return exactly one.";
+                await EmitRejectedLog(emitSse, "Incremental planning: rejected — returned neither planComplete, exploreFile, nor a step; retrying", neitherFb, ct);
+                rejectionFeedback.Add(neitherFb);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
@@ -8621,8 +8687,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     regenAttempts = 0;
                     continue;
                 }
-                await EmitLog(emitSse, "warn", "Incremental planning: rejected — _discover was already run this session; retrying", ct: ct);
-                rejectionFeedback.Add("You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.");
+                var discoverFb = "You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.";
+                await EmitRejectedLog(emitSse, "Incremental planning: rejected — _discover was already run this session; retrying", discoverFb, ct);
+                rejectionFeedback.Add(discoverFb);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
@@ -8661,9 +8728,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     skipLlm: skipLlm);
                 if (!valid)
                 {
-                    await EmitLog(emitSse, "warn",
-                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
-                    rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                    var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";
+                    await EmitRejectedLog(emitSse,
+                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", stepFb, ct);
+                    rejectionFeedback.Add(stepFb);
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
@@ -8968,9 +9036,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning, atomicStepEstimate: atomicStepEstimate);
             if (proposal == null)
             {
-                await EmitLog(emitSse, "warn", "Interleaved execution: rejected — response was not valid JSON; retrying with parse feedback", ct: ct);
-                rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
-                    "Output ONLY the JSON object described in the system prompt.");
+                var jsonFb = "Your previous response could not be parsed as valid JSON. " +
+                    "Output ONLY the JSON object described in the system prompt.";
+                await EmitRejectedLog(emitSse, "Interleaved execution: rejected — response was not valid JSON; retrying with parse feedback", jsonFb, ct);
+                rejectionFeedback.Add(jsonFb);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
                 continue;
             }
@@ -9026,11 +9095,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                     if (alreadyInContext)
                     {
-                        await EmitLog(emitSse, "warn",
-                            $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already in discovery context; retrying", ct: ct);
-                        rejectionFeedback.Add(
-                            $"STOP — '{proposal.ExploreFile}' is ALREADY in the DISCOVERY CONTEXT above. " +
-                            "Do NOT request it again. Read it and propose the actual next step.");
+                        var ctxFb = $"STOP — '{proposal.ExploreFile}' is ALREADY in the DISCOVERY CONTEXT above. " +
+                            "Do NOT request it again. Read it and propose the actual next step.";
+                        await EmitRejectedLog(emitSse,
+                            $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already in discovery context; retrying", ctxFb, ct);
+                        rejectionFeedback.Add(ctxFb);
                         if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                         continue;
                     }
@@ -9048,19 +9117,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 else
                 {
-                    await EmitLog(emitSse, "warn",
-                        $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", ct: ct);
-                    rejectionFeedback.Add(
-                        $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full above. " +
-                        "Do not re-request it. Propose the actual next step using the exact names visible there.");
+                    var exploreFb = $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full above. " +
+                        "Do not re-request it. Propose the actual next step using the exact names visible there.";
+                    await EmitRejectedLog(emitSse,
+                        $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", exploreFb, ct);
+                    rejectionFeedback.Add(exploreFb);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
                 }
             }
             if (proposal.Step == null)
             {
-                await EmitLog(emitSse, "warn", "Interleaved execution: rejected — returned neither planComplete, exploreFile, nor a step; retrying", ct: ct);
-                rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
+                var neitherFb = "You returned neither planComplete=true, exploreFile, nor a step — return exactly one.";
+                await EmitRejectedLog(emitSse, "Interleaved execution: rejected — returned neither planComplete, exploreFile, nor a step; retrying", neitherFb, ct);
+                rejectionFeedback.Add(neitherFb);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
@@ -9073,8 +9143,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     regenAttempts = 0;
                     continue;
                 }
-                await EmitLog(emitSse, "warn", "Interleaved execution: rejected — _discover was already run this session; retrying", ct: ct);
-                rejectionFeedback.Add("You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.");
+                var discoverFb = "You already ran _discover — its results are now in the DISCOVERY CONTEXT. Use them to propose the next step.";
+                await EmitRejectedLog(emitSse, "Interleaved execution: rejected — _discover was already run this session; retrying", discoverFb, ct);
+                rejectionFeedback.Add(discoverFb);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
@@ -9096,16 +9167,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 });
                 if (duplicateOf != null)
                 {
-                    await EmitLog(emitSse, "warn",
-                        $"Interleaved execution: rejected duplicate step — [{proposal.Step.File}] {proposal.Step.Change} repeats completed step [{duplicateOf.File}] {duplicateOf.Change}", ct: ct);
-                    rejectionFeedback.Add(
+                    var dupFb =
                         $"STEP ALREADY DONE (IMMUTABLE) — [{proposal.Step.File}] {proposal.Step.Change}\n" +
                         $"is too similar to the COMPLETED step:\n" +
                         $"  [{duplicateOf.File}] {duplicateOf.Change}\n" +
                         $"Completed steps CANNOT be revised, edited, or repeated. " +
                         $"Look at the EDIT LOG — this work is DONE. " +
                         $"If the task needs something ELSE, propose a DIFFERENT step. " +
-                        $"If the task is fully satisfied, return planComplete=true.");
+                        $"If the task is fully satisfied, return planComplete=true.";
+                    await EmitRejectedLog(emitSse,
+                        $"Interleaved execution: rejected duplicate step — [{proposal.Step.File}] {proposal.Step.Change} repeats completed step [{duplicateOf.File}] {duplicateOf.Change}", dupFb, ct);
+                    rejectionFeedback.Add(dupFb);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
                 }
@@ -9169,9 +9241,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 skipLlm: skipLlm, lastStepCompletionNote: completionNote);
             if (!valid)
             {
-                await EmitLog(emitSse, "warn",
-                    $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
-                rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";
+                await EmitRejectedLog(emitSse,
+                    $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", stepFb, ct);
+                rejectionFeedback.Add(stepFb);
                 if (emitSse && planSoFar.Count > 0)
                 {
                     var planSummary = $"Step {planSoFar.Count + 1} rejected — {reason}";
@@ -9888,14 +9961,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.SubPlan == null)
             {
-                await EmitLog(emitSse, "warn", "Meta-plan: rejected — response contained no subPlan; retrying", ct: ct);
+                await EmitRejectedLog(emitSse, "Meta-plan: rejected — response contained no subPlan; retrying", "Response contained no subPlan object — must return planComplete or subPlan.", ct);
                 if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
             var (valid, reason) = await ValidateSubPlanAsync(proposal.SubPlan, prompt, subPlansSoFar, ct);
             if (!valid)
             {
-                await EmitLog(emitSse, "warn", $"Meta-plan: rejected stage '{proposal.SubPlan.Title}' — {reason}", ct: ct);
+                await EmitRejectedLog(emitSse, $"Meta-plan: rejected stage '{proposal.SubPlan.Title}' — {reason}", reason, ct);
                 rejectionFeedback.Add($"REJECTED — '{proposal.SubPlan.Title}' → {reason}");
                 if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) { rejectionFeedback.Clear(); attempts = 0; }
                 continue;
@@ -13535,6 +13608,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 "- Ground every claim in the RELEVANT PROJECT FILES: quote real identifiers, method names, imports and exact " +
                 "template markup. That is your source for what to copy, how it integrates, and which variables come into play. " +
                 "Never invent names or guess structure.\n" +
+                "- NEVER declare code 'broken' or plan a DELETION of any symbol (method, function, class, variable, property) " +
+                "unless you can QUOTE that exact code block verbatim from the file content shown in this prompt (RELEVANT " +
+                "PROJECT FILES / ATTACHED FILES). A deletion step is only valid when the code being removed is actually " +
+                "visible in the file above. If the task references a method or symbol that is NOT present in the file content, " +
+                "do not invent it and do not propose \"remove the broken <name>\" — state plainly that the symbol could not " +
+                "be found in the file, and propose the next step grounded in the symbols that actually exist (e.g. create the " +
+                "missing method, or edit a real method you can see and quote). Every deletion must be backed by a visible anchor.\n" +
                 "- Decide: exactly which file to touch next, what to insert or change, the exact anchor text (oldString) to " +
                 "match against the current file, and the exact replacement (newString). Think about what could go wrong — " +
                 "missing imports, type errors, breaking call sites, duplicate anchors, CRLF line endings.\n" +
@@ -15790,6 +15870,48 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var steps = _cancelledSteps.GetOrAdd(req.CardId, _ => new HashSet<int>());
         lock (steps) { steps.Add(req.StepIndex); }
         return Ok(new { status = "cancelled", cardId = req.CardId, stepIndex = req.StepIndex });
+    }
+
+    // ── Per-endpoint stream health for the endpoint picker ───────────────
+    // Stream reliability counters accumulated by RecordEndpointCall in the LLM
+    // wrappers (transport/stream/truncation failures vs total calls). Rendered as
+    // a badge in the endpoint picker so flaky endpoints are easy to spot and swap.
+    [HttpGet("endpoint-health")]
+    public IActionResult GetEndpointHealth()
+    {
+        var now = DateTime.UtcNow;
+        // Prune endpoints the user has removed or that went idle: entries whose last
+        // activity (success or stream error) is older than 48h are dropped so the static
+        // tracker doesn't accumulate URLs forever for the process lifetime.
+        foreach (var kv in _endpointStreamHealth.ToList())
+        {
+            var last = kv.Value.LastSuccessUtc > kv.Value.LastStreamErrorUtc
+                ? kv.Value.LastSuccessUtc : kv.Value.LastStreamErrorUtc;
+            if (last != default && (now - last).TotalHours > 48)
+                _endpointStreamHealth.TryRemove(kv.Key, out _);
+        }
+        var items = _endpointStreamHealth
+            .Select(kv => new
+            {
+                baseUrl = kv.Key,
+                calls = kv.Value.Calls,
+                streamErrors = kv.Value.StreamErrors,
+                errorRate = kv.Value.Calls > 0
+                    ? Math.Round(100.0 * kv.Value.StreamErrors / kv.Value.Calls, 1)
+                    : 0,
+                lastStreamErrorAt = kv.Value.LastStreamErrorUtc == default
+                    ? null : kv.Value.LastStreamErrorUtc.ToString("o"),
+                lastSuccessAt = kv.Value.LastSuccessUtc == default
+                    ? null : kv.Value.LastSuccessUtc.ToString("o"),
+                stale = kv.Value.LastSuccessUtc != default &&
+                       kv.Value.LastStreamErrorUtc != default &&
+                       (now - kv.Value.LastSuccessUtc).TotalMinutes > 60 &&
+                       kv.Value.LastStreamErrorUtc > kv.Value.LastSuccessUtc
+            })
+            .OrderByDescending(x => x.streamErrors)
+            .ThenByDescending(x => x.errorRate)
+            .ToList();
+        return Ok(items);
     }
 
     // ── Improvement suggestions for a completed card ──────────────────────

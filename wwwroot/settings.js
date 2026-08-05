@@ -240,17 +240,37 @@ angular.module('kanbanApp')
                 };
                 vm.ideThemeFilter = '';
                 vm.ideTheme = 'weaver-dark';
+                // 28 CodeMirror themes (all verified against the CodeMirror 5.65.17
+                // CDN). `dark: false` marks light themes so the picker can badge them.
                 vm.ideThemeList = [
-                    { name: 'Default (Weaver Dark)', value: 'weaver-dark' },
-                    { name: 'Monokai', value: 'monokai' },
-                    { name: 'Dracula', value: 'dracula' },
-                    { name: 'Material', value: 'material' },
-                    { name: 'Darcula', value: 'darcula' },
-                    { name: 'Seti', value: 'seti' },
-                    { name: 'Tomorrow Night Eighties', value: 'tomorrow-night-eighties' },
-                    { name: 'Ambiance', value: 'ambiance' },
-                    { name: 'Eclipse (light)', value: 'eclipse' },
-                    { name: 'Neo (light)', value: 'neo' }
+                    { name: 'Default (Weaver Dark)', value: 'weaver-dark', dark: true },
+                    { name: 'Monokai', value: 'monokai', dark: true },
+                    { name: 'Dracula', value: 'dracula', dark: true },
+                    { name: 'Material', value: 'material', dark: true },
+                    { name: 'Darcula', value: 'darcula', dark: true },
+                    { name: 'Seti', value: 'seti', dark: true },
+                    { name: 'Tomorrow Night Eighties', value: 'tomorrow-night-eighties', dark: true },
+                    { name: 'Ambiance', value: 'ambiance', dark: true },
+                    { name: '3024 Night', value: '3024-night', dark: true },
+                    { name: 'Blackboard', value: 'blackboard', dark: true },
+                    { name: 'Cobalt', value: 'cobalt', dark: true },
+                    { name: 'Gruvbox Dark', value: 'gruvbox-dark', dark: true },
+                    { name: 'Lucario', value: 'lucario', dark: true },
+                    { name: 'Material Darker', value: 'material-darker', dark: true },
+                    { name: 'Material Ocean', value: 'material-ocean', dark: true },
+                    { name: 'Material Palenight', value: 'material-palenight', dark: true },
+                    { name: 'Nord', value: 'nord', dark: true },
+                    { name: 'Oceanic Next', value: 'oceanic-next', dark: true },
+                    { name: 'Railscasts', value: 'railscasts', dark: true },
+                    { name: 'Twilight', value: 'twilight', dark: true },
+                    { name: 'Vibrant Ink', value: 'vibrant-ink', dark: true },
+                    { name: 'Zenburn', value: 'zenburn', dark: true },
+                    { name: 'Eclipse (light)', value: 'eclipse', dark: false },
+                    { name: 'IntelliJ IDEA (light)', value: 'idea', dark: false },
+                    { name: 'Neo (light)', value: 'neo', dark: false },
+                    { name: 'Paraiso Light', value: 'paraiso-light', dark: false },
+                    { name: 'XQ Light', value: 'xq-light', dark: false },
+                    { name: 'Yeti (light)', value: 'yeti', dark: false }
                 ];
 
                 vm.settingsTab = 'appearance';
@@ -399,7 +419,9 @@ angular.module('kanbanApp')
                             if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
                             if (typeof cfg.showNotes === 'boolean') vm.showNotes = cfg.showNotes;
                             if (typeof cfg.showMeeting === 'boolean') vm.showMeeting = cfg.showMeeting;
-                            if (typeof cfg.meetingMuted === 'boolean') vm.meetingMuted = cfg.meetingMuted;
+                            if (typeof cfg.meetingVolume === 'number') vm.meetingVolume = Math.max(0, Math.min(100, cfg.meetingVolume));
+                            else if (typeof cfg.meetingMuted === 'boolean') vm.meetingVolume = cfg.meetingMuted ? 0 : 70;
+                            if (vm.applyMeetingVolume) vm.applyMeetingVolume();
                             // Font sizes sync across devices via the backend config; mirror
                             // them into localStorage so reloads show them before the async
                             // config load resolves. Backend wins over the local cache.
@@ -436,6 +458,7 @@ angular.module('kanbanApp')
                             vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
                             vm.llamaModel = cfg.llamaModel || "medgemma:4b";
                             vm.llamaEndpoints = (cfg.llamaEndpoints || []).map(function (e) { return { id: e.id || ('ep-' + Math.random().toString(36).slice(2, 9)), name: e.name || '', url: e.url || '', model: e.model || '' }; });
+                            vm.loadEndpointHealth();
                             vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
                             vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
                             vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
@@ -511,7 +534,8 @@ angular.module('kanbanApp')
                         cfg.llmTimeoutMinutes = vm.llmInfiniteTimeout || !vm.llmTimeoutMinutes ? 0 : Math.max(5, vm.llmTimeoutMinutes);
                         cfg.showNotes = vm.showNotes === true;
                         cfg.showMeeting = vm.showMeeting === true;
-                        cfg.meetingMuted = vm.meetingMuted === true;
+                        cfg.meetingVolume = Math.round(vm.meetingVolume || 0);
+                        cfg.meetingMuted = (vm.meetingVolume || 0) <= 0;
                         if (vm.meeting) cfg.meetingPanel = { left: vm.meeting.left, top: vm.meeting.top, width: vm.meeting.width, height: vm.meeting.height };
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
                         cfg.ideTheme = vm.ideTheme || 'weaver-dark';
@@ -541,6 +565,51 @@ angular.module('kanbanApp')
                     if (!id) return 'Default';
                     var ep = (vm.llamaEndpoints || []).find(function (e) { return e.id === id; });
                     return ep ? (ep.name || ep.url || 'Default') : 'Default';
+                };
+                // Per-endpoint stream reliability (backend accumulates these from every LLM
+                // call): used to badge flaky endpoints in the picker. Keyed by normalized URL.
+                vm.endpointHealthMap = {};
+                vm.loadEndpointHealth = function () {
+                    return $http.get('/api/agent/endpoint-health').then(function (resp) {
+                        var map = {};
+                        (resp.data || []).forEach(function (h) {
+                            map[(h.baseUrl || '').replace(/\/+$/, '')] = h;
+                        });
+                        vm.endpointHealthMap = map;
+                    }, function () { });
+                };
+                vm.endpointHealthFor = function (url) {
+                    if (!url) return null;
+                    var key = String(url).replace(/\/+$/, '');
+                    return vm.endpointHealthMap[key] || null;
+                };
+                // Returns { level, icon, title } for an endpoint URL, or null when there's
+                // not enough data yet. Bad (🔴): >=40% stream-error rate or >=5 errors with
+                // no recent success. Warn (🟡): >=15% rate or any errors while calls are few.
+                vm.endpointHealthBadge = function (url) {
+                    var h = vm.endpointHealthFor(url);
+                    if (!h || !h.calls || h.calls < 3) return null;
+                    var rate = h.errorRate || 0;
+                    if (rate >= 40 || (h.streamErrors >= 5 && !h.lastSuccessAt)) {
+                        return { level: 'bad', icon: '🔴', title: 'Frequently drops streams: ' + h.streamErrors + '/' + h.calls + ' calls failed mid-stream (' + rate + '%)' };
+                    }
+                    // No successful call in the last hour while errors keep coming → treat
+                    // as bad, not just warn, so a sick endpoint is easy to spot.
+                    if (rate >= 15 || h.streamErrors >= 2) {
+                        if (h.stale) {
+                            return { level: 'bad', icon: '🔴', title: 'Unhealthy: no successful call in 1h+ and ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' };
+                        }
+                        return { level: 'warn', icon: '🟡', title: 'Some stream drops: ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' };
+                    }
+                    return { level: 'ok', icon: '🟢', title: 'Healthy: ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' };
+                };
+                vm.endpointBadgeText = function (url) {
+                    var b = vm.endpointHealthBadge(url);
+                    return b ? ' ' + b.icon : '';
+                };
+                vm.endpointBadgeTitle = function (url) {
+                    var b = vm.endpointHealthBadge(url);
+                    return b ? b.title : '';
                 };
                 vm.checkEmailServer = function (index) {
                     var acct = vm.emailAccounts[index]; if (!acct || !acct.imapServer) return acct.showAppPasswordInstructions = false;

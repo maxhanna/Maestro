@@ -11,6 +11,7 @@
 	--error: #f87171;
 	--brand-primary: #06b6d4;
 	--brand-secondary: #7c3aed;
+	--brand-tertiary: #a78bfa; /* lighter violet — spider thorax in the header logo */
 	--brand-accent: #4dd0e1;
 	--brand-success: #4ade80;
 	--brand-warning: #fbbf24;
@@ -786,12 +787,28 @@ header h1 {
 }
 
 .theme-card .theme-card-name {
+	flex: 1;
+	min-width: 0;
 	font-size: 11px;
 	font-weight: 600;
 	color: var(--text);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+.theme-card .theme-card-mode {
+	flex-shrink: 0;
+	font-size: 8px;
+	font-weight: 700;
+	letter-spacing: 0.5px;
+	text-transform: uppercase;
+	color: var(--muted);
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	border-radius: 3px;
+	padding: 1px 3px;
+	line-height: 1.3;
+	user-select: none;
 }
 
 .theme-card .theme-card-check {
@@ -1665,48 +1682,58 @@ h1 .brand-e:hover::before {
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	padding: 8px 12px;
-	border-radius: 12px;
-	color: #012;
+	padding: 6px 14px;
+	border-radius: 999px;
+	color: var(--text);
 	font-weight: 700;
-	font-size: 16px;
-	box-shadow: var(--brand-shadow), var(--brand-glow);
-	transition: all 0.3s ease;
-	border: none;
+	font-size: 15px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.08);
 	cursor: pointer;
-	min-width: 160px;
 	justify-content: center;
 	transform: translateY(0);
 	position: relative;
 	overflow: hidden;
-	border: 1px solid rgba(255, 255, 255, 0.1);
-	border-radius: 10px;
-	backdrop-filter: blur(4px);
+	backdrop-filter: blur(6px);
+	-webkit-backdrop-filter: blur(6px);
+	/* Quiet shadow language matching the header chips — the loud cyan glow
+	   moves to the hover state only, and even there stays a whisper. */
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.04),
+		0 2px 8px rgba(2, 6, 23, 0.4);
+	transition: all 0.25s ease;
 }
 
 .brand-logo-container:hover {
-	transform: translateY(-2px);
-	box-shadow: var(--brand-glow), 0 8px 20px rgba(6, 182, 212, 0.4), 0 0 20px rgba(6, 182, 212, 0.3);
+	transform: translateY(-1px);
+	background: rgba(6, 182, 212, 0.06);
+	border-color: rgba(6, 182, 212, 0.35);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.05),
+		0 4px 14px rgba(2, 6, 23, 0.5),
+		0 0 14px rgba(6, 182, 212, 0.18);
 	transition: all 0.2s ease;
 }
 
-.brand-icon {
-	font-size: 20px;
+/* The spider icon's glow follows its actual silhouette (drop-shadow), not
+   the icon's rectangular box (box-shadow) — and it stays subtle at rest.
+   box-shadow/background/margin are neutralized explicitly: the generic
+   .brand-icon rules still apply to this SVG and would otherwise re-add the
+   loud box halo and a stray right margin. */
+.brand-logo-enhanced .brand-icon {
 	width: 20px;
 	height: 20px;
-	transition: all 0.3s ease;
-	background: var(--brand-accent);
-	-webkit-background-clip: text;
-	-webkit-text-fill-color: transparent;
-	background-clip: text;
-	filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
-	box-shadow: var(--brand-glow);
+	margin: 0;
+	background: none;
+	box-shadow: none;
 	transform: scale(1);
+	transition: all 0.25s ease;
+	filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.35)) drop-shadow(0 0 5px rgba(6, 182, 212, 0.25));
 }
 
-.brand-icon:hover {
-	transform: scale(1.2);
-	box-shadow: var(--brand-glow), 0 0 15px rgba(77, 208, 225, 0.6);
+.brand-logo-enhanced:hover .brand-icon {
+	transform: scale(1.08);
+	filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.35)) drop-shadow(0 0 8px rgba(6, 182, 212, 0.45));
 }
 
 .brand-text {
@@ -1971,6 +1998,77 @@ header h1 span.brand-badge {
 	margin-bottom: 2px;
 	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 	letter-spacing: 0.3px;
+}
+
+/* ── Progress bar to the next rank tier ────────────────────────────────
+   Shown inside the user-stats popup between the rank title and the stat
+   chips. The fill is tinted by the NEXT tier's metal (its .rank-grade-*),
+   so the bar previews the color you're climbing toward. */
+.rank-progress {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	margin: 2px 0 8px;
+	padding: 7px 9px;
+	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 8px;
+}
+
+.rank-progress-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 11px;
+}
+
+.rank-progress-label {
+	color: var(--muted);
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.rank-progress-label b {
+	color: var(--brand-secondary);
+	font-weight: 700;
+}
+
+.rank-progress-pct {
+	color: var(--muted);
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+
+.rank-progress-track {
+	height: 6px;
+	background: rgba(255, 255, 255, 0.08);
+	border-radius: 999px;
+	overflow: hidden;
+}
+
+.rank-progress-fill {
+	height: 100%;
+	border-radius: 999px;
+	background: linear-gradient(90deg, var(--brand-secondary), #22d3ee);
+	transition: width 0.4s ease;
+	box-shadow: 0 0 8px rgba(6, 182, 212, 0.45);
+}
+
+/* Fill previews the NEXT tier's metal. */
+.rank-progress-fill.rank-grade-platinum { background: linear-gradient(90deg, #e5e4e2, #ffffff); }
+.rank-progress-fill.rank-grade-gold { background: linear-gradient(90deg, #b8860b, #ffd700); }
+.rank-progress-fill.rank-grade-silver { background: linear-gradient(90deg, #9ca3af, #e5e7eb); }
+.rank-progress-fill.rank-grade-bronze { background: linear-gradient(90deg, #9a5b24, #e0954c); }
+
+.rank-progress-max {
+	align-items: center;
+	justify-content: center;
+	font-size: 11px;
+	font-weight: 700;
+	color: var(--brand-secondary);
 }
 
 @keyframes popIn {
@@ -2305,6 +2403,18 @@ h3 .small.ghost:hover {
 .agent-log .log-entry.metric {
 	color: #c084fc;
 	background: rgba(192, 132, 252, 0.08);
+}
+
+.agent-log .log-entry.rejected {
+	color: #f87171;
+	background: rgba(248, 113, 113, 0.08);
+	border-color: rgba(248, 113, 113, 0.25);
+}
+
+.agent-log .log-entry.recovering {
+	color: #fbbf24;
+	background: rgba(251, 191, 36, 0.1);
+	border-color: rgba(251, 191, 36, 0.3);
 }
 
 .panel h3 {
@@ -2649,6 +2759,39 @@ h3 .small.ghost:hover {
 	color: #fbbf24;
 }
 
+.latest-log-msg.recovering {
+	color: #fbbf24;
+}
+
+/* Endpoint health badge in the endpoint picker (stream reliability) */
+.endpoint-health {
+	font-size: 13px;
+	line-height: 1;
+	cursor: default;
+	filter: saturate(1.2);
+}
+
+/* Match the compact endpoint tags in the Agent panel headers */
+.endpoint-tag .endpoint-health,
+.agent-run-endpoint .endpoint-health {
+	font-size: 11px;
+	margin-left: 2px;
+}
+.endpoint-health.ok {
+	opacity: 0.85;
+}
+.endpoint-health.warn {
+	opacity: 1;
+}
+.endpoint-health.bad {
+	opacity: 1;
+	animation: endpoint-health-pulse 1.6s ease-in-out infinite;
+}
+@keyframes endpoint-health-pulse {
+	0%, 100% { transform: scale(1); }
+	50% { transform: scale(1.25); }
+}
+
 .latest-log-msg.error {
 	color: var(--error);
 }
@@ -2800,6 +2943,18 @@ h3 .small.ghost:hover {
 .agent-activity-log .log-entry.metric {
 	color: #c084fc;
 	background: rgba(192, 132, 252, 0.08);
+	border-radius: 4px;
+}
+
+.agent-activity-log .log-entry.rejected {
+	color: #f87171;
+	background: rgba(248, 113, 113, 0.08);
+	border-radius: 4px;
+}
+
+.agent-activity-log .log-entry.recovering {
+	color: #fbbf24;
+	background: rgba(251, 191, 36, 0.1);
 	border-radius: 4px;
 }
 
@@ -4867,6 +5022,125 @@ h3 .small.ghost:hover {
   user-select: none;
 }
 
+/* Sound volume — the mute button grew into a slider. Clicking the speaker
+   icon still mutes/unmutes instantly; the slider sets the level. The chip
+   floats OVER the meeting window (not the title bar) because the header's
+   drag handler would swallow the slider's own drag gesture. */
+.meeting-volume-chip {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: var(--meeting-font, 12px);
+  background: rgba(12, 22, 36, 0.68);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  user-select: none;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, opacity 0.5s ease;
+}
+
+.meeting-volume-chip:hover {
+  background: rgba(12, 22, 36, 0.9);
+  border-color: rgba(6, 182, 212, 0.6);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.55), 0 0 8px rgba(6, 182, 212, 0.25);
+}
+
+/* Auto-fade: dims to ~30% after a few seconds of audio silence (JS sets
+   .dimmed once the rumble stops and no step sounds have played). Hovering
+   the chip or focusing the slider snaps it back to full opacity instantly;
+   the JS also keeps it bright while the mouse is anywhere over the panel. */
+.meeting-volume-chip.dimmed {
+  opacity: 0.3;
+}
+
+.meeting-volume-chip.dimmed:hover,
+.meeting-volume-chip:focus-within {
+  opacity: 1;
+}
+
+.meeting-volume-mute {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.meeting-volume-mute:hover {
+  background: rgba(255, 255, 255, 0.1);
+  transform: scale(1.1);
+}
+
+.meeting-volume-slider {
+  width: 80px;
+  height: 4px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+  margin: 0;
+}
+
+.meeting-volume-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.meeting-volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--brand-secondary, #06b6d4);
+  box-shadow: 0 0 6px rgba(6, 182, 212, 0.6);
+  cursor: pointer;
+}
+
+.meeting-volume-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.meeting-volume-slider::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--brand-secondary, #06b6d4);
+  border: none;
+  box-shadow: 0 0 6px rgba(6, 182, 212, 0.6);
+  cursor: pointer;
+}
+
+.meeting-volume-label {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #888);
+  min-width: 30px;
+  text-align: right;
+  user-select: none;
+}
+
 .meeting-scrubber {
   display: flex;
   align-items: center;
@@ -4955,6 +5229,33 @@ h3 .small.ghost:hover {
 .meeting-ticker-good { color: #98c379; }
 .meeting-ticker-bad { color: #e06c75; }
 
+/* The combined feud chip — red-gold blend so it reads as the whole argument
+   in one strip, slightly bolder than the plain step outcomes. */
+.meeting-ticker-feud { color: #ffca8a; font-weight: 600; }
+
+/* A meter hitting 100% (rage or smug) pulses its ticker chip once: a quick
+   scale-up with a bright glow that fades back to the chip's normal tint. */
+.meeting-ticker-item.meeting-ticker-flash {
+  border-radius: 4px;
+  padding: 0 6px;
+  animation: meeting-ticker-flash 1.4s ease-out;
+}
+
+@keyframes meeting-ticker-flash {
+  0% {
+    color: #fff;
+    text-shadow: 0 0 12px currentColor;
+    background: rgba(255, 255, 255, 0.25);
+    transform: scale(1.3);
+  }
+  70% {
+    background: rgba(255, 255, 255, 0.18);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 @keyframes meeting-ticker-scroll {
   0% { transform: translateX(0); }
   100% { transform: translateX(-50%); }
@@ -4967,6 +5268,15 @@ h3 .small.ghost:hover {
   border-top: 1px solid rgba(255, 255, 255, 0.07);
   background: rgba(0, 0, 0, 0.28);
   overflow: hidden;
+  transition: max-height 0.25s ease;
+}
+
+/* Expanded: the feed grows to most of the panel so the whole conversation
+   is readable at once — the canvas simply shrinks above it. The px cap
+   keeps the % resolved to a real px value so the max-height transition
+   actually animates (and guards tiny/giant panel heights). */
+.meeting-gossip-log.meeting-gossip-expanded {
+  max-height: min(52%, 320px);
 }
 
 .meeting-gossip-log-head {
@@ -4984,7 +5294,14 @@ h3 .small.ghost:hover {
   color: var(--muted, #777);
 }
 
-.meeting-gossip-log-clear {
+.meeting-gossip-log-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.meeting-gossip-log-clear,
+.meeting-gossip-log-expand {
   background: none;
   border: none;
   color: var(--muted, #777);
@@ -4998,6 +5315,15 @@ h3 .small.ghost:hover {
   color: #e06c75;
 }
 
+.meeting-gossip-log-expand:hover {
+  color: #61afef;
+}
+
+.meeting-gossip-count {
+  color: var(--muted, #666);
+  font-weight: 400;
+}
+
 .meeting-gossip-log-feed {
   overflow-y: auto;
   padding: 4px 12px 6px;
@@ -5009,9 +5335,11 @@ h3 .small.ghost:hover {
 .meeting-gossip-line {
   font-size: var(--meeting-font, 12px);
   line-height: 1.5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Full text, no truncation — long file names / paths wrap onto new lines
+     instead of disappearing behind an ellipsis. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .meeting-gossip-time {
@@ -5066,6 +5394,127 @@ h3 .small.ghost:hover {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  min-width: 0;      /* let it shrink below its text width so the meters group
+                        (and now the feud gauge) never push it off the bar */
+  flex-shrink: 1;
+}
+
+/* Live spider meters — the Editor's rage / Verifier's smugness as small
+   pills with mini progress bars in the status bar, so users can watch the
+   feud climb (and cool) in real time. */
+.meeting-meters {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.meeting-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: calc(var(--meeting-font, 12px) - 1px);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.meeting-meter-emoji {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.meeting-meter-track {
+  width: 42px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.meeting-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.meeting-meter-fill-rage {
+  background: linear-gradient(90deg, #ff7b5c, #ff3b30);
+  box-shadow: 0 0 6px rgba(255, 59, 48, 0.5);
+}
+
+.meeting-meter-fill-smug {
+  background: linear-gradient(90deg, #ffd98f, #f5be3c);
+  box-shadow: 0 0 6px rgba(245, 190, 60, 0.5);
+}
+
+.meeting-meter-pct {
+  color: #ff9a9a;
+}
+
+.meeting-meter-smug .meeting-meter-pct {
+  color: #ffd98f;
+}
+
+/* Feud gauge: one dual-color bar for the whole argument — red (Editor rage)
+   pulls from the left, gold (Verifier smug) from the right, and the seam
+   between them rides at rage/(rage+smug). A glance at the seam (plus the
+   glowing leader chip) shows who's winning the argument. */
+.meeting-feud {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.meeting-feud-leader {
+  width: 16px;
+  font-size: calc(var(--meeting-font, 12px) + 2px);
+  line-height: 1;
+  text-align: center;
+  border-radius: 50%;
+  transition: text-shadow 0.3s ease;
+}
+
+.meeting-feud-leader-rage { text-shadow: 0 0 9px rgba(255, 59, 48, 0.9); }
+.meeting-feud-leader-smug { text-shadow: 0 0 9px rgba(245, 190, 60, 0.9); }
+.meeting-feud-leader-tie  { text-shadow: 0 0 6px rgba(255, 255, 255, 0.35); }
+
+.meeting-feud-track {
+  display: flex;
+  align-items: stretch;
+  width: 92px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.35);
+}
+
+.meeting-feud-rage,
+.meeting-feud-smug {
+  box-sizing: border-box;
+  height: 100%;
+  transition: width 0.4s ease;
+}
+
+.meeting-feud-rage {
+  background: linear-gradient(90deg, #ff7b5c, #ff3b30);
+  border-right: 1px solid rgba(255, 255, 255, 0.55);
+}
+
+/* One side at 100% means the seam has slid to the track edge — hide the
+   hairline so it doesn't dangle on the rounded corner. */
+.meeting-feud-rage.meeting-feud-seamless {
+  border-right: none;
+}
+
+.meeting-feud-smug {
+  background: linear-gradient(90deg, #ffd98f, #f5be3c);
 }
 
 

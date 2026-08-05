@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Weaver.Services;
@@ -9,6 +11,48 @@ partial class AgentController
     private const int StreamWindowChars = 400;
     private const int StreamChunkLen = 40;
     private const int StreamRepeatThreshold = 4;
+
+    /// <summary>Per-endpoint stream reliability counters, keyed by normalized base URL.
+    /// Feeds the health badge in the endpoint picker so flaky endpoints (frequent
+    /// mid-stream drops) are visible at a glance.</summary>
+    private sealed class EndpointStreamHealth
+    {
+        public long Calls;
+        public long StreamErrors;
+        public DateTime LastStreamErrorUtc;
+        public DateTime LastSuccessUtc;
+    }
+    private static readonly ConcurrentDictionary<string, EndpointStreamHealth> _endpointStreamHealth =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Normalizes an endpoint URL to the dictionary key (trim trailing slash).</summary>
+    private static string EndpointHealthKey(string? baseUrl)
+        => string.IsNullOrWhiteSpace(baseUrl) ? "" : baseUrl.Trim().TrimEnd('/');
+
+    /// <summary>
+    /// Records one completed LLM attempt for the endpoint health tracker. A call counts as
+    /// a stream error when it failed with a transport/stream/truncation problem (the same
+    /// predicate that triggers recovery), so the badge reflects reliability, not LLM quality.
+    /// </summary>
+    private static void RecordEndpointCall(string? baseUrl, string? partial, string? error)
+    {
+        var key = EndpointHealthKey(baseUrl);
+        if (key.Length == 0) return;
+        var h = _endpointStreamHealth.GetOrAdd(key, _ => new EndpointStreamHealth());
+        Interlocked.Increment(ref h.Calls);
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            h.LastSuccessUtc = DateTime.UtcNow;
+        }
+        else if (IsTransientTransportFailure(error) || IsRecoverableStreamFailure(partial, error))
+        {
+            // A recovered call counts as a stream error on the FIRST attempt plus a success
+            // on the retry — intentional: the badge measures connection drops, not task
+            // outcomes, so a drop that was healed still shows up as a reliability blip.
+            Interlocked.Increment(ref h.StreamErrors);
+            h.LastStreamErrorUtc = DateTime.UtcNow;
+        }
+    }
 
     private string? _runBaseUrl;
     private string? _runModel;
@@ -116,7 +160,21 @@ partial class AgentController
         var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-        return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens);
+        var first = await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens);
+        RecordEndpointCall(baseUrl, first.raw, first.error);
+        // Non-streaming calls can't reuse partial output, but a one-shot retry still
+        // recovers a transient transport blip (network drop, connection reset, premature
+        // close, timeout) — the prompt is intact and the second attempt often lands.
+        // A tiny delay lets a momentary blip clear before re-issuing.
+        if (IsTransientTransportFailure(first.error))
+        {
+            try { await Task.Delay(300, ct); } catch { return first; }
+            using var retryTimeoutCts = new CancellationTokenSource(timeout);
+            using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
+            first = await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, retryLinkedCts.Token, maxTokens);
+            RecordEndpointCall(baseUrl, first.raw, first.error);
+        }
+        return first;
     }
     private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRawStreaming(
         string systemPrompt, string userMessage, bool emitSse, CancellationToken ct = default,
@@ -134,7 +192,28 @@ partial class AgentController
         var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-        return await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens, emitSse);
+        var first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens, emitSse);
+        RecordEndpointCall(baseUrl, first.raw, first.error);
+        // A stream read error / truncated response can kill an otherwise-good response mid-run
+        // (e.g. the planner had already produced the correct edit before the connection dropped).
+        // Retry the SAME call ONCE, feeding the already-received partial back as a continuation
+        // hint so the work already done is completed instead of discarded.
+        if (IsRecoverableStreamFailure(first.raw, first.error))
+        {
+            await EmitLog(emitSse, "recovering",
+                string.Format(StreamRecoveryRetryMessage, first.raw.Length),
+                detail: RecoveryDetail(first.raw), ct: ct);
+            using var retryTimeoutCts = new CancellationTokenSource(timeout);
+            using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
+            var hintMessages = new object[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user",   content = AppendPartialContinuationHint(userMessage, first.raw) }
+            };
+            first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, hintMessages, retryLinkedCts.Token, maxTokens, emitSse: false);
+            RecordEndpointCall(baseUrl, first.raw, first.error);
+        }
+        return first;
     }
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
       HttpClient client, string target, string model, object messages,
@@ -191,6 +270,8 @@ partial class AgentController
             : target;
         using var progressCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         if (emitSse) _ = PollLlamaProgressAsync(llmBaseUrl, progressCts.Token);
+        var sb = new StringBuilder();
+        var truncatedByTokenLimit = false;
         try
         {
             var request = new HttpRequestMessage(HttpMethod.Post, target) { Content = httpContent };
@@ -199,7 +280,6 @@ partial class AgentController
             { var t2 = await resp.Content.ReadAsStringAsync(ct); return (t2, null, $"HTTP {resp.StatusCode}"); }
             var stream = await resp.Content.ReadAsStreamAsync(ct);
             var reader = new StreamReader(stream);
-            var sb = new StringBuilder();
             using var repeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             while (true)
             {
@@ -217,6 +297,10 @@ partial class AgentController
                     if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
                     {
                         var choice = choices[0];
+                        if (choice.TryGetProperty("finish_reason", out var finishReason) &&
+                            finishReason.ValueKind == JsonValueKind.String &&
+                            string.Equals(finishReason.GetString(), "length", StringComparison.OrdinalIgnoreCase))
+                            truncatedByTokenLimit = true;
                         if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var content))
                         {
                             var token = content.GetString();
@@ -268,10 +352,14 @@ partial class AgentController
                 raw = AgentUtilities.ExtractFirstJsonObject(raw);
             }
             var parsed2 = ParseAgentResponse(raw);
+            // Only treat a max-token cut as unrecoverable when the JSON failed to parse — a
+            // truncated-but-parseable response is returned as-is to avoid spurious retries.
+            if (parsed2 == null && truncatedByTokenLimit)
+                return (raw, null, "Response truncated at max_tokens — partial kept for recovery hint.");
             return (raw, parsed2, parsed2 == null ? "JSON parse failed" : null);
         }
-        catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }
-        catch (Exception ex) { return ("", null, ex.Message); }
+        catch (TaskCanceledException) { return (sb.ToString(), null, "LLM request timed out"); }
+        catch (Exception ex) { return (sb.ToString(), null, ex.Message); }
         finally { try { progressCts.Cancel(); } catch { } }
     }
     private static string? ExtractNewlyAddedMethodName(string? stepChange, string? newStr)
@@ -483,6 +571,29 @@ partial class AgentController
         TimeSpan? requestTimeout = null, int? maxTokens = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
+        var timeout = requestTimeout ?? _infiniteTimeout;
+        using var timeoutCts = new CancellationTokenSource(timeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, linkedCts.Token, maxTokens);
+        RecordEndpointCall(baseUrl, first.raw, first.error);
+        // Same recovery as CallLlmRawStreaming: a dropped connection or max-token cut must
+        // not discard a good partial response — retry once with the partial as a hint.
+        if (IsRecoverableStreamFailure(first.raw, first.error))
+        {
+            await EmitLog(emitSse, "recovering",
+                string.Format(StreamRecoveryRetryMessage, first.raw.Length),
+                detail: RecoveryDetail(first.raw), ct: ct);
+            using var retryTimeoutCts = new CancellationTokenSource(timeout);
+            using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
+            first = await CallLlmRawTextOnce(systemPrompt, AppendPartialContinuationHint(userMessage, first.raw), emitSse: false, retryLinkedCts.Token, maxTokens);
+            RecordEndpointCall(baseUrl, first.raw, first.error);
+        }
+        return first;
+    }
+    private async Task<(string raw, string? error)> CallLlmRawTextOnce(
+        string systemPrompt, string userMessage, bool emitSse, CancellationToken ct, int? maxTokens = null)
+    {
+        var baseUrl = await GetLlamaBaseUrl();
         var model = await GetLlamaModel();
         var client = _clientFactory.CreateClient("llama");
         client.Timeout = _infiniteTimeout;
@@ -491,9 +602,6 @@ partial class AgentController
             new { role = "system", content = systemPrompt },
             new { role = "user",   content = userMessage  }
         };
-        var timeout = requestTimeout ?? _infiniteTimeout;
-        using var timeoutCts = new CancellationTokenSource(timeout);
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var cfg = await LoadConfigAsync();
         var mt = maxTokens ?? cfg.defaultMaxTokens;
         var reqBody = new
@@ -509,19 +617,19 @@ partial class AgentController
         var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
         using var progressCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         if (emitSse) _ = PollLlamaProgressAsync(baseUrl, progressCts.Token);
+        var sb = new StringBuilder();
         try
         {
             var request = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/chat/completions") { Content = httpContent };
-            var resp = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedCts.Token);
+            var resp = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!resp.IsSuccessStatusCode)
-            { var t2 = await resp.Content.ReadAsStringAsync(linkedCts.Token); return (t2, $"HTTP {resp.StatusCode}"); }
-            var stream = await resp.Content.ReadAsStreamAsync(linkedCts.Token);
+            { var t2 = await resp.Content.ReadAsStringAsync(ct); return (t2, $"HTTP {resp.StatusCode}"); }
+            var stream = await resp.Content.ReadAsStreamAsync(ct);
             var reader = new StreamReader(stream);
-            var sb = new StringBuilder();
             while (true)
             {
-                linkedCts.Token.ThrowIfCancellationRequested();
-                var line = await reader.ReadLineAsync().WaitAsync(linkedCts.Token);
+                ct.ThrowIfCancellationRequested();
+                var line = await reader.ReadLineAsync().WaitAsync(ct);
                 if (line == null) break;
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 if (line.Contains("[DONE]")) break;
@@ -568,12 +676,106 @@ partial class AgentController
             if (string.IsNullOrWhiteSpace(raw)) return ("", "Empty LLM response");
             var hallError = DetectHallucination(raw);
             if (hallError != null) return (raw, hallError);
+            // NOTE: max_tokens truncation on the PROSE path is intentionally NOT an error —
+            // pre-plan thinking and compaction are budget-capped and their partial output is
+            // still usable reasoning. Only the JSON path (CallLlmStreaming) treats a truncated
+            // response as an error, because an unparseable step/edit is genuinely unrecoverable.
             return (raw, null);
         }
-        catch (TaskCanceledException) { return ("", "LLM request timed out"); }
-        catch (Exception ex) { return ("", ex.Message); }
+        catch (TaskCanceledException) { return (sb.ToString(), "LLM request timed out"); }
+        catch (Exception ex) { return (sb.ToString(), ex.Message); }
         finally { try { progressCts.Cancel(); } catch { } }
     }
+    private const string StreamRecoveryRetryMessage =
+        "⚠ Stream interrupted — retrying the same call once with the partial response ({0} chars) as a continuation hint.";
+
+    /// <summary>
+    /// True when a failed streaming LLM call should be retried once with its partial output
+    /// as a continuation hint. Only genuine transport/stream failures or max-token truncation
+    /// qualify — a substantive partial response was received but the call did not complete.
+    /// Pure semantic failures (JSON parse, hallucination, repetition loops, empty) are NOT
+    /// recoverable by re-running and must flow through their existing retry/rejection paths.
+    /// </summary>
+    private static bool IsRecoverableStreamFailure(string? partial, string? error)
+    {
+        if (string.IsNullOrWhiteSpace(partial) || partial.Length < 40) return false;
+        if (string.IsNullOrWhiteSpace(error)) return false;
+        if (error.Contains("JSON parse", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("hallucination", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("Repetition loop", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("Empty LLM response", StringComparison.OrdinalIgnoreCase))
+            return false;
+        return error.Contains("read", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("stream", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("network", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("connection", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("reset", StringComparison.OrdinalIgnoreCase) ||
+               // HttpIOException for a server closing the body early: "The response ended prematurely."
+               error.Contains("prematurely", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("truncated at max_tokens", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// True when a NON-STREAMING LLM call failed with a transient transport problem worth
+    /// one silent retry: network/read/connection/reset/premature-close/timeout. There is no
+    /// partial output to preserve (the whole response is discarded on exception), but the
+    /// prompt is intact, so a second attempt often succeeds after a transient blip. Semantic
+    /// failures (JSON parse, hallucination, repetition, empty, HTTP status) are excluded —
+    /// they are deterministic and retrying would just burn time.
+    /// NOTE: timeouts ARE retried here (unlike the streaming path, which excludes them) —
+    /// the non-streaming call lost the ENTIRE response, so one fresh-budget attempt is a
+    /// genuine hedge; a streaming partial is junk and the server is likely still generating.
+    /// </summary>
+    private static bool IsTransientTransportFailure(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error)) return false;
+        if (error.StartsWith("HTTP ", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("JSON parse", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("hallucination", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("Repetition loop", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("Empty LLM response", StringComparison.OrdinalIgnoreCase))
+            return false;
+        return error.Contains("read", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("stream", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("network", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("connection", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("reset", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("prematurely", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("timed out", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Capped preview of the partial response, attached to the 'recovering' log entry so the
+    /// user can inspect exactly what work was preserved before the retry completed it.
+    /// </summary>
+    private static string? RecoveryDetail(string? partial)
+        => string.IsNullOrWhiteSpace(partial)
+            ? null
+            : (partial.Length > 600 ? partial[..600] + "\n…(partial preview)…" : partial);
+
+    /// <summary>
+    /// Builds the user message for the one-shot retry: the original prompt plus the partial
+    /// response the model already produced, framed as a continuation task so the retry keeps
+    /// the good work (e.g. the correct refactor that was streamed before the connection died)
+    /// instead of regenerating from scratch. Capped to keep the retry context sane.
+    /// </summary>
+    private static string AppendPartialContinuationHint(string userMessage, string partial)
+    {
+        // Keep the HEAD (structure/context) and the TAIL (the exact continuation point) of a
+        // long partial; dropping the middle is safe, dropping the end would orphan the retry.
+        var cap = partial;
+        if (partial.Length > 16000)
+            cap = partial[..12000] + "\n…(partial truncated, middle omitted)…\n" + partial[^4000..];
+        return userMessage + "\n\n" +
+               "### YOUR PREVIOUS RESPONSE WAS INTERRUPTED BY A STREAM ERROR ###\n" +
+               "Your previous attempt produced the partial response below but the connection dropped before it " +
+               "finished. The partial work is good — CONTINUE from exactly where it left off and output the " +
+               "COMPLETE response to the original request. Preserve everything already written below; finish any " +
+               "truncated JSON (close braces/brackets, complete field values) and return the FULL valid response.\n" +
+               "\nPARTIAL RESPONSE (already produced — continue from this point):\n```\n" +
+               cap + "\n```\n";
+    }
+
     private static string ExtractLlmContent(string respText)
     {
         try

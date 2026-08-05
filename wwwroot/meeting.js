@@ -55,6 +55,10 @@ angular.module('kanbanApp')
         };
         vm._clampMeetingPanel();
         vm.meetingSpeaker = '🕷️ the spiders are resting';
+        vm.meetingEditorRage = 0;   // live Editor rage % — drives the status-bar meter
+        vm.meetingVerifierSmug = 0; // live Verifier smug % (the same failing edits drive both)
+        vm.meetingFeudRatio = 50;   // feud-gauge seam: rage/(rage+smug), 0-100
+        vm.meetingFeudLeader = 'tie'; // 'rage' | 'smug' | 'tie' — who's winning the argument
         vm.meetingBoardLines = [];
 
         // ── Spider cast (role → spider) ────────────────────────────────────
@@ -74,6 +78,9 @@ angular.module('kanbanApp')
         // Where the Verifier stands to stare down the Complexity spider after
         // an overruled verdict — just left of the board stand, face to face.
         var STANDOFF_SPOT = { x: 0.54, y: 0.86 };
+        var SHOUT_SPOT_EDITOR = { x: 0.48, y: 0.86 };   // middle of the office
+        var SHOUT_SPOT_VERIFIER = { x: 0.60, y: 0.86 }; // face to face
+
         // Board rectangle on the wall (fractions of W/H).
         var BOARD_RECT = { x: 0.60, y: 0.05, w: 0.34, h: 0.20 };
         // Table rectangle on the floor.
@@ -101,6 +108,17 @@ angular.module('kanbanApp')
         vm.meetingReplaySpeed = 1;    // replay playback multiplier (1 / 1.5 / 2)
         vm.meetingTicker = [];        // recent step outcomes ({ kind, label })
         vm.gossipLog = [];            // transcribed jokes + gossip ({ t, who, text })
+        // Restore the office chat from the previous session so the whole
+        // conversation survives a page refresh (capped, hardened against junk).
+        try {
+          var _chatRaw = window.localStorage.getItem('weaver.meeting.chat');
+          if (_chatRaw) {
+            var _chat = JSON.parse(_chatRaw);
+            if (Array.isArray(_chat)) vm.gossipLog = _chat.slice(-500);
+          }
+        } catch (e) { }
+        vm.gossipExpanded = false;    // office chat feed expanded → full conversation view
+        vm.toggleGossipExpanded = function () { vm.gossipExpanded = !vm.gossipExpanded; };
         vm.meetingIdeas = [];         // backend improvement suggestions ({ topic, desc, complete, date })
 
         function makeScene() {
@@ -123,6 +141,13 @@ angular.module('kanbanApp')
               rageAt: Date.now(), // when rage last changed (for idle cooling)
               rageDrainedAt: Date.now(), // last frame cooling was applied
               stomping: false, // exaggerated angry walk back to the desk
+              smug: 0, // Verifier spider: escalating smugness meter (0..100)
+              smugAt: Date.now(), // when smugness last changed (for idle cooling)
+              smugDrainedAt: Date.now(), // last frame cooling was applied
+              crowned: false,  // 100% smug → the desk badge becomes a golden crown
+              grump: 0,        // per-role domain meter (planner/explorer/commander/reviewer/IT/ideas)
+              grumpAt: Date.now(),      // when grump last changed (for idle cooling)
+              grumpDrainedAt: Date.now(), // last frame cooling was applied
               glaringAt: null  // spider this one is locking eyes with (glare skit)
             };
           });
@@ -145,16 +170,23 @@ angular.module('kanbanApp')
             verdictOutcome: null,    // 'right' | 'wrong' | 'fail' from the run's verdict
             verdictGossiped: false,  // once the verdict is retold at the cooler, it's done
             _lastStepType: '',       // step type for reaction routing
+            _editFailStreak: 0,      // consecutive failed edits (Editor spider's escalating anger)
             confetti: [],            // celebration particles ({ x, y, vx, vy, rot, vr, color, size, life, ttl })
             calmQuipFired: false,    // once-per-run 'calmed down' line (idle drain to 0)
             steam: [],               // rage steam wisps off the Complexity spider ({ x, y, vx, vy, size, sway, swaySpeed, life, ttl })
+            sparkles: [],            // smug golden glints off the Verifier spider ({ x, y, vx, vy, size, phase, twinkle, life, ttl })
             watching: null,          // active 'the user is watching' skit
             watchingCd: 8,           // cooldown before the next watching skit
             standoff: null,          // active Verifier-vs-Complexity standoff skit
             standoffCd: 20,          // cooldown before the next standoff can start
             glare: null,             // active Reviewer-vs-Complexity glare skit
             coolerTrip: null,        // Complexity spider storming off to the cooler
-            coolerTripCd: 90         // cooldown before the next rage-cooler trip
+            coolerTripCd: 90,        // cooldown before the next rage-cooler trip
+            editorMeltdown: null,    // Editor's 100%-rage board tantrum skit
+            meltdownFired: false,    // once-per-run: the meltdown already happened
+            verifierVictory: null,   // Verifier's 100%-smug chat victory lap
+            shoutMatch: null,        // Editor-vs-Verifier 70%+ shouting match
+            shoutFired: false        // once-per-run: the shouting match happened
           };
         }
 
@@ -676,6 +708,244 @@ angular.module('kanbanApp')
           "Rejected?! Rude.",
           "I felt that one in my 8 legs."
         ];
+        // The Editor spider's escalating fury — it APPLIES the edits, so a
+        // rejected diff is personal. Its rage meter climbs with every edit
+        // that fails in a row, and the line it picks is chosen by how hot the
+        // meter is: mild professional disappointment → deadpan passive
+        // aggression → proper anger → full meltdown.
+        var EDITOR_ANNOYED = [
+          [ // rage < 30 — disappointed, still professional
+            "Hm. Rejected. That's… suboptimal.",
+            "Another failed edit. Fascinating.",
+            "I'll just… try that again. No big deal.",
+            "The diff was right. Probably. We'll see.",
+            "Okay. Retrying. This is fine.",
+            "A small setback. I've recovered from worse. Barely."
+          ],
+          [ // 30-59 — passive-aggressive
+            "AGAIN? The file and I are having a conversation, and it keeps hanging up.",
+            "Third time's the charm. My leg is cramping from all this retrying.",
+            "If this edit fails one more time, I'm naming the diff.",
+            "I crafted that edit with CARE. Rejected. REJECTED.",
+            "The board doesn't appreciate art. Clearly.",
+            "I'm starting to take this personally. And I take things VERY personally.",
+            "I've woven webs less tangled than this edit's rejection history."
+          ],
+          [ // 60-89 — properly angry
+            "THIS FILE. THIS STUPID FILE. I WILL BEND IT TO MY WILL.",
+            "Rejected AGAIN?! The code is wrong. Not me. THE CODE.",
+            "I'm this close to rewriting the whole file by hand. Leg by leg.",
+            "Every rejected edit is a tiny web of vengeance I'm weaving.",
+            "I have 8 legs and NONE of them are for accepting this nonsense.",
+            "The next edit I write is going to be so correct it hurts."
+          ],
+          [ // 90-100 — full meltdown
+            "💢 I AM GOING TO SPIN A WEB SO TIGHT THIS FILE CAN'T ESCAPE.",
+            "💢 REJECTED. REJECTED. REJECTED. I KEEP COUNTING. THE COUNT KEEPS GROWING.",
+            "💢 THE DIFF IS INNOCENT. THE TOOL IS GUILTY. I AM DOING THE EDIT MYSELF.",
+            "💢 I WILL EDIT THIS FILE WITH MY SHEER ANGER. NO TOOL. NO DIFF. JUST FURY.",
+            "💢 CALM. I'M CALM. I'VE NEVER BEEN LESS CALM IN MY LIFE.",
+            "💢 8 LEGS. 100% RAGE. ZERO ACCEPTANCE OF THIS OUTCOME."
+          ]
+        ];
+        function editorRageLine(rage) {
+          var r = rage || 0;
+          var tier = r >= 90 ? 3 : r >= 60 ? 2 : r >= 30 ? 1 : 0;
+          var arr = EDITOR_ANNOYED[tier];
+          return arr[Math.floor(Math.random() * arr.length)];
+        }
+        // The Verifier spider's smugness — it's the one REJECTING the Editor's
+        // work, so every failed edit is a personal vindication. Its meter
+        // climbs with the same consecutive-edit streak that enrages the
+        // Editor, and the lines it posts to the Office Chat degrade from quiet
+        // satisfaction to insufferable gloating as the meter heats up.
+        var VERIFIER_SMUG = [
+          [ // smug < 25 — quiet satisfaction
+            "Hm. Rejected. As expected.",
+            "I did say that edit looked shaky.",
+            "The diff didn't survive contact with reality.",
+            "Another rejection. I'll just… note that down. Not counting, though.",
+            "Correction: the edit was wrong. Small note. Moving on."
+          ],
+          [ // 25-49 — starting to enjoy it
+            "Told you so. Gently. I'm being nice about it.",
+            "I'm not saying I told you so. But I did. I am saying it.",
+            "Every failed edit is a small victory for verification.",
+            "The evidence keeps agreeing with me. Good evidence.",
+            "I'd say 'I could have predicted this'… but I already did."
+          ],
+          [ // 50-74 — full smug
+            "TOLD you so. Where's my gold star?",
+            "I reject. I reject again. This is fun.",
+            "The Editor keeps writing, I keep catching. We're a beautiful machine.",
+            "Oh, this is wonderful. Rejected again. My day is made.",
+            "Someone get the Editor a break. And me a trophy."
+          ],
+          [ // 75-100 — insufferable
+            "✨ REJECTED. AGAIN. I am LITERALLY never wrong.",
+            "✨ I should write a book: 'Why You're Wrong, Vol. 47'.",
+            "✨ The Editor is trying SO hard. It's adorable. Rejected.",
+            "✨ Verification: 47. Edits: 0. The scoreboard is my art.",
+            "✨ I'm so smug right now it's practically a second abdomen.",
+            "✨ Look at the Editor fuming. Anyway — rejected."
+          ]
+        ];
+        function verifierSmugLine(smug) {
+          var s = smug || 0;
+          var tier = s >= 75 ? 3 : s >= 50 ? 2 : s >= 25 ? 1 : 0;
+          var arr = VERIFIER_SMUG[tier];
+          return arr[Math.floor(Math.random() * arr.length)];
+        }
+        // ── Verifier victory-lap lines ─────────────────────────────────────
+        // When smugness hits 100% the Verifier takes a victory lap in the
+        // Office Chat: a string of gloats, the Editor's objection, a weary
+        // bystander, and one final gloat. It also gets crowned — its desk
+        // badge becomes a glittering golden crown for the rest of the run.
+        var VICTORY_LAP = [
+          "✨ 100% SMUG. A perfect score. I'm having this framed.",
+          "✨ Victory lap! Catch me glowing. Actually don't — I'm too brilliant to touch.",
+          "✨ REJECTED. AGAIN. I am LITERALLY never wrong. This is now a lifestyle.",
+          "✨ Somewhere, a trophy is being engraved. Probably with my name.",
+          "✨ The crown fits. Don't be jealous. Be verified."
+        ];
+        var VICTORY_EDITOR_REACTION = [
+          "😤 A CROWN?! For REJECTING MY WORK?!",
+          "😤 I object to this coronation. Vigorously.",
+          "😤 That crown is 100% undeserved. …fine. Maybe 15% deserved."
+        ];
+        var VICTORY_WITNESS = [
+          "And now we live in a crowned-verifier timeline.",
+          "Somebody get the gold one a bigger desk for its ego.",
+          "It's been 3 seconds and it already mentioned the crown twice.",
+          "The office is at 0% peace. The crown is at 100% smug."
+        ];
+        // ── Shouting-match lines ──────────────────────────────────────────
+        // When both the Editor's rage and the Verifier's smugness pass 70 the
+        // rivalry boils over into a head-to-head shouting match in the middle
+        // of the office, while the rest of the office takes cover.
+        var SHOUT_EDITOR = [
+          "YOU. REJECT. EVERYTHING. WHY?!",
+          "I AM TRYING TO WORK AND YOU KEEP SAYING NO!",
+          "SEVENTY PERCENT. SEVENTY. THAT'S NOT A COINCIDENCE!",
+          "THE DIFF WAS FINE AND YOU KNOW IT!",
+          "SAY 'REJECTED' ONE MORE TIME. I DARE YOU."
+        ];
+        var SHOUT_VERIFIER = [
+          "AND I WILL KEEP SAYING NO! IT'S MY JOB!",
+          "SEVENTY PERCENT SMUG AND CLIMBING. YOU'RE WELCOME.",
+          "YOUR DIFFS ARE 30% RIGHT AT BEST. I MEASURE THESE THINGS.",
+          "REJECTED. REJECTED. REJECTED. SEE? STILL CORRECT.",
+          "SHOUT ALL YOU WANT — THE CHECKMARK IS ON MY SIDE!"
+        ];
+        var SHOUT_EDITOR_LAST = [
+          "THIS ISN'T OVER. I'LL FIX EVERYTHING. WATCH ME.",
+          "FINE. I'M GOING BACK TO MY DESK. TO WRITE BETTER CODE THAN YOUR REJECTIONS."
+        ];
+        var SHOUT_VERIFIER_LAST = [
+          "I'LL BE HERE. SMUG. CORRECT. AS ALWAYS.",
+          "SAME TIME TOMORROW? I'M FREE. I'M ALWAYS FREE."
+        ];
+        var SHOUT_COVER = [
+          "🛡️ COVER!",
+          "🙈",
+          "I'm hiding behind the monitor.",
+          "Act natural. They can't see us if we don't move.",
+          "🛡️ This is between THEM now."
+        ];
+        // ── Editor meltdown lines ──────────────────────────────────────────
+        // At 100% rage the Editor storms to the board, scribbles a furious
+        // message, then delivers a tirade of blame. It blames the planner,
+        // explorer, commander, verifier — anyone but itself. ~1 in 12 blames
+        // is a grudging admission of fault; the rest point at a colleague.
+        var MELTDOWN_SCRIBBLE = [
+          "FIX YOUR OWN CODE!!!",
+          "THIS IS NOT MY FAULT",
+          "I AM FINE. EVERYTHING IS BROKEN.",
+          "WHY DOES EVERYTHING REJECT?!",
+          "I DID NOTHING WRONG"
+        ];
+        var MELTDOWN_BLAME = [
+          "THE PLAN said 'simple edit'. THIS. IS. NOT. SIMPLE. PLANNER?!",
+          "I blame the PLAN. It promised a clean diff. THE PLAN LIED.",
+          "The EXPLORER said this file was pristine. IT WAS A LIE.",
+          "I blame the EXPLORER. 'Coast is clear', it said. It was NOT clear.",
+          "The COMMANDER ran the wrong build. I saw it. I always see it.",
+          "I blame the COMMANDER. Wrong command, wrong everything.",
+          "The VERIFIER rejected a PERFECTLY GOOD DIFF. This is a vendetta.",
+          "I blame the VERIFIER. It has been in a MOOD all day.",
+          "The IT specialist configured the WRONG endpoint. Classic.",
+          "I blame IT specialist. It's always the config. ALWAYS.",
+          "I blame IDEAS. It suggested this. It has never had a good idea.",
+          "The REVIEWER will take credit when this finally works. Mark my words."
+        ];
+        var MELTDOWN_SELF = [
+          "...FINE. Maybe the diff was slightly off. MAYBE. I said MAYBE.",
+          "I am NOT blaming myself. I am simply... noting a correlation."
+        ];
+        var MELTDOWN_REACTIONS = [
+          "The green one just... exploded at the board?",
+          "Is the Editor okay? That scribble was LOUD.",
+          "I've never seen it write that fast. Or that angry.",
+          "Someone get the Editor a hug. From a distance.",
+          "The board is going to need therapy after this.",
+          "That was a lot of caps lock. A LOT.",
+          "I'm staying at my desk until the green one calms down.",
+          "It pointed at EVERYONE. Except itself. Curious.",
+          "Did it just blame the PLAN? The plan is a document. It can't defend itself."
+        ];
+        var MELTDOWN_RETORTS = [
+          "It blamed ME?! I was right here the whole time!",
+          "That's rich. Coming from the spider who wrote the diff.",
+          "I'm not even in the code path. But fine. I'M the problem.",
+          "Blame me all you want — the checkmark is on MY side.",
+          "I would defend myself, but the Editor is at 100% and I value my legs."
+        ];
+        // ── Post-meltdown emergency meeting lines ─────────────────────────
+        // After the Editor stomps home, the rest of the office convenes an
+        // emergency meeting in the chat to process what just happened: the
+        // Planner leads with a 'teachable moment', the Verifier gleefully
+        // makes it worse, a couple more colleagues weigh in, and the Editor
+        // mumbles from its desk. Role-pooled so every speaker stays in
+        // character.
+        var AFTERMATH_PLANNER = [
+          "Okay. That happened. Let's call it… a teachable moment.",
+          "A teachable moment, everyone. I've seen worse. Rarely.",
+          "Let's all treat this as a teachable moment. The scribble, however, stays."
+        ];
+        var AFTERMATH_VERIFIER = [
+          "I'd apologize, but I was right. Again. As usual. It's a burden.",
+          "A 100% meltdown means I rejected 100% correctly. You're welcome.",
+          "Should we check on him? I brought popcorn. I'm fine either way."
+        ];
+        var AFTERMATH_COMMANDER = [
+          "Nobody panics. Except him. He's banned from the sharpie.",
+          "Deploy the decaf. This is now officially a personnel issue."
+        ];
+        var AFTERMATH_EXPLORER = [
+          "I saw this coming from a mile away. I saw it from EVERY mile.",
+          "The territory was unclear. The blame, however, was fully mapped."
+        ];
+        var AFTERMATH_COMPLEXITY = [
+          "That tantrum burned a full rage meter in 40 seconds. Impressive throughput.",
+          "I rate that tantrum 92/100 on my misery index. The scribble was 88."
+        ];
+        var AFTERMATH_REVIEWER = [
+          "For the record: the scribble is grammatically sound. Just… loud.",
+          "I would have rejected the tantrum too. Poor variable naming."
+        ];
+        var AFTERMATH_ITS = [
+          "I can reset his chair. Physically. I've been waiting for permission.",
+          "I've prepared a 'calm down' playlist. It's just white noise. It works."
+        ];
+        var AFTERMATH_IDEAS = [
+          "What if… we installed a designated scream corner?",
+          "What if the board were made of… stress foam?"
+        ];
+        var AFTERMATH_EDITOR = [
+          "🔇 I CAN HEAR EVERY SINGLE ONE OF YOU.",
+          "🔇 THIS IS NOT A MEETING. THIS IS A WITCH HUNT.",
+          "🔇 THE SCRIBBLE WAS ART. ART, I SAY."
+        ];
         // Fake but fun ranks based on live user stats. Each rank carries a
         // military-style insignia: chevrons (enlisted stripes, pointing up),
         // stars (officer rank), and a grade color (bronze → silver → gold →
@@ -836,9 +1106,11 @@ angular.module('kanbanApp')
           if (scene.gossip) endGossipNow();
           if (scene.coolerTrip) endCoolerTripNow(); // a step landing breaks the cooler break
           var spider = randomSpider();
-          // Prefer the spider matching the step, but never stomp the writer.
+          // Prefer the spider matching the step, but never stomp the writer —
+          // unless it's the Editor fuming over a rejected edit: fury trumps
+          // stagecraft, so it interrupts its own board-writing to complain.
           var byStep = spiderForStepType(scene._lastStepType);
-          if (byStep && byStep !== scene.writer) spider = byStep;
+          if (byStep && (byStep !== scene.writer || (byStep.role === 'editor' && (byStep.rage || 0) > 0))) spider = byStep;
           if (!spider) return;
           var emoji = kind === 'good' ? '🙌' : '😬';
           setSpeech(spider, emoji + ' ' + text, 3.5, spider.icon + ' ' + spider.name + (kind === 'good' ? ' — step landed' : ' — step failed'));
@@ -858,16 +1130,31 @@ angular.module('kanbanApp')
         // ── Sound effects (WebAudio synth — no external files) ─────────────
         // Soft tick while a spider writes on the board, gentle whoosh while
         // they walk, and a little chime when the plan completes. All sounds
-        // are generated with oscillators/noise buffers, and can be muted via
-        // the header button (persisted in localStorage).
+        // are generated with oscillators/noise buffers, and scale with the
+        // header volume slider (persisted in localStorage).
         vm.meetingHovered = false;  // true while the mouse is over the panel
         vm.meetingHoverSince = null; // when the current hover began (for watched-drain boost)
         var _audioCtx = null;
+        var _masterGain = null; // global volume node — every sound routes through it
+        // Office sound volume, 0-100 (0 = muted). Replaces the old on/off mute
+        // with a header slider; the legacy meetingMuted flag maps to 0.
+        vm.meetingVolume = 70;
         vm.meetingMuted = false;
-        try { vm.meetingMuted = window.localStorage.getItem('weaver.meeting.muted') === '1'; } catch (e) { }
+        var _prevMeetingVolume = 70;
+        try {
+          var _volRaw = window.localStorage.getItem('weaver.meeting.volume');
+          if (_volRaw !== null) {
+            var _v = parseInt(_volRaw, 10);
+            if (!isNaN(_v)) vm.meetingVolume = Math.max(0, Math.min(100, _v));
+          } else if (window.localStorage.getItem('weaver.meeting.muted') === '1') {
+            vm.meetingVolume = 0; // legacy mute → volume off
+            try { window.localStorage.removeItem('weaver.meeting.muted'); } catch (e) { }
+          }
+        } catch (e) { }
+        vm.meetingMuted = vm.meetingVolume <= 0;
         // Panel-wide text size — scales the DOM chrome (status bar, ticker,
         // office chat, badges) via the --meeting-font CSS var AND the canvas
-        // text via mf() below. Persisted like the mute toggle.
+        // text via mf() below. Persisted like the volume slider.
         vm.meetingFontSize = 12;
         try {
           var _mf = parseInt(window.localStorage.getItem('weaver.meeting.font'), 10);
@@ -886,7 +1173,7 @@ angular.module('kanbanApp')
           if (vm.saveSettings) vm.saveSettings(true);
         }
         // One-time discoverability tooltip: the first time the rage rumble is
-        // actually heard, point users at the header mute toggle. Persisted so
+        // actually heard, point users at the header volume slider. Persisted so
         // it only shows once ever.
         vm.meetingSoundTip = false;
         vm._soundTipShown = false;
@@ -939,9 +1226,48 @@ angular.module('kanbanApp')
           }
           return _audioCtx;
         }
-        function sfx() { return !vm.meetingMuted ? audioCtx() : null; }
+        // Master volume node — every one-shot sound and the rage rumble connect
+        // here instead of ctx.destination, so the header slider scales them all.
+        function masterGain() {
+          var ctx = audioCtx(); if (!ctx) return null;
+          if (!_masterGain) {
+            _masterGain = ctx.createGain();
+            _masterGain.gain.value = Math.max(0, Math.min(1, (vm.meetingVolume || 0) / 100));
+            _masterGain.connect(ctx.destination);
+          }
+          return _masterGain;
+        }
+        function sfx() { return vm.meetingVolume > 0 ? audioCtx() : null; }
+        // ── Volume chip auto-fade ─────────────────────────────────────────
+        // The floating volume chip dims to ~30% after a few seconds of audio
+        // silence so it doesn't loom over the office, then snaps back to full
+        // opacity the instant any sound plays (step ticks, stomps, chimes,
+        // the rage rumble) or the mouse is over the panel. vm.meetingVolumeDim
+        // is the only digest-triggering state and flips at most once per
+        // change, so the per-frame check can't cause digest storms.
+        vm.meetingVolumeDim = false;   // true → chip faded to ~30% opacity
+        var _lastSoundAt = 0;          // when the last one-shot sound played
+        var VOLUME_ACTIVE_MS = 3000;   // how long a sound keeps the chip bright
+        function markSoundActive() {
+          _lastSoundAt = Date.now();
+          updateVolumeChipVisibility();
+        }
+        function updateVolumeChipVisibility() {
+          // _rageRumble is declared later in this scope (var-hoisted, so safe
+          // to read here at runtime — it's always initialized before any
+          // sound or frame can run). The node exists only while it's audibly
+          // playing (the per-frame updater starts it and tears it down on
+          // silence), so its presence alone means sound is actively playing.
+          var soundActive = !!_rageRumble || (Date.now() - _lastSoundAt) < VOLUME_ACTIVE_MS;
+          var dim = !soundActive && !vm.meetingHovered;
+          if (vm.meetingVolumeDim !== dim) {
+            vm.meetingVolumeDim = dim;
+            $scope.$applyAsync();
+          }
+        }
         function playTick() {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             var osc = ctx.createOscillator();
@@ -950,12 +1276,13 @@ angular.module('kanbanApp')
             osc.frequency.value = 1250;
             gain.gain.setValueAtTime(0.025, t);
             gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
-            osc.connect(gain); gain.connect(ctx.destination);
+            osc.connect(gain); gain.connect(masterGain());
             osc.start(t); osc.stop(t + 0.05);
           } catch (e) { }
         }
         function playWhoosh() {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             var bufferSize = Math.floor(ctx.sampleRate * 0.16);
@@ -971,12 +1298,13 @@ angular.module('kanbanApp')
             var gain = ctx.createGain();
             gain.gain.setValueAtTime(0.05, t);
             gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
-            src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+            src.connect(filter); filter.connect(gain); gain.connect(masterGain());
             src.start(t);
           } catch (e) { }
         }
         function playChime() {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             var notes = [523.25, 659.25, 783.99]; // C5 E5 G5
@@ -989,13 +1317,14 @@ angular.module('kanbanApp')
               gain.gain.setValueAtTime(0, st);
               gain.gain.linearRampToValueAtTime(0.06, st + 0.02);
               gain.gain.exponentialRampToValueAtTime(0.0001, st + 0.6);
-              osc.connect(gain); gain.connect(ctx.destination);
+              osc.connect(gain); gain.connect(masterGain());
               osc.start(st); osc.stop(st + 0.65);
             }
           } catch (e) { }
         }
         function playDing() {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             // Bright pop: two quick sine partials that decay fast.
@@ -1008,13 +1337,14 @@ angular.module('kanbanApp')
               g.gain.setValueAtTime(0, st);
               g.gain.linearRampToValueAtTime(spec.gain, st + 0.012);
               g.gain.exponentialRampToValueAtTime(0.0001, st + 0.18);
-              osc.connect(g); g.connect(ctx.destination);
+              osc.connect(g); g.connect(masterGain());
               osc.start(st); osc.stop(st + 0.2);
             });
           } catch (e) { }
         }
         function playWomp() {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             // Low descending wobble: a sine that slides down with a soft thump.
@@ -1025,12 +1355,13 @@ angular.module('kanbanApp')
             osc.frequency.exponentialRampToValueAtTime(98, t + 0.28);
             gain.gain.setValueAtTime(0.07, t);
             gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
-            osc.connect(gain); gain.connect(ctx.destination);
+            osc.connect(gain); gain.connect(masterGain());
             osc.start(t); osc.stop(t + 0.34);
           } catch (e) { }
         }
         function playStomp() {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             // Heavy angry thud: low square hit with a fast pitch drop.
@@ -1041,15 +1372,104 @@ angular.module('kanbanApp')
             osc.frequency.exponentialRampToValueAtTime(38, t + 0.18);
             gain.gain.setValueAtTime(0.09, t);
             gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
-            osc.connect(gain); gain.connect(ctx.destination);
+            osc.connect(gain); gain.connect(masterGain());
             osc.start(t); osc.stop(t + 0.24);
+          } catch (e) { }
+        }
+        // ── Meltdown sound design ─────────────────────────────────────────
+        // The Editor's board tantrum gets three audio beats: a low sustained
+        // 'furious scribbling' hiss while it writes, the thud of each stomp-
+        // land (already played by the walk-arrival handler via playStomp), and
+        // a record-scratch 'silence' the moment it finishes stomping back —
+        // as if the whole office's needle jumped off the record.
+        var _scribbleLoop = null; // { src, lfo, gain, filter } persistent scribble node
+        function startScribbleLoop() {
+          if (vm.meetingVolume <= 0) return; // no point running a silent hiss
+          var ctx = audioCtx(); if (!ctx) return;
+          if (_scribbleLoop) return;
+          try {
+            // Looped hiss of white noise through a bandpass — the sound of a
+            // marker dragged furiously. A fast square LFO chops the gain so it
+            // reads as rapid scribble strokes instead of flat white noise.
+            var dur = 1.5;
+            var buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+            var data = buffer.getChannelData(0);
+            for (var i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+            var src = ctx.createBufferSource();
+            src.buffer = buffer;
+            src.loop = true;
+            var filter = ctx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = 1900;
+            filter.Q.value = 1.1;
+            var gain = ctx.createGain();
+            gain.gain.value = 0.028;
+            var lfo = ctx.createOscillator();
+            lfo.type = 'square';
+            lfo.frequency.value = 16;
+            var lfoGain = ctx.createGain();
+            lfoGain.gain.value = 0.028;
+            lfo.connect(lfoGain); lfoGain.connect(gain.gain); // chop: 0 ↔ 0.056
+            src.connect(filter); filter.connect(gain); gain.connect(masterGain());
+            src.start(); lfo.start();
+            _scribbleLoop = { src: src, lfo: lfo, gain: gain, filter: filter };
+          } catch (e) { _scribbleLoop = null; }
+        }
+        function updateScribbleLoop() {
+          if (!_scribbleLoop) return;
+          try {
+            var t = audioCtx().currentTime;
+            // The marker drags across the board — the filter pitch scrubs
+            // side to side so the hiss feels frantic, not static.
+            var wob = Math.sin(Date.now() / 55) * 340;
+            _scribbleLoop.filter.frequency.setTargetAtTime(1900 + wob, t, 0.03);
+          } catch (e) { }
+        }
+        function stopScribbleLoop() {
+          if (!_scribbleLoop) return;
+          try { _scribbleLoop.src.stop(); _scribbleLoop.lfo.stop(); } catch (e) { }
+          _scribbleLoop = null;
+        }
+        // The turntable stops: a needle-scrape sweep (noise through a bandpass
+        // sliding down) plus a drooping tone — then the office falls silent.
+        function playRecordScratch() {
+          var ctx = sfx(); if (!ctx) return;
+          markSoundActive();
+          try {
+            var t = ctx.currentTime;
+            var dur = 0.55;
+            var buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+            var data = buffer.getChannelData(0);
+            for (var i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - (i / data.length) * 0.9);
+            var src = ctx.createBufferSource();
+            src.buffer = buffer;
+            var filter = ctx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.setValueAtTime(3200, t);
+            filter.frequency.exponentialRampToValueAtTime(350, t + dur);
+            filter.Q.value = 2;
+            var gain = ctx.createGain();
+            gain.gain.setValueAtTime(0.06, t);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+            src.connect(filter); filter.connect(gain); gain.connect(masterGain());
+            src.start(t);
+            // The slowing turntable: a sine that droops with a bit of wow.
+            var osc = ctx.createOscillator();
+            var og = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(320, t);
+            osc.frequency.exponentialRampToValueAtTime(55, t + dur);
+            og.gain.setValueAtTime(0.05, t);
+            og.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+            osc.connect(og); og.connect(masterGain());
+            osc.start(t); osc.stop(t + dur + 0.05);
           } catch (e) { }
         }
         // ── Rage sound ─────────────────────────────────────────────────────
         // The Complexity spider's anger has a voice: a low continuous rumble
         // that swells as the meter climbs (volume + pitch both track rage),
         // plus a quick one-shot 'steam vent' hiss when it hits 100%. Both
-        // honor the existing mute toggle and only sound while the panel is
+        // honor the volume slider and only sound while the panel is
         // visible. The rumble is a persistent node that must be started and
         // stopped explicitly (unlike the one-shots above).
         // The jitter wave that trembles the spider's body on screen. Shared by
@@ -1063,6 +1483,7 @@ angular.module('kanbanApp')
         var _steamVentAt = 0;   // last steam-vent time (throttle)
         function playSteamVent() {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             // Short burst of band-passed noise — a pressure-valve hiss.
@@ -1079,12 +1500,13 @@ angular.module('kanbanApp')
             var gain = ctx.createGain();
             gain.gain.setValueAtTime(0.055, t);
             gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
-            src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+            src.connect(filter); filter.connect(gain); gain.connect(masterGain());
             src.start(t);
           } catch (e) { }
         }
         function playRageCreak(bucket) {
           var ctx = sfx(); if (!ctx) return;
+          markSoundActive(); // any audible one-shot keeps the volume chip bright
           try {
             var t = ctx.currentTime;
             // A short rising tension tone — a 'creak' as the meter clenches a
@@ -1099,7 +1521,7 @@ angular.module('kanbanApp')
             gain.gain.setValueAtTime(0, t);
             gain.gain.linearRampToValueAtTime(0.05, t + 0.02);
             gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
-            osc.connect(gain); gain.connect(ctx.destination);
+            osc.connect(gain); gain.connect(masterGain());
             osc.start(t); osc.stop(t + 0.32);
           } catch (e) { }
         }
@@ -1123,8 +1545,8 @@ angular.module('kanbanApp')
               panner = ctx.createStereoPanner();
             }
             osc.connect(filter); filter.connect(gain);
-            if (panner) { gain.connect(panner); panner.connect(ctx.destination); }
-            else { gain.connect(ctx.destination); }
+            if (panner) { gain.connect(panner); panner.connect(masterGain()); }
+            else { gain.connect(masterGain()); }
             osc.start();
             _rageRumble = { osc: osc, gain: gain, filter: filter, panner: panner };
           } catch (e) { _rageRumble = null; }
@@ -1135,13 +1557,13 @@ angular.module('kanbanApp')
           // gets louder and slightly higher-pitched as the meter climbs.
           var sp = scene ? spiderFor('complexity') : null;
           var rage = sp ? (sp.rage || 0) : 0;
-          var audible = !vm.meetingMuted && vm.showMeeting && rage > 0;
+          var audible = vm.meetingVolume > 0 && vm.showMeeting && rage > 0;
           if (!audible) { stopRageRumble(); return; }
           var ctx = audioCtx(); if (!ctx) return;
           if (!_rageRumble) startRageRumble();
           if (!_rageRumble) return;
           // First time the rumble is heard: pop the one-time tooltip so users
-          // discover the header mute toggle controls these office sounds.
+          // discover the header volume slider controls these office sounds.
           // Fired only after the rumble is genuinely playing (startRageRumble
           // succeeded) and never during a replay.
           if (!vm._soundTipShown && !_replay) {
@@ -1182,18 +1604,59 @@ angular.module('kanbanApp')
           try { _rageRumble.osc.stop(); } catch (e) { }
           _rageRumble = null;
         }
+        // Live-syncs the derived muted flag and the master gain node whenever
+        // the volume changes (slider drag, mute click, or config load).
+        vm.applyMeetingVolume = function () {
+          vm.meetingVolume = Math.max(0, Math.min(100, Math.round(vm.meetingVolume || 0)));
+          // Track the last non-zero level so clicking the speaker icon after
+          // dragging to 0 restores exactly the volume the user last set.
+          if (vm.meetingVolume > 0) _prevMeetingVolume = vm.meetingVolume;
+          vm.meetingMuted = vm.meetingVolume <= 0;
+          if (_masterGain && _masterGain.gain) {
+            try { _masterGain.gain.value = vm.meetingVolume / 100; } catch (e) { }
+          }
+        };
+        vm.onMeetingVolumeChange = function () {
+          vm.applyMeetingVolume();
+          persistMeetingVolume();
+          // A drag gesture is user interaction — wake the context so sounds resume.
+          if (!vm.meetingMuted) audioCtx();
+        };
         vm.toggleMeetingMute = function () {
-          vm.meetingMuted = !vm.meetingMuted;
+          if (vm.meetingVolume > 0) {
+            vm.meetingVolume = 0;
+          } else {
+            vm.meetingVolume = _prevMeetingVolume > 0 ? _prevMeetingVolume : 70;
+          }
+          vm.applyMeetingVolume();
           // Muting kills the ongoing rage rumble immediately (the per-frame
           // updater would also silence it, but stop it now so it never lingers).
           if (vm.meetingMuted) stopRageRumble();
-          // Instant local cache, plus persist to saved settings so the
-          // preference syncs across devices (same pattern as showMeeting).
-          try { window.localStorage.setItem('weaver.meeting.muted', vm.meetingMuted ? '1' : '0'); } catch (e) { }
-          if (vm.saveSettings) vm.saveSettings(true);
+          persistMeetingVolume(true);
           // Unmuting is a click gesture — wake the context so sounds resume.
           if (!vm.meetingMuted) audioCtx();
         };
+        var _volumePersistTimer = null;
+        function persistMeetingVolume(immediate) {
+          // Slider drags fire ng-change on every tick — debounce the local +
+          // backend save so a drag persists once instead of dozens of times.
+          if (_volumePersistTimer) $timeout.cancel(_volumePersistTimer);
+          if (immediate) {
+            _volumePersistTimer = null;
+            saveMeetingVolume();
+            return;
+          }
+          _volumePersistTimer = $timeout(function () {
+            _volumePersistTimer = null;
+            saveMeetingVolume();
+          }, 300);
+        }
+        function saveMeetingVolume() {
+          // Instant local cache, plus persist to saved settings so the
+          // preference syncs across devices (same pattern as showMeeting).
+          try { window.localStorage.setItem('weaver.meeting.volume', String(vm.meetingVolume)); } catch (e) { }
+          if (vm.saveSettings) vm.saveSettings(true);
+        }
 
         // ── Gossip log ─────────────────────────────────────────────────────
         // A small scrolling feed at the bottom of the panel that transcribes
@@ -1203,17 +1666,34 @@ angular.module('kanbanApp')
           var clean = String(text || '').replace(/[\u{1F300}-\u{1FAFF}]/gu, '').trim();
           if (!clean) return;
           vm.gossipLog.push({ t: Date.now(), who: who, text: clean });
-          if (vm.gossipLog.length > 30) vm.gossipLog.shift();
+          // Keep the WHOLE session's conversation — bumped from 30 so old lines
+          // stop silently vanishing; the feed scrolls to read them instead.
+          if (vm.gossipLog.length > 500) vm.gossipLog.shift();
+          saveChatLog();
           $scope.$applyAsync();
           // Auto-scroll the feed so the newest line stays visible even when
           // the user looked away (deferred until the DOM re-renders).
           try {
             $timeout(function () {
               var feed = document.getElementById('meetingGossipFeed');
-              if (feed) feed.scrollTop = feed.scrollHeight;
+              if (!feed) return;
+              // Only ride the feed down if the user is already at (or near) the
+              // bottom — someone scrolling up through the history shouldn't be
+              // yanked back to the newest line by every new message.
+              var nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 48;
+              if (nearBottom) feed.scrollTop = feed.scrollHeight;
             }, 0);
           } catch (e) { }
         }
+        // Persists the transcribed chat so the full conversation survives an app
+        // reload (localStorage, capped at the same 500 lines as the live log).
+        function saveChatLog() {
+          try { window.localStorage.setItem('weaver.meeting.chat', JSON.stringify(vm.gossipLog.slice(-500))); } catch (e) { }
+        }
+        vm.clearGossipLog = function () {
+          vm.gossipLog = [];
+          try { window.localStorage.removeItem('weaver.meeting.chat'); } catch (e) { }
+        };
         vm.gossipTimeLabel = function (ts) {
           var d = new Date(ts);
           return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
@@ -1223,12 +1703,27 @@ angular.module('kanbanApp')
         // A small scrolling strip at the bottom of the panel showing the last
         // few step results ('✓ edit kanban.html', '✗ command failed') so users
         // can read the reaction history at a glance.
-        function pushTicker(kind, label) {
-          var text = (kind === 'good' ? '✓ ' : '✗ ') + label;
+        function pushTicker(kind, label, flash) {
+          // 'good'/'bad' get the ✓/✗ step-outcome prefix; other kinds (rage,
+          // smug, …) carry their own fully-formed label.
+          var text = kind === 'good' ? '✓ ' + label : kind === 'bad' ? '✗ ' + label : label;
           // Skip exact duplicates in a row (e.g. reconnects re-reporting a step).
+          // For the feud chip, step chips interleave between two failures, so
+          // compare against the most recent feud chip instead of the last item.
           var last = vm.meetingTicker[vm.meetingTicker.length - 1];
           if (last && last.label === text) return;
-          vm.meetingTicker.push({ kind: kind, label: text });
+          if (kind === 'feud') {
+            for (var i = vm.meetingTicker.length - 1; i >= 0; i--) {
+              var it = vm.meetingTicker[i];
+              if (it.kind === 'feud') {
+                if (it.label === text) return;
+                break;
+              }
+            }
+          }
+          // flash=true marks a climactic chip (a meter hitting 100%) so the
+          // template can add the one-shot pulse animation to it.
+          vm.meetingTicker.push({ kind: kind, label: text, flash: !!flash });
           if (vm.meetingTicker.length > 12) vm.meetingTicker.shift();
           $scope.$applyAsync();
         }
@@ -1398,6 +1893,23 @@ angular.module('kanbanApp')
           return a;
         }
 
+        // Progress toward the NEXT rank tier (drives the popup's progress bar).
+        // RANK_TITLES is sorted highest-first, so the current tier is the first
+        // whose `min` we've reached and the next tier is the one above it (index
+        // minus one). Returns the score, current/next rank objects, the fill
+        // percentage between the two floors, and how many points remain.
+        function userRankProgress(st) {
+          var score = userRankScore(st);
+          var current = null, next = null;
+          for (var i = 0; i < RANK_TITLES.length; i++) {
+            if (score >= RANK_TITLES[i].min) { current = RANK_TITLES[i]; next = i > 0 ? RANK_TITLES[i - 1] : null; break; }
+          }
+          if (!current) { current = RANK_TITLES[RANK_TITLES.length - 1]; next = RANK_TITLES[RANK_TITLES.length - 2] || null; }
+          if (!next) return { score: score, current: current, next: null, pct: 100, toNext: 0 };
+          var pct = Math.max(0, Math.min(100, ((score - current.min) / (next.min - current.min)) * 100));
+          return { score: score, current: current, next: next, pct: pct, toNext: Math.max(0, next.min - score) };
+        }
+
         // ── Header user-stats widget ───────────────────────────────────────
         // Surfaces the same live stats the water-cooler gossip brags about as a
         // compact chip row in the top bar (next to the Project picker). Values
@@ -1405,6 +1917,7 @@ angular.module('kanbanApp')
         vm.userStats = collectUserStats;
         vm.userRankTitle = userRankTitle;
         vm.userRank = userRank;
+        vm.userRankProgress = userRankProgress;
         vm.chevronArray = chevronArray;
 
         // ── Water-cooler gossip skit ───────────────────────────────────────
@@ -1711,6 +2224,9 @@ angular.module('kanbanApp')
         function startWatching() {
           if (!scene || scene.watching || _replay || vm.streamingActive) return;
           if (scene.writer || scene.queue.length) return; // never interrupt real work
+          // The big stage skits beat watching — a hover can't crash a tantrum
+          // or a shouting match with a wave-along.
+          if (scene.editorMeltdown || scene.shoutMatch) return;
           if (scene.gossip) endGossipNow(); // drop the gossip — they're watching!
           if (scene.coolerTrip) endCoolerTripNow(); // and the cooler trip too
           var star = randomSpider();
@@ -1809,7 +2325,7 @@ angular.module('kanbanApp')
         // spider sulks back to its desk. Same walk → talk → leave flow as the
         // gossip and watching skits.
         function startStandoff() {
-          if (!scene || scene.standoff || scene.glare || _replay) return; // glare is busy too
+          if (!scene || scene.standoff || scene.glare || scene.editorMeltdown || scene.shoutMatch || _replay) return; // meltdown is busy too
           var verifier = spiderFor('verifier');
           var complexity = spiderFor('complexity');
           if (!verifier || !complexity) return;
@@ -1895,7 +2411,7 @@ angular.module('kanbanApp')
         // (false → the caller falls back to the plain one-liner).
         function startGlare(revLine) {
           if (!scene || scene.glare || _replay || !vm.showMeeting) return false;
-          if (scene.standoff || scene.coolerTrip || scene.gossip || scene.watching) return false;
+          if (scene.standoff || scene.coolerTrip || scene.gossip || scene.watching || scene.editorMeltdown || scene.shoutMatch) return false;
           if (scene.writer || scene.queue.length || vm.streamingActive) return false;
           var reviewer = spiderFor('reviewer');
           var complexity = spiderFor('complexity');
@@ -1985,6 +2501,156 @@ angular.module('kanbanApp')
           scene.glare = null;
         }
 
+        // ── Editor vs Verifier shouting match ─────────────────────────────
+        // When both meters pass 70 the rivalry boils over: the Editor and
+        // Verifier storm to the middle of the office and shout it out (speech
+        // bubbles + Office Chat) while the rest of the office takes cover.
+        // Once per run; recorded so replays retell the brawl.
+        function buildShoutLines() {
+          var lines = [];
+          for (var si = 0; si < 3; si++) {
+            lines.push({ speakerRole: 'editor', text: pick(SHOUT_EDITOR), ttl: 2.6 });
+            lines.push({ speakerRole: 'verifier', text: pick(SHOUT_VERIFIER), ttl: 2.6 });
+          }
+          lines.push({ speakerRole: 'editor', text: pick(SHOUT_EDITOR_LAST), ttl: 3.0 });
+          lines.push({ speakerRole: 'verifier', text: pick(SHOUT_VERIFIER_LAST), ttl: 3.0 });
+          return lines;
+        }
+        // Pre-picks the cover reaction: two non-combatant spiders get a 'take
+        // cover' bubble (everyone else just trembles) — pre-picked so replays
+        // match the live run.
+        function buildShoutCover() {
+          var cover = [];
+          var others = scene.spiders.filter(function (s) { return s.role !== 'editor' && s.role !== 'verifier'; });
+          var n = Math.min(2, others.length);
+          for (var ci = 0; ci < n; ci++) {
+            var idx = Math.floor(Math.random() * others.length);
+            var sp = others.splice(idx, 1)[0];
+            cover.push({ speakerRole: sp.role, text: pick(SHOUT_COVER), ttl: 2.2 });
+          }
+          return cover;
+        }
+        function maybeStartShoutMatch() {
+          if (!scene || _replay || !vm.showMeeting) return;
+          if (scene.shoutMatch || scene.shoutFired) return; // once per run
+          if (scene.editorMeltdown || scene.standoff || scene.glare || scene.coolerTrip || scene.gossip || scene.watching || scene.verifierVictory) return;
+          startShoutMatch();
+        }
+        function startShoutMatch(rec) {
+          if (!scene || scene.shoutMatch) return;
+          if (!rec && _replay) return; // during replay, start only via a recorded event
+          var editor = spiderFor('editor');
+          var verifier = spiderFor('verifier');
+          if (!editor || !verifier) return;
+          if (!rec) {
+            if (scene.writer || scene.queue.length || vm.streamingActive) return; // never interrupt real work
+            if (scene.gossip || scene.watching || scene.standoff || scene.coolerTrip || scene.glare) return;
+          }
+          var lines, cover;
+          if (rec) {
+            // Replay: reuse the exact lines and cover picks from the live run.
+            lines = (rec.lines || []).map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; });
+            cover = (rec.cover || []).map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; });
+          } else {
+            lines = buildShoutLines();
+            cover = buildShoutCover();
+            recordEvent({
+              type: 'shout',
+              lines: lines.map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; }),
+              cover: cover.map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; })
+            });
+          }
+          scene.shoutFired = true;
+          // Both storm to the middle of the office, face to face.
+          editor.stomping = true;
+          editor.state = 'walk';
+          editor.target = { x: SHOUT_SPOT_EDITOR.x, y: SHOUT_SPOT_EDITOR.y };
+          editor.speech = ''; editor.speechTtl = 0;
+          verifier.state = 'walk';
+          verifier.target = { x: SHOUT_SPOT_VERIFIER.x, y: SHOUT_SPOT_VERIFIER.y };
+          verifier.speech = ''; verifier.speechTtl = 0;
+          scene.shoutMatch = {
+            phase: 'walk', ttl: 2.6,   // walk | shout | leave
+            editor: editor, verifier: verifier,
+            lines: lines, cover: cover,
+            li: 0, lineTtl: 0
+          };
+          if (!_replay) {
+            vm.meetingSpeaker = editor.icon + ' ' + editor.name + ' vs ' + verifier.icon + ' ' + verifier.name + ' — SHOUTING MATCH!';
+            $scope.$applyAsync();
+          }
+        }
+        function advanceShoutMatch(dt) {
+          if (!scene || !scene.shoutMatch) return;
+          var sm = scene.shoutMatch;
+          var editor = sm.editor;
+          var verifier = sm.verifier;
+          if (sm.phase === 'walk') {
+            sm.ttl -= dt;
+            if (sm.ttl <= 0) {
+              sm.phase = 'shout';
+              sm.li = 0; sm.lineTtl = 0;
+              // The rest of the office takes cover — everyone trembles, and
+              // the pre-picked spiders shout a cover bubble.
+              scene.spiders.forEach(function (s) {
+                if (s !== editor && s !== verifier) { s.reactT = 1.1; s.reactKind = 'bad'; }
+              });
+              sm.cover.forEach(function (cl) {
+                var cSp = spiderFor(cl.speakerRole);
+                if (cSp) setSpeech(cSp, cl.text, cl.ttl, cSp.icon + ' ' + cSp.name + ' — taking cover');
+              });
+            }
+            return;
+          }
+          if (sm.phase === 'shout') {
+            sm.lineTtl -= dt;
+            if (sm.lineTtl > 0) return;
+            if (sm.li < sm.lines.length) {
+              var ln = sm.lines[sm.li];
+              var spk = ln.speakerRole === 'editor' ? editor : verifier;
+              setSpeech(spk, ln.text, ln.ttl, spk.icon + ' ' + spk.name + ' — SHOUTING');
+              if (!_replay) {
+                logGossipEntry(spk.icon + ' ' + spk.name, ln.text);
+                recordEvent({ type: 'chat', who: spk.icon + ' ' + spk.name, text: ln.text });
+              }
+              sm.lineTtl = ln.ttl;
+              sm.li++;
+            } else {
+              sm.phase = 'leave';
+            }
+            return;
+          }
+          // leave — both head back to their desks; the Editor is still fuming
+          // and stomps the whole way (the walk handler plays the land-thud).
+          var edTarget = scene.meetingOn ? editor.seat : editor.home;
+          var vfTarget = scene.meetingOn ? verifier.seat : verifier.home;
+          editor.stomping = true;
+          editor.state = 'walk';
+          editor.target = { x: edTarget.x, y: edTarget.y };
+          editor.speech = ''; editor.speechTtl = 0;
+          verifier.state = 'walk';
+          verifier.target = { x: vfTarget.x, y: vfTarget.y };
+          verifier.speech = ''; verifier.speechTtl = 0;
+          scene.shoutMatch = null;
+          if (!_replay) {
+            vm.meetingSpeaker = '💢 the shouting match breaks up — the office slowly comes out of cover';
+            $scope.$applyAsync();
+          }
+        }
+        function endShoutMatchNow() {
+          if (!scene || !scene.shoutMatch) return;
+          var sm = scene.shoutMatch;
+          var edTarget = scene.meetingOn ? sm.editor.seat : sm.editor.home;
+          var vfTarget = scene.meetingOn ? sm.verifier.seat : sm.verifier.home;
+          sm.editor.state = 'walk';
+          sm.editor.target = { x: edTarget.x, y: edTarget.y };
+          sm.verifier.state = 'walk';
+          sm.verifier.target = { x: vfTarget.x, y: vfTarget.y };
+          sm.editor.speech = ''; sm.editor.speechTtl = 0;
+          sm.verifier.speech = ''; sm.verifier.speechTtl = 0;
+          scene.shoutMatch = null;
+        }
+
         // ── Rage cooler trip ───────────────────────────────────────────────
         // When the Complexity spider's rage crosses 75 it occasionally storms
         // off to the water cooler, grabs a drink, mutters about the
@@ -2018,7 +2684,7 @@ angular.module('kanbanApp')
           if (!sp) return;
           if (!rec) {
             if (scene.writer || scene.queue.length || vm.streamingActive) return; // never interrupt real work
-            if (scene.gossip || scene.watching || scene.standoff) return;
+            if (scene.gossip || scene.watching || scene.standoff || scene.shoutMatch) return;
           }
           scene.lastLogAt = Date.now(); // trips are "alive" time — keeps banter from stomping the bubbles
           sp.state = 'walk';
@@ -2143,9 +2809,246 @@ angular.module('kanbanApp')
           scene.coolerTripCd = 30;
         }
 
+        // ── Editor meltdown skit ──────────────────────────────────────────
+        // When the Editor's rage hits 100% it STORMS to the whiteboard,
+        // scribbles a furious message in red, blames the rest of the office
+        // (itself almost never), takes a bystander reaction or two, then
+        // stomps back to its desk — a few rage points vented by the catharsis.
+        // Once per run; recorded so replays retell the tantrum.
+        function maybeStartEditorMeltdown() {
+          if (!scene || _replay || !vm.showMeeting) return;
+          if (scene.editorMeltdown || scene.meltdownFired) return; // once per run
+          if (scene.writer || scene.queue.length || vm.streamingActive) return;
+          if (scene.gossip || scene.watching || scene.standoff || scene.coolerTrip || scene.glare || scene.shoutMatch) return;
+          startEditorMeltdown();
+        }
+        function meltdownBlameLine() {
+          // ~1 in 12 blames is a grudging self-admission; the rest point at a
+          // colleague. The Editor is many things; self-aware is not one of them.
+          if (Math.random() < 1 / 12) return pick(MELTDOWN_SELF);
+          return pick(MELTDOWN_BLAME);
+        }
+        // Composes the meltdown tirade: Editor blame → bystander shock →
+        // Editor blame → a blamed spider's retort → Editor blame → grudging
+        // admission. Speakers are pre-picked so a replay matches the live run.
+        function buildMeltdownLines() {
+          function otherSpider() {
+            var others = scene.spiders.filter(function (s) { return s.role !== 'editor'; });
+            return others.length ? pick(others) : null;
+          }
+          var shock = otherSpider();
+          var retort = otherSpider();
+          return [
+            { speakerRole: 'editor', text: meltdownBlameLine(), ttl: 3.4 },
+            { speakerRole: shock ? shock.role : 'verifier', text: pick(MELTDOWN_REACTIONS), ttl: 3.0 },
+            { speakerRole: 'editor', text: meltdownBlameLine(), ttl: 3.4 },
+            { speakerRole: retort ? retort.role : 'verifier', text: pick(MELTDOWN_RETORTS), ttl: 3.0 },
+            { speakerRole: 'editor', text: meltdownBlameLine(), ttl: 3.4 },
+            { speakerRole: 'editor', text: pick(MELTDOWN_SELF), ttl: 3.6 }
+          ];
+        }
+        // Composes the emergency meeting arc: Planner 'teachable moment' →
+        // Verifier making it worse → two more office voices → a muffled
+        // protest from the Editor's desk. Speakers are pre-picked so a replay
+        // matches the live run exactly.
+        function buildAftermathLines() {
+          function pickLine(roleKey, pool) {
+            var s = spiderFor(roleKey);
+            return s ? { speakerRole: roleKey, text: pick(pool), ttl: 3.2 } : null;
+          }
+          var lines = [];
+          var planner = pickLine('planner', AFTERMATH_PLANNER);
+          var verifier = pickLine('verifier', AFTERMATH_VERIFIER);
+          if (planner) lines.push(planner);
+          if (verifier) lines.push(verifier);
+          // Two more voices from the rest of the office (no repeats).
+          var extras = [];
+          [
+            ['commander', AFTERMATH_COMMANDER],
+            ['explorer', AFTERMATH_EXPLORER],
+            ['complexity', AFTERMATH_COMPLEXITY],
+            ['reviewer', AFTERMATH_REVIEWER],
+            ['itspecialist', AFTERMATH_ITS],
+            ['ideas', AFTERMATH_IDEAS]
+          ].forEach(function (pair) {
+            var l = pickLine(pair[0], pair[1]);
+            if (l) extras.push(l);
+          });
+          while (extras.length && lines.length < 4) {
+            var i = Math.floor(Math.random() * extras.length);
+            lines.push(extras.splice(i, 1)[0]);
+          }
+          var edLine = pickLine('editor', AFTERMATH_EDITOR);
+          if (edLine) lines.push(edLine);
+          return lines;
+        }
+        function startEditorMeltdown(rec) {
+          if (!scene || scene.editorMeltdown) return;
+          if (!rec && _replay) return; // during replay, start only via a recorded event
+          if (!vm.showMeeting) return;
+          var sp = spiderFor('editor');
+          if (!sp) return;
+          if (!rec) {
+            if (scene.writer || scene.queue.length || vm.streamingActive) return; // never interrupt real work
+            if (scene.gossip || scene.watching || scene.standoff || scene.coolerTrip || scene.glare || scene.shoutMatch) return;
+          }
+          // The tantrum interrupts the victory lap and any shouting match —
+          // live or in a replay, so a rewatch interleaves no more than live.
+          scene.verifierVictory = null;
+          endShoutMatchNow();
+          scene.lastLogAt = Date.now(); // the tantrum is "alive" time too
+          sp.stomping = true;           // stomp the whole way there
+          sp.state = 'walk';
+          sp.target = { x: BOARD_STAND.x, y: BOARD_STAND.y };
+          sp.speech = ''; sp.speechTtl = 0;
+          var scribble, lines, aftermath;
+          if (rec) {
+            // Replay: reuse the exact scribble, tirade, and aftermath lines
+            // from the live run (fall back to fresh picks if a stored event
+            // is missing fields).
+            scribble = rec.scribble || pick(MELTDOWN_SCRIBBLE);
+            lines = (rec.lines || []).map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; });
+            aftermath = (rec.aftermath || []).map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; });
+          } else {
+            scribble = pick(MELTDOWN_SCRIBBLE);
+            lines = buildMeltdownLines();
+            aftermath = buildAftermathLines();
+            recordEvent({
+              type: 'meltdown',
+              scribble: scribble,
+              lines: lines.map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; }),
+              aftermath: aftermath.map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; })
+            });
+          }
+          scene.editorMeltdown = {
+            phase: 'stomp',   // stomp | scribble | tirade | stompback | aftermath
+            spider: sp,
+            scribble: scribble,
+            scrLine: null,    // the red board line being scribbled
+            scrProg: 0,
+            lines: lines,
+            aftermath: aftermath, // the post-tantrum emergency meeting
+            li: 0, lineTtl: 0
+          };
+          vm.meetingSpeaker = sp.icon + ' ' + sp.name + ' — MELTDOWN: stomping to the board';
+          $scope.$applyAsync();
+        }
+        function advanceEditorMeltdown(dt) {
+          if (!scene || !scene.editorMeltdown) return;
+          var m = scene.editorMeltdown;
+          var sp = m.spider;
+          if (m.phase === 'stomp') {
+            // Arrived at the board stand (the walk-arrival handler already
+            // played the stomp-land burst) — the scribbling begins.
+            if (Math.abs(sp.x - BOARD_STAND.x) < 0.012 && Math.abs(sp.y - BOARD_STAND.y) < 0.012) {
+              m.phase = 'scribble';
+              m.scrProg = 0;
+              m.scrLine = { role: 'editor', color: '#ff4d4d', text: '', progress: 0, done: false };
+              scene.boardLines.push(m.scrLine);
+              if (scene.boardLines.length > 8) scene.boardLines.shift();
+              // The furious scribbling hiss starts as the marker hits the board.
+              startScribbleLoop();
+            }
+            return;
+          }
+          if (m.phase === 'scribble') {
+            updateScribbleLoop(); // scrub the hiss as the marker drags
+            var lastLen = m.scrLine ? m.scrLine.text.length : 0;
+            m.scrProg += dt * 26; // frantic scribble speed
+            var shown = Math.min(m.scribble.length, Math.floor(m.scrProg));
+            m.scrLine.text = m.scribble.slice(0, shown);
+            // Frantic marker ticks — faster than the normal board writing.
+            if (shown > lastLen && shown % 2 === 0) playTick();
+            if (m.scrProg >= m.scribble.length) {
+              m.scrLine.text = m.scribble;
+              m.scrLine.done = true;
+              m.phase = 'tirade';
+              m.li = 0; m.lineTtl = 0;
+              stopScribbleLoop(); // the marker goes down with the final slash
+            }
+            return;
+          }
+          if (m.phase === 'tirade' || m.phase === 'aftermath') {
+            m.lineTtl -= dt;
+            if (m.lineTtl > 0) return;
+            if (m.li < m.lines.length) {
+              var ln = m.lines[m.li];
+              var speaker = ln.speakerRole === 'editor' ? sp : spiderFor(ln.speakerRole);
+              if (!speaker) speaker = sp;
+              var context = m.phase === 'aftermath' ? 'emergency meeting' : 'meltdown fallout';
+              setSpeech(speaker, ln.text, ln.ttl, speaker.icon + ' ' + speaker.name + ' — ' + context);
+              if (!_replay) {
+                // Live: post to the Office Chat AND record it as a chat event
+                // so replays retell the whole exchange in the feed (the skit
+                // itself skips the chat during replay to avoid double-posts).
+                logGossipEntry(speaker.icon + ' ' + speaker.name, ln.text);
+                recordEvent({ type: 'chat', who: speaker.icon + ' ' + speaker.name, text: ln.text });
+              }
+              if (speaker !== sp) {
+                speaker.reactT = 1.1;
+                // The Verifier relishes the meeting; everyone else fidgets.
+                speaker.reactKind = (m.phase === 'aftermath' && speaker.role === 'verifier') ? 'good' : 'bad';
+              }
+              m.lineTtl = ln.ttl;
+              m.li++;
+            } else {
+              if (m.phase === 'tirade') {
+                m.phase = 'stompback';
+                var mHome = scene.meetingOn ? sp.seat : sp.home;
+                sp.stomping = true; // still fuming — stomp back to the desk
+                sp.state = 'walk';
+                sp.target = { x: mHome.x, y: mHome.y };
+                sp.speech = ''; sp.speechTtl = 0;
+              } else {
+                // Emergency meeting adjourned — everyone pretends it never
+                // happened and the queued board writes resume.
+                scene.editorMeltdown = null;
+                scene.meltdownFired = true;
+                pumpQueue();
+                if (!_replay) {
+                  vm.meetingSpeaker = '🏢 the emergency meeting adjourns — the scribble is never mentioned again';
+                }
+                $scope.$applyAsync();
+              }
+            }
+            return;
+          }
+          // stompback — the Editor arrives home and vents a few rage points;
+          // then the rest of the office holds an emergency meeting about it.
+          var h = scene.meetingOn ? sp.seat : sp.home;
+          if (Math.abs(sp.x - h.x) < 0.012 && Math.abs(sp.y - h.y) < 0.012) {
+            m.phase = 'aftermath';
+            m.lines = m.aftermath || [];
+            m.li = 0; m.lineTtl = 1.2; // a beat of silence before the meeting starts
+            // The thud of the landing, then a record-scratch: the whole office
+            // goes quiet at once. The 1.2s beat above is that silence.
+            playRecordScratch();
+            if (!_replay) {
+              bumpEditRage(-15); // catharsis: the meter vents, though it's still mad
+              vm.meetingSpeaker = '✏️ the Editor stomps back to its desk — the office calls an emergency meeting';
+            } else {
+              vm.meetingSpeaker = '✏️ the Editor stomps back to its desk (replay)';
+            }
+            $scope.$applyAsync();
+          }
+        }
+        function endEditorMeltdownNow() {
+          if (!scene || !scene.editorMeltdown) return;
+          stopScribbleLoop(); // an interrupted scribble stops mid-stroke
+          var m = scene.editorMeltdown;
+          var mHome = scene.meetingOn ? m.spider.seat : m.spider.home;
+          m.spider.state = 'walk';
+          m.spider.target = { x: mHome.x, y: mHome.y };
+          m.spider.speech = ''; m.spider.speechTtl = 0;
+          scene.editorMeltdown = null;
+          // meltdownFired stays false — an interrupted tantrum can still happen
+          // if the rage climbs back to 100.
+        }
+
         // ── Public methods ─────────────────────────────────────────────────
         vm.openMeeting = function () {
           vm.showMeeting = true; vm.saveSettings(true);
+          vm.meetingVolumeDim = false; // chip starts bright; auto-fades once idle
           // Load the last persisted replay timeline (from a past run's card)
           // so the ▶ button works even after a page reload.
           if (vm._restoreMeetingReplayFromCards) vm._restoreMeetingReplayFromCards();
@@ -2300,6 +3203,8 @@ angular.module('kanbanApp')
             idx: 0,
             total: vm.meetingReplay[vm.meetingReplay.length - 1].t - vm.meetingReplay[0].t
           };
+          var _rvReset = spiderFor('verifier');
+          if (_rvReset) _rvReset.crowned = false; // the timeline re-crowns it if the run earned it
           vm.meetingReplaying = true;
           vm.meetingSpeaker = '▶ replaying the last run…';
           startLoop();
@@ -2379,6 +3284,14 @@ angular.module('kanbanApp')
             s.speechTtl = 0; s.text = ''; s.progress = 0; s.reactT = 0;
           });
 
+          // Meters rewind too: the fresh scene starts at 0, so a backwards
+          // seek must not leave stale rage/smug on the status bar until the
+          // next meter snapshot passes.
+          vm.meetingEditorRage = 0;
+          vm.meetingVerifierSmug = 0;
+          vm.meetingFeudRatio = 50;
+          vm.meetingFeudLeader = 'tie';
+
           // Rebuild board state instantly: replay all events up to the target
           // time, writing completed board lines directly (no animation).
           var evs = _replay.events;
@@ -2441,7 +3354,8 @@ angular.module('kanbanApp')
           if (level === 'log') return 'reviewer';
           if (level === 'error') return 'reviewer';
           if (level === 'warn') return /reject/.test(m) ? 'planner' : 'reviewer';
-          // info / metric / bypass / status fall through to keyword scan
+          // info / metric / bypass / status / recovering fall through to keyword scan
+          // (a recovery retry is a log-level event — no spider commentary needed)
           // The Complexity spider owns anything about the task's difficulty,
           // the accumulated context budget, or compaction of reasoning/diffs.
           // Meta-plans stay with the planner (they only MENTION a complexity
@@ -2543,7 +3457,7 @@ angular.module('kanbanApp')
           sp.rageDrainedAt = Date.now(); // a fresh burst restarts cooling
           // Hitting 100% vents steam — a one-shot hiss. Gated on visibility
           // (bumps also fire from watchers while the panel is closed) and on
-          // the existing mute toggle via sfx().
+          // the existing volume slider via sfx().
           if (before < 100 && sp.rage >= 100 && !_replay && vm.showMeeting) {
             playSteamVent();
           }
@@ -2561,12 +3475,357 @@ angular.module('kanbanApp')
           // off to the water cooler for a drink about the unmanageable context.
           if (before < 75 && sp.rage >= 75) maybeStartCoolerTrip();
         }
+
+        // ── Editor spider anger meter ─────────────────────────────────────
+        // The Editor APPLIES the edits, so a rejected diff is personal. Each
+        // failed edit step bumps its rage by an escalating amount (the more in
+        // a row, the angrier it gets), and a landed edit cools it off. Shares
+        // the Complexity spider's cooling clock so the meter breathes between
+        // bursts and never stays pinned at 100%. Caps at 100 and resets when
+        // the plan completes.
+        function bumpEditRage(amount) {
+          if (!scene || _replay) return;
+          var sp = spiderFor('editor');
+          if (!sp) return;
+          var before = sp.rage || 0;
+          sp.rage = Math.max(0, Math.min(100, before + amount));
+          sp.rageAt = Date.now();
+          sp.rageDrainedAt = Date.now(); // a fresh burst restarts cooling
+          // Hitting 100% vents steam — the same one-shot hiss as the
+          // Complexity spider's meter.
+          if (before < 100 && sp.rage >= 100 && vm.showMeeting) {
+            playSteamVent();
+          }
+          // Hitting 100% is a full meltdown: the Editor storms to the board,
+          // scribbles its frustration, and blames everyone but itself.
+          if (before < 100 && sp.rage >= 100) maybeStartEditorMeltdown();
+          // Angry enough to stomp? Its legs stamp wider until it cools. The
+          // posture tracks the meter exactly, so a landed edit (negative bump)
+          // relaxes it immediately instead of lingering.
+          sp.stomping = sp.rage >= 60;
+          // The climb is reported by the combined feud ticker chip in the
+          // step watcher (it fires with the Verifier's smug side by side), so
+          // no separate per-meter bucket chip is needed here.
+          syncMeetingMeters();
+        }
+        function resetEditRage() {
+          if (!scene) return;
+          var sp = spiderFor('editor');
+          if (sp) { sp.rage = 0; sp.rageAt = Date.now(); sp.rageDrainedAt = Date.now(); sp.stomping = false; }
+          syncMeetingMeters();
+        }
+        // Idle cooling for the Editor spider — same rules as the Complexity
+        // spider's meter: no drain for ~20s after the last rejection, then a
+        // few points per idle minute (faster while the user is hovering the
+        // panel), and stomping relaxes once it's under 50.
+        function coolEditRage() {
+          if (!scene || _replay) return;
+          var sp = spiderFor('editor');
+          if (!sp || !sp.rage) return;
+          var now = Date.now();
+          var idleMs = now - (sp.rageAt || now);
+          if (idleMs <= RAGE_COOL_IDLE_MS) {
+            sp.rageDrainedAt = now; // keep the drain clock in sync while gated
+            return;
+          }
+          var sinceDrain = now - (sp.rageDrainedAt || now);
+          var hoverFactor = 1;
+          if (vm.meetingHovered && vm.meetingHoverSince) {
+            hoverFactor = 1 + Math.min(4, (now - vm.meetingHoverSince) / 5000);
+          }
+          sp.rage = Math.max(0, sp.rage - RAGE_COOL_PER_SEC * hoverFactor * (sinceDrain / 1000));
+          sp.rageDrainedAt = now;
+          if (sp.stomping && sp.rage < 50) sp.stomping = false;
+          syncMeetingMeters();
+        }
+
+        // ── Verifier spider smugness meter ────────────────────────────────
+        // The Verifier is the one REJECTING the Editor's work, so every failed
+        // edit feeds its ego. Its meter climbs with the same consecutive-edit
+        // streak that enrages the Editor (mirror amounts), a landed edit
+        // deflates it a little, and it cools during quiet stretches exactly
+        // like the anger meters. Caps at 100 and resets when the plan
+        // completes.
+        function bumpVerifierSmug(amount) {
+          if (!scene || _replay) return;
+          var sp = spiderFor('verifier');
+          if (!sp) return;
+          var before = sp.smug || 0;
+          sp.smug = Math.max(0, Math.min(100, before + amount));
+          sp.smugAt = Date.now();
+          sp.smugDrainedAt = Date.now(); // a fresh gloat restarts cooling
+          // The climb is reported by the combined feud ticker chip in the
+          // step watcher, so no separate per-meter bucket chip is needed here.
+          // 100% is the climax: the victory lap fires and the crown appears.
+          if (before < 100 && sp.smug >= 100) maybeStartVerifierVictory();
+          syncMeetingMeters();
+        }
+        function resetVerifierSmug() {
+          if (!scene) return;
+          var sp = spiderFor('verifier');
+          if (sp) { sp.smug = 0; sp.smugAt = Date.now(); sp.smugDrainedAt = Date.now(); sp.crowned = false; }
+          syncMeetingMeters();
+        }
+        // Idle cooling for the Verifier spider — same rules as the anger
+        // meters: no drain for ~20s after the last gloat, then a few points
+        // per idle minute (faster while the user hovers the panel).
+        function coolVerifierSmug() {
+          if (!scene || _replay) return;
+          var sp = spiderFor('verifier');
+          if (!sp || !sp.smug) return;
+          var now = Date.now();
+          var idleMs = now - (sp.smugAt || now);
+          if (idleMs <= RAGE_COOL_IDLE_MS) {
+            sp.smugDrainedAt = now; // keep the drain clock in sync while gated
+            return;
+          }
+          var sinceDrain = now - (sp.smugDrainedAt || now);
+          var hoverFactor = 1;
+          if (vm.meetingHovered && vm.meetingHoverSince) {
+            hoverFactor = 1 + Math.min(4, (now - vm.meetingHoverSince) / 5000);
+          }
+          sp.smug = Math.max(0, sp.smug - RAGE_COOL_PER_SEC * hoverFactor * (sinceDrain / 1000));
+          sp.smugDrainedAt = now;
+          syncMeetingMeters();
+        }
+
+        // ── Domain grump meters (the other six roles) ─────────────────────
+        // The Complexity spider rages about context, the Editor about rejected
+        // edits, the Verifier about being right. Everyone else gets a small
+        // meter too, tied to the turf they actually own: the Planner's plan,
+        // the Explorer's terrain, the Commander's commands, the Reviewer's
+        // quality bar, the IT Specialist's config, the Ideas spider's
+        // creations. Failed steps grind on them (12), landed steps soothe them
+        // (-5), each 25-point tier crossing earns a mutter in the Office Chat,
+        // and they cool during quiet stretches exactly like the anger meters.
+        var GRUMP_ROLES = ['planner', 'explorer', 'commander', 'reviewer', 'itspecialist', 'ideas'];
+        var GRUMP_LINES = {
+          planner: [
+            ["The plan is… evolving. Unofficially.", "We had a plan. It's having a rough day."],
+            ["This was NOT in the plan. I checked. Twice.", "The plan is now a suggestion. I am very upset."],
+            ["SCOPE. CREEP. Both capital letters.", "I have revised this plan twelve times. The plan has given up."],
+            ["THE PLAN IS NOW A COMPLETELY DIFFERENT PLAN. I DON'T EVEN RECOGNIZE IT."]
+          ],
+          explorer: [
+            ["The territory was… less clear than reported.", "I found a file. It was the wrong file."],
+            ["Every road leads to a dead end. I should know — I mapped them all.", "The terrain is fighting back."],
+            ["I have explored EVERYWHERE and the answer is NOWHERE.", "This map is a lie. I drew it myself. Still a lie."],
+            ["THE WHOLE CODEBASE IS UNCHARTED. AGAIN. WHERE IS THE MAP?!"]
+          ],
+          commander: [
+            ["The build has… opinions. Wrong ones.", "That command failed. It happens. Frequently, lately."],
+            ["The terminal and I are no longer on speaking terms.", "Another red command. My console looks like a stoplight."],
+            ["EVERY BUILD IS RED. AM I THE ONLY ONE WHO SEES THE RED?", "I gave the order. The machine disobeyed. Mutiny."],
+            ["I AM DECLARING WAR ON THIS TERMINAL. A BUILD WAR."]
+          ],
+          reviewer: [
+            ["I've seen better code. I've seen worse. This is in between.", "The quality bar is… somewhere. I'll find it."],
+            ["I take no pleasure in this. I take SOME pleasure in this.", "Every diff lowers my expectations. They keep meeting them."],
+            ["STANDARDS. ARE. SLIPPING. I AM THE STANDARD.", "I would reject this run on principle."],
+            ["I AM NOW REVIEWING THE REVIEWERS. NOBODY IS SAFE."]
+          ],
+          itspecialist: [
+            ["The config is… adventurous.", "An endpoint moved. It didn't tell anyone. Classic."],
+            ["I've checked the config twice. It's configured wrong on purpose. I'm sure of it.", "The database is being dramatic again."],
+            ["WHO TOUCHED THE MIGRATIONS? SOMEONE TOUCHED THE MIGRATIONS.", "The infrastructure is held together by vibes and hope."],
+            ["I AM REBOOTING THE ENTIRE OFFICE. INCLUDING THE OTHER SPIDERS."]
+          ],
+          ideas: [
+            ["My idea was beautiful. Reality disagreed.", "Another creation, rejected by the world."],
+            ["Every new thing I imagine gets deleted. It's a pattern.", "The world isn't ready for my ideas. The world is NEVER ready."],
+            ["MY IDEAS ARE INCREDIBLE. REALITY IS THE BUG.", "I suggested something. It failed. I will keep suggesting."],
+            ["I HAVE STOPPED HAVING IDEAS. YOU'LL ALL REGRET THIS."]
+          ]
+        };
+        // Which role's turf a step type belongs to — used ONLY for the grump
+        // meters (the existing reaction mapping in spiderForStepType is
+        // untouched).
+        function grumpRoleForStepType(type) {
+          var t = String(type || '');
+          if (/plan/.test(t)) return 'planner';
+          if (/explore/.test(t)) return 'explorer';
+          if (/command|terminal|build|test/.test(t)) return 'commander';
+          if (/verif|review|check/.test(t)) return 'reviewer';
+          if (/sql|migration|db|database/.test(t)) return 'itspecialist';
+          if (/create|rename|write|delete|add/.test(t)) return 'ideas';
+          return null;
+        }
+        function grumpLineFor(role, grump) {
+          var pools = GRUMP_LINES[role];
+          if (!pools) return null;
+          // Lines fire only on upward tier crossings (25/50/75/100), so the
+          // pool must line up with the crossing points — 25→pool 0 (quiet),
+          // 50→pool 1, 75→pool 2, and only 100 gets the meltdown lines.
+          var tier = grump >= 100 ? 3 : grump >= 75 ? 2 : grump >= 50 ? 1 : 0;
+          var arr = pools[tier];
+          return arr[Math.floor(Math.random() * arr.length)];
+        }
+        function bumpSpiderGrump(role, amount) {
+          if (!scene || _replay) return;
+          var sp = spiderFor(role);
+          if (!sp) return;
+          var before = sp.grump || 0;
+          sp.grump = Math.max(0, Math.min(100, before + amount));
+          sp.grumpAt = Date.now();
+          sp.grumpDrainedAt = Date.now(); // a fresh grievance restarts cooling
+          // Crossing UP a 25-point tier → the spider mutters about its domain
+          // in the Office Chat. Only while the panel is visible, so hidden
+          // runs don't spam the persisted transcript.
+          var tier = Math.floor(sp.grump / 25);
+          var prevTier = Math.floor(before / 25);
+          if (tier > prevTier && vm.showMeeting) {
+            var text = grumpLineFor(role, sp.grump);
+            if (text) {
+              var who = sp.icon + ' ' + sp.name;
+              recordEvent({ type: 'chat', who: who, text: text });
+              logGossipEntry(who, text);
+            }
+          }
+        }
+        // Idle cooling for the domain grumps — same rules as the anger
+        // meters: no drain for ~20s after the last grievance, then a few
+        // points per idle minute (faster while the user hovers the panel).
+        function coolSpiderGrump(sp) {
+          if (!scene || _replay) return;
+          if (!sp || !sp.grump) return;
+          var now = Date.now();
+          var idleMs = now - (sp.grumpAt || now);
+          if (idleMs <= RAGE_COOL_IDLE_MS) { sp.grumpDrainedAt = now; return; }
+          var sinceDrain = now - (sp.grumpDrainedAt || now);
+          var hoverFactor = 1;
+          if (vm.meetingHovered && vm.meetingHoverSince) {
+            hoverFactor = 1 + Math.min(4, (now - vm.meetingHoverSince) / 5000);
+          }
+          sp.grump = Math.max(0, sp.grump - RAGE_COOL_PER_SEC * hoverFactor * (sinceDrain / 1000));
+          sp.grumpDrainedAt = now;
+        }
+        function resetAllGrump() {
+          GRUMP_ROLES.forEach(function (rk) {
+            var gs = spiderFor(rk);
+            if (gs) { gs.grump = 0; gs.grumpAt = Date.now(); gs.grumpDrainedAt = Date.now(); }
+          });
+        }
+
+        // ── Verifier victory lap + crown ───────────────────────────────────
+        // At 100% smug the Verifier posts a victory-lap tirade in the Office
+        // Chat (gloats, the Editor's objection, a weary bystander) and its
+        // desk badge becomes a glittering golden crown for the rest of the
+        // run. Chat-only — unlike the meltdown it doesn't own the stage.
+        function buildVictoryLines() {
+          var lines = [];
+          for (var vi = 0; vi < 3; vi++) lines.push({ speakerRole: 'verifier', text: pick(VICTORY_LAP), ttl: 3.2 });
+          var edV = spiderFor('editor');
+          if (edV) lines.push({ speakerRole: 'editor', text: pick(VICTORY_EDITOR_REACTION), ttl: 3.0 });
+          var witnessPool = ['planner', 'commander', 'explorer', 'complexity', 'reviewer', 'itspecialist', 'ideas']
+            .map(function (k) { return spiderFor(k); })
+            .filter(function (s) { return !!s; });
+          if (witnessPool.length) {
+            lines.push({ speakerRole: pick(witnessPool).role, text: pick(VICTORY_WITNESS), ttl: 3.0 });
+          }
+          lines.push({ speakerRole: 'verifier', text: pick(VICTORY_LAP), ttl: 3.4 });
+          return lines;
+        }
+        function maybeStartVerifierVictory() {
+          if (!scene || _replay || !vm.showMeeting) return;
+          var sp = spiderFor('verifier');
+          if (!sp || sp.crowned || scene.verifierVictory) return;
+          // Bigger skits own the stage; the victory lap waits its turn.
+          if (scene.editorMeltdown || scene.standoff || scene.coolerTrip || scene.glare || scene.shoutMatch) return;
+          startVerifierVictory();
+        }
+        function startVerifierVictory(rec) {
+          if (!scene || scene.verifierVictory) return;
+          if (!rec && _replay) return; // during replay, start only via a recorded event
+          var sp = spiderFor('verifier');
+          if (!sp) return;
+          var lines;
+          if (rec) {
+            // Replay: reuse the exact lines from the live run.
+            lines = (rec.lines || []).map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; });
+          } else {
+            lines = buildVictoryLines();
+            recordEvent({
+              type: 'victory',
+              lines: lines.map(function (l) { return { speakerRole: l.speakerRole, text: l.text, ttl: l.ttl }; })
+            });
+          }
+          sp.crowned = true; // the glittering crown stays for the rest of the run
+          scene.verifierVictory = { li: 0, lineTtl: 0.8, lines: lines };
+          if (!_replay) {
+            vm.meetingSpeaker = sp.icon + ' ' + sp.name + ' — 100% SMUG: VICTORY LAP! 👑';
+            $scope.$applyAsync();
+          }
+        }
+
+        // ── Live status-bar meters ─────────────────────────────────────────
+        // Mirrors the Editor's rage and the Verifier's smugness onto vm so the
+        // status-bar chips show them in real time. Called from every meter
+        // mutation; only re-renders when a rounded % actually changes, so the
+        // per-frame idle drain never floods the digest.
+        function syncMeetingMeters() {
+          var ed = spiderFor('editor');
+          var r = ed ? Math.round(ed.rage || 0) : 0;
+          var vf = spiderFor('verifier');
+          var s = vf ? Math.round(vf.smug || 0) : 0;
+          if (r !== vm.meetingEditorRage || s !== vm.meetingVerifierSmug) {
+            vm.meetingEditorRage = r;
+            vm.meetingVerifierSmug = s;
+            // Feud gauge: who's ahead in the rage-vs-smug argument. The seam
+            // of the dual bar rides at rage/(rage+smug) so the bar and the
+            // leader chip drift together as the feud shifts.
+            var sum = r + s;
+            vm.meetingFeudRatio = sum > 0 ? Math.round((r / sum) * 100) : 50;
+            vm.meetingFeudLeader = r > s ? 'rage' : s > r ? 'smug' : 'tie';
+            // Record a timeline snapshot so a rewatch replays the climb too —
+            // the meter events fire on the same clock as the step outcomes.
+            recordEvent({ type: 'meter', rage: r, smug: s });
+            $scope.$applyAsync();
+          }
+        }
+
+        // ── Smug sparkles ─────────────────────────────────────────────────
+        // Tiny golden glints that float up around the Verifier spider while
+        // its smugness meter is up — the smug equivalent of rage steam. They
+        // emit faster the smuggest it gets, twinkle as they rise, and thin out
+        // as the meter cools.
+        function updateSparkles(dt) {
+          if (!scene || !scene.sparkles) return;
+          var sp = spiderFor('verifier');
+          var smug = sp ? (sp.smug || 0) : 0;
+          var smugFactor = Math.min(1, smug / 100);
+          // Emit once it's visibly enjoying itself: ~1/sec at 25 up to ~8/sec.
+          if (sp && smug >= 25) {
+            scene._sparkleAcc = (scene._sparkleAcc || 0) + dt * (1 + smugFactor * 7);
+            while (scene._sparkleAcc >= 1) {
+              scene._sparkleAcc -= 1;
+              if (scene.sparkles.length >= 30) scene.sparkles.shift();
+              scene.sparkles.push({
+                x: sp.x + (Math.random() - 0.5) * 0.05,
+                y: sp.y - 0.06,
+                vx: (Math.random() - 0.5) * 0.006,
+                vy: -(0.02 + Math.random() * 0.03),
+                size: 0.008 + Math.random() * 0.009,
+                phase: Math.random() * 6.283,
+                twinkle: 4 + Math.random() * 5,
+                life: 0,
+                ttl: 0.9 + Math.random() * 0.8
+              });
+            }
+          }
+          for (var i = scene.sparkles.length - 1; i >= 0; i--) {
+            var p = scene.sparkles[i];
+            p.life += dt;
+            if (p.life >= p.ttl) { scene.sparkles.splice(i, 1); continue; }
+            p.x += p.vx * dt + Math.sin(p.life * p.twinkle + p.phase) * 0.002 * dt;
+            p.y += p.vy * dt;
+          }
+        }
         // Occasional + cooldown-gated trigger for the cooler trip. Won't
         // interrupt real work or other skits, never fires during a replay, and
         // only about half the crossings actually set off the storm-off.
         function maybeStartCoolerTrip() {
           if (!scene || _replay || !vm.showMeeting) return;
-          if (scene.coolerTrip || scene.gossip || scene.watching || scene.standoff) return;
+          if (scene.coolerTrip || scene.gossip || scene.watching || scene.standoff || scene.editorMeltdown || scene.shoutMatch) return;
           if (scene.writer || scene.queue.length || vm.streamingActive) return;
           scene.coolerTripCd = (scene.coolerTripCd === undefined || scene.coolerTripCd === null) ? 90 : scene.coolerTripCd;
           if (scene.coolerTripCd > 0) return;
@@ -2632,14 +3891,15 @@ angular.module('kanbanApp')
         // normalized coordinates (fractions of W/H) like the confetti system.
         function updateSteam(dt) {
           if (!scene || !scene.steam) return;
-          var sp = spiderFor('complexity');
-          var rage = sp ? (sp.rage || 0) : 0;
-          var rageFactor = Math.min(1, rage / 100);
-          // Emit while angry: ~2 wisps/sec at low anger up to ~12/sec at 100%.
-          if (sp && rage > 0) {
-            scene._steamAcc = (scene._steamAcc || 0) + dt * (2 + rageFactor * 10);
-            while (scene._steamAcc >= 1) {
-              scene._steamAcc -= 1;
+          // Emit rage steam off any spider whose meter is up: the Complexity
+          // spider steams at the mere existence of context (from ~1 point), the
+          // Editor spider only once it's properly furious (>30) after repeated
+          // rejected edits.
+          function emitSteam(sp, rate) {
+            var accKey = '_steamAcc' + sp.role;
+            scene[accKey] = (scene[accKey] || 0) + dt * rate;
+            while (scene[accKey] >= 1) {
+              scene[accKey] -= 1;
               if (scene.steam.length >= 40) scene.steam.shift();
               scene.steam.push({
                 x: sp.x + (Math.random() - 0.5) * 0.03,
@@ -2654,6 +3914,16 @@ angular.module('kanbanApp')
               });
             }
           }
+          var complexity = spiderFor('complexity');
+          var cRage = complexity ? (complexity.rage || 0) : 0;
+          var cFactor = Math.min(1, cRage / 100);
+          // ~2 wisps/sec at low anger up to ~12/sec at 100%.
+          if (complexity && cRage > 0) emitSteam(complexity, 2 + cFactor * 10);
+          var editor = spiderFor('editor');
+          var eRage = editor ? (editor.rage || 0) : 0;
+          var eFactor = Math.min(1, eRage / 100);
+          // The Editor only steams once it's really seeing red — up to ~7/sec.
+          if (editor && eRage >= 30) emitSteam(editor, 1 + eFactor * 6);
           for (var i = scene.steam.length - 1; i >= 0; i--) {
             var p = scene.steam[i];
             p.life += dt;
@@ -2793,6 +4063,9 @@ angular.module('kanbanApp')
 
         function pumpQueue() {
           if (!scene || scene.writer) return; // one writer at a time
+          // The Editor's meltdown owns the stage — board writes queue up and
+          // resume the moment the tantrum ends.
+          if (scene.editorMeltdown) return;
           if (!scene.queue.length) return;
           var job = scene.queue.shift();
           var spider = spiderFor(job.role);
@@ -2831,12 +4104,28 @@ angular.module('kanbanApp')
           scene.queue = [];
           scene.writer = null;
           scene.confetti = []; // clear leftover confetti from a previous run
+          scene.sparkles = []; // clear leftover smug glints from a previous run
+          scene.editorMeltdown = null; // no tantrum in progress on a fresh run
           scene.postMortem = null; // clear the est-vs-actual chart
-          // A fresh run resets the Complexity spider's anger meter — a new
-          // task starts with a clean (if skeptical) slate.
+          // A fresh run resets the meters — the Complexity spider starts with a
+          // clean (if skeptical) slate, the Editor forgives every rejected
+          // edit, and the Verifier drops its smugness back to a mere hum.
           if (!fromReplay) {
             resetComplexityRage();
+            resetEditRage();
+            resetVerifierSmug();
+            resetAllGrump();
             scene.calmQuipFired = false; // allow the 'calmed down' line again
+            scene._editFailStreak = 0;
+            scene.meltdownFired = false; // the meltdown can happen again this run
+            scene.shoutFired = false;    // the shouting match can happen again this run
+          } else {
+            // A replay rewinds the meters to zero first; the recorded meter
+            // snapshots then drive them back up in sync with the timeline.
+            vm.meetingEditorRage = 0;
+            vm.meetingVerifierSmug = 0;
+            vm.meetingFeudRatio = 50;
+            vm.meetingFeudLeader = 'tie';
           }
           // Only a fresh LIVE run resets the ticker — replays reuse the last
           // live history so the rewatch keeps the step outcomes visible.
@@ -2914,9 +4203,12 @@ angular.module('kanbanApp')
           // Confetti burst across the whole canvas — every spider throws a
           // handful before heading back to their desk.
           spawnConfetti();
-          // Everyone celebrates and walks home shortly after. The Complexity
-          // spider's rage meter resets — the plan is done, its suffering ends.
+          // Everyone celebrates and walks home shortly after. The meters
+          // reset — the plan is done, their suffering (and gloating) ends.
           resetComplexityRage();
+          resetEditRage();
+          resetVerifierSmug();
+          if (scene.editorMeltdown) endEditorMeltdownNow(); // a run ending cuts any tantrum short
           scene.spiders.forEach(function (s) {
             if (s.role !== 'reviewer') {
               s.state = 'celebrate';
@@ -2950,9 +4242,11 @@ angular.module('kanbanApp')
             cancelAnimationFrame(raf);
             raf = null;
           }
-          // No more frames → stop the persistent rage rumble so it can't
-          // keep droning after the panel closes or the view is destroyed.
+          // No more frames → stop the persistent rage rumble and any
+          // mid-meltdown scribble hiss so neither can keep droning after the
+          // panel closes or the view is destroyed.
           stopRageRumble();
+          stopScribbleLoop();
         }
 
         function tick(ts) {
@@ -2967,6 +4261,9 @@ angular.module('kanbanApp')
           if (_replay && vm.meetingReplaySpeed > 1) dt *= vm.meetingReplaySpeed;
           updateScene(dt);
           drawFrame();
+          // Fade the volume chip once audio goes quiet; it stays opaque while
+          // sounds play or the mouse is over the panel.
+          updateVolumeChipVisibility();
         }
 
         function updateScene(dt) {
@@ -2982,7 +4279,26 @@ angular.module('kanbanApp')
               if (ev.type === 'start') startMeeting(true);
               else if (ev.type === 'finish') finishMeeting(true);
               else if (ev.type === 'reaction') fireReaction(ev.kind, ev.text);
+              else if (ev.type === 'chat') logGossipEntry(ev.who, ev.text); // replay a verifier gloat
               else if (ev.type === 'cooler') startCoolerTrip(ev); // replay the storm-off
+              else if (ev.type === 'meltdown') startEditorMeltdown(ev); // replay the Editor's tantrum
+              else if (ev.type === 'victory') startVerifierVictory(ev); // replay the Verifier's victory lap
+              else if (ev.type === 'shout') startShoutMatch(ev); // replay the shouting match
+              else if (ev.type === 'meter') {
+                // Replay the live rage/smug snapshots so the status-bar meters
+                // AND the on-canvas readouts (desk badges, tint, halo,
+                // sparkles) climb again while the failure run is rewatched.
+                var _me = spiderFor('editor');
+                if (_me) { _me.rage = ev.rage; _me.stomping = ev.rage >= 60; }
+                var _mv = spiderFor('verifier');
+                if (_mv) { _mv.smug = ev.smug; if (ev.smug >= 100) _mv.crowned = true; }
+                vm.meetingEditorRage = ev.rage;
+                vm.meetingVerifierSmug = ev.smug;
+                var _sum = ev.rage + ev.smug;
+                vm.meetingFeudRatio = _sum > 0 ? Math.round((ev.rage / _sum) * 100) : 50;
+                vm.meetingFeudLeader = ev.rage > ev.smug ? 'rage' : ev.smug > ev.rage ? 'smug' : 'tie';
+                $scope.$applyAsync();
+              }
               else if (ev.type === 'stream') {
                 // Replay the LLM stream-reading bubble on the same spider role.
                 // Skip the active writer so a stream bubble never stomps the
@@ -3021,9 +4337,23 @@ angular.module('kanbanApp')
           // goes quiet — a few points per idle minute, so the meter breathes
           // between bursts instead of staying pinned at 100%.
           coolComplexityRage();
-          // Steam wisps off its head while the meter is high — they thin as the
-          // rage drains, making the cooling visible at a glance.
+          // The Editor spider's meter cools the same way — after a burst of
+          // rejected edits it unclenches over time, red fading back to green.
+          coolEditRage();
+          // The Verifier's smugness cools too — gloating fades when the office
+          // goes quiet, so it can be humbled all over again.
+          coolVerifierSmug();
+          // The six domain spiders' grumps cool the same way — each grievance
+          // fades once the office goes quiet on their turf.
+          GRUMP_ROLES.forEach(function (rk) {
+            var gs = spiderFor(rk);
+            if (gs) coolSpiderGrump(gs);
+          });
+          // Steam wisps off the angry spiders' heads while the meters are high
+          // — they thin as the rage drains, making the cooling visible.
           updateSteam(dt);
+          // Golden glints rise off the Verifier while its smug meter is high.
+          updateSparkles(dt);
           // Its rage also has a voice: a low rumble that swells with the meter
           // (silenced when muted, panel hidden, or rage at 0).
           updateRageRumble();
@@ -3261,8 +4591,74 @@ angular.module('kanbanApp')
             }
           }
 
+          // ── Editor meltdown ──────────────────────────────────────────────
+          // At 100% rage the Editor storms to the board, scribbles, blames
+          // everyone else, and stomps home. pumpQueue is blocked while it runs
+          // (writes queue up and resume after), so the tantrum plays out in
+          // full unless the run itself ends.
+          if (!_replay && vm.showMeeting && !scene.editorMeltdown && !scene.meltdownFired) {
+            // A 100% crossing that happened while the panel was closed still
+            // fires the once-per-run tantrum once the panel is visible again.
+            var edSp = spiderFor('editor');
+            if (edSp && (edSp.rage || 0) >= 100) maybeStartEditorMeltdown();
+          }
+          if (scene.editorMeltdown) {
+            if (scene.writer) endEditorMeltdownNow(); // defensive — pumpQueue can't create one
+            else advanceEditorMeltdown(dt);
+          }
+
+          // ── Verifier victory lap ─────────────────────────────────────────
+          // At 100% smug the Verifier gloats from its desk — chat-only, so it
+          // never blocks real work. A smug crossing that happened while the
+          // panel was closed fires once it's visible again.
+          if (!_replay && vm.showMeeting && !scene.verifierVictory) {
+            var _vsp = spiderFor('verifier');
+            if (_vsp && !_vsp.crowned && (_vsp.smug || 0) >= 100) maybeStartVerifierVictory();
+          }
+          if (scene.verifierVictory) {
+            var vvAct = scene.verifierVictory;
+            vvAct.lineTtl -= dt;
+            if (vvAct.lineTtl <= 0) {
+              if (vvAct.li < vvAct.lines.length) {
+                var vvLine = vvAct.lines[vvAct.li];
+                var vvSpk = vvLine.speakerRole === 'verifier' ? spiderFor('verifier') : spiderFor(vvLine.speakerRole);
+                if (!vvSpk) vvSpk = spiderFor('verifier');
+                setSpeech(vvSpk, vvLine.text, vvLine.ttl, vvSpk.icon + ' ' + vvSpk.name + ' — victory lap');
+                if (!_replay) {
+                  logGossipEntry(vvSpk.icon + ' ' + vvSpk.name, vvLine.text);
+                  recordEvent({ type: 'chat', who: vvSpk.icon + ' ' + vvSpk.name, text: vvLine.text });
+                }
+                if (vvSpk.role !== 'verifier') { vvSpk.reactT = 1.0; vvSpk.reactKind = 'bad'; }
+                vvAct.lineTtl = vvLine.ttl;
+                vvAct.li++;
+              } else {
+                scene.verifierVictory = null;
+                if (!_replay) {
+                  vm.meetingSpeaker = '👑 the Verifier is crowned — smugness 100%, humility 0%';
+                  $scope.$applyAsync();
+                }
+              }
+            }
+          }
+
           // ── Verifier vs Complexity standoff ──────────────────────────────
           // Driven per-frame like the other skits; real work interrupts it.
+          // ── Editor vs Verifier shouting match ───────────────────────────
+          // When both meters pass 70 the rivalry boils over once per run: the
+          // two storm to the middle of the office and shout it out while the
+          // rest of the office takes cover. A crossing that happened while the
+          // panel was closed fires once it's visible again.
+          if (!_replay && vm.showMeeting && !scene.shoutMatch && !scene.shoutFired) {
+            var _edSp = spiderFor('editor');
+            var _vfSp = spiderFor('verifier');
+            if (_edSp && _vfSp && (_edSp.rage || 0) >= 70 && (_vfSp.smug || 0) >= 70) maybeStartShoutMatch();
+          }
+          if (scene.shoutMatch) {
+            if (scene.writer || scene.queue.length || vm.streamingActive) endShoutMatchNow();
+            else advanceShoutMatch(dt);
+          }
+
+          // ── Verifier vs Complexity standoff ──────────────────────────────
           if (scene.standoff) {
             if (scene.writer || scene.queue.length || vm.streamingActive) {
               endStandoffNow();
@@ -3309,8 +4705,9 @@ angular.module('kanbanApp')
 
           // ── 'The user is watching' skit ──────────────────────────────────
           // When the mouse is over the panel the spiders notice and perform.
-          // Hover beats gossip (drops it); real work beats hover (interrupts).
-          if (!_replay && vm.meetingHovered) {
+          // Hover beats gossip (drops it); real work beats hover (interrupts);
+          // the Editor's meltdown beats hover (the tantrum owns the stage).
+          if (!_replay && vm.meetingHovered && !scene.editorMeltdown) {
             if (scene.writer || scene.queue.length || vm.streamingActive) {
               if (scene.watching) endWatchingNow();
             } else if (scene.watching) {
@@ -3355,6 +4752,7 @@ angular.module('kanbanApp')
           drawDesks(W, H);
           drawSpiders(W, H);
           drawSteam(W, H);
+          drawSparkles(W, H);
           drawConfetti(W, H);
         }
 
@@ -3517,6 +4915,28 @@ angular.module('kanbanApp')
             ctx.beginPath();
             ctx.arc(p.x * W, p.y * H, p.size * W * grow, 0, 6.283);
             ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        function drawSparkles(W, H) {
+          if (!scene.sparkles || !scene.sparkles.length) return;
+          for (var i = 0; i < scene.sparkles.length; i++) {
+            var p = scene.sparkles[i];
+            var fadeIn = Math.min(1, p.life * 4);
+            var fadeOut = Math.max(0, 1 - p.life / p.ttl);
+            var tw = 0.5 + 0.5 * Math.sin(p.life * p.twinkle + p.phase); // twinkle 0..1
+            var px = p.x * W, py = p.y * H;
+            var s = Math.max(1.5, p.size * W * (0.7 + tw * 0.6));
+            ctx.globalAlpha = fadeIn * fadeOut * (0.35 + tw * 0.5);
+            ctx.strokeStyle = '#ffd27f';
+            ctx.lineWidth = Math.max(0.8, s * 0.22);
+            ctx.lineCap = 'round';
+            // A tiny 4-point star — two crossed strokes, gently twinkling.
+            ctx.beginPath();
+            ctx.moveTo(px - s, py); ctx.lineTo(px + s, py);
+            ctx.moveTo(px, py - s); ctx.lineTo(px, py + s);
+            ctx.stroke();
           }
           ctx.globalAlpha = 1;
         }
@@ -3813,10 +5233,12 @@ angular.module('kanbanApp')
             ctx.fillStyle = s.color;
             ctx.fillText(nLabel, nCx + mf(5), nY + nH - mf(3));
             ctx.textAlign = 'left';
-            // Rage counter — a tiny badge over the Complexity spider's desk that
-            // climbs with every step / context milestone / compaction event.
-            // Sits one row below the name-plate so the two never collide.
-            if (s.role === 'complexity' && Math.round(s.rage) > 0) {
+            // Rage counter — a tiny badge over the Complexity AND Editor desks.
+            // The Complexity spider's climbs with every step / context
+            // milestone; the Editor's climbs with every REJECTED edit, so its
+            // badge is the visible proof of how fed up it is. Sits one row
+            // below the name-plate so the two never collide.
+            if ((s.role === 'complexity' || s.role === 'editor') && Math.round(s.rage) > 0) {
               var bw = mf(24), bh = mf(13);
               var flash = (s.rage >= 100 && Math.floor(Date.now() / 300) % 2 === 0);
               ctx.fillStyle = flash ? 'rgba(220,30,30,0.9)' : 'rgba(0,0,0,0.6)';
@@ -3825,13 +5247,71 @@ angular.module('kanbanApp')
               ctx.font = 'bold ' + mf(9) + 'px sans-serif';
               ctx.fillStyle = s.rage >= 100 ? '#ffd0d0' : '#ff9a9a';
               ctx.textAlign = 'center';
-              ctx.fillText((s.rage >= 100 ? '💢 ' : '🔥 ') + Math.round(s.rage) + '%', dx, dy - mf(27));
+              ctx.fillText((s.rage >= 100 ? '💢 ' : (s.role === 'editor' ? '😤 ' : '🔥 ')) + Math.round(s.rage) + '%', dx, dy - mf(27));
+              ctx.textAlign = 'left';
+            }
+            // Smug counter — the Verifier's own desk badge, gold instead of
+            // red: climbs with every rejected edit, flashes at 100%. Once
+            // smugness HITS 100% the badge becomes a glittering golden crown
+            // for the rest of the run. Same slot as the rage badges.
+            if (s.role === 'verifier' && (s.crowned || Math.round(s.smug) > 0)) {
+              var sCx = Math.max(mf(13), Math.min(W - mf(13), dx));
+              if (s.crowned) {
+                // Crowned! The desk badge is replaced by a golden crown with a
+                // pulsing halo and twinkling sparkles orbiting it.
+                var cY = dy - mf(26);
+                var glow = 0.5 + 0.35 * Math.sin(Date.now() / 260);
+                ctx.save();
+                ctx.shadowColor = 'rgba(245,190,60,' + glow.toFixed(3) + ')';
+                ctx.shadowBlur = mf(7);
+                ctx.font = mf(12) + 'px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('👑', sCx, cY);
+                ctx.restore();
+                var ct = Date.now() / 380;
+                for (var ki = 0; ki < 5; ki++) {
+                  var twinkle = Math.sin(ct * 2 + ki * 1.7);
+                  if (twinkle > 0.15) {
+                    ctx.fillStyle = 'rgba(255,236,170,' + (0.35 + 0.5 * twinkle).toFixed(3) + ')';
+                    ctx.font = mf(6) + 'px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('✦', sCx + Math.cos(ct + ki * 1.256) * mf(13), cY - mf(4) + Math.sin(ct + ki * 1.256) * mf(8));
+                  }
+                }
+                ctx.textAlign = 'left';
+              } else {
+                var bw2 = mf(24), bh2 = mf(13);
+                var sflash = (s.smug >= 100 && Math.floor(Date.now() / 300) % 2 === 0);
+                ctx.fillStyle = sflash ? 'rgba(245,190,60,0.9)' : 'rgba(0,0,0,0.6)';
+                rr(sCx - bw2 / 2, dy - mf(38), bw2, bh2, 4); ctx.fill();
+                ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+                ctx.font = 'bold ' + mf(9) + 'px sans-serif';
+                ctx.fillStyle = s.smug >= 100 ? '#fff3d6' : '#ffd98f';
+                ctx.textAlign = 'center';
+                ctx.fillText((s.smug >= 100 ? '✨ ' : '😏 ') + Math.round(s.smug) + '%', sCx, dy - mf(27));
+                ctx.textAlign = 'left';
+              }
+            }
+            // Domain grumps — the remaining six roles get a small badge in
+            // their own color when their corner of the office keeps failing
+            // (plans, exploration, commands, quality, config, creations).
+            // Same slot as the rage/smug badges, one row below the name-plate.
+            if (s.grump > 0 && s.role !== 'complexity' && s.role !== 'editor' && s.role !== 'verifier') {
+              var gw = mf(24), gh = mf(13);
+              var gCx = Math.max(gw / 2 + 2, Math.min(W - gw / 2 - 2, dx));
+              ctx.fillStyle = 'rgba(0,0,0,0.6)';
+              rr(gCx - gw / 2, dy - mf(38), gw, gh, 4); ctx.fill();
+              ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+              ctx.font = 'bold ' + mf(9) + 'px sans-serif';
+              ctx.fillStyle = s.color;
+              ctx.textAlign = 'center';
+              ctx.fillText(s.icon + ' ' + Math.round(s.grump) + '%', gCx, dy - mf(27));
               ctx.textAlign = 'left';
             }
             // Sound indicator — a tiny ON/OFF plaque beside the rage counter so
-            // users discover the header mute toggle controls the office sounds.
+            // users discover the header volume slider controls the office sounds.
             if (s.role === 'complexity') {
-              var sLabel = 'SOUND: ' + (vm.meetingMuted ? 'OFF' : 'ON');
+              var sLabel = 'SOUND: ' + (vm.meetingVolume <= 0 ? 'OFF' : vm.meetingVolume + '%');
               ctx.font = 'bold ' + mf(8) + 'px sans-serif';
               var sW = Math.ceil(ctx.measureText(sLabel).width) + 12;
               var sH = mf(13);
@@ -3839,9 +5319,9 @@ angular.module('kanbanApp')
               var sX = Math.round(s.rage) > 0 ? dx + mf(15) : dx - sW / 2;
               ctx.fillStyle = 'rgba(0,0,0,0.6)';
               rr(sX, dy - mf(38), sW, sH, 4); ctx.fill();
-              ctx.strokeStyle = vm.meetingMuted ? 'rgba(248,113,113,0.55)' : 'rgba(74,222,128,0.55)';
+              ctx.strokeStyle = vm.meetingVolume <= 0 ? 'rgba(248,113,113,0.55)' : 'rgba(74,222,128,0.55)';
               ctx.lineWidth = 1; ctx.stroke();
-              ctx.fillStyle = vm.meetingMuted ? '#f87171' : '#4ade80';
+              ctx.fillStyle = vm.meetingVolume <= 0 ? '#f87171' : '#4ade80';
               ctx.textAlign = 'center';
               ctx.fillText(sLabel, sX + sW / 2, dy - mf(27));
               ctx.textAlign = 'left';
@@ -3910,7 +5390,11 @@ angular.module('kanbanApp')
           }
           var px = s.x * W + tremble + rageShake;
           var cy = py + bob;
+          // Smugness tints the Verifier toward warm gold (on top of any rage
+          // red, so a furious editor who's also smug keeps both hues blended).
+          var smugFactor = Math.min(1, (s.smug || 0) / 100);
           var bodyColor = rageFactor > 0 ? blendHex(s.color, '#ff3b30', rageFactor) : s.color;
+          if (smugFactor > 0) bodyColor = blendHex(bodyColor, '#ffcf6b', smugFactor * 0.55);
 
           // Shadow
           ctx.fillStyle = 'rgba(0,0,0,0.3)';
@@ -3967,6 +5451,17 @@ angular.module('kanbanApp')
             ctx.fillStyle = '#ff3b30';
             ctx.beginPath();
             ctx.arc(px, cy, (bodyW * 0.9) * (1 + rageFactor * 0.5), 0, 6.283);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          }
+          // Smug aura — a soft golden halo that swells with the Verifier's
+          // smugness. Kept fainter than the rage aura: it glows, it doesn't
+          // burn.
+          if (smugFactor > 0) {
+            ctx.globalAlpha = 0.08 + smugFactor * 0.14;
+            ctx.fillStyle = '#ffd27f';
+            ctx.beginPath();
+            ctx.arc(px, cy, (bodyW * 0.9) * (1 + smugFactor * 0.35), 0, 6.283);
             ctx.fill();
             ctx.globalAlpha = 1;
           }
@@ -4103,13 +5598,71 @@ angular.module('kanbanApp')
                 }
                 // Skipped steps don't add complexity (and a replay of a finished
                 // run must not re-angrify the spider — live runs only).
-                if (!_replay) bumpComplexityRage(3); // another step done
+                if (!_replay) {
+                  bumpComplexityRage(3); // another step done
+                  // A landed step soothes the role whose turf it is.
+                  var grumpRole = grumpRoleForStepType(st.type);
+                  if (grumpRole) bumpSpiderGrump(grumpRole, -5);
+                }
+                // A landed edit breaks the Editor spider's losing streak and
+                // takes the edge off its rage — it unclenches a little. The
+                // Verifier's smugness takes a matching hit: it was wrong to be
+                // this confident.
+                if (!_replay) {
+                  var okSpider = spiderForStepType(st.type);
+                  if (okSpider && okSpider.role === 'editor') {
+                    if (scene) scene._editFailStreak = 0;
+                    bumpEditRage(-10);
+                    bumpVerifierSmug(-8);
+                  }
+                }
               } else if (status === 'error' || status === 'rejected' || status === 'failed') {
                 if (scene && scene.meetingOn) {
-                  fireReaction('bad', pick(REACT_FAIL));
+                  // A failed EDIT step is the Editor spider's turf — and it's
+                  // personal. Every consecutive failure makes it angrier (the
+                  // rage bump grows with the streak: 9, 12, 15…), and once it's
+                  // properly furious it stops being diplomatic about it.
+                  var failSpider = spiderForStepType(st.type);
+                  if (failSpider && failSpider.role === 'editor') {
+                    // The rage reaction lands FIRST — the bubble plays, then the
+                    // bumps (and any 100% meltdown start) follow, so the tantrum
+                    // isn't cancelled by the same tick's reaction.
+                    fireReaction('bad', editorRageLine(failSpider.rage || 0));
+                    if (!_replay) {
+                      scene._editFailStreak = (scene._editFailStreak || 0) + 1;
+                      var bump = 6 + Math.min(14, scene._editFailStreak * 3);
+                      // The same rejection that enrages the Editor vindicates
+                      // the Verifier — it's the one who said the edit wouldn't
+                      // hold up, and it's exactly as smug as the Editor is mad.
+                      bumpEditRage(bump);
+                      bumpVerifierSmug(bump);
+                      // The feud lands in the ticker — both meters at a glance
+                      // with no canvas needed. Flashes when a side hits 100%.
+                      var verSpider = spiderFor('verifier');
+                      pushTicker('feud',
+                        '✏️ Editor ' + Math.round(failSpider.rage || 0) + '% rage ↔ ✅ Verifier ' + (verSpider ? Math.round(verSpider.smug || 0) : 0) + '% smug',
+                        (failSpider.rage || 0) >= 100 || (verSpider ? (verSpider.smug || 0) >= 100 : false));
+                      // The Verifier gloats into the Office Chat, its line
+                      // chosen by how smug it just became. Recorded as a chat
+                      // event so a replay retells the gloating too.
+                      if (verSpider) {
+                        var gloatText = verifierSmugLine(verSpider.smug || 0);
+                        var gloatWho = verSpider.icon + ' ' + verSpider.name;
+                        recordEvent({ type: 'chat', who: gloatWho, text: gloatText });
+                        logGossipEntry(gloatWho, gloatText);
+                      }
+                    }
+                  } else {
+                    fireReaction('bad', pick(REACT_FAIL));
+                  }
                   pushTicker('bad', tickerLabelForStep(st));
                 }
-                if (!_replay) bumpComplexityRage(10); // a failed step is complex
+                if (!_replay) {
+                  bumpComplexityRage(10); // a failed step is complex
+                  // A failed step grinds on the role whose turf it is.
+                  var grumpRole = grumpRoleForStepType(st.type);
+                  if (grumpRole) bumpSpiderGrump(grumpRole, 12);
+                }
               }
             }
             _stepStatusCache[key] = status;

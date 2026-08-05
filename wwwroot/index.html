@@ -194,7 +194,8 @@
           <span class="rank-stars"><i ng-repeat="s in vm.chevronArray(vm.userRank(vm.userStats()).stars) track by $index" class="rank-star">★</i></span>
         </span>
         {{vm.userRankTitle(vm.userStats())}} ▾</button>
-      <div class="user-stats-popup" ng-if="vm.showUserStats" ng-blur="vm.closeUserStatsOnBlur($event)" tabindex="0">
+      <div class="user-stats-popup" ng-if="vm.showUserStats" ng-blur="vm.closeUserStatsOnBlur($event)" tabindex="0"
+        ng-init="rp = vm.userRankProgress(vm.userStats())">
         <div class="user-stats-popup-title">
           <span class="rank-insignia rank-insignia-lg rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
             <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
@@ -202,6 +203,16 @@
           </span>
           {{vm.userRankTitle(vm.userStats())}}
         </div>
+        <div class="rank-progress" ng-if="rp.next">
+          <div class="rank-progress-head">
+            <span class="rank-progress-label">{{rp.toNext | number:0}} pts to <b>{{rp.next.title}}</b></span>
+            <span class="rank-progress-pct">{{rp.pct | number:0}}%</span>
+          </div>
+          <div class="rank-progress-track">
+            <div class="rank-progress-fill rank-grade-{{rp.next.grade}}" ng-style="{width: rp.pct + '%'}"></div>
+          </div>
+        </div>
+        <div class="rank-progress rank-progress-max" ng-if="!rp.next">🏆 Top rank reached — you're at the pinnacle</div>
         <span class="header-stat" title="Cards done — {{vm.userStats().done}} across {{vm.userStats().archived}} archived">✅
           {{vm.userStats().done}} done</span>
         <span class="header-stat" title="Finished this week">📅 {{vm.userStats().doneThisWeek}} this week</span>
@@ -326,7 +337,7 @@
             </span>
             <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
             <span class="endpoint-tag" ng-if="vm.currentRun && vm.currentRun.endpointName"
-              title="{{vm.currentRun.endpointUrl}} / {{vm.currentRun.endpointModel}}">⚡ {{vm.currentRun.endpointName}}</span>
+              title="{{vm.currentRun.endpointUrl}} / {{vm.currentRun.endpointModel}}">⚡ {{vm.currentRun.endpointName}}<span ng-if="vm.endpointHealthBadge(vm.currentRun.endpointUrl)" class="endpoint-health endpoint-health-{{vm.endpointHealthBadge(vm.currentRun.endpointUrl).level}}" title="{{vm.endpointHealthBadge(vm.currentRun.endpointUrl).title}}">{{vm.endpointHealthBadge(vm.currentRun.endpointUrl).icon}}</span></span>
           </div>
 
           <!-- Concurrent agent sections (one per simultaneously-running agent, side by side) -->
@@ -335,7 +346,7 @@
               ng-class="{active: run.active, done: run.status === 'done', error: run.status === 'error'}">
               <div class="agent-run-header">
                 <span class="agent-run-status">{{run.active ? '●' : (run.status === 'error' ? '✕' : '✓')}}</span>
-                <span class="agent-run-endpoint" title="{{run.endpointUrl}} / {{run.endpointModel}}">⚡ {{run.endpointName}}</span>
+                <span class="agent-run-endpoint" title="{{run.endpointUrl}} / {{run.endpointModel}}">⚡ {{run.endpointName}}<span ng-if="vm.endpointHealthBadge(run.endpointUrl)" class="endpoint-health endpoint-health-{{vm.endpointHealthBadge(run.endpointUrl).level}}" title="{{vm.endpointHealthBadge(run.endpointUrl).title}}">{{vm.endpointHealthBadge(run.endpointUrl).icon}}</span></span>
                 <span class="agent-run-task" title="{{run.cardText}}">{{run.cardText | limitTo:40}}</span>
                 <span class="agent-run-progress" ng-if="run.active && run.llmProgressPercent != null">LLM {{run.llmProgressPercent}}%</span>
                 <span class="agent-run-duration">{{ vm.msToDigitalTime(run.elapsed) }}</span>
@@ -1071,6 +1082,7 @@
                   <div class="theme-card-preview theme-card-preview-cm" data-theme="{{t.value}}"></div>
                   <span class="theme-card-label">
                     <span class="theme-card-name">{{t.name}}</span>
+                    <span class="theme-card-mode" ng-if="t.dark === false">light</span>
                     <span class="theme-card-check" ng-if="vm.ideTheme === t.value">✓</span>
                   </span>
                 </div>
@@ -1290,6 +1302,8 @@
               <div ng-repeat="ep in vm.llamaEndpoints track by $index"
                 style="border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:6px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
                 <input ng-model="ep.name" placeholder="Name (e.g. GPU-2)" style="flex:1 1 90px;min-width:80px;padding:3px 6px;font-size:12px;" />
+                <span ng-if="vm.endpointHealthBadge(ep.url)" class="endpoint-health endpoint-health-{{vm.endpointHealthBadge(ep.url).level}}"
+                  title="{{vm.endpointHealthBadge(ep.url).title}}">{{vm.endpointHealthBadge(ep.url).icon}}</span>
                 <input ng-model="ep.url" placeholder="http://localhost:8080" style="flex:2 1 160px;min-width:120px;padding:3px 6px;font-size:12px;" />
                 <input ng-model="ep.model" placeholder="medgemma:4b" style="flex:1 1 110px;min-width:90px;padding:3px 6px;font-size:12px;" />
                 <button ng-click="vm.removeLlamaEndpoint($index)" class="small ghost" style="padding:2px 8px;" title="Remove endpoint">✕</button>

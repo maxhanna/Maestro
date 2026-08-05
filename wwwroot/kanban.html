@@ -201,8 +201,8 @@
             <select ng-if="vm.llamaEndpoints.length > 0" ng-model="card.llmEndpointId" ng-change="vm.saveCardText(card)"
               ng-click="$event.stopPropagation()" class="card-endpoint-select"
               title="LLM endpoint for this card (Default = settings endpoint)">
-              <option value="">⚡ Default</option>
-              <option ng-repeat="ep in vm.llamaEndpoints" value="{{ep.id}}">{{ep.name || ep.url}}</option>
+              <option value="">⚡ Default{{vm.endpointBadgeText(vm.llamaUrl)}}</option>
+              <option ng-repeat="ep in vm.llamaEndpoints" value="{{ep.id}}" title="{{vm.endpointBadgeTitle(ep.url)}}">{{ep.name || ep.url}}{{vm.endpointBadgeText(ep.url)}}</option>
             </select>
             <span ng-if="vm.llamaEndpoints.length === 0" class="card-endpoint-disabled"
               title="Only the default LLM endpoint is configured — add more endpoints in Settings.">⚡</span>

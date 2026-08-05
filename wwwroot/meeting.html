@@ -10,7 +10,6 @@
         <span class="meeting-font-label">{{vm.meetingFontSize}}px</span>
         <button class="ide-panel-btn" ng-click="vm.increaseMeetingFont()" title="Increase font size">+</button>
       </span>
-      <button class="ide-panel-btn" ng-click="vm.toggleMeetingMute()" title="{{vm.meetingMuted ? 'Unmute sounds' : 'Mute sounds'}}">{{vm.meetingMuted ? '🔇' : '🔊'}}</button>
       <button class="ide-panel-btn" ng-click="vm.resetMeeting()" title="Reset the office">↺</button>
       <button class="ide-panel-btn" ng-click="vm.closeMeeting()" title="Close Meeting View">✕</button>
     </div>
@@ -20,10 +19,19 @@
     <canvas id="meetingCanvas" class="meeting-canvas"></canvas>
     <div class="meeting-sound-tip" ng-show="vm.meetingSoundTip">
       <span class="meeting-sound-tip-icon">🔊</span>
-      <span class="meeting-sound-tip-text">You're hearing the Complexity spider's rage — the <strong>🔇 mute</strong> button in the header silences the office sounds.</span>
+      <span class="meeting-sound-tip-text">You're hearing the Complexity spider's rage — the <strong>🔊 volume slider</strong> floating over the office window controls the sound level.</span>
       <button type="button" class="meeting-sound-tip-close" ng-click="vm.dismissMeetingSoundTip()" title="Got it">✕</button>
     </div>
     <div class="meeting-replay-badge" ng-show="vm.meetingReplaying">▶ REPLAY<span ng-if="vm.meetingReplaySpeed > 1"> · {{vm.meetingReplaySpeed}}×</span></div>
+    <!-- Volume lives over the window, not the title bar: the header's drag
+         handler would hijack the slider's own drag. This chip sits on the
+         meeting body, which has no drag handler, so the slider is usable. -->
+    <div class="meeting-volume-chip" ng-class="{ 'dimmed': vm.meetingVolumeDim }" title="Office sound volume — 0% is muted">
+      <button type="button" class="meeting-volume-mute" ng-click="vm.toggleMeetingMute()" title="{{vm.meetingVolume <= 0 ? 'Unmute sounds' : 'Mute sounds'}}">{{vm.meetingVolume <= 0 ? '🔇' : '🔊'}}</button>
+      <input type="range" class="meeting-volume-slider" min="0" max="100" step="1" aria-label="Sound volume"
+        ng-model="vm.meetingVolume" ng-change="vm.onMeetingVolumeChange()" />
+      <span class="meeting-volume-label">{{vm.meetingVolume}}%</span>
+    </div>
     <div class="meeting-scrubber" ng-show="vm.meetingReplay && vm.meetingReplay.length" ng-click="vm.seekReplay($event)" title="Click to seek within the run">
       <div class="meeting-scrubber-track">
         <div class="meeting-scrubber-fill" id="meetingScrubberFill"></div>
@@ -31,23 +39,47 @@
       <span class="meeting-scrubber-time" id="meetingScrubberTime">0:00 / 0:00</span>
     </div>
     <div class="meeting-status-bar">
-      <span class="meeting-speaker">{{vm.meetingSpeaker}}</span>
+      <span class="meeting-speaker">{{vm.meetingSpeaker}}</span>        <span class="meeting-meters" ng-if="vm.meetingEditorRage > 0 || vm.meetingVerifierSmug > 0">
+          <span class="meeting-feud" title="Feud gauge — the Editor and Verifier argue over every rejected edit. {{vm.meetingFeudLeader === 'rage' ? 'The Editor is winning the argument.' : vm.meetingFeudLeader === 'smug' ? 'The Verifier is winning the argument.' : 'Dead heat — neither is backing down.'}}">
+            <span class="meeting-feud-leader meeting-feud-leader-{{vm.meetingFeudLeader}}">{{vm.meetingFeudLeader === 'rage' ? '😤' : vm.meetingFeudLeader === 'smug' ? '😏' : '⚖️'}}</span>
+            <span class="meeting-feud-track">
+              <span class="meeting-feud-rage" ng-style="{width: (vm.meetingFeudRatio || 50) + '%'}" ng-class="{'meeting-feud-seamless': (vm.meetingFeudRatio || 50) <= 0 || (vm.meetingFeudRatio || 50) >= 100}"></span>
+              <span class="meeting-feud-smug" ng-style="{width: (100 - (vm.meetingFeudRatio || 50)) + '%'}"></span>
+            </span>
+          </span>
+          <span class="meeting-meter meeting-meter-rage" ng-if="vm.meetingEditorRage > 0"
+          title="Editor spider's rage — climbs with every rejected edit, cools with success">
+          <span class="meeting-meter-emoji">😤</span>
+          <span class="meeting-meter-track"><span class="meeting-meter-fill meeting-meter-fill-rage" ng-style="{width: vm.meetingEditorRage + '%'}"></span></span>
+          <span class="meeting-meter-pct">{{vm.meetingEditorRage}}%</span>
+        </span>
+        <span class="meeting-meter meeting-meter-smug" ng-if="vm.meetingVerifierSmug > 0"
+          title="Verifier spider's smugness — climbs with the same rejected edits">
+          <span class="meeting-meter-emoji">😏</span>
+          <span class="meeting-meter-track"><span class="meeting-meter-fill meeting-meter-fill-smug" ng-style="{width: vm.meetingVerifierSmug + '%'}"></span></span>
+          <span class="meeting-meter-pct">{{vm.meetingVerifierSmug}}%</span>
+        </span>
+      </span>
       <span class="meeting-hint">The spiders animate the live agent run — planning, editing, verifying.</span>
     </div>
     <div class="meeting-ticker" ng-show="vm.meetingTicker.length">
-      <span class="meeting-ticker-label">STEPS</span>
+      <span class="meeting-ticker-label">ACTIVITY</span>
       <div class="meeting-ticker-viewport">
         <!-- Two copies of the items let the -50% keyframe loop seamlessly. -->
         <div class="meeting-ticker-track" ng-class="{ 'meeting-ticker-track-paused': vm.meetingReplaying }">
-          <span class="meeting-ticker-item" ng-repeat="t in vm.meetingTicker track by $index" ng-class="'meeting-ticker-' + t.kind">{{t.label}}</span>
-          <span class="meeting-ticker-item" ng-repeat="t in vm.meetingTicker track by $index" ng-class="'meeting-ticker-' + t.kind">{{t.label}}</span>
+          <span class="meeting-ticker-item" ng-repeat="t in vm.meetingTicker track by $index" ng-class="'meeting-ticker-' + t.kind + (t.flash ? ' meeting-ticker-flash' : '')">{{t.label}}</span>
+          <span class="meeting-ticker-item" ng-repeat="t in vm.meetingTicker track by $index" ng-class="'meeting-ticker-' + t.kind + (t.flash ? ' meeting-ticker-flash' : '')">{{t.label}}</span>
         </div>
       </div>
     </div>
-    <div class="meeting-gossip-log" ng-show="vm.gossipLog.length">
+    <div class="meeting-gossip-log" ng-class="{'meeting-gossip-expanded': vm.gossipExpanded}" ng-show="vm.gossipLog.length">
       <div class="meeting-gossip-log-head">
-        <span class="meeting-gossip-log-title">💬 OFFICE CHAT</span>
-        <button class="meeting-gossip-log-clear" ng-click="vm.gossipLog = []; $event.stopPropagation()" title="Clear the chat log">✕</button>
+        <span class="meeting-gossip-log-title">💬 OFFICE CHAT <span class="meeting-gossip-count" ng-if="vm.gossipLog.length">· {{vm.gossipLog.length}}</span></span>
+        <div class="meeting-gossip-log-actions">
+          <button class="meeting-gossip-log-expand" ng-click="vm.toggleGossipExpanded(); $event.stopPropagation()"
+            title="{{vm.gossipExpanded ? 'Collapse chat' : 'Expand the chat to read the full conversation'}}">{{vm.gossipExpanded ? '⤵' : '⤴'}}</button>
+          <button class="meeting-gossip-log-clear" ng-click="vm.clearGossipLog(); $event.stopPropagation()" title="Clear the chat log">✕</button>
+        </div>
       </div>
       <div class="meeting-gossip-log-feed" id="meetingGossipFeed">
         <div class="meeting-gossip-line" ng-repeat="g in vm.gossipLog track by $index">

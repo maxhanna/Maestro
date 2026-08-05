@@ -377,7 +377,13 @@ partial class AgentController
         }
         sb.Append("4. NEVER repeat or restate a step already present in PLAN SO FAR.\n");
         sb.Append("5. NEVER propose a step that assumes a method/property/symbol exists unless it is already visible in ");
-        sb.Append("   the discovery context OR was introduced by an earlier committed step.\n");
+        sb.Append("   the discovery context OR was introduced by an earlier committed step. NEVER declare code 'broken' ");
+        sb.Append("   and NEVER plan a deletion/removal of a symbol (method, function, class, variable) that you cannot ");
+        sb.Append("   see and quote verbatim from the discovery context. If the task references a method or symbol that is ");
+        sb.Append("   NOT visible in the discovery context, do not invent it and do not propose 'remove the broken <name>': ");
+        sb.Append("   say in your \"thinking\" that the symbol could not be found in the file, and ground the step in ");
+        sb.Append("   symbols that actually exist (e.g. create the missing method, or edit a real one you can quote).");
+        sb.Append("   Every deletion must be backed by a visible anchor in the file content.\n");
         if (stepMode != "command")
         {
             sb.Append("6. Respect dependency order: DTOs/models before endpoints that use them, backend before frontend, ");

@@ -17,7 +17,7 @@ angular.module('kanbanApp')
             try {
                 function normalise(s) { return (s || '').replace(/\d+/g, '#'); }
                 var recentDupe = vm.agentActivityLog.length > 0 && vm.agentActivityLog.slice(-3).some(function (e) { return e.level === level && normalise(e.message) === normalise(message); });
-                if (recentDupe && level !== 'error' && level !== 'warn' && level !== 'bypass' && level !== 'metric') return;
+                if (recentDupe && level !== 'error' && level !== 'warn' && level !== 'bypass' && level !== 'metric' && level !== 'rejected' && level !== 'recovering') return;
                 var entry = { ts: new Date().toLocaleTimeString(), level: level || 'info', message: message, detail: detail };
                 vm.agentActivityLog.push(entry); vm.agentActivityLogLength = vm.agentActivityLog.length;
                 if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift();
@@ -307,6 +307,7 @@ angular.module('kanbanApp')
                                                                     run.endpointName = parsed.endpointName || run.endpointName;
                                                                     run.endpointUrl = parsed.endpointUrl || '';
                                                                     run.endpointModel = parsed.endpointModel || '';
+                                                                    if (vm.loadEndpointHealth) vm.loadEndpointHealth();
                                                                     pushAgentLog(vm, 'info', '⚡ Running on endpoint: ' + run.endpointName + (run.endpointModel ? ' (' + run.endpointModel + ')' : ''));
                                                                 }
                                                                 break;
@@ -478,6 +479,7 @@ angular.module('kanbanApp')
                                                                 vm.sendSystemToast(); vm.steeringContext = '';
                                                                 var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                                                                 run.active = false; run.status = 'done'; run.elapsed = Date.now() - run.startedAt; vm.refreshStreamingActive();
+                                                                if (vm.loadEndpointHealth) vm.loadEndpointHealth();
                                                                 var editsApplied = parsed && parsed.editsApplied;
                                                                 var incomplete = parsed && parsed.incomplete;
                                                                 if (card.id !== vm.activeCardId) {
@@ -653,6 +655,7 @@ angular.module('kanbanApp')
                                         }).catch(function (readErr) {
                                             if (readErr && readErr.name === 'AbortError') return;
                                             run.active = false; run.status = 'error'; vm.currentRun = null; vm.refreshStreamingActive(); vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) }; $scope.$applyAsync();
+                                            if (vm.loadEndpointHealth) vm.loadEndpointHealth();
                                         });
                                     }
                                     readNext();
