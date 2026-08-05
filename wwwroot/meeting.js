@@ -13,16 +13,47 @@
 //     spiders celebrate, then walk back to their desks.
 // ─────────────────────────────────────────────────────────────────────────────
 angular.module('kanbanApp')
-  .factory('MeetingMixin', ['$timeout', function ($timeout) {
+  .factory('MeetingMixin', ['$timeout', '$http', function ($timeout, $http) {
     return {
       init: function (vm, $scope) {
         // ── Panel state (mirrors NotesMixin) ──────────────────────────────
+        // Default the floating panel to the BOTTOM-RIGHT corner of the viewport
+        // so it never covers the Agent panel / streaming section (which live in
+        // the top-left panel column) on first open. A saved position (persisted
+        // via settings) overrides the default, and everything is clamped to the
+        // viewport so a stale save can't park it over the agent UI either.
+        var _vw = window.innerWidth || 1280;
+        var _vh = window.innerHeight || 800;
         vm.meeting = {
-          left: 240, top: 120, width: 620, height: 430,
+          left: Math.max(16, _vw - 620 - 16),
+          top: Math.max(16, _vh - 430 - 16),
+          width: 620, height: 430,
           dragging: false, dragStartX: 0, dragStartY: 0,
           resizing: false, resizeDir: '', resizeStartX: 0, resizeStartY: 0,
           resizeStartW: 0, resizeStartH: 0
         };
+        // Restore a persisted panel position/size (saved by SettingsMixin).
+        if (vm._meetingPanelCfg) {
+          var _mp = vm._meetingPanelCfg;
+          if (typeof _mp.left === 'number') vm.meeting.left = _mp.left;
+          if (typeof _mp.top === 'number') vm.meeting.top = _mp.top;
+          if (typeof _mp.width === 'number') vm.meeting.width = _mp.width;
+          if (typeof _mp.height === 'number') vm.meeting.height = _mp.height;
+        }
+        // Shared clamp so the panel always stays fully on-screen, no matter
+        // how it was positioned (fresh default, restored save, or drag/resize).
+        // Exposed on vm so SettingsMixin can re-clamp when it applies a saved
+        // geometry asynchronously after this mixin has already run.
+        vm._clampMeetingPanel = function () {
+          if (vm._clampFloatingPanel) vm._clampFloatingPanel(vm.meeting);
+          else if (vm.meeting) {
+            var cvw = window.innerWidth || 1280;
+            var cvh = window.innerHeight || 800;
+            vm.meeting.left = Math.max(0, Math.min(vm.meeting.left || 0, cvw - (vm.meeting.width || 620)));
+            vm.meeting.top = Math.max(0, Math.min(vm.meeting.top || 0, cvh - (vm.meeting.height || 430)));
+          }
+        };
+        vm._clampMeetingPanel();
         vm.meetingSpeaker = '🕷️ the spiders are resting';
         vm.meetingBoardLines = [];
 
@@ -33,10 +64,16 @@ angular.module('kanbanApp')
           { key: 'editor',   name: 'Editor',    icon: '✏️', color: '#98c379', desk: { x: 0.10, y: 0.90 }, seat: { x: 0.50, y: 0.63 } },
           { key: 'commander',name: 'Commander', icon: '🛠', color: '#e5c07b', desk: { x: 0.90, y: 0.52 }, seat: { x: 0.56, y: 0.63 } },
           { key: 'verifier', name: 'Verifier',  icon: '✅', color: '#c678dd', desk: { x: 0.94, y: 0.72 }, seat: { x: 0.62, y: 0.63 } },
-          { key: 'reviewer', name: 'Reviewer',  icon: '🏁', color: '#e06c75', desk: { x: 0.90, y: 0.90 }, seat: { x: 0.68, y: 0.63 } }
+          { key: 'reviewer', name: 'Reviewer',  icon: '🏁', color: '#e06c75', desk: { x: 0.90, y: 0.90 }, seat: { x: 0.68, y: 0.63 } },
+          { key: 'itspecialist', name: 'IT Specialist', icon: '💾', color: '#d19a66', desk: { x: 0.28, y: 0.78 }, seat: { x: 0.74, y: 0.63 } },
+          { key: 'ideas',      name: 'Ideas',      icon: '💡', color: '#7ee787', desk: { x: 0.28, y: 0.52 }, seat: { x: 0.80, y: 0.63 } },
+          { key: 'complexity', name: 'Complexity', icon: '🤯', color: '#ff5370', desk: { x: 0.28, y: 0.90 }, seat: { x: 0.86, y: 0.63 } }
         ];
         // Board stand: where the writing spider stands (in front of the board).
         var BOARD_STAND = { x: 0.66, y: 0.86 };
+        // Where the Verifier stands to stare down the Complexity spider after
+        // an overruled verdict — just left of the board stand, face to face.
+        var STANDOFF_SPOT = { x: 0.54, y: 0.86 };
         // Board rectangle on the wall (fractions of W/H).
         var BOARD_RECT = { x: 0.60, y: 0.05, w: 0.34, h: 0.20 };
         // Table rectangle on the floor.
@@ -47,9 +84,9 @@ angular.module('kanbanApp')
         // Spots where the listeners gather around the cooler.
         var COOLER_SPOTS = [
           { x: 0.11, y: 0.64 },
-          { x: 0.23, y: 0.64 }
+          { x: 0.23, y: 0.64 },
+          { x: 0.17, y: 0.72 }
         ];
-
         var scene = null;      // { spiders:[], boardLines:[], writer:null, queue:[], meetingOn:false, done:false }
         var raf = null;
         var canvas = null;
@@ -57,12 +94,14 @@ angular.module('kanbanApp')
         var lastTs = 0;
         var destroyed = false;
         var _recording = null; // events captured during a live run (for replay)
+        var _recordingCardId = null; // card whose run is being recorded (persisted for replay)
         var _replay = null;    // active replay clock { events, t0, elapsed, idx }
         vm.meetingReplay = null;      // last completed run's events
         vm.meetingReplaying = false;  // true while a replay is running
         vm.meetingReplaySpeed = 1;    // replay playback multiplier (1 / 1.5 / 2)
         vm.meetingTicker = [];        // recent step outcomes ({ kind, label })
         vm.gossipLog = [];            // transcribed jokes + gossip ({ t, who, text })
+        vm.meetingIdeas = [];         // backend improvement suggestions ({ topic, desc, complete, date })
 
         function makeScene() {
           var spiders = ROLES.map(function (r) {
@@ -79,7 +118,12 @@ angular.module('kanbanApp')
               speech: '', speechTtl: 0,
               celebrateT: 0,
               reactT: 0, reactKind: '', // brief reaction hop / tremble
-              waveT: 0, wavePhase: Math.random() * 6.28 // waving at the user
+              waveT: 0, wavePhase: Math.random() * 6.28, // waving at the user
+              rage: 0, // Complexity spider: escalating anger meter (0..100)
+              rageAt: Date.now(), // when rage last changed (for idle cooling)
+              rageDrainedAt: Date.now(), // last frame cooling was applied
+              stomping: false, // exaggerated angry walk back to the desk
+              glaringAt: null  // spider this one is locking eyes with (glare skit)
             };
           });
           return {
@@ -97,10 +141,20 @@ angular.module('kanbanApp')
             gossip: null,            // active water-cooler gossip sequence
             gossipCd: 12,            // countdown until next gossip moment
             reactLockT: 0,           // reactions pause stream-reading/jokes briefly
+            postMortem: null,        // { est, actual, shown } est-vs-actual chart
+            verdictOutcome: null,    // 'right' | 'wrong' | 'fail' from the run's verdict
+            verdictGossiped: false,  // once the verdict is retold at the cooler, it's done
             _lastStepType: '',       // step type for reaction routing
             confetti: [],            // celebration particles ({ x, y, vx, vy, rot, vr, color, size, life, ttl })
+            calmQuipFired: false,    // once-per-run 'calmed down' line (idle drain to 0)
+            steam: [],               // rage steam wisps off the Complexity spider ({ x, y, vx, vy, size, sway, swaySpeed, life, ttl })
             watching: null,          // active 'the user is watching' skit
-            watchingCd: 8            // cooldown before the next watching skit
+            watchingCd: 8,           // cooldown before the next watching skit
+            standoff: null,          // active Verifier-vs-Complexity standoff skit
+            standoffCd: 20,          // cooldown before the next standoff can start
+            glare: null,             // active Reviewer-vs-Complexity glare skit
+            coolerTrip: null,        // Complexity spider storming off to the cooler
+            coolerTripCd: 90         // cooldown before the next rage-cooler trip
           };
         }
 
@@ -177,6 +231,233 @@ angular.module('kanbanApp')
           "On step {current} of {total} and nobody has panicked yet. Beautiful.",
           "{done} step(s) done. Only {left} left. We're basically done. Mostly.",
           "I planned {total} step(s). The others execute them. I take full credit. Fair trade."
+        ];
+        var BANTER_CONFIG = [  // IT Specialist: settings / configuration — the boring stuff
+          "Configuration check: thinking capped at {think} tokens, output at {tokens}. Tune responsibly.",
+          "This run is using {model} on {endpoint}. I wrote that down somewhere. Probably.",
+          "Thinking context is at {think} tokens. Above 4096 the model gets… creative. I mean that literally.",
+          "Output budget is {tokens} tokens. If the plan runs long, that's why. Budgeting. I love budgeting.",
+          "Endpoint config verified: {endpoint}. Yes. That is a configured thing. It's configured.",
+          "{saved} saved theme(s), plan font at {font}px, {model} on deck. The boring numbers that run the show.",
+          "The user set {model} as the worker. I checked the model field three times. It says what it says.",
+          "Default max tokens {tokens}, thinking {think}. In my professional opinion? These are numbers. Good numbers."
+        ];
+        // The Complexity spider is the office's most complicated, most annoyed
+        // resident. It mutters about the task's difficulty score, the context
+        // budget, and whenever reasoning or diffs get compacted.
+        var COMPLEXITY_QUIPS = [
+          "Ugh. Complexity {score}/100. {label}. Obviously. I could have told you that from the first syllable.",
+          "{label} task. {cap} tokens of thinking. I've seen harder. I've also seen EASIER. Mostly easier.",
+          "Complexity {score}/100. Let me just… carry that around for the whole run. Sure. No problem.",
+          "{label}. {cap} thinking tokens. And they expect RESULTS from that. Delightful.",
+          "Oh good — complexity {score}/100. Because my life was too simple before.",
+          "A {label} task, capped at {cap} tokens. I've compressed entire novels into less.",
+          "This task rates a {score}/100 on my personal misery index. Also known as: complexity.",
+          "{cap} tokens of thinking budget for a {label} task. What could possibly go wrong. Again."
+        ];
+        var COMPLEXITY_CTX = [   // about the accumulated context budget
+          "The context is up to {ctx} tokens now. It grows. It always grows.",
+          "{ctx} tokens of context and counting. The whiteboard is practically vibrating.",
+          "We're at {ctx} tokens of accumulated context. Someone's going to pay for this later.",
+          "{ctx} tokens. Do you understand what that MEANS for my poor spider brain? Probably not."
+        ];
+        var COMPLEXITY_COMPACT = [ // when reasoning/diffs get compacted
+          "COMPACTED. They compacted my context. Everything I knew, summarized by a stranger.",
+          "Oh wonderful — the reasoning just got compressed. Goodbye, nuance. We barely knew you.",
+          "They compressed the accumulated diffs. My memory is now a Highlights Reel.",
+          "COMPACTION. That's their solution to complexity. Add more complexity. Perfect.",
+          "The context was too big, so they made it smaller. I am Big Mad about this.",
+          "Diff context summarized. Translation: my beautiful, detailed history is now a haiku."
+        ];
+        var CALMED_QUIPS = [ // rare: the meter fully drains during idle cooling
+          "Huh. I'm… relaxed? This is new. Don't get used to it.",
+          "Fine. FINE. I will breathe. For now. Temporarily.",
+          "The rage is gone. It feels wrong. What do I do with my hands?",
+          "A quiet mind. Disgusting. Absolutely disgusting.",
+          "Okay, who replaced my rage with calm? HR is going to hear about this."
+        ];
+        // When the run finishes, the Complexity spider compares its own
+        // difficulty estimate to what actually happened. Being right: smug.
+        // Being overruled by the verifier: sulking, obviously.
+        var COMPLEXITY_VERDICT_RIGHT = [
+          "I said {label} — {est} step(s). It took {actual}. I am never wrong. Don't test me again.",
+          "Estimated {est} step(s), actual {actual}. Verifier agreed with me. As it SHOULD.",
+          "{label}, as predicted. {actual} step(s). My complexity sense is flawless. It's exhausting being right.",
+          "Called it: {est} steps, we did {actual}. The verifier and I are in rare agreement. Unsettling.",
+          "I told everyone it was {label}. Now the verifier agrees. Everyone owes me an apology.",
+          "Track record's now {record}. I keep receipts. Somebody has to.",
+          "That's {record} on the board. The verifier is basically my yes-man at this point."
+        ];
+        var COMPLEXITY_VERDICT_WRONG = [
+          "I estimated {est} step(s). It took {actual}. The verifier overrode me. OVERRODE. Me.",
+          "I said {label} and the verifier said 'actually no'. The verifier has a lot of nerve.",
+          "{est} steps I predicted. {actual} happened. Clearly the complexity was hiding. Sneaky complexity.",
+          "The verifier overruled my estimate. My estimate. I'm not wrong, the universe just got more complicated.",
+          "I called it {label} and it ended up {actual} step(s). I blame the verifier. And gravity.",
+          "Record's {record} now. One blemish. The verifier is SO going to hear about this.",
+          "{record}. That's the score. Don't ask about the losses column. I'm choosing not to see it."
+        ];
+        var COMPLEXITY_VERDICT_WRONG = [
+          "I estimated {est} step(s). It took {actual}. The verifier overrode me. OVERRODE. Me.",
+          "I said {label} and the verifier said 'actually no'. The verifier has a lot of nerve.",
+          "{est} steps I predicted. {actual} happened. Clearly the complexity was hiding. Sneaky complexity.",
+          "The verifier overruled my estimate. My estimate. I'm not wrong, the universe just got more complicated.",
+          "I called it {label} and it ended up {actual} step(s). I blame the verifier. And gravity."
+        ];
+        var COMPLEXITY_VERDICT_FAIL = [ // the verifier said the task is NOT complete
+          "The verifier says it's NOT complete. On a {label} task. I don't make the rules — I just estimate them.",
+          "Verification failed. My {label} estimate was apparently too generous. Or reality is broken.",
+          "The verifier found issues. {actual} step(s) and STILL not done. This is exactly why I complain.",
+          "Not complete?! The complexity was clearly {label}-and-then-some. But nobody listens to the spider.",
+          "That's {record} now, tainted by THIS. The failure column grew. I felt it in my legs.",
+          "{record}. And this run is why there's a losses column at all. Unbelievable."
+        ];
+        // The Complexity spider's water-cooler brag about its historical
+        // accuracy once it has a real track record to brag about.
+        var VERDICT_BRAG = [
+          "Speaking of verdicts — my all-time record is {record}. I've been counting. Always counting.",
+          "The verifier and I? {record} against me is a fiction. Check the desk tally. It's real.",
+          "Historical accuracy: {record}. Ask anyone. Actually don't ask the verifier.",
+          "My lifetime estimate score is {record}. I'd say 'no pressure', but I thrive on it."
+        ];
+        var VERDICT_BRAG_REACTIONS = [
+          "He keeps a SCOREBOARD?!",
+          "Of course he tracks his wins. OF COURSE he does.",
+          "A verdict tally. On his desk. I'm both impressed and afraid.",
+          "He's bragging about being right, again. It's… consistent.",
+          "The record is real. I've seen the plaque. It's glued down."
+        ];
+        // The reviewer's counter-reaction, delivered from the board right after
+        // it writes the final verdict: a grudging concession when the
+        // Complexity spider's estimate was right, a smug 'told you so' when it
+        // was overruled. Both land in the Office Chat.
+        var REVIEWER_GRUDGE = [
+          "Ugh. Fine. You were right — {est} step(s), we did {actual}. Don't let it go to your head.",
+          "Fine, you were right. The {label} call was accurate. I said what I said, but you were right.",
+          "I take it back. Mostly. {est} was right on the money. Grudgingly noted.",
+          "Okay, okay — you called it. The board agrees with you. I'll be over here, being wrong.",
+          "Fine. You were right. The verdict and your estimate are best friends now. I need a moment."
+        ];
+        var REVIEWER_SMUG = [
+          "Told you so. Estimated {est}, took {actual}. The board keeps the receipts.",
+          "Told you so. {label}? It was {actual} step(s) of reality. Stick to what you know.",
+          "Told you so. My verdict says {actual} step(s). Your estimate? Adorable.",
+          "Told you so. The code doesn't lie, even when estimates do.",
+          "Told you so. I've seen this board write itself before. It knows better."
+        ];
+        var REVIEWER_SMUG_FAIL = [ // verifier said it's not done — own it together
+          "Okay, that one's on all of us. The board will have to stay up a little longer.",
+          "I wrote 'complete' and the verifier wrote 'no'. Some days the board plays both sides.",
+          "{label}, {actual} step(s), and not finished. We'll take the L as a team.",
+          "I've seen incomplete plans before. This one's going back to the drawing board. All of us."
+        ];
+        // When the reviewer's smug 'told you so' lands, the two lock eyes from
+        // across the office for a beat before the Complexity spider stomps
+        // home. The Complexity spider fires back; the reviewer gets the last
+        // word. Both bubbles land in the Office Chat.
+        var COMPLEXITY_GLARE = [
+          "Don't look at me like that. I KNOW what the code says.",
+          "You're lucky the verifier is standing right there.",
+          "I was ONE estimate away. One. That's practically a bullseye.",
+          "Keep your 'told you so'. This changes NOTHING.",
+          "The next task is a 95 and you'll eat those words."
+        ];
+        var REVIEWER_GLARE_LAST = [
+          "I'll be at my desk. Glaring.",
+          "Estimate said {est}, code said {actual}. That's math, not opinion.",
+          "Anytime you want a rematch, my desk is right across the room.",
+          "I don't need to win the argument. The diff already did."
+        ];
+        // Water-cooler retellings: after a run, a bystander spider recounts the
+        // reviewer's verdict moment for the rest of the office — the grudging
+        // admission when the estimate was right, the smug 'told you so' when it
+        // was overruled, or the shared L when the verifier said it wasn't done.
+        var GOSSIP_VERDICT_RIGHT = [
+          "The reviewer had to tell the Complexity spider he was right. You could hear the grinding from here.",
+          "The reviewer literally wrote 'fine, you were right.' The Complexity spider has not stopped mentioning it.",
+          "Verifier agreed with the estimate. The reviewer had to sit with that. Delicious.",
+          "I saw the reviewer eat crow today. It was a whole meal."
+        ];
+        var GOSSIP_VERDICT_WRONG = [
+          "The reviewer said 'told you so' to its face. Full eye contact. The board felt it.",
+          "Reviewer got the last word — 'told you so' — and then they GLARED across the whole office.",
+          "The estimate missed by a mile and the reviewer has not let it go. Not one letter.",
+          "There was a stare-down after the verdict. The Complexity spider lost. The reviewer is still smug."
+        ];
+        var GOSSIP_VERDICT_FAIL = [
+          "The reviewer wrote 'complete' and the verifier said no. The whole office took that L together.",
+          "The board says it's not done. The reviewer and the Complexity spider are suddenly best friends in failure."
+        ];
+        var GOSSIP_VERDICT_REACTIONS = [
+          "No way. The board has RECEIPTS.",
+          "I'd pay to see that again.",
+          "We were all at our desks. We SAW it.",
+          "Somebody check on the reviewer's ego."
+        ];
+        // When rage crosses 75 the Complexity spider occasionally storms off to
+        // the water cooler, grabs a drink, mutters about the unmanageable
+        // context, then stalks back to its desk.
+        var COOLER_GRIPE = [
+          "75. SEVENTY-FIVE. And the context just keeps GROWING. I need a drink.",
+          "This context is {ctx} tokens of unmanageable nonsense. Cooler. Now.",
+          "{label} task, {ctx} tokens of context, {score}/100 complexity. Obviously I'm at the cooler.",
+          "The whiteboard is fine. The context is NOT. Water. Immediately.",
+          "I'm at the cooler because THIS ({ctx} tokens) is what happens when nobody listens to me."
+        ];
+        var COOLER_SIP = [
+          "*glug glug* …unmanageable. Absolutely unmanageable.",
+          "*sips* …context. {ctx} tokens of it. Does anyone ELSE have to drink their feelings?",
+          "*gulp* …right. Back to the desk. The chaos awaits.",
+          "*sip* …I feel nothing. Which is an improvement."
+        ];
+        var COOLER_STALK_BACK = [
+          "Fine. Hydrated. Now where were we with this {label} mess.",
+          "Back to the desk. The context won't manage itself. Apparently.",
+          "Drink done. Rage: slightly diluted. See you at the board."
+        ];
+        // A random nearby spider's double-take when the Complexity spider
+        // storms off mid-meeting — with a bubble in the Office Chat.
+        var DOUBLE_TAKE = [
+          "did… did he just leave mid-meeting?",
+          "Is the red one… storming off? Again?",
+          "He just LEFT. Mid-sentence. Rude but… honestly, fair.",
+          "Wait, did he just go for water during MY turn?",
+          "Okay, who's covering his seat while he hydrates?",
+          "The Complex one just walked out. Should someone go after him? …No? No one? Cool."
+        ];
+        // The sarcastic post-mortem the Complexity spider writes on the board
+        // LAST, after the reviewer's verdict — summarizing how the task turned
+        // out versus how easy the user probably thought it would be.
+        var COMPLEXITY_POSTMORTEM = [
+          "POST-MORTEM: user expected 'quick tweak', reality was {label} ({actual} step(s)). I saw this coming.",
+          "Post-mortem: {label} in {actual} step(s). The user said 'easy'. The whiteboard says otherwise.",
+          "Task autopsy: called it {label}. {actual} step(s) later, I remain unimpressed and correct.",
+          "The user asked for a 'small change'. The board says {label}, {actual} steps. They always do.",
+          "Final analysis: {label}. {actual} steps. The user's expectations and my estimate were never friends.",
+          "Post-mortem complete: {label} ({actual} step(s)). I predicted {est} step(s). Close enough. I'm always close."
+        ];
+        var COMPLEXITY_POSTMORTEM_FAIL = [ // the verifier said it's NOT done
+          "POST-MORTEM: {label} in {actual} step(s) and STILL not done. The user said 'simple'. Unbelievable.",
+          "Task autopsy: {label}, {actual} steps, verifier unsatisfied. So the user gets MORE complexity. Great.",
+          "Post-mortem: user wanted trivial, got {label}, verifier wanted more. My estimate was the only sane one here.",
+          "The board says {actual} step(s) of {label} and the task STILL isn't done. 'Quick task', the user said."
+        ];
+        // The two-spider standoff: when the Complexity spider's estimate is
+        // overruled, the Verifier walks over and stares it down with the code
+        // as evidence, then the Complexity spider sulks back to its desk.
+        var VERIFIER_REBUTTAL = [
+          "The code is the evidence. And the evidence disagrees with your {label}.",
+          "You estimated {est} step(s). The actual diff says {actual}. I read the diff, not your estimate.",
+          "I don't argue with estimates. I argue with the code that's already written. It says {actual}.",
+          "Your complexity score is a suggestion. The whiteboard is the verdict. Look at it.",
+          "I verified the real changes. They don't match your math. That's the entire story."
+        ];
+        var COMPLEXITY_SULK = [
+          "Fine. The code wins this round. I'll be right next time.",
+          "Overruled by the verifier. Of course. The code always gets the final word.",
+          "I'm not sulking. I'm… recalculating my entire worldview.",
+          "Enjoy the win, verifier. I'll be back with a better estimate.",
+          "This is why I complain. It builds character. Apparently."
         ];
         // Water-cooler gossip — one spider brags about the user's stats and
         // the others react (they're VERY impressed by mundane numbers).
@@ -395,14 +676,17 @@ angular.module('kanbanApp')
           "Rejected?! Rude.",
           "I felt that one in my 8 legs."
         ];
-        // Fake but fun ranks based on live user stats.
+        // Fake but fun ranks based on live user stats. Each rank carries a
+        // military-style insignia: chevrons (enlisted stripes, pointing up),
+        // stars (officer rank), and a grade color (bronze → silver → gold →
+        // platinum). The header rank chip renders the insignia beside the title.
         var RANK_TITLES = [
-          { min: 100, title: 'Grand Architect of Everything' },
-          { min: 50, title: 'Supreme Code Commander' },
-          { min: 25, title: 'Certified Power User' },
-          { min: 10, title: 'Respected Contributor' },
-          { min: 3, title: 'Rising Star' },
-          { min: 0, title: 'Legend in Training' }
+          { min: 100, title: 'Grand Architect of Everything', chevrons: 5, stars: 2, grade: 'platinum' },
+          { min: 50, title: 'Supreme Code Commander', chevrons: 4, stars: 1, grade: 'gold' },
+          { min: 25, title: 'Certified Power User', chevrons: 3, stars: 1, grade: 'gold' },
+          { min: 10, title: 'Respected Contributor', chevrons: 2, stars: 0, grade: 'silver' },
+          { min: 3, title: 'Rising Star', chevrons: 1, stars: 0, grade: 'bronze' },
+          { min: 0, title: 'Legend in Training', chevrons: 0, stars: 0, grade: 'recruit' }
         ];
 
         function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
@@ -464,6 +748,31 @@ angular.module('kanbanApp')
           if (total > 0 && current < 1) current = 1;
           return { file: file, endpoint: endpoint, done: done, total: total, current: current, left: Math.max(0, total - done) };
         }
+        // Live settings snapshot for the IT Specialist's config banter.
+        function settingsContext() {
+          var endpoint = '', model = '';
+          if (vm.llamaEndpoints && vm.llamaEndpoints.length) {
+            var ep = vm.llamaEndpoints.find(function (e) { return e.id === (vm.currentEndpointId || ''); });
+            ep = ep || vm.llamaEndpoints[0];
+            if (ep) {
+              endpoint = ep.name || ep.model || '';
+              model = ep.model || ep.name || '';
+            }
+          }
+          var think = (typeof vm.thinkingMaxTokens === 'number' && vm.thinkingMaxTokens) ? vm.thinkingMaxTokens : 4096;
+          var tokens = (typeof vm.defaultMaxTokens === 'number' && vm.defaultMaxTokens) ? vm.defaultMaxTokens : 2048;
+          var saved = (vm.savedThemes && vm.savedThemes.length) || 0;
+          var font = vm.planFontSize || 14;
+          return {
+            ready: !!(model || endpoint),
+            model: model || 'the default model',
+            endpoint: endpoint || 'Default',
+            think: think,
+            tokens: tokens,
+            saved: saved,
+            font: font
+          };
+        }
         // Replaces {placeholders} in a banter template with live context.
         function fmtBanter(tpl, ctx) {
           return tpl
@@ -472,7 +781,12 @@ angular.module('kanbanApp')
             .replace(/\{done\}/g, ctx.done)
             .replace(/\{total\}/g, ctx.total || '?')
             .replace(/\{current\}/g, ctx.current)
-            .replace(/\{left\}/g, ctx.left);
+            .replace(/\{left\}/g, ctx.left)
+            .replace(/\{think\}/g, ctx.think)
+            .replace(/\{tokens\}/g, ctx.tokens)
+            .replace(/\{saved\}/g, ctx.saved)
+            .replace(/\{font\}/g, ctx.font)
+            .replace(/\{model\}/g, ctx.model || 'the model');
         }
         function randomSpider() {
           if (!scene || !scene.spiders.length) return null;
@@ -520,6 +834,7 @@ angular.module('kanbanApp')
           if (!scene || scene.done) return;
           if (!_replay) recordEvent({ type: 'reaction', kind: kind, text: text });
           if (scene.gossip) endGossipNow();
+          if (scene.coolerTrip) endCoolerTripNow(); // a step landing breaks the cooler break
           var spider = randomSpider();
           // Prefer the spider matching the step, but never stomp the writer.
           var byStep = spiderForStepType(scene._lastStepType);
@@ -546,9 +861,72 @@ angular.module('kanbanApp')
         // are generated with oscillators/noise buffers, and can be muted via
         // the header button (persisted in localStorage).
         vm.meetingHovered = false;  // true while the mouse is over the panel
+        vm.meetingHoverSince = null; // when the current hover began (for watched-drain boost)
         var _audioCtx = null;
         vm.meetingMuted = false;
         try { vm.meetingMuted = window.localStorage.getItem('weaver.meeting.muted') === '1'; } catch (e) { }
+        // Panel-wide text size — scales the DOM chrome (status bar, ticker,
+        // office chat, badges) via the --meeting-font CSS var AND the canvas
+        // text via mf() below. Persisted like the mute toggle.
+        vm.meetingFontSize = 12;
+        try {
+          var _mf = parseInt(window.localStorage.getItem('weaver.meeting.font'), 10);
+          if (_mf >= 9 && _mf <= 26) vm.meetingFontSize = _mf;
+        } catch (e) { }
+        vm.increaseMeetingFont = function () {
+          vm.meetingFontSize = Math.min(26, vm.meetingFontSize + 1);
+          persistMeetingFont();
+        };
+        vm.decreaseMeetingFont = function () {
+          vm.meetingFontSize = Math.max(9, vm.meetingFontSize - 1);
+          persistMeetingFont();
+        };
+        function persistMeetingFont() {
+          try { window.localStorage.setItem('weaver.meeting.font', String(vm.meetingFontSize)); } catch (e) { }
+          if (vm.saveSettings) vm.saveSettings(true);
+        }
+        // One-time discoverability tooltip: the first time the rage rumble is
+        // actually heard, point users at the header mute toggle. Persisted so
+        // it only shows once ever.
+        vm.meetingSoundTip = false;
+        vm._soundTipShown = false;
+        try { vm._soundTipShown = window.localStorage.getItem('weaver.meeting.soundTipSeen') === '1'; } catch (e) { }
+        vm.dismissMeetingSoundTip = function () {
+          vm.meetingSoundTip = false;
+          if (vm._soundTipTimer) { $timeout.cancel(vm._soundTipTimer); vm._soundTipTimer = null; }
+        };
+
+        // ── Complexity spider verdict track record ─────────────────────────
+        // A persistent win/loss tally of the Complexity spider's estimates
+        // against the verifier's verdicts, saved to localStorage so it survives
+        // across runs and can brag about its historical accuracy. 'right' is a
+        // win; 'wrong' and 'fail' are both losses.
+        var _verdictRecord = { right: 0, wrong: 0, fail: 0 };
+        try {
+          var _vrRaw = window.localStorage.getItem('weaver.meeting.verdicts');
+          if (_vrRaw) {
+            var _vrParsed = JSON.parse(_vrRaw);
+            // Harden against corrupted / legacy shapes: only adopt a real
+            // object with numeric counters; anything else keeps the defaults.
+            if (_vrParsed && typeof _vrParsed === 'object' && !Array.isArray(_vrParsed)) {
+              _verdictRecord = {
+                right: typeof _vrParsed.right === 'number' ? _vrParsed.right : 0,
+                wrong: typeof _vrParsed.wrong === 'number' ? _vrParsed.wrong : 0,
+                fail: typeof _vrParsed.fail === 'number' ? _vrParsed.fail : 0
+              };
+            }
+          }
+        } catch (e) { }
+        function saveVerdictRecord() {
+          try { window.localStorage.setItem('weaver.meeting.verdicts', JSON.stringify(_verdictRecord)); } catch (e) { }
+        }
+        // '3-1' style label: wins-losses (wrong + fail both count as losses).
+        function verdictRecordLabel() {
+          return (_verdictRecord.right || 0) + '-' + ((_verdictRecord.wrong || 0) + (_verdictRecord.fail || 0));
+        }
+        function verdictRecordTotal() {
+          return (_verdictRecord.right || 0) + (_verdictRecord.wrong || 0) + (_verdictRecord.fail || 0);
+        }
         function audioCtx() {
           if (!_audioCtx) {
             try {
@@ -651,8 +1029,164 @@ angular.module('kanbanApp')
             osc.start(t); osc.stop(t + 0.34);
           } catch (e) { }
         }
+        function playStomp() {
+          var ctx = sfx(); if (!ctx) return;
+          try {
+            var t = ctx.currentTime;
+            // Heavy angry thud: low square hit with a fast pitch drop.
+            var osc = ctx.createOscillator();
+            var gain = ctx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(90, t);
+            osc.frequency.exponentialRampToValueAtTime(38, t + 0.18);
+            gain.gain.setValueAtTime(0.09, t);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+            osc.connect(gain); gain.connect(ctx.destination);
+            osc.start(t); osc.stop(t + 0.24);
+          } catch (e) { }
+        }
+        // ── Rage sound ─────────────────────────────────────────────────────
+        // The Complexity spider's anger has a voice: a low continuous rumble
+        // that swells as the meter climbs (volume + pitch both track rage),
+        // plus a quick one-shot 'steam vent' hiss when it hits 100%. Both
+        // honor the existing mute toggle and only sound while the panel is
+        // visible. The rumble is a persistent node that must be started and
+        // stopped explicitly (unlike the one-shots above).
+        // The jitter wave that trembles the spider's body on screen. Shared by
+        // drawSpider (pixel shake) and updateRageRumble (filter wobble) so the
+        // audio stays in sync with the animation by construction.
+        function rageShakeWave(now, walkPhase, rageFactor) {
+          return Math.sin(now * (6 + rageFactor * 26) + walkPhase * 3) +
+                 Math.sin(now * (9 + rageFactor * 20) * 1.7);
+        }
+        var _rageRumble = null; // { osc, gain, filter } persistent nodes
+        var _steamVentAt = 0;   // last steam-vent time (throttle)
+        function playSteamVent() {
+          var ctx = sfx(); if (!ctx) return;
+          try {
+            var t = ctx.currentTime;
+            // Short burst of band-passed noise — a pressure-valve hiss.
+            var bufferSize = Math.floor(ctx.sampleRate * 0.16);
+            var buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            var data = buffer.getChannelData(0);
+            for (var i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+            var src = ctx.createBufferSource();
+            src.buffer = buffer;
+            var filter = ctx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = 3200;
+            filter.Q.value = 0.6;
+            var gain = ctx.createGain();
+            gain.gain.setValueAtTime(0.055, t);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+            src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+            src.start(t);
+          } catch (e) { }
+        }
+        function playRageCreak(bucket) {
+          var ctx = sfx(); if (!ctx) return;
+          try {
+            var t = ctx.currentTime;
+            // A short rising tension tone — a 'creak' as the meter clenches a
+            // notch tighter. Pitch climbs with the bucket so the escalation is
+            // audible even without looking at the counter.
+            var base = 140 + bucket * 4;      // 180 Hz at 10, 500 Hz at 90
+            var osc = ctx.createOscillator();
+            var gain = ctx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(base, t);
+            osc.frequency.exponentialRampToValueAtTime(base * 1.35, t + 0.16);
+            gain.gain.setValueAtTime(0, t);
+            gain.gain.linearRampToValueAtTime(0.05, t + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+            osc.connect(gain); gain.connect(ctx.destination);
+            osc.start(t); osc.stop(t + 0.32);
+          } catch (e) { }
+        }
+        function startRageRumble() {
+          var ctx = audioCtx(); if (!ctx) return;
+          if (_rageRumble) return;
+          try {
+            var osc = ctx.createOscillator();
+            osc.type = 'sawtooth';
+            osc.frequency.value = 42;
+            var filter = ctx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 95;
+            var gain = ctx.createGain();
+            gain.gain.value = 0;
+            // Stereo panner so the growl can be positioned toward the spider.
+            // Feature-detected: older engines without StereoPanner just skip it.
+            var panner = null;
+            if (typeof ctx.createStereoPanner === 'function') {
+              // pan defaults to 0 on a fresh node.
+              panner = ctx.createStereoPanner();
+            }
+            osc.connect(filter); filter.connect(gain);
+            if (panner) { gain.connect(panner); panner.connect(ctx.destination); }
+            else { gain.connect(ctx.destination); }
+            osc.start();
+            _rageRumble = { osc: osc, gain: gain, filter: filter, panner: panner };
+          } catch (e) { _rageRumble = null; }
+        }
+        function updateRageRumble() {
+          // Called every frame: scale the persistent rumble to current rage.
+          // Muted or hidden → silence; rage 0 → silence; otherwise the rumble
+          // gets louder and slightly higher-pitched as the meter climbs.
+          var sp = scene ? spiderFor('complexity') : null;
+          var rage = sp ? (sp.rage || 0) : 0;
+          var audible = !vm.meetingMuted && vm.showMeeting && rage > 0;
+          if (!audible) { stopRageRumble(); return; }
+          var ctx = audioCtx(); if (!ctx) return;
+          if (!_rageRumble) startRageRumble();
+          if (!_rageRumble) return;
+          // First time the rumble is heard: pop the one-time tooltip so users
+          // discover the header mute toggle controls these office sounds.
+          // Fired only after the rumble is genuinely playing (startRageRumble
+          // succeeded) and never during a replay.
+          if (!vm._soundTipShown && !_replay) {
+            vm._soundTipShown = true;
+            try { window.localStorage.setItem('weaver.meeting.soundTipSeen', '1'); } catch (e) { }
+            vm.meetingSoundTip = true;
+            $scope.$applyAsync();
+            if (vm._soundTipTimer) $timeout.cancel(vm._soundTipTimer);
+            vm._soundTipTimer = $timeout(function () { vm.meetingSoundTip = false; }, 9000);
+          }
+          var t = ctx.currentTime;
+          var level = Math.min(1, rage / 100);
+          // Smooth targets avoid zipper clicks on every step bump.
+          _rageRumble.gain.gain.setTargetAtTime(0.045 * level, t, 0.08);
+          _rageRumble.osc.frequency.setTargetAtTime(40 + level * 24, t, 0.1);
+            // The lowpass filter wobbles in sync with the on-screen shake: the
+            // shared rageShakeWave (same as drawSpider uses) drives the cutoff,
+            // so at high rage the rumble physically wobbles as the spider
+            // vibrates. sp is guaranteed non-null here (rage > 0 passed the
+            // audible gate above, and rage is 0 whenever sp is null).
+            var wave = rageShakeWave(Date.now() / 1000, sp.walkPhase, level);
+            // wave swings roughly in [-2, 2]; normalize to a wobble whose
+            // width grows with rage (tight at calm, wide and shaky at 100%).
+            var wobble = (wave / 2) * (18 + level * 70);
+            _rageRumble.filter.frequency.setTargetAtTime(95 + wobble, t, 0.05);
+            // Spatial: pan the growl toward the spider's current screen
+            // position (x is normalized 0..1, so map to a -1..1 balance capped
+            // at ±0.85 — near hard-pan at the edge desks but keeps them
+            // distinct). Walking to the cooler shifts where the rumble comes
+            // from.
+            if (_rageRumble.panner) {
+              var pan = Math.max(-0.85, Math.min(0.85, sp.x * 2 - 1));
+              _rageRumble.panner.pan.setTargetAtTime(pan, t, 0.12);
+            }
+        }
+        function stopRageRumble() {
+          if (!_rageRumble) return;
+          try { _rageRumble.osc.stop(); } catch (e) { }
+          _rageRumble = null;
+        }
         vm.toggleMeetingMute = function () {
           vm.meetingMuted = !vm.meetingMuted;
+          // Muting kills the ongoing rage rumble immediately (the per-frame
+          // updater would also silence it, but stop it now so it never lingers).
+          if (vm.meetingMuted) stopRageRumble();
           // Instant local cache, plus persist to saved settings so the
           // preference syncs across devices (same pattern as showMeeting).
           try { window.localStorage.setItem('weaver.meeting.muted', vm.meetingMuted ? '1' : '0'); } catch (e) { }
@@ -714,6 +1248,32 @@ angular.module('kanbanApp')
         // across the canvas before the spiders head home. Position/velocity are
         // in normalized 0..1 scene units so the burst looks right at any size.
         var CONFETTI_COLORS = ['#61afef', '#98c379', '#e5c07b', '#c678dd', '#e06c75', '#56b6c2', '#ffd866', '#f97583', '#7ee787', '#79c0ff'];
+        // The Complexity spider slams down at its desk after the post-mortem:
+        // a small red particle burst, a heavy tremble, and a thud.
+        function stompLand(s) {
+          if (!scene || !s) return;
+          var n = 14;
+          for (var i = 0; i < n; i++) {
+            var fromLeft = Math.random() < 0.5;
+            scene.confetti.push({
+              x: s.x, y: s.y,
+              vx: (fromLeft ? -1 : 1) * (0.03 + Math.random() * 0.16),
+              vy: -(0.05 + Math.random() * 0.22),
+              rot: Math.random() * 6.28,
+              vr: (Math.random() - 0.5) * 8,
+              color: ['#ff3b30', '#ff5f52', '#c0392b', '#ffd0d0'][(Math.random() * 4) | 0],
+              size: 0.008 + Math.random() * 0.011,
+              life: 0,
+              ttl: 0.55 + Math.random() * 0.5
+            });
+          }
+          s.reactT = 1.0;
+          s.reactKind = 'bad'; // tremble = the burst shaking it
+          bumpComplexityRage(5); // one last angry pulse
+          if (vm.showMeeting) playStomp();
+          scene.lastLogAt = Date.now();
+        }
+
         function spawnConfetti() {
           if (!scene) return;
           scene.confetti = [];
@@ -809,28 +1369,119 @@ angular.module('kanbanApp')
           } catch (e) { return 1; }
         }
 
-        function userRankTitle(st) {
-          var score = (st.done || 0) + (st.benchmarks || 0) * 2 + (st.projects || 0) * 3 + (st.archived || 0) * 0.5
+        function userRankScore(st) {
+          return (st.done || 0) + (st.benchmarks || 0) * 2 + (st.projects || 0) * 3 + (st.archived || 0) * 0.5
             + Math.round((st.bestScore || 0) / 10) + Math.min(20, (st.totalPoints || 0) / 50);
+        }
+
+        function userRankTitle(st) {
           for (var i = 0; i < RANK_TITLES.length; i++) {
-            if (score >= RANK_TITLES[i].min) return RANK_TITLES[i].title;
+            if (userRankScore(st) >= RANK_TITLES[i].min) return RANK_TITLES[i].title;
           }
           return 'Legend in Training';
         }
+
+        // Full rank object (title + insignia: chevrons, stars, grade) for the
+        // header chip so each rank renders its own military insignia.
+        function userRank(st) {
+          var score = userRankScore(st);
+          for (var i = 0; i < RANK_TITLES.length; i++) {
+            if (score >= RANK_TITLES[i].min) return RANK_TITLES[i];
+          }
+          return RANK_TITLES[RANK_TITLES.length - 1];
+        }
+
+        // ng-repeat helper: [0..n) for drawing `n` chevron stripes.
+        function chevronArray(n) {
+          var a = [];
+          for (var i = 0; i < (n || 0); i++) a.push(i);
+          return a;
+        }
+
+        // ── Header user-stats widget ───────────────────────────────────────
+        // Surfaces the same live stats the water-cooler gossip brags about as a
+        // compact chip row in the top bar (next to the Project picker). Values
+        // are recomputed from the live view-model whenever the header renders.
+        vm.userStats = collectUserStats;
+        vm.userRankTitle = userRankTitle;
+        vm.userRank = userRank;
+        vm.chevronArray = chevronArray;
 
         // ── Water-cooler gossip skit ───────────────────────────────────────
         // One spider strolls to the cooler and brags about the user's stats
         // while two others gather and react — as impressed by a tab count as
         // by an entire architecture.
+        // Fetches the backend's improvement suggestions for the current project
+        // (the "new tickets" the self-improving pipeline spawns) so the Ideas
+        // spider can relay them during idle gossip. Throttled to once a minute.
+        var _ideasFetchedAt = 0;
+        function refreshMeetingIdeas() {
+          var proj = vm.selectedProject;
+          if (!proj) return;
+          var now = Date.now();
+          if (now - _ideasFetchedAt < 60000) return;
+          _ideasFetchedAt = now;
+          $http.get('/api/improvementdata', { params: { project: proj } }).then(function (resp) {
+            var data = resp.data;
+            if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return; } }
+            var feats = (data && data.features) || [];
+            var ideas = [];
+            feats.forEach(function (f) {
+              var imps = (f && f.improvements) || [];
+              if (!imps.length) return;
+              var last = imps[imps.length - 1];
+              if (!last || !last.description) return;
+              ideas.push({
+                topic: f.feature || 'a new task',
+                desc: last.description || '',
+                complete: !!last.complete,
+                date: last.date || ''
+              });
+            });
+            ideas.sort(function (x, y) { return (y.date || '').localeCompare(x.date || ''); });
+            vm.meetingIdeas = ideas.slice(0, 6);
+            $scope.$applyAsync();
+          }).catch(function () { /* silent — office keeps gossiping about other stuff */ });
+        }
+        // The Ideas spider cuts in with the freshest backend suggestion.
+        var IDEA_LINES = [
+          "Fresh from the backend: '{topic}' is now a ticket. I basically invented it.",
+          "Hey, the system just spawned an idea — '{topic}'. Filed under: brilliant.",
+          "New suggestion dropped from the backend: '{topic}'. You're welcome.",
+          "The backend birthed a ticket about '{topic}'. I've already got notes.",
+          "Idea alert from the pipeline: '{topic}'. I saw it coming. I always see it coming."
+        ];
+        var IDEA_REACTIONS = [
+          "ANOTHER ticket?! From thin air?!",
+          "The backend just THINKS of work now?!",
+          "Self-spawning tickets?! Terrifying. I love it.",
+          "Where does it get these ideas?! ...Oh. From the user's code."
+        ];
         function startGossip() {
           if (!scene || scene.gossip) return;
+          refreshMeetingIdeas();
+          var freshIdeas = (vm.meetingIdeas || []).filter(function (i) { return !i.complete; });
+          var ideasSpider = spiderFor('ideas');
+          // Keep the Ideas spider out of the bragger seat when it has something
+          // to relay — it's the featured speaker for backend suggestions, not
+          // the one bragging about the user's tab count.
           var bragger = randomSpider();
+          if (!bragger) return;
+          if (freshIdeas.length && ideasSpider && bragger === ideasSpider) {
+            var notIdeas = scene.spiders.filter(function (s) { return s !== ideasSpider; });
+            if (notIdeas.length) bragger = notIdeas[Math.floor(Math.random() * notIdeas.length)];
+          }
           if (!bragger) return;
           var others = scene.spiders.filter(function (s) { return s !== bragger; });
           var a = others[Math.floor(Math.random() * others.length)];
           var rest = others.filter(function (s) { return s !== a; });
           var b = rest[Math.floor(Math.random() * rest.length)];
           var listeners = [a, b];
+          // The Ideas spider crashes the gossip to relay a backend suggestion —
+          // it walks up to the cooler and joins the circle.
+          if (freshIdeas.length && ideasSpider && ideasSpider !== bragger && ideasSpider !== a && ideasSpider !== b) {
+            listeners.push(ideasSpider); // walks to COOLER_SPOTS[2] with the others
+          }
 
           // Everyone strolls over to the cooler.
           bragger.state = 'walk';
@@ -880,6 +1531,9 @@ angular.module('kanbanApp')
               .replace(/\{file\}/g, file || 'a file')
               .replace(/\{endpoint\}/g, endpoint || 'the endpoint');
           }
+          function fmtIdea(tpl, topic) {
+            return tpl.replace(/\{topic\}/g, topic);
+          }
           // Seasonal twist: swap the gossip's openers/reactions/endings for the
           // current holiday's lines and add a holiday roast of the user.
           var season = currentSeason();
@@ -891,6 +1545,50 @@ angular.module('kanbanApp')
           }
 
           lines.push({ spider: bragger, text: pick(sOpen), ttl: 2.8 });
+          // The Ideas spider cuts in with the freshest backend suggestion.
+          if (ideasSpider && freshIdeas.length && listeners.indexOf(ideasSpider) !== -1) {
+            var idea = freshIdeas[0];
+            var topic = (idea.topic || 'a new task').trim();
+            if (topic.length > 48) topic = topic.slice(0, 45) + '…';
+            var ideaText = fmtIdea(pick(IDEA_LINES), topic);
+            // Sprinkle in the actual suggestion description when there is one,
+            // so the spider relays the ticket's content, not just its title.
+            if (idea.desc) {
+              var snippet = idea.desc.trim();
+              if (snippet.length > 60) snippet = snippet.slice(0, 57) + '…';
+              ideaText = ideaText + ' (' + snippet + ')';
+            }
+            lines.push({ spider: ideasSpider, text: ideaText, ttl: 3.6 });
+            lines.push({ spider: listeners[0], text: pick(IDEA_REACTIONS), ttl: 2.2 });
+          }
+          // A bystander retells the reviewer's verdict moment from the run that
+          // just ended — the grudging admission, the smug 'told you so', or the
+          // shared L — with the rest of the cooler circle reacting. Consumed
+          // once per verdict so it lands in the first gossip after the run,
+          // then the office moves on. The teller is chosen from whoever is
+          // already at the cooler (the participants never retell their own
+          // drama), so nobody has to leave the circle.
+          if (scene.verdictOutcome && !scene.verdictGossiped) {
+            var reviewerSp = spiderFor('reviewer');
+            var complexitySp = spiderFor('complexity');
+            var coolerGroup = [bragger].concat(listeners);
+            var tellers = coolerGroup.filter(function (s) { return s !== reviewerSp && s !== complexitySp && s !== ideasSpider; });
+            if (tellers.length) {
+              // Only consume the retelling when it actually lands — if the
+              // circle happens to be all participants, the next gossip session
+              // gets another shot with a different group.
+              scene.verdictGossiped = true;
+              var teller = pick(tellers);
+              var vPool = scene.verdictOutcome === 'right' ? GOSSIP_VERDICT_RIGHT
+                : scene.verdictOutcome === 'fail' ? GOSSIP_VERDICT_FAIL
+                : GOSSIP_VERDICT_WRONG;
+              var reactors = coolerGroup.filter(function (s) { return s !== teller; });
+              lines.push({ spider: teller, text: pick(vPool), ttl: 3.8 });
+              if (reactors.length) {
+                lines.push({ spider: pick(reactors), text: pick(GOSSIP_VERDICT_REACTIONS), ttl: 2.4 });
+              }
+            }
+          }
           chosen.forEach(function (g, i) {
             var text, wow;
             if (g.key === 'steps') {
@@ -911,6 +1609,18 @@ angular.module('kanbanApp')
             var listener = listeners[i % 2];
             lines.push({ spider: listener, text: (i === 0 && g.wow) ? wow : pick(sReact), ttl: 2.2 });
           });
+          // The Complexity spider cuts in with its all-time verdict record
+          // once it has something to brag about (only when it's already at the
+          // cooler — it won't interrupt its own work to brag).
+          if (verdictRecordTotal() >= 2) {
+            var cpxSpider = spiderFor('complexity');
+            if (cpxSpider && (cpxSpider === bragger || listeners.indexOf(cpxSpider) !== -1)) {
+              lines.push({ spider: cpxSpider, text: fmt(pick(VERDICT_BRAG), 0).replace(/\{record\}/g, verdictRecordLabel()), ttl: 3.4 });
+              var cpxReact = listeners[0];
+              if (cpxReact === cpxSpider) cpxReact = listeners[1] || listeners[0];
+              lines.push({ spider: cpxReact, text: pick(VERDICT_BRAG_REACTIONS), ttl: 2.4 });
+            }
+          }
           // The holiday roast lands as the punchline before the rank reveal.
           if (sRoast) {
             lines.push({ spider: bragger, text: sRoast, ttl: 3.4 });
@@ -1002,6 +1712,7 @@ angular.module('kanbanApp')
           if (!scene || scene.watching || _replay || vm.streamingActive) return;
           if (scene.writer || scene.queue.length) return; // never interrupt real work
           if (scene.gossip) endGossipNow(); // drop the gossip — they're watching!
+          if (scene.coolerTrip) endCoolerTripNow(); // and the cooler trip too
           var star = randomSpider();
           if (!star) return;
           // Everyone notices and waves.
@@ -1092,9 +1803,354 @@ angular.module('kanbanApp')
           $scope.$applyAsync();
         }
 
+        // ── Verifier vs Complexity standoff ────────────────────────────────
+        // After an overruled verdict, the Verifier walks over and stares the
+        // Complexity spider down with the code as evidence, then the Complexity
+        // spider sulks back to its desk. Same walk → talk → leave flow as the
+        // gossip and watching skits.
+        function startStandoff() {
+          if (!scene || scene.standoff || scene.glare || _replay) return; // glare is busy too
+          var verifier = spiderFor('verifier');
+          var complexity = spiderFor('complexity');
+          if (!verifier || !complexity) return;
+          if (scene.writer || scene.queue.length || vm.streamingActive) return; // never interrupt real work
+          // The Verifier walks over; the Complexity spider stays at the board.
+          verifier.state = 'walk';
+          verifier.target = { x: STANDOFF_SPOT.x, y: STANDOFF_SPOT.y };
+          verifier.speech = ''; verifier.speechTtl = 0;
+          complexity.state = 'idle';
+          complexity.speech = ''; complexity.speechTtl = 0;
+          var vals = complexityVals();
+          vals.actual = complexityActualSteps();
+          scene.standoff = {
+            phase: 'walk', ttl: 2.2,
+            verifier: verifier, complexity: complexity,
+            lines: [
+              { spider: verifier, text: fmtComplexity(pick(VERIFIER_REBUTTAL), vals), ttl: 3.6 },
+              { spider: complexity, text: pick(COMPLEXITY_SULK), ttl: 3.2 },
+              { spider: verifier, text: "The code. Is. The evidence. Goodbye.", ttl: 2.8 }
+            ],
+            li: 0, lineTtl: 0
+          };
+          vm.meetingSpeaker = verifier.icon + ' ' + verifier.name + ' — staring down the Complexity spider';
+          $scope.$applyAsync();
+        }
+
+        function advanceStandoff(dt) {
+          if (!scene || !scene.standoff) return;
+          var st = scene.standoff;
+          if (st.phase === 'walk') {
+            st.ttl -= dt;
+            if (st.ttl <= 0) { st.phase = 'talk'; st.li = 0; st.lineTtl = 0; }
+            return;
+          }
+          if (st.phase === 'talk') {
+            st.lineTtl -= dt;
+            if (st.lineTtl > 0) return;
+            if (st.li < st.lines.length) {
+              var ln = st.lines[st.li];
+              setSpeech(ln.spider, ln.text, ln.ttl, ln.spider.icon + ' ' + ln.spider.name);
+              logGossipEntry(ln.spider.icon + ' ' + ln.spider.name, ln.text);
+              st.lineTtl = ln.ttl;
+              st.li++;
+            } else {
+              st.phase = 'leave';
+            }
+            return;
+          }
+          // leave — verifier heads back to its seat, complexity sulks to its desk
+          var vTarget = scene.meetingOn ? st.verifier.seat : st.verifier.home;
+          st.verifier.state = 'walk';
+          st.verifier.target = { x: vTarget.x, y: vTarget.y };
+          st.verifier.speech = ''; st.verifier.speechTtl = 0;
+          st.complexity.state = 'walk';
+          st.complexity.target = { x: st.complexity.home.x, y: st.complexity.home.y };
+          st.complexity.speech = ''; st.complexity.speechTtl = 0;
+          scene.standoff = null;
+          scene.standoffCd = 45 + Math.random() * 25;
+          vm.meetingSpeaker = '🕷️ the standoff breaks up — the Complexity spider sulks home';
+          $scope.$applyAsync();
+        }
+
+        function endStandoffNow() {
+          if (!scene || !scene.standoff) return;
+          var st = scene.standoff;
+          var vTarget = scene.meetingOn ? st.verifier.seat : st.verifier.home;
+          st.verifier.state = 'walk';
+          st.verifier.target = { x: vTarget.x, y: vTarget.y };
+          st.complexity.state = 'walk';
+          st.complexity.target = { x: st.complexity.home.x, y: st.complexity.home.y };
+          st.verifier.speech = ''; st.verifier.speechTtl = 0;
+          st.complexity.speech = ''; st.complexity.speechTtl = 0;
+          scene.standoff = null;
+          scene.standoffCd = 15;
+        }
+
+        // ── Reviewer vs Complexity glare ───────────────────────────────────
+        // When the reviewer's smug 'told you so' lands after an overruled
+        // verdict, the two spiders stay at their own desks — same row, far
+        // apart — and stare each other down across the office: a silent
+        // eye-lock beat, then a couple of back-and-forth bubbles, then the
+        // Complexity spider stomps home. Returns true if the glare started
+        // (false → the caller falls back to the plain one-liner).
+        function startGlare(revLine) {
+          if (!scene || scene.glare || _replay || !vm.showMeeting) return false;
+          if (scene.standoff || scene.coolerTrip || scene.gossip || scene.watching) return false;
+          if (scene.writer || scene.queue.length || vm.streamingActive) return false;
+          var reviewer = spiderFor('reviewer');
+          var complexity = spiderFor('complexity');
+          if (!reviewer || !complexity) return false;
+          // Both head to their own desks — the glare happens desk-to-desk
+          // across the office (home = desk, not the meeting seat row).
+          reviewer.state = 'walk';
+          reviewer.target = { x: reviewer.home.x, y: reviewer.home.y };
+          reviewer.speech = ''; reviewer.speechTtl = 0;
+          complexity.state = 'walk';
+          complexity.target = { x: complexity.home.x, y: complexity.home.y };
+          complexity.speech = ''; complexity.speechTtl = 0;
+          var vals = complexityVals();
+          vals.actual = complexityActualSteps();
+          scene.glare = {
+            phase: 'walk', ttl: 1.0, beatTtl: 1.3,
+            reviewer: reviewer, complexity: complexity,
+            lines: [
+              { spider: reviewer, text: revLine, ttl: 4.0 },   // 'told you so'
+              { spider: complexity, text: pick(COMPLEXITY_GLARE), ttl: 3.2 },
+              { spider: reviewer, text: fmtComplexity(pick(REVIEWER_GLARE_LAST), vals), ttl: 3.0 }
+            ],
+            li: 0, lineTtl: 0
+          };
+          vm.meetingSpeaker = reviewer.icon + ' ' + reviewer.name + ' — locking eyes with the Complexity spider';
+          $scope.$applyAsync();
+          return true;
+        }
+
+        function advanceGlare(dt) {
+          if (!scene || !scene.glare) return;
+          var g = scene.glare;
+          if (g.phase === 'walk') {
+            g.ttl -= dt;
+            if (g.ttl <= 0) {
+              // Silent eye-contact beat: both spiders lock onto each other.
+              g.phase = 'glare';
+              g.reviewer.glaringAt = g.complexity;
+              g.complexity.glaringAt = g.reviewer;
+              // The reviewer trembles a little for staring down an angry
+              // spider; the Complexity spider's rage shake carries its side.
+              g.reviewer.reactT = 0.9; g.reviewer.reactKind = 'bad';
+            }
+            return;
+          }
+          if (g.phase === 'glare') {
+            g.beatTtl -= dt;
+            if (g.beatTtl <= 0) { g.phase = 'talk'; g.li = 0; g.lineTtl = 0; }
+            return;
+          }
+          if (g.phase === 'talk') {
+            g.lineTtl -= dt;
+            if (g.lineTtl > 0) return;
+            if (g.li < g.lines.length) {
+              var ln = g.lines[g.li];
+              setSpeech(ln.spider, ln.text, ln.ttl, ln.spider.icon + ' ' + ln.spider.name + (g.li === 0 ? ' — told you so' : ''));
+              logGossipEntry(ln.spider.icon + ' ' + ln.spider.name, ln.text);
+              g.lineTtl = ln.ttl;
+              g.li++;
+            } else {
+              g.phase = 'leave';
+            }
+            return;
+          }
+          // leave — eyes unlock, the Complexity spider stomps back to its desk
+          // (already at its desk from the walk phase, so the stomp lands with
+          // a red burst in place — the beat has its punctuation).
+          g.reviewer.glaringAt = null;
+          g.complexity.glaringAt = null;
+          g.reviewer.speech = ''; g.reviewer.speechTtl = 0;
+          g.complexity.speech = ''; g.complexity.speechTtl = 0;
+          g.complexity.stomping = true;
+          g.complexity.state = 'walk';
+          g.complexity.target = { x: g.complexity.home.x, y: g.complexity.home.y };
+          scene.glare = null;
+          vm.meetingSpeaker = '🤯 the Complexity spider stomps back to its desk — the glare is over';
+          $scope.$applyAsync();
+        }
+
+        function endGlareNow() {
+          if (!scene || !scene.glare) return;
+          var g = scene.glare;
+          g.reviewer.glaringAt = null;
+          g.complexity.glaringAt = null;
+          g.reviewer.speech = ''; g.reviewer.speechTtl = 0;
+          g.complexity.speech = ''; g.complexity.speechTtl = 0;
+          scene.glare = null;
+        }
+
+        // ── Rage cooler trip ───────────────────────────────────────────────
+        // When the Complexity spider's rage crosses 75 it occasionally storms
+        // off to the water cooler, grabs a drink, mutters about the
+        // unmanageable context, then stalks back to its desk. Same walk → talk
+        // → leave flow as the other skits.
+        // A random spider whose current position is close to the Complexity
+        // spider's storm-off path — the witness does a double-take as he
+        // storms past. Measured from the Complexity spider's desk (passed in
+        // explicitly since scene.coolerTrip isn't built yet), and compared
+        // against each candidate's LIVE x/y so it feels truly nearby.
+        function pickWitnessSpider(fromX, fromY) {
+          if (!scene) return null;
+          var others = scene.spiders.filter(function (s) { return s.role !== 'complexity'; });
+          if (!others.length) return null;
+          var cx = (fromX !== undefined) ? fromX : COOLER.x;
+          var cy = (fromY !== undefined) ? fromY : COOLER.y;
+          var sorted = others.slice().sort(function (a, b) {
+            var da = Math.abs(a.x - cx) + Math.abs(a.y - cy);
+            var db = Math.abs(b.x - cx) + Math.abs(b.y - cy);
+            return da - db;
+          });
+          var pool = sorted.slice(0, 3);
+          return pick(pool);
+        }
+
+        function startCoolerTrip(rec) {
+          if (!scene || scene.coolerTrip) return;
+          if (!rec && _replay) return; // during replay, start only via a recorded event
+          if (!vm.showMeeting) return;
+          var sp = spiderFor('complexity');
+          if (!sp) return;
+          if (!rec) {
+            if (scene.writer || scene.queue.length || vm.streamingActive) return; // never interrupt real work
+            if (scene.gossip || scene.watching || scene.standoff) return;
+          }
+          scene.lastLogAt = Date.now(); // trips are "alive" time — keeps banter from stomping the bubbles
+          sp.state = 'walk';
+          sp.target = { x: COOLER.x, y: COOLER.y };
+          sp.speech = ''; sp.speechTtl = 0;
+          var witness, lines, witnessText;
+          if (rec) {
+            // Replay: reuse the exact lines, witness, and double-take from the
+            // live run so the rewatch is faithful to what actually happened.
+            witness = rec.witnessRole ? spiderFor(rec.witnessRole) : null;
+            lines = (rec.lines || []).map(function (l) { return { spider: sp, text: l.text, ttl: l.ttl }; });
+            witnessText = rec.witnessText || pick(DOUBLE_TAKE);
+          } else {
+            var vals = complexityVals();
+            witness = pickWitnessSpider(sp.home.x, sp.home.y);
+            witnessText = pick(DOUBLE_TAKE);
+            lines = [
+              { spider: sp, text: fmtComplexity(pick(COOLER_GRIPE), vals), ttl: 3.6 },
+              { spider: sp, text: pick(COOLER_SIP), ttl: 2.8 },
+              { spider: sp, text: pick(COOLER_STALK_BACK), ttl: 2.8 }
+            ];
+            // Record the storm-off into the replay timeline so rewatching the
+            // run replays the angry walk to the cooler and back.
+            recordEvent({
+              type: 'cooler',
+              lines: lines.map(function (l) { return { text: l.text, ttl: l.ttl }; }),
+              witnessRole: witness ? witness.role : null,
+              witnessText: witnessText
+            });
+          }
+          scene.coolerTrip = {
+            phase: 'walk', ttl: 1.4,
+            spider: sp,
+            witness: witness,           // nearby spider doing a double-take
+            witnessFired: false,
+            witnessText: witnessText,   // pre-picked so replay matches live
+            lines: lines,
+            li: 0, lineTtl: 0,
+            drink: 0 // 0..1 — the cup in the spider's hand fills while sipping
+          };
+          vm.meetingSpeaker = sp.icon + ' ' + sp.name + ' — storming off to the water cooler';
+          $scope.$applyAsync();
+        }
+
+        function advanceCoolerTrip(dt) {
+          if (!scene || !scene.coolerTrip) return;
+          var ct = scene.coolerTrip;
+          if (ct.phase === 'walk') {
+            ct.ttl -= dt;
+            // Mid-storm (about halfway), the nearby witness does a double-take
+            // with a bubble in the Office Chat — a reaction to the walk itself.
+            if (!ct.witnessFired && ct.witness && ct.ttl < 0.7) {
+              ct.witnessFired = true;
+              var wText = ct.witnessText || pick(DOUBLE_TAKE);
+              setSpeech(ct.witness, '😳 ' + wText, 3.4, ct.witness.icon + ' ' + ct.witness.name + ' — double-take');
+              if (!_replay) logGossipEntry(ct.witness.icon + ' ' + ct.witness.name, wText);
+              ct.witness.reactT = 1.1;
+              ct.witness.reactKind = 'bad'; // worried tremble = the double-take
+              scene.lastLogAt = Date.now();
+            }
+            if (ct.ttl <= 0) { ct.phase = 'talk'; ct.li = 0; ct.lineTtl = 0; }
+            return;
+          }
+          if (ct.phase === 'talk') {
+            // Drink state: while the SIP line is up (li === 2 — the index
+            // points at the NEXT line to show, so lines[1] is playing now),
+            // the cup fills toward full; it drains as the stalk-back line
+            // plays (li === 3).
+            if (ct.li === 2) {
+              ct.drink = Math.min(1, ct.drink + dt / 0.9);
+            } else if (ct.li === 3) {
+              // Drain over the full stalk-back line so the cup visibly empties
+              // as the spider finishes its drink.
+              ct.drink = Math.max(0, ct.drink - dt / 2.8);
+            }
+            ct.lineTtl -= dt;
+            if (ct.lineTtl > 0) return;
+            if (ct.li < ct.lines.length) {
+              var ln = ct.lines[ct.li];
+              setSpeech(ln.spider, ln.text, ln.ttl, ln.spider.icon + ' ' + ln.spider.name);
+              // During replay the trip's chat lines were already logged live,
+              // so skip them to avoid double-posting to the Office Chat.
+              if (!_replay) logGossipEntry(ln.spider.icon + ' ' + ln.spider.name, ln.text);
+              ct.lineTtl = ln.ttl;
+              ct.li++;
+            } else {
+              ct.phase = 'leave';
+            }
+            return;
+          }
+          // leave — stalk back to the desk (or the seat row if a meeting is
+          // still in progress, matching how the gossip skit returns home).
+          var ctHome = scene.meetingOn ? ct.spider.seat : ct.spider.home;
+          ct.spider.state = 'walk';
+          ct.spider.target = { x: ctHome.x, y: ctHome.y };
+          ct.spider.speech = ''; ct.spider.speechTtl = 0;
+          // Finished the drink → one-time rage discount: the storm-off is both
+          // a gag and a gameplay beat that visibly calms the spider (the meter
+          // drops, the red tint fades, the rumble eases). Only a COMPLETED trip
+          // pays out — an interrupted one (endCoolerTripNow) skips the reward.
+          // Live only: during replay the meter is rebuilt from scratch, so a
+          // negative bump would be a meaningless no-op anyway.
+          scene.coolerTrip = null;
+          scene.coolerTripCd = 75 + Math.random() * 40;
+          if (!_replay) {
+            bumpComplexityRage(-10);
+            vm.meetingSpeaker = '🕷️ the Complexity spider stalks back to its desk — rage −10, hydration +1';
+          } else {
+            vm.meetingSpeaker = '🕷️ the Complexity spider stalks back to its desk (replay)';
+          }
+          $scope.$applyAsync();
+        }
+
+        function endCoolerTripNow() {
+          if (!scene || !scene.coolerTrip) return;
+          var ct = scene.coolerTrip;
+          var ctHome = scene.meetingOn ? ct.spider.seat : ct.spider.home;
+          ct.spider.state = 'walk';
+          ct.spider.target = { x: ctHome.x, y: ctHome.y };
+          ct.spider.speech = ''; ct.spider.speechTtl = 0;
+          scene.coolerTrip = null;
+          scene.coolerTripCd = 30;
+        }
+
         // ── Public methods ─────────────────────────────────────────────────
         vm.openMeeting = function () {
           vm.showMeeting = true; vm.saveSettings(true);
+          // Load the last persisted replay timeline (from a past run's card)
+          // so the ▶ button works even after a page reload.
+          if (vm._restoreMeetingReplayFromCards) vm._restoreMeetingReplayFromCards();
+          // Auto-dodge: keep the panel off the Agent panel / panel columns.
+          if (vm._dodgeFloatingPanel) vm._dodgeFloatingPanel(vm.meeting, { selfCls: 'meeting-floating-panel', margin: 10 });
           // Prime the AudioContext from a real click gesture so browser
           // autoplay policy doesn't suspend it (rAF-created contexts start
           // suspended and resume() fails outside a gesture).
@@ -1104,6 +2160,9 @@ angular.module('kanbanApp')
         vm.closeMeeting = function () { vm.showMeeting = false; vm.saveSettings(true); stopLoop(); };
         vm.setMeetingHovered = function (on) {
           vm.meetingHovered = !!on;
+          // Remember when the hover began so coolComplexityRage can scale the
+          // cooldown by how long someone has been watching the desk badge.
+          vm.meetingHoverSince = on ? Date.now() : null;
           if (on && scene) startWatching();
           else if (!on && scene) endWatchingNow();
           $scope.$applyAsync();
@@ -1116,14 +2175,17 @@ angular.module('kanbanApp')
           vm.meeting.dragStartY = event.clientY - vm.meeting.top;
           var onMove = function (e) {
             if (!vm.meeting.dragging) return;
-            vm.meeting.left = Math.max(0, e.clientX - vm.meeting.dragStartX);
-            vm.meeting.top = Math.max(0, e.clientY - vm.meeting.dragStartY);
+            vm.meeting.left = e.clientX - vm.meeting.dragStartX;
+            vm.meeting.top = e.clientY - vm.meeting.dragStartY;
+            if (vm._clampFloatingPanel) vm._clampFloatingPanel(vm.meeting);
+            else { vm.meeting.left = Math.max(0, vm.meeting.left); vm.meeting.top = Math.max(0, vm.meeting.top); }
             $scope.$apply();
           };
           var onUp = function () {
             vm.meeting.dragging = false;
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
+            if (vm.saveSettings) vm.saveSettings(true); // persist the new position
           };
           document.addEventListener('mousemove', onMove);
           document.addEventListener('mouseup', onUp);
@@ -1150,6 +2212,7 @@ angular.module('kanbanApp')
             vm.meeting.resizing = false;
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
+            if (vm.saveSettings) vm.saveSettings(true); // persist the new size
           };
           document.addEventListener('mousemove', onMove);
           document.addEventListener('mouseup', onUp);
@@ -1173,6 +2236,48 @@ angular.module('kanbanApp')
           $scope.$applyAsync();
         };
 
+        // ── Restore a persisted replay timeline (survives page reloads) ──
+        // On open, if no live run has been captured this session, load the
+        // most recent card that carries a recorded _meetingReplay timeline so
+        // the ▶ button replays a past run instead of being empty.
+        vm._restoreMeetingReplayFromCards = function () {
+          if (!vm.state) return;
+          if (_recording || _replay) return; // a live run or replay is in flight
+          if (vm.meetingReplay && vm.meetingReplay.length) return; // already loaded
+          var cols = ['done', 'doing', 'selfImproving', 'todo'];
+          for (var c = 0; c < cols.length; c++) {
+            var cards = vm.state[cols[c]] || [];
+            for (var i = cards.length - 1; i >= 0; i--) {
+              var rc = cards[i];
+              if (!rc || !Array.isArray(rc._meetingReplay) || !rc._meetingReplay.length) continue;
+              // Only restore timelines from cards in the currently selected
+              // project — a project switch must not replay another project's run.
+              if (vm.selectedProject && rc.filePath && rc.filePath !== vm.selectedProject) continue;
+              vm.meetingReplay = rc._meetingReplay;
+              return;
+            }
+          }
+        };
+
+        // Bound what we persist onto the card: the live timeline is kept in
+        // full for this session, but the stored copy is capped and its log
+        // entry details are trimmed so board data doesn't bloat (the full log
+        // already lives in card.agentLog).
+        function boundedReplayForStorage(events) {
+          if (!events) return events;
+          var out = [];
+          var start = Math.max(0, events.length - 2000);
+          for (var i = start; i < events.length; i++) {
+            var ev = events[i];
+            if (ev && ev.type === 'log' && ev.entry && typeof ev.entry.detail === 'string' && ev.entry.detail.length > 200) {
+              out.push({ t: ev.t, type: 'log', entry: { ts: ev.entry.ts, level: ev.entry.level, message: ev.entry.message, detail: ev.entry.detail.slice(0, 200) + '…' } });
+            } else {
+              out.push(ev);
+            }
+          }
+          return out;
+        }
+
         vm.replayMeeting = function () {
           if (vm.meetingReplaying) { stopReplay(); return; }
           if (!vm.meetingReplay || !vm.meetingReplay.length) return;
@@ -1186,7 +2291,7 @@ angular.module('kanbanApp')
           scene.spiders.forEach(function (s) {
             s.state = 'walk';
             s.target = { x: s.seat.x, y: s.seat.y };
-            s.speechTtl = 0; s.text = ''; s.progress = 0; s.reactT = 0;
+            s.speechTtl = 0; s.text = ''; s.progress = 0; s.reactT = 0; s.stomping = false;
           });
           _replay = {
             events: vm.meetingReplay,
@@ -1296,7 +2401,7 @@ angular.module('kanbanApp')
               scene.boardLines.push({ role: 'reviewer', color: '#e06c75', text: verdictText, progress: verdictText.length });
               if (scene.boardLines.length > 8) scene.boardLines.shift();
             }
-            // reaction / stream events are transient bubbles — skipped on seek
+            // reaction / stream / cooler events are transient skits — skipped on seek
           }
 
           _replay.elapsed = target;
@@ -1337,7 +2442,16 @@ angular.module('kanbanApp')
           if (level === 'error') return 'reviewer';
           if (level === 'warn') return /reject/.test(m) ? 'planner' : 'reviewer';
           // info / metric / bypass / status fall through to keyword scan
-          if (/proposing|meta-plan|complexity|plan/.test(m)) return 'planner';
+          // The Complexity spider owns anything about the task's difficulty,
+          // the accumulated context budget, or compaction of reasoning/diffs.
+          // Meta-plans stay with the planner (they only MENTION a complexity
+          // score); a bare 'complexity' line is the Complexity spider's turf.
+          if (/meta-plan/.test(m)) return 'planner';
+          if (/complexity|compacted|compact(ed|ing|s)? |context (size|accum|budget)|accumulated (reasoning|diffs?|context)|thinking context|context summarized|token cap|atomic step/.test(m)) {
+            if (/context review/.test(m)) return 'explorer'; // that's the explorer's job
+            return 'complexity';
+          }
+          if (/proposing|plan/.test(m)) return 'planner';
           if (/exploring|context review/.test(m)) return 'explorer';
           if (/cohesion/.test(m)) return 'verifier';
           if (/running on endpoint|endpoint/.test(m)) return 'commander';
@@ -1369,6 +2483,275 @@ angular.module('kanbanApp')
           return { role: role, text: text };
         }
 
+        // The Complexity spider relays the task's difficulty / context budget /
+        // compaction events with maximum annoyance. {score} {label} {cap} {ctx}
+        // are the live complexity values; {est}/{actual} are the estimated vs
+        // executed step counts for the verdict commentary.
+        function fmtComplexity(tpl, vals) {
+          return tpl
+            .replace(/\{score\}/g, vals.score)
+            .replace(/\{label\}/g, vals.label)
+            .replace(/\{cap\}/g, vals.cap)
+            .replace(/\{ctx\}/g, vals.ctx)
+            .replace(/\{est\}/g, vals.est)
+            .replace(/\{actual\}/g, vals.actual)
+            .replace(/\{record\}/g, vals.record);
+        }
+        function complexityVals() {
+          return {
+            score: (typeof vm.complexityScore === 'number' && vm.complexityScore) ? vm.complexityScore : '?',
+            label: vm.complexityLabel || 'some',
+            cap: (typeof vm.complexityTokenCap === 'number' && vm.complexityTokenCap) ? vm.complexityTokenCap : 'some',
+            ctx: vm.streamingContextSize ? vm.streamingContextSize.toLocaleString() : '0',
+            est: (typeof vm.complexityAtomicSteps === 'number' && vm.complexityAtomicSteps) ? vm.complexityAtomicSteps : '?',
+            actual: 0,
+            record: verdictRecordLabel()
+          };
+        }
+        // Count how many steps actually ran to completion this run.
+        function complexityActualSteps() {
+          var n = 0;
+          var steps = vm.streamingSteps || [];
+          for (var i = 0; i < steps.length; i++) {
+            var s = steps[i];
+            if (s && /done|applied|created|ok/.test(s.status || '')) n++;
+          }
+          if (n === 0 && vm.planItems && vm.planItems.length) {
+            for (var j = 0; j < vm.planItems.length; j++) {
+              if (vm.planItems[j] && vm.planItems[j].done) n++;
+            }
+          }
+          return n;
+        }
+        // ── Complexity spider anger meter ──────────────────────────────────
+        // Every new step, context milestone, or compaction event makes the
+        // Complexity spider visibly redder and shakier, with a rising counter
+        // over its desk. Caps at 100 and resets when the plan completes.
+        // The meter also COOLS: whenever the office goes quiet (no new rage
+        // sources for a while), a few points per idle minute drain away, so
+        // the meter breathes between bursts instead of staying pinned at 100%.
+        // rageAt stamps every change so the idle clock restarts on each bump.
+        var RAGE_COOL_PER_SEC = 4 / 60; // ≈4 points per idle minute
+        var RAGE_COOL_IDLE_MS = 20000;  // only start cooling after ~20s of quiet
+        function bumpComplexityRage(amount) {
+          if (!scene) return;
+          var sp = spiderFor('complexity');
+          if (!sp) return;
+          var before = sp.rage || 0;
+          sp.rage = Math.max(0, Math.min(100, before + amount));
+          sp.rageAt = Date.now();
+          sp.rageDrainedAt = Date.now(); // a fresh burst restarts cooling
+          // Hitting 100% vents steam — a one-shot hiss. Gated on visibility
+          // (bumps also fire from watchers while the panel is closed) and on
+          // the existing mute toggle via sfx().
+          if (before < 100 && sp.rage >= 100 && !_replay && vm.showMeeting) {
+            playSteamVent();
+          }
+          // Crossing a fresh 10-point bucket (10, 20, … 90) plays a short
+          // rising 'creak' so the climb itself is audible — not just the
+          // continuous rumble. Each bucket is a slightly higher tension tone.
+          if (!_replay && vm.showMeeting) {
+            var bucket = Math.floor(sp.rage / 10) * 10;
+            var prevBucket = Math.floor(before / 10) * 10;
+            if (bucket >= 10 && bucket < 100 && bucket > prevBucket) {
+              playRageCreak(bucket);
+            }
+          }
+          // Crossing the 75 threshold occasionally sends the spider storming
+          // off to the water cooler for a drink about the unmanageable context.
+          if (before < 75 && sp.rage >= 75) maybeStartCoolerTrip();
+        }
+        // Occasional + cooldown-gated trigger for the cooler trip. Won't
+        // interrupt real work or other skits, never fires during a replay, and
+        // only about half the crossings actually set off the storm-off.
+        function maybeStartCoolerTrip() {
+          if (!scene || _replay || !vm.showMeeting) return;
+          if (scene.coolerTrip || scene.gossip || scene.watching || scene.standoff) return;
+          if (scene.writer || scene.queue.length || vm.streamingActive) return;
+          scene.coolerTripCd = (scene.coolerTripCd === undefined || scene.coolerTripCd === null) ? 90 : scene.coolerTripCd;
+          if (scene.coolerTripCd > 0) return;
+          if (Math.random() < 0.5) {
+            startCoolerTrip();
+          } else {
+            scene.coolerTripCd = 30 + Math.random() * 30; // try again at the next crossing
+          }
+        }
+        function resetComplexityRage() {
+          if (!scene) return;
+          var sp = spiderFor('complexity');
+          if (sp) { sp.rage = 0; sp.rageAt = Date.now(); sp.rageDrainedAt = Date.now(); }
+        }
+        // Called every frame from updateScene: drain rage during idle stretches
+        // (live runs only — a replay replays the run as it happened, so the
+        // rewatch shows the meter exactly as it was). The gate uses the idle
+        // clock (time since the LAST rage event) so a fresh step/compaction
+        // instantly restarts cooling. Drainage is measured in real wall-clock
+        // time since the last cooling tick (not the rAF dt, which is clamped
+        // to 0.05s and lags after a backgrounded tab), so a "few points per
+        // idle minute" stays true no matter what.
+        function coolComplexityRage() {
+          if (!scene || _replay) return;
+          var sp = spiderFor('complexity');
+          if (!sp || !sp.rage) return;
+          var now = Date.now();
+          var idleMs = now - (sp.rageAt || now);
+          if (idleMs <= RAGE_COOL_IDLE_MS) {
+            sp.rageDrainedAt = now; // keep the drain clock in sync while gated
+            return;
+          }
+          var sinceDrain = now - (sp.rageDrainedAt || now);
+          // The spider visibly relaxes faster when someone is actually looking:
+          // the longer the mouse has been hovering the panel, the stronger the
+          // cooldown — 1x at hover start, ramping to 5x after ~20s of continuous
+          // attention, capped so a long idle hover can't wipe the meter in one
+          // blink. Interrupting the hover returns the rate to baseline.
+          var hoverFactor = 1;
+          if (vm.meetingHovered && vm.meetingHoverSince) {
+            hoverFactor = 1 + Math.min(4, (now - vm.meetingHoverSince) / 5000);
+          }
+          var before = sp.rage;
+          sp.rage = Math.max(0, sp.rage - RAGE_COOL_PER_SEC * hoverFactor * (sinceDrain / 1000));
+          sp.rageDrainedAt = now;
+          // Rare 'calmed down' moment: when idle cooling drains the meter all
+          // the way to zero, the spider is briefly at a loss. Fires once per
+          // run (reset in startMeeting) — a speech bubble plus an Office Chat
+          // line — then it's right back to being furious about having relaxed.
+          if (before > 0 && sp.rage === 0 && !scene.calmQuipFired) {
+            scene.calmQuipFired = true;
+            var calm = pick(CALMED_QUIPS);
+            setSpeech(sp, '🧘 ' + calm, 4.5, sp.icon + ' ' + sp.name + ' — calmed down');
+            logGossipEntry(sp.icon + ' ' + sp.name, calm);
+          }
+        }
+
+        // ── Rage steam wisps ───────────────────────────────────────────────
+        // Tiny particles rising off the Complexity spider's head while its rage
+        // is high. Emission rate tracks the meter (sparse at low anger, a steady
+        // wisp at full), so as the rage drains the steam visibly thins — the
+        // cooling shows even when the desk-badge counter is off-screen. Uses
+        // normalized coordinates (fractions of W/H) like the confetti system.
+        function updateSteam(dt) {
+          if (!scene || !scene.steam) return;
+          var sp = spiderFor('complexity');
+          var rage = sp ? (sp.rage || 0) : 0;
+          var rageFactor = Math.min(1, rage / 100);
+          // Emit while angry: ~2 wisps/sec at low anger up to ~12/sec at 100%.
+          if (sp && rage > 0) {
+            scene._steamAcc = (scene._steamAcc || 0) + dt * (2 + rageFactor * 10);
+            while (scene._steamAcc >= 1) {
+              scene._steamAcc -= 1;
+              if (scene.steam.length >= 40) scene.steam.shift();
+              scene.steam.push({
+                x: sp.x + (Math.random() - 0.5) * 0.03,
+                y: sp.y - 0.04,
+                vx: (Math.random() - 0.5) * 0.004,
+                vy: -(0.018 + Math.random() * 0.028),
+                size: 0.011 + Math.random() * 0.01,
+                sway: Math.random() * 6.283,
+                swaySpeed: 1 + Math.random() * 2,
+                life: 0,
+                ttl: 1.3 + Math.random() * 1.1
+              });
+            }
+          }
+          for (var i = scene.steam.length - 1; i >= 0; i--) {
+            var p = scene.steam[i];
+            p.life += dt;
+            if (p.life >= p.ttl) { scene.steam.splice(i, 1); continue; }
+            p.x += p.vx * dt + Math.sin(p.life * p.swaySpeed + p.sway) * 0.003 * dt;
+            p.y += p.vy * dt;
+          }
+        }
+
+        // Make the Complexity spider actually SAY something about a complexity-
+        // related log entry (speech bubble + office-chat line), not just write
+        // it on the board. Returns true if it spoke.
+        function complexityReactToLog(low, fromReplay) {
+          if (fromReplay || !scene) return false;
+          var sp = spiderFor('complexity');
+          if (!sp) return false;
+          var vals = complexityVals();
+          var text = null;
+          if (/complexity|token cap|atomic step/.test(low)) {
+            // Only fire the score-aware quip once a REAL complexity rating is
+            // in — otherwise a bare 'Complexity' mention (e.g. meta-plan) would
+            // render '?/100' and look broken.
+            if (typeof vm.complexityScore !== 'number') return false;
+            text = fmtComplexity(pick(COMPLEXITY_QUIPS), vals);
+            bumpComplexityRage(12); // being forced to care about the rating
+          } else if (/compacted|compressed|context summarized|compact summary|compaction/.test(low)) {
+            text = pick(COMPLEXITY_COMPACT);
+            bumpComplexityRage(25); // compaction is personal
+          }
+          if (!text) return false;
+          setSpeech(sp, text, 5.0, sp.icon + ' ' + sp.name);
+          logGossipEntry(sp.icon + ' ' + sp.name, text);
+          scene.lastLogAt = Date.now();
+          return true;
+        }
+
+        // The sarcastic post-mortem line the Complexity spider writes on the
+        // board last — estimate vs reality vs the user's (presumed) expectations.
+        // Kept short (~100 chars) so it wraps cleanly on the whiteboard.
+        function complexityPostMortemText() {
+          var actual = complexityActualSteps();
+          var vals = complexityVals(); // est already set from complexityAtomicSteps
+          vals.actual = actual;
+          var fail = !!(vm.agentResult && vm.agentResult.incomplete);
+          var text = fmtComplexity(pick(fail ? COMPLEXITY_POSTMORTEM_FAIL : COMPLEXITY_POSTMORTEM), vals);
+          return text.length > 100 ? text.slice(0, 97) + '…' : text;
+        }
+
+        // At plan finish the Complexity spider compares its own difficulty
+        // estimate to what the verifier actually decided: smug when right,
+        // sulking when overruled, furious when the task was judged incomplete.
+        function complexityVerdictReact(fromReplay) {
+          if (fromReplay || !scene) return;
+          var sp = spiderFor('complexity');
+          var est = (typeof vm.complexityAtomicSteps === 'number' && vm.complexityAtomicSteps) ? vm.complexityAtomicSteps : 0;
+          var actual = complexityActualSteps();
+          // ── Track the verdict record REGARDLESS of panel visibility ─────
+          // The win/loss tally is a persistent cross-run stat, so it must count
+          // every finished run — even ones where the Meeting View was closed.
+          // Only the visual reaction (speech/rage) is gated on visibility below.
+          var outcome;
+          var right = false;
+          if (vm.agentResult && vm.agentResult.incomplete) {
+            outcome = 'fail';
+          } else {
+            // Right or wrong about the step count: within ~1 step (or no
+            // estimate at all) counts as right — the verifier agreed.
+            var off = est > 0 ? Math.abs(actual - est) : 0;
+            right = est === 0 ? actual <= 4 : off <= 1;
+            outcome = right ? 'right' : 'wrong';
+          }
+          scene.verdictOutcome = outcome;
+          scene.verdictGossiped = false; // a fresh verdict is retell-worthy again
+          if (outcome === 'fail') _verdictRecord.fail = (_verdictRecord.fail || 0) + 1;
+          else if (outcome === 'right') _verdictRecord.right = (_verdictRecord.right || 0) + 1;
+          else _verdictRecord.wrong = (_verdictRecord.wrong || 0) + 1;
+          saveVerdictRecord();
+          // ── Visual reaction (only when the panel is actually visible) ────
+          if (!vm.showMeeting || !sp) return;
+          var vals = complexityVals();
+          vals.actual = actual; // est already set by complexityVals()
+          vals.record = verdictRecordLabel();
+          if (outcome === 'fail') {
+            var fail = fmtComplexity(pick(COMPLEXITY_VERDICT_FAIL), vals);
+            setSpeech(sp, fail, 5.0, sp.icon + ' ' + sp.name + ' — the verifier disagrees');
+            logGossipEntry(sp.icon + ' ' + sp.name, fail);
+            bumpComplexityRage(30);
+            scene.lastLogAt = Date.now();
+            return;
+          }
+          var text = fmtComplexity(pick(right ? COMPLEXITY_VERDICT_RIGHT : COMPLEXITY_VERDICT_WRONG), vals);
+          var speaker = sp.icon + ' ' + sp.name + (right ? ' — the verifier agrees with me' : ' — the verifier overrode me');
+          setSpeech(sp, text, 5.0, speaker);
+          logGossipEntry(sp.icon + ' ' + sp.name, text);
+          bumpComplexityRage(right ? -8 : 18); // being right cools the rage a little
+          scene.lastLogAt = Date.now();
+        }
+
         function handleLogEntry(entry, fromReplay) {
           if (!scene) return;
           var msg = entry && entry.message ? String(entry.message) : '';
@@ -1393,6 +2776,11 @@ angular.module('kanbanApp')
           scene.activeRole = parsed.role;
           scene.lastLogAt = Date.now();
           enqueueWrite(parsed.role, parsed.text);
+          // The Complexity spider cuts in (angrily) whenever the task's
+          // difficulty or a context compaction shows up in the log. Runs AFTER
+          // the write so its speech bubble wins over the writer's "reading"
+          // bubble — the board still gets the actual text written.
+          if (parsed.role === 'complexity') complexityReactToLog(low, fromReplay);
         }
 
         function enqueueWrite(role, text) {
@@ -1434,6 +2822,7 @@ angular.module('kanbanApp')
           // Begin a new timeline capture (only once per run).
           if (!fromReplay && !_recording) {
             _recording = [];
+            _recordingCardId = vm.activeCardId || null;
             _recording.push({ t: Date.now(), type: 'start' });
           }
           scene.meetingOn = true;
@@ -1442,6 +2831,13 @@ angular.module('kanbanApp')
           scene.queue = [];
           scene.writer = null;
           scene.confetti = []; // clear leftover confetti from a previous run
+          scene.postMortem = null; // clear the est-vs-actual chart
+          // A fresh run resets the Complexity spider's anger meter — a new
+          // task starts with a clean (if skeptical) slate.
+          if (!fromReplay) {
+            resetComplexityRage();
+            scene.calmQuipFired = false; // allow the 'calmed down' line again
+          }
           // Only a fresh LIVE run resets the ticker — replays reuse the last
           // live history so the rewatch keeps the step outcomes visible.
           if (!fromReplay) vm.meetingTicker = [];
@@ -1451,6 +2847,9 @@ angular.module('kanbanApp')
           scene.banterCd = 2;
           scene.gossip = null;
           scene.gossipCd = 12;
+          scene.coolerTrip = null; // no storm-offs on a fresh run
+          scene.coolerTripCd = 90;
+          scene.glare = null;      // no stare-downs on a fresh run
           scene.spiders.forEach(function (s, i) {
             s.state = 'walk';
             s.target = { x: s.seat.x, y: s.seat.y };
@@ -1470,22 +2869,54 @@ angular.module('kanbanApp')
             _recording.push({ t: Date.now(), type: 'finish' });
             vm.meetingReplay = _recording.slice();
             _recording = null;
+            // Persist the timeline onto the card so the spider-meeting replay
+            // survives page reloads and works for past runs. Cards are stored
+            // as raw JSON board data, so attaching _meetingReplay persists it
+            // via vm.saveCards() with no backend change.
+            if (_recordingCardId) {
+              var repCard = vm.findCardById ? vm.findCardById(_recordingCardId) : null;
+              if (repCard) {
+                repCard._meetingReplay = boundedReplayForStorage(vm.meetingReplay);
+                if (vm.saveCards) vm.saveCards();
+              }
+            }
+            _recordingCardId = null;
           }
           // Little celebration chime when the plan completes. Only play when
           // the panel is actually visible — finishMeeting is driven by the
           // log/streaming watches, which fire even while the panel is closed.
           if (vm.showMeeting) playChime();
-          // Let the reviewer write the verdict on the board. enqueueWrite bails
-          // once scene.done is true, so flip the flag AFTER enqueueing.
+          // Let the reviewer write the verdict on the board, then the Complexity
+          // spider writes its sarcastic post-mortem LAST (queued behind the
+          // reviewer, so it walks to the board after the verdict lands).
+          // enqueueWrite bails once scene.done is true, so flip the flag AFTER
+          // both writes are queued.
           var reviewer = spiderFor('reviewer');
           if (reviewer) {
             enqueueWrite('reviewer', '✅ Plan looks good — task complete!');
+          }
+          var complexitySpider = spiderFor('complexity');
+          if (complexitySpider && typeof vm.complexityScore === 'number' && vm.complexityScore >= 0) {
+            // Remember the estimate vs reality (and the exact composed text) so
+            // the whiteboard can draw the est-vs-actual bar chart and trigger
+            // the angry stomp only when THIS post-mortem write actually lands —
+            // never when some earlier complexity log line completes writing.
+            var pmText = complexityPostMortemText();
+            scene.postMortem = {
+              est: (typeof vm.complexityAtomicSteps === 'number' && vm.complexityAtomicSteps) ? vm.complexityAtomicSteps : 0,
+              actual: complexityActualSteps(),
+              text: pmText,
+              shown: false
+            };
+            enqueueWrite('complexity', pmText);
           }
           scene.done = true;
           // Confetti burst across the whole canvas — every spider throws a
           // handful before heading back to their desk.
           spawnConfetti();
-          // Everyone celebrates and walks home shortly after.
+          // Everyone celebrates and walks home shortly after. The Complexity
+          // spider's rage meter resets — the plan is done, its suffering ends.
+          resetComplexityRage();
           scene.spiders.forEach(function (s) {
             if (s.role !== 'reviewer') {
               s.state = 'celebrate';
@@ -1494,6 +2925,9 @@ angular.module('kanbanApp')
               s.speechTtl = 2.5;
             }
           });
+          // The Complexity spider sizes itself up against the verifier's verdict
+          // AFTER the celebration loop so its speech bubble wins the spotlight.
+          complexityVerdictReact(fromReplay);
           vm.meetingSpeaker = '🏁 task complete — confetti! the spiders are heading home';
           $scope.$applyAsync();
         }
@@ -1516,6 +2950,9 @@ angular.module('kanbanApp')
             cancelAnimationFrame(raf);
             raf = null;
           }
+          // No more frames → stop the persistent rage rumble so it can't
+          // keep droning after the panel closes or the view is destroyed.
+          stopRageRumble();
         }
 
         function tick(ts) {
@@ -1545,6 +2982,7 @@ angular.module('kanbanApp')
               if (ev.type === 'start') startMeeting(true);
               else if (ev.type === 'finish') finishMeeting(true);
               else if (ev.type === 'reaction') fireReaction(ev.kind, ev.text);
+              else if (ev.type === 'cooler') startCoolerTrip(ev); // replay the storm-off
               else if (ev.type === 'stream') {
                 // Replay the LLM stream-reading bubble on the same spider role.
                 // Skip the active writer so a stream bubble never stomps the
@@ -1579,6 +3017,17 @@ angular.module('kanbanApp')
             scene._whooshCd = 0.33;
           }
 
+          // The Complexity spider's anger slowly cools whenever the office
+          // goes quiet — a few points per idle minute, so the meter breathes
+          // between bursts instead of staying pinned at 100%.
+          coolComplexityRage();
+          // Steam wisps off its head while the meter is high — they thin as the
+          // rage drains, making the cooling visible at a glance.
+          updateSteam(dt);
+          // Its rage also has a voice: a low rumble that swells with the meter
+          // (silenced when muted, panel hidden, or rage at 0).
+          updateRageRumble();
+
           // Confetti physics: gentle rise, then gravity pulls the pieces down
           // with a little drift + spin. Fade out at the end of their life.
           if (scene.confetti && scene.confetti.length) {
@@ -1604,7 +3053,14 @@ angular.module('kanbanApp')
               if (dist < 0.012) {
                 s.x = s.target.x; s.y = s.target.y;
                 if (scene.writer === s) { s.state = 'write'; s.progress = 0; }
-                else { s.state = 'idle'; }
+                else {
+                  // The Complexity spider's angry stomp lands with a burst.
+                  if (s.stomping) {
+                    s.stomping = false;
+                    stompLand(s);
+                  }
+                  s.state = 'idle';
+                }
               } else {
                 // Clamp step to the remaining distance so spiders never
                 // overshoot and jitter forever around their target — matters
@@ -1642,12 +3098,64 @@ angular.module('kanbanApp')
               w.progress = w.text.length;
               scene.boardLines.push({ role: w.role, color: w.color, text: w.text, progress: w.text.length });
               if (scene.boardLines.length > 8) scene.boardLines.shift();
-              scene.writer = null;
-              w.state = 'walk';
-              w.target = { x: w.seat.x, y: w.seat.y };
-              w.speech = '';
-              w.speechTtl = 0;
-              pumpQueue();
+              // The Complexity spider's post-mortem is the last line written —
+              // once THIS exact write lands (matched by its composed text, so
+              // an earlier complexity log line never triggers it), the chart
+              // appears in the corner. When the verifier overruled the
+              // estimate, a two-spider standoff follows: the Verifier walks
+              // over and stares it down, then the Complexity spider sulks home.
+              // Otherwise it just stomps angrily back to its own desk.
+              if (w.role === 'complexity' && scene.postMortem && w.text === scene.postMortem.text) {
+                scene.postMortem.shown = true;
+                if (scene.verdictOutcome === 'wrong' && !_replay) {
+                  // Stay at the board — the Verifier comes to us.
+                  w.target = { x: w.x, y: w.y };
+                  scene.writer = null;
+                  w.state = 'walk';
+                  w.speech = '';
+                  w.speechTtl = 0;
+                  pumpQueue();
+                  startStandoff();
+                } else {
+                  w.stomping = true;
+                  w.target = { x: w.home.x, y: w.home.y };
+                  scene.writer = null;
+                  w.state = 'walk';
+                  w.speech = '';
+                  w.speechTtl = 0;
+                  pumpQueue();
+                }
+              } else {
+                w.target = { x: w.seat.x, y: w.seat.y };
+                scene.writer = null;
+                w.state = 'walk';
+                w.speech = '';
+                w.speechTtl = 0;
+                // The reviewer reacts to the Complexity spider's verdict from
+                // the board, right after its own verdict line lands: grudging
+                // 'fine, you were right' when the estimate was right, smug
+                // 'told you so' when it was overruled. Both go to the Office
+                // Chat. Matches the exact verdict text so an earlier reviewer
+                // write (a step verdict during the run) never triggers it.
+                if (!_replay && vm.showMeeting && w.role === 'reviewer' && w.text === '✅ Plan looks good — task complete!' && scene.verdictOutcome) {
+                  var revVals = complexityVals();
+                  revVals.actual = complexityActualSteps();
+                  var revLine = fmtComplexity(
+                    pick(scene.verdictOutcome === 'right' ? REVIEWER_GRUDGE : (scene.verdictOutcome === 'fail' ? REVIEWER_SMUG_FAIL : REVIEWER_SMUG)),
+                    revVals);
+                  // A smug 'told you so' escalates into a desk-to-desk glare:
+                  // the two lock eyes across the office, trade a couple of
+                  // bubbles, then the Complexity spider stomps home. Falls back
+                  // to the plain one-liner if the office is busy.
+                  var glareStarted = scene.verdictOutcome === 'wrong' && startGlare(revLine);
+                  if (!glareStarted) {
+                    setSpeech(w, revLine, 4.5, w.icon + ' ' + w.name + (scene.verdictOutcome === 'right' ? ' — grudging respect' : ' — smug'));
+                    logGossipEntry(w.icon + ' ' + w.name, revLine);
+                  }
+                  scene.lastLogAt = Date.now();
+                }
+                pumpQueue();
+              }
             }
           }
 
@@ -1696,8 +3204,10 @@ angular.module('kanbanApp')
                 var ctx = currentContext();
                 // Role-specific context banter: pick the spider whose turf the
                 // context belongs to, then a joke from that spider's own array.
-                // File > endpoint > steps priority, so the most concrete bit of
-                // context gets the spotlight.
+                // File > endpoint > steps > config priority, so the most concrete
+                // bit of context gets the spotlight; the IT Specialist chimes in
+                // with the boring config details when there's nothing more
+                // exciting happening.
                 var joker = null;
                 var joke = null;
                 if (ctx.file) {
@@ -1709,9 +3219,20 @@ angular.module('kanbanApp')
                 } else if (ctx.total > 0) {
                   joker = spiderFor('planner') || randomSpider();
                   joke = fmtBanter(pick(BANTER_STEPS), ctx);
+                } else if (typeof vm.complexityScore === 'number' && vm.complexityScore >= 0 && vm.complexityLabel) {
+                  // A task is (or was) being rated — the Complexity spider has
+                  // opinions about that, and will not be ignored.
+                  joker = spiderFor('complexity') || randomSpider();
+                  joke = fmtComplexity(pick(COMPLEXITY_QUIPS), complexityVals());
                 } else {
-                  joker = randomSpider();
-                  joke = streaming ? pick(BANTER_STREAM) : pick(BANTER_IDLE);
+                  var cfg = settingsContext();
+                  if (cfg.ready) {
+                    joker = spiderFor('itspecialist') || randomSpider();
+                    joke = fmtBanter(pick(BANTER_CONFIG), cfg);
+                  } else {
+                    joker = randomSpider();
+                    joke = streaming ? pick(BANTER_STREAM) : pick(BANTER_IDLE);
+                  }
                 }
                 if (joker && joke) {
                   setSpeech(joker, joke, 4.5, joker.icon + ' ' + joker.name);
@@ -1725,6 +3246,42 @@ angular.module('kanbanApp')
             }
           }
 
+          // ── Rage cooler trip: the Complexity spider storms off for a drink ─
+          // Triggered when its rage crosses 75; driven per-frame like the other
+          // skits. Real work interrupts it — the spider stalks straight home.
+          // Runs in BOTH live and replay modes: a recorded 'cooler' event
+          // starts the trip during a rewatch, and the same per-frame driver
+          // walks it to the cooler and back (real work from the timeline
+          // interrupts it exactly like live).
+          if (scene.coolerTrip) {
+            if (scene.writer || scene.queue.length || vm.streamingActive) {
+              endCoolerTripNow();
+            } else {
+              advanceCoolerTrip(dt);
+            }
+          }
+
+          // ── Verifier vs Complexity standoff ──────────────────────────────
+          // Driven per-frame like the other skits; real work interrupts it.
+          if (scene.standoff) {
+            if (scene.writer || scene.queue.length || vm.streamingActive) {
+              endStandoffNow();
+            } else {
+              advanceStandoff(dt);
+            }
+          }
+
+          // ── Reviewer vs Complexity glare ─────────────────────────────────
+          // After the reviewer's 'told you so' the two stare each other down
+          // from across the office; the Complexity spider stomps home after.
+          if (scene.glare) {
+            if (scene.writer || scene.queue.length || vm.streamingActive) {
+              endGlareNow();
+            } else {
+              advanceGlare(dt);
+            }
+          }
+
           // ── Water-cooler gossip: idle skit about the user's stats ────────
           if (_replay) {
             // no gossip during replay
@@ -1735,7 +3292,7 @@ angular.module('kanbanApp')
             } else {
               advanceGossip(dt);
             }
-          } else if (!scene.writer && !scene.queue.length && !vm.streamingActive && !vm.meetingHovered) {
+          } else if (!scene.writer && !scene.queue.length && !vm.streamingActive && !vm.meetingHovered && !scene.coolerTrip) {
             // Gossip yields to the watching skit — when the user is hovering,
             // the office greets them instead of gossiping about them.
             scene.gossipCd = (scene.gossipCd === undefined || scene.gossipCd === null) ? 12 : scene.gossipCd;
@@ -1776,6 +3333,9 @@ angular.module('kanbanApp')
         }
 
         // ── Drawing ────────────────────────────────────────────────────────
+        // Scale any base pixel size up/down by the panel-wide text-size setting
+        // (relative to the 12px default), so canvas text grows with the chrome.
+        var mf = function (px) { return Math.max(6, Math.round(px * (vm.meetingFontSize || 12) / 12)); };
         function drawFrame() {
           if (!canvas || !ctx) return;
           var dpr = window.devicePixelRatio || 1;
@@ -1794,6 +3354,7 @@ angular.module('kanbanApp')
           drawBoard(W, H);
           drawDesks(W, H);
           drawSpiders(W, H);
+          drawSteam(W, H);
           drawConfetti(W, H);
         }
 
@@ -1831,7 +3392,7 @@ angular.module('kanbanApp')
             ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.75; ctx.stroke();
           }
           if (text) {
-            ctx.font = 'bold ' + Math.round(bh * 0.42) + 'px sans-serif';
+            ctx.font = 'bold ' + Math.round(bh * 0.42 * (vm.meetingFontSize || 12) / 12) + 'px sans-serif';
             ctx.textAlign = 'center';
             ctx.fillStyle = 'rgba(255,255,255,0.92)';
             ctx.fillText(text, W / 2, by + bh + bh * 0.75);
@@ -1873,7 +3434,7 @@ angular.module('kanbanApp')
           // Tiny floating emoji drifting across the wall — cheap and cheerful.
           var wallH = H * 0.52;
           var t = Date.now() / 1000;
-          ctx.font = Math.round(H * 0.03) + 'px sans-serif';
+          ctx.font = Math.round(H * 0.03 * (vm.meetingFontSize || 12) / 12) + 'px sans-serif';
           ctx.textAlign = 'center';
           for (var i = 0; i < count; i++) {
             var c = chars[i % chars.length];
@@ -1942,6 +3503,22 @@ angular.module('kanbanApp')
         function drawStPattyDecor(W, H) {
           drawHolidayBanner(W, H, 'LUCKY OFFICE');
           drawFloatingEmoji(W, H, ['🍀', '🌈', '☘️', '💰'], 8);
+        }
+
+        function drawSteam(W, H) {
+          if (!scene.steam || !scene.steam.length) return;
+          for (var i = 0; i < scene.steam.length; i++) {
+            var p = scene.steam[i];
+            var fadeIn = Math.min(1, p.life * 3);     // quick pop-in
+            var fadeOut = Math.max(0, 1 - p.life / p.ttl); // then dissolve
+            var grow = 1 + p.life * 0.9;              // wisps expand as they rise
+            ctx.globalAlpha = fadeIn * fadeOut * 0.5;
+            ctx.fillStyle = '#efe9dc';                // pale steam, no hard edge
+            ctx.beginPath();
+            ctx.arc(p.x * W, p.y * H, p.size * W * grow, 0, 6.283);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
         }
 
         function drawConfetti(W, H) {
@@ -2057,6 +3634,29 @@ angular.module('kanbanApp')
           ctx.fillStyle = '#ffffff';
           rr(cx + 3 * s, cy + 9 * s, 5 * s, 6 * s, 1 * s); ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.stroke();
+
+          // Steam wisp — a gentle rising curl while the cooler is in use (the
+          // Complexity spider is sipping), so the drink is visible on the
+          // cooler itself, not just in the spider's hand.
+          var ct = scene ? scene.coolerTrip : null;
+          if (ct && ct.phase === 'talk' && ct.drink > 0) {
+            var now = Date.now() / 1000;
+            var baseAlpha = 0.22 + ct.drink * 0.3;
+            for (var w = 0; w < 3; w++) {
+              var ph = now * 1.4 + w * 1.9;
+              var rise = (ph % 1);
+              var wpx = cx - 2 * s + Math.sin(ph * 3.1) * 3 * s;
+              var wpy = cy - 22 * s - rise * 12 * s;
+              var alpha = baseAlpha * (1 - rise);
+              ctx.strokeStyle = 'rgba(230,245,255,' + alpha.toFixed(3) + ')';
+              ctx.lineWidth = 1.4 * s;
+              ctx.lineCap = 'round';
+              ctx.beginPath();
+              ctx.moveTo(wpx, wpy);
+              ctx.quadraticCurveTo(wpx + Math.sin(ph * 2.2) * 4 * s, wpy - 3 * s, wpx + Math.cos(ph * 2.2) * 5 * s, wpy - 7 * s);
+              ctx.stroke();
+            }
+          }
         }
 
         function drawBoard(W, H) {
@@ -2075,9 +3675,15 @@ angular.module('kanbanApp')
 
           // Board text
           var padX = 10, padY = 12;
-          var maxChars = Math.floor((bw - padX * 2) / 9);
+          // Reserve the bottom-right corner for the post-mortem chart ONLY while
+          // the chart is actually visible — during the run, text keeps full
+          // width. Wrapping happens per-frame, so narrowing at chart time
+          // re-wraps the existing lines cleanly around it.
+          var chartW = 52, chartH = 34;
+          var chartShown = !!(scene && scene.postMortem && scene.postMortem.shown);
+          var maxChars = Math.max(8, Math.floor((bw - padX * 2 - (chartShown ? chartW + 4 : 0)) / mf(9)));
           var lines = scene ? scene.boardLines.slice(-6) : [];
-          ctx.font = 'bold 11px monospace';
+          ctx.font = 'bold ' + mf(11) + 'px monospace';
           ctx.textBaseline = 'top';
           // Writing spider's in-progress line
           if (scene && scene.writer && scene.writer.state === 'write') {
@@ -2103,6 +3709,38 @@ angular.module('kanbanApp')
             }
           }
           ctx.textBaseline = 'alphabetic';
+
+          // Post-mortem est-vs-actual chart: a tiny two-bar graphic in the
+          // bottom-right corner of the board, once the Complexity spider has
+          // written its autopsy line. Stays until the next run starts.
+          if (chartShown) {
+            var pm = scene.postMortem;
+            var cx = bx + bw - chartW - 8, cy = by + bh - chartH - 6;
+            var maxVal = Math.max(1, pm.est, pm.actual);
+            // Panel backdrop (tall enough for title + bars + labels inside).
+            ctx.fillStyle = 'rgba(255,255,255,0.55)';
+            rr(cx - 4, cy - 16, chartW + 8, chartH + 22, 4); ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.font = 'bold ' + mf(8) + 'px sans-serif';
+            ctx.fillStyle = '#8b4a4a';
+            ctx.textAlign = 'left';
+            ctx.fillText('EST vs ACTUAL', cx, cy - 9);
+            // Bars (base line above where the labels sit, so nothing clips).
+            var bw2 = 16, bh2 = chartH - 14;
+            var bx2 = cx + 6, by2 = cy + chartH - 8;
+            ctx.fillStyle = '#c0392b';
+            ctx.fillRect(bx2, by2 - bh2 * (pm.est / maxVal), bw2, bh2 * (pm.est / maxVal));
+            ctx.fillStyle = '#e67e22';
+            ctx.fillRect(bx2 + bw2 + 8, by2 - bh2 * (pm.actual / maxVal), bw2, bh2 * (pm.actual / maxVal));
+            // Labels inside the panel, under the bars.
+            ctx.font = mf(8) + 'px sans-serif';
+            ctx.fillStyle = '#c0392b';
+            ctx.textAlign = 'center';
+            ctx.fillText('est ' + pm.est, bx2 + bw2 / 2, by2 + 9);
+            ctx.fillStyle = '#e67e22';
+            ctx.fillText('act ' + pm.actual, bx2 + bw2 + 8 + bw2 / 2, by2 + 9);
+            ctx.textAlign = 'left';
+          }
         }
 
         function wrapText(text, maxChars) {
@@ -2125,6 +3763,16 @@ angular.module('kanbanApp')
           return lines.join('');
         }
 
+        // Blend two hex colors by t (0..1) — used to turn the Complexity spider
+        // redder as its anger meter climbs.
+        function blendHex(a, b, t) {
+          var pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+          var r = Math.round(((pa >> 16) & 255) + ((((pb >> 16) & 255) - ((pa >> 16) & 255)) * t));
+          var g = Math.round(((pa >> 8) & 255) + ((((pb >> 8) & 255) - ((pa >> 8) & 255)) * t));
+          var bl = Math.round((pa & 255) + (((pb & 255) - (pa & 255)) * t));
+          return 'rgb(' + r + ',' + g + ',' + bl + ')';
+        }
+
         function drawDesks(W, H) {
           if (!scene) return;
           scene.spiders.forEach(function (s) {
@@ -2137,19 +3785,83 @@ angular.module('kanbanApp')
             ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1; ctx.stroke();
             // Monitor
             ctx.fillStyle = '#0d1424';
-            rr(dx - 10, dy - 24, 20, 14, 2); ctx.fill();
+            rr(dx - mf(10), dy - mf(24), mf(20), mf(14), 2); ctx.fill();
             ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.stroke();
             // tiny screen glow
             ctx.fillStyle = s.color;
             ctx.globalAlpha = 0.5;
-            ctx.fillRect(dx - 7, dy - 21, 14, 2);
+            ctx.fillRect(dx - mf(7), dy - mf(21), mf(14), 2);
             ctx.globalAlpha = 1;
-            // Name tag
-            ctx.font = '9px sans-serif';
-            ctx.fillStyle = 'rgba(255,255,255,0.55)';
+            // Name tag — a standing name-plate on every desk: the spider's
+            // icon + name, so each desk advertises exactly who sits there.
+            var nLabel = s.name.toUpperCase();
+            ctx.font = 'bold ' + mf(8) + 'px sans-serif';
+            var nW = Math.ceil(ctx.measureText(nLabel).width) + mf(20);
+            var nH = mf(13);
+            var nY = dy - mf(52);
+            // Clamp so edge desks (Explorer, Verifier, …) never push the plate
+            // off-screen even at large text sizes.
+            var nCx = Math.max(nW / 2 + 2, Math.min(W - nW / 2 - 2, dx));
+            ctx.fillStyle = 'rgba(8,12,22,0.88)';
+            rr(nCx - nW / 2, nY, nW, nH, 4); ctx.fill();
+            ctx.strokeStyle = s.color; ctx.globalAlpha = 0.75; ctx.lineWidth = 1; ctx.stroke(); ctx.globalAlpha = 1;
             ctx.textAlign = 'center';
-            ctx.fillText(s.icon, dx, dy - 30);
+            ctx.font = mf(9) + 'px sans-serif';
+            ctx.fillStyle = 'rgba(255,255,255,0.85)';
+            ctx.fillText(s.icon, nCx - nW / 2 + mf(9), nY + nH - mf(3));
+            ctx.font = 'bold ' + mf(8) + 'px sans-serif';
+            ctx.fillStyle = s.color;
+            ctx.fillText(nLabel, nCx + mf(5), nY + nH - mf(3));
             ctx.textAlign = 'left';
+            // Rage counter — a tiny badge over the Complexity spider's desk that
+            // climbs with every step / context milestone / compaction event.
+            // Sits one row below the name-plate so the two never collide.
+            if (s.role === 'complexity' && Math.round(s.rage) > 0) {
+              var bw = mf(24), bh = mf(13);
+              var flash = (s.rage >= 100 && Math.floor(Date.now() / 300) % 2 === 0);
+              ctx.fillStyle = flash ? 'rgba(220,30,30,0.9)' : 'rgba(0,0,0,0.6)';
+              rr(dx - bw / 2, dy - mf(38), bw, bh, 4); ctx.fill();
+              ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+              ctx.font = 'bold ' + mf(9) + 'px sans-serif';
+              ctx.fillStyle = s.rage >= 100 ? '#ffd0d0' : '#ff9a9a';
+              ctx.textAlign = 'center';
+              ctx.fillText((s.rage >= 100 ? '💢 ' : '🔥 ') + Math.round(s.rage) + '%', dx, dy - mf(27));
+              ctx.textAlign = 'left';
+            }
+            // Sound indicator — a tiny ON/OFF plaque beside the rage counter so
+            // users discover the header mute toggle controls the office sounds.
+            if (s.role === 'complexity') {
+              var sLabel = 'SOUND: ' + (vm.meetingMuted ? 'OFF' : 'ON');
+              ctx.font = 'bold ' + mf(8) + 'px sans-serif';
+              var sW = Math.ceil(ctx.measureText(sLabel).width) + 12;
+              var sH = mf(13);
+              // Beside the rage badge when it's up, centered otherwise.
+              var sX = Math.round(s.rage) > 0 ? dx + mf(15) : dx - sW / 2;
+              ctx.fillStyle = 'rgba(0,0,0,0.6)';
+              rr(sX, dy - mf(38), sW, sH, 4); ctx.fill();
+              ctx.strokeStyle = vm.meetingMuted ? 'rgba(248,113,113,0.55)' : 'rgba(74,222,128,0.55)';
+              ctx.lineWidth = 1; ctx.stroke();
+              ctx.fillStyle = vm.meetingMuted ? '#f87171' : '#4ade80';
+              ctx.textAlign = 'center';
+              ctx.fillText(sLabel, sX + sW / 2, dy - mf(27));
+              ctx.textAlign = 'left';
+            }
+            // Verdict track record — a tiny win/loss plaque pinned above the
+            // Complexity spider's desk ('called it: 3-1') that updates after
+            // every task so it can brag about its historical accuracy.
+            if (s.role === 'complexity' && verdictRecordTotal() > 0) {
+              var rl = 'called it: ' + verdictRecordLabel();
+              ctx.font = mf(8) + 'px sans-serif';
+              var tw = ctx.measureText(rl).width;
+              var pw = Math.max(mf(40), Math.ceil(tw) + mf(14));
+              ctx.fillStyle = 'rgba(0,0,0,0.65)';
+              rr(dx - pw / 2, dy - mf(66), pw, mf(12), 4); ctx.fill();
+              ctx.strokeStyle = 'rgba(255,83,112,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+              ctx.fillStyle = '#ffd0d8';
+              ctx.textAlign = 'center';
+              ctx.fillText(rl, dx, dy - mf(57));
+              ctx.textAlign = 'left';
+            }
           });
         }
 
@@ -2166,19 +3878,39 @@ angular.module('kanbanApp')
           var bodyW = 26 * scale, bodyH = 20 * scale;
           var bob = 0;
           var tremble = 0;
-          if (s.state === 'walk') bob = Math.sin(s.walkPhase * 2) * 1.5 * scale;
+          // The Complexity spider's angry stomp: heavier, angrier gait — big
+          // slamming bobs instead of the gentle walk wiggle.
+          if (s.state === 'walk') {
+            bob = s.stomping
+              ? -Math.abs(Math.sin(s.walkPhase * 2.4)) * 4.2 * scale
+              : Math.sin(s.walkPhase * 2) * 1.5 * scale;
+          }
           else if (s.state === 'celebrate') bob = -Math.abs(Math.sin(s.celebrateT * 9)) * 6 * scale;
           else bob = Math.sin(s.walkPhase) * 1.2 * scale;
           // Reaction: happy hop for a landed step, worried tremble for a fail.
+          // The tremble scales with rage, so only the (angry) Complexity spider
+          // shakes hard on landing — other spiders keep the normal tremble.
           if (s.reactT > 0) {
             if (s.reactKind === 'good') {
               bob -= Math.abs(Math.sin(s.reactT * 16)) * 5 * scale;
             } else {
-              tremble = Math.sin(s.reactT * 40) * 1.6 * scale;
+              tremble = Math.sin(s.reactT * 40) * (1.6 + (s.rage || 0) / 40) * scale;
             }
           }
-          var px = s.x * W + tremble;
+          // Anger meter: the Complexity spider reddens and shakes as its rage
+          // climbs. rageFactor 0..1 → blend toward a hot red and add a jittery
+          // shake that gets faster and wider with every point of anger.
+          var rage = s.rage || 0;
+          var rageFactor = Math.min(1, rage / 100);
+          var rageShake = 0;
+          if (rageFactor > 0) {
+            // Shared with updateRageRumble so the audio wobble always matches
+            // the on-screen tremble. Pixel amplitude scales the wave here.
+            rageShake = rageShakeWave(Date.now() / 1000, s.walkPhase, rageFactor) * (0.6 + rageFactor * 2.6) * scale;
+          }
+          var px = s.x * W + tremble + rageShake;
           var cy = py + bob;
+          var bodyColor = rageFactor > 0 ? blendHex(s.color, '#ff3b30', rageFactor) : s.color;
 
           // Shadow
           ctx.fillStyle = 'rgba(0,0,0,0.3)';
@@ -2187,14 +3919,16 @@ angular.module('kanbanApp')
           ctx.fill();
 
           // Legs (8 small legs, 4 per side) — wiggle while walking
-          ctx.strokeStyle = s.color;
+          ctx.strokeStyle = bodyColor;
           ctx.lineWidth = Math.max(1.5, 2 * scale);
           ctx.lineCap = 'round';
           var legSwing = s.state === 'walk' ? Math.sin(s.walkPhase) : Math.sin(s.walkPhase * 0.6) * 0.35;
           for (var i = 0; i < 4; i++) {
             var attachY = cy - bodyH * 0.3 + (i / 3) * bodyH * 0.7;
             var off = 8 + i * 3;
-            var sway = legSwing * (i % 2 === 0 ? 1 : -1) * 4 * scale;
+            // Stomping legs stamp wider and more erratically — pure anger.
+            var stompLegs = s.stomping ? 7 * scale : 4 * scale;
+            var sway = legSwing * (i % 2 === 0 ? 1 : -1) * stompLegs;
             // left leg
             ctx.beginPath();
             ctx.moveTo(px - bodyW * 0.35, attachY);
@@ -2210,7 +3944,7 @@ angular.module('kanbanApp')
           // Waving arm — one raised front leg that waves when the user watches.
           if (s.waveT > 0) {
             var waveSwing = Math.sin(s.waveT * 14 + s.wavePhase) * 7 * scale;
-            ctx.strokeStyle = s.color;
+            ctx.strokeStyle = bodyColor;
             ctx.lineWidth = Math.max(1.5, 2 * scale);
             ctx.lineCap = 'round';
             // raised arm (front, toward the user)
@@ -2219,14 +3953,26 @@ angular.module('kanbanApp')
             ctx.lineTo(px + bodyW * 0.55, cy - bodyH * 1.15 + waveSwing);
             ctx.stroke();
             // little hand
-            ctx.fillStyle = s.color;
+            ctx.fillStyle = bodyColor;
             ctx.beginPath();
             ctx.arc(px + bodyW * 0.55, cy - bodyH * 1.15 + waveSwing, 2.4 * scale, 0, 6.283);
             ctx.fill();
           }
 
+          // Rage aura — a faint red glow that grows with the anger meter. Drawn
+          // BEFORE the body so it reads as a halo behind the spider rather than
+          // a tint over it.
+          if (rageFactor > 0) {
+            ctx.globalAlpha = 0.12 + rageFactor * 0.18;
+            ctx.fillStyle = '#ff3b30';
+            ctx.beginPath();
+            ctx.arc(px, cy, (bodyW * 0.9) * (1 + rageFactor * 0.5), 0, 6.283);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          }
+
           // Body: one big block
-          ctx.fillStyle = s.color;
+          ctx.fillStyle = bodyColor;
           rr(px - bodyW / 2, cy - bodyH / 2, bodyW, bodyH, 6 * scale);
           ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.35)';
@@ -2236,14 +3982,19 @@ angular.module('kanbanApp')
           ctx.fillStyle = 'rgba(255,255,255,0.28)';
           rr(px - bodyW / 2 + 3 * scale, cy - bodyH / 2 + 2 * scale, bodyW * 0.4, bodyH * 0.28, 3 * scale);
           ctx.fill();
-          // Eyes (look toward target, or UP at the user when waving)
+          // Eyes (look toward target, or UP at the user when waving, or lock
+          // onto the other spider during a glare — narrowed for the stare-down)
           var look = s.state === 'walk' ? 1 : 0;
           var ex = px + (s.target.x > s.x ? 3 : s.target.x < s.x ? -3 : 0) * scale;
+          var eyeR = s.glaringAt ? 2.6 * scale : 3.2 * scale;
+          if (s.glaringAt) {
+            ex = px + (s.glaringAt.x > s.x ? 1 : -1) * 3.4 * scale;
+          }
           var lookUp = (s.waveT > 0 || (scene.watching && scene.watching.star === s)) ? 1.4 * scale : 0;
           var ey = cy - bodyH * 0.1 - lookUp;
           ctx.fillStyle = '#fff';
-          ctx.beginPath(); ctx.arc(px - bodyW * 0.18, ey, 3.2 * scale, 0, 6.283); ctx.fill();
-          ctx.beginPath(); ctx.arc(px + bodyW * 0.18, ey, 3.2 * scale, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(px - bodyW * 0.18, ey, eyeR, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(px + bodyW * 0.18, ey, eyeR, 0, 6.283); ctx.fill();
           ctx.fillStyle = '#111';
           ctx.beginPath(); ctx.arc(px - bodyW * 0.18 + ex * 0.4, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
           ctx.beginPath(); ctx.arc(px + bodyW * 0.18 + ex * 0.4, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
@@ -2258,6 +4009,34 @@ angular.module('kanbanApp')
             ctx.stroke();
           }
 
+          // Drink state: the Complexity spider holds a little cup while at the
+          // cooler, and the liquid fills as it sips (drink 0..1). Drawn in the
+          // front 'hand' so the sip is part of the animation, not just dialog.
+          var ct = scene ? scene.coolerTrip : null;
+          if (s.role === 'complexity' && ct && ct.spider === s && ct.drink > 0) {
+            var cupW = 7 * scale, cupH = 9 * scale;
+            var cupX = px + bodyW * 0.55, cupY = cy + bodyH * 0.12;
+            // arm to the cup
+            ctx.strokeStyle = bodyColor;
+            ctx.lineWidth = Math.max(1.5, 2 * scale);
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(px + bodyW * 0.3, cy - bodyH * 0.1);
+            ctx.lineTo(cupX + cupW / 2, cupY - cupH * 0.5);
+            ctx.stroke();
+            // cup body
+            ctx.fillStyle = '#ffffff';
+            rr(cupX, cupY - cupH, cupW, cupH, 2 * scale); ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+            // liquid fill (rises with drink)
+            var fillH = cupH * 0.8 * ct.drink;
+            if (fillH > 0.5) {
+              ctx.fillStyle = '#7dd3fc';
+              rr(cupX + 1.2 * scale, cupY - cupH * 0.2 - fillH, cupW - 2.4 * scale, fillH, 1 * scale);
+              ctx.fill();
+            }
+          }
+
           // Speech bubble
           if (s.speech && s.speechTtl > 0) {
             drawSpeechBubble(W, H, px, cy - bodyH, s.speech);
@@ -2265,7 +4044,7 @@ angular.module('kanbanApp')
         }
 
         function drawSpeechBubble(W, H, px, py, text) {
-          ctx.font = '10px sans-serif';
+          ctx.font = mf(10) + 'px sans-serif';
           var maxW = Math.min(W * 0.32, 220);
           var words = text.split(' ');
           var lines = []; var cur = '';
@@ -2317,16 +4096,20 @@ angular.module('kanbanApp')
             var prev = _stepStatusCache[key] !== undefined ? _stepStatusCache[key] : 'pending';
             if (prev !== status) {
               if (scene) scene._lastStepType = st.type;
-              if (status === 'done' || status === 'applied' || status === 'created' || status === 'ok' || status === 'skipped') {
+              if (status === 'done' || status === 'applied' || status === 'created' || status === 'ok') {
                 if (scene && scene.meetingOn && prev !== 'done') {
                   fireReaction('good', pick(REACT_SUCCESS));
                   pushTicker('good', tickerLabelForStep(st));
                 }
+                // Skipped steps don't add complexity (and a replay of a finished
+                // run must not re-angrify the spider — live runs only).
+                if (!_replay) bumpComplexityRage(3); // another step done
               } else if (status === 'error' || status === 'rejected' || status === 'failed') {
                 if (scene && scene.meetingOn) {
                   fireReaction('bad', pick(REACT_FAIL));
                   pushTicker('bad', tickerLabelForStep(st));
                 }
+                if (!_replay) bumpComplexityRage(10); // a failed step is complex
               }
             }
             _stepStatusCache[key] = status;
@@ -2338,6 +4121,34 @@ angular.module('kanbanApp')
         // first step of the new run is treated as a real transition.
         $scope.$watch(function () { return vm.streamingSteps ? vm.streamingSteps.length : 0; }, function (len, prev) {
           if (len === 0 && prev > 0) _stepStatusCache = {};
+        });
+
+        // The Complexity spider gripes as the accumulated context grows past
+        // round thresholds — one grumble per 10k-token bucket so it never
+        // spams. It's allowed to talk while other spiders write (setSpeech is
+        // per-spider); it only stays quiet when it's the active writer itself,
+        // when the user is hovering (watching skit wins), or during a replay.
+        var _ctxGripedAt = 0;
+        $scope.$watch(function () { return vm.streamingContextSize || 0; }, function (size, prev) {
+          if (!size || size === prev) return;
+          if (!scene || _replay || vm.meetingHovered) return;
+          if (!vm.showMeeting) return;
+          var sp = spiderFor('complexity');
+          if (!sp) return;
+          if (scene.writer === sp || scene.gossip || scene.watching) return;
+          var bucket = Math.floor(size / 10000);
+          if (bucket <= _ctxGripedAt || bucket < 2) return;
+          _ctxGripedAt = bucket;
+          var vals = complexityVals();
+          var text = fmtComplexity(pick(COMPLEXITY_CTX), vals);
+          setSpeech(sp, text, 4.5, sp.icon + ' ' + sp.name);
+          logGossipEntry(sp.icon + ' ' + sp.name, text);
+          scene.lastLogAt = Date.now();
+          bumpComplexityRage(10); // every 10k tokens of context, more rage
+        });
+        // Reset the griped-bucket tracker on a fresh run (context resets to 0).
+        $scope.$watch(function () { return vm.streamingActive; }, function (val, prev) {
+          if (val && !prev) _ctxGripedAt = 0;
         });
 
         $scope.$watch(function () { return vm.agentActivityLog ? vm.agentActivityLog.length : 0; }, function (len, prev) {
@@ -2361,7 +4172,8 @@ angular.module('kanbanApp')
         });
 
         $scope.$watch('vm.showMeeting', function (val) {
-          if (val) startLoop(); else stopLoop();
+          if (val) { startLoop(); if (vm._restoreMeetingReplayFromCards) vm._restoreMeetingReplayFromCards(); }
+          else stopLoop();
         });
 
         // Also trigger meeting start/end from the streaming state (belt & braces).

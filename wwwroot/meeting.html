@@ -5,13 +5,24 @@
     <div class="ide-panel-controls">
       <button class="ide-panel-btn" ng-click="vm.replayMeeting()" ng-disabled="!vm.meetingReplay || !vm.meetingReplay.length || vm.streamingActive" title="{{vm.meetingReplaying ? 'Stop replay' : 'Replay the last agent run'}}">{{vm.meetingReplaying ? '⏹' : '▶'}}</button>
       <button class="ide-panel-btn replay-speed-btn" ng-click="vm.cycleMeetingReplaySpeed()" ng-disabled="!vm.meetingReplay || !vm.meetingReplay.length || vm.streamingActive" title="Replay speed — click to cycle (1× / 1.5× / 2×)">{{vm.meetingReplaySpeed}}×</button>
+      <span class="meeting-font-controls" title="Meeting panel text size">
+        <button class="ide-panel-btn" ng-click="vm.decreaseMeetingFont()" title="Decrease font size">−</button>
+        <span class="meeting-font-label">{{vm.meetingFontSize}}px</span>
+        <button class="ide-panel-btn" ng-click="vm.increaseMeetingFont()" title="Increase font size">+</button>
+      </span>
       <button class="ide-panel-btn" ng-click="vm.toggleMeetingMute()" title="{{vm.meetingMuted ? 'Unmute sounds' : 'Mute sounds'}}">{{vm.meetingMuted ? '🔇' : '🔊'}}</button>
       <button class="ide-panel-btn" ng-click="vm.resetMeeting()" title="Reset the office">↺</button>
       <button class="ide-panel-btn" ng-click="vm.closeMeeting()" title="Close Meeting View">✕</button>
     </div>
   </div>
-  <div class="meeting-body" ng-mouseenter="vm.setMeetingHovered(true)" ng-mouseleave="vm.setMeetingHovered(false)">
+  <div class="meeting-body" ng-mouseenter="vm.setMeetingHovered(true)" ng-mouseleave="vm.setMeetingHovered(false)"
+    ng-style="{'--meeting-font': vm.meetingFontSize + 'px'}">
     <canvas id="meetingCanvas" class="meeting-canvas"></canvas>
+    <div class="meeting-sound-tip" ng-show="vm.meetingSoundTip">
+      <span class="meeting-sound-tip-icon">🔊</span>
+      <span class="meeting-sound-tip-text">You're hearing the Complexity spider's rage — the <strong>🔇 mute</strong> button in the header silences the office sounds.</span>
+      <button type="button" class="meeting-sound-tip-close" ng-click="vm.dismissMeetingSoundTip()" title="Got it">✕</button>
+    </div>
     <div class="meeting-replay-badge" ng-show="vm.meetingReplaying">▶ REPLAY<span ng-if="vm.meetingReplaySpeed > 1"> · {{vm.meetingReplaySpeed}}×</span></div>
     <div class="meeting-scrubber" ng-show="vm.meetingReplay && vm.meetingReplay.length" ng-click="vm.seekReplay($event)" title="Click to seek within the run">
       <div class="meeting-scrubber-track">

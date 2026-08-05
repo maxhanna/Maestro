@@ -185,6 +185,30 @@
       <span class="brand-text">Weaver</span>
     </div>
     <div class="project-picker">
+      <button type="button" class="header-stat header-stat-rank rank-trigger" ng-if="vm.showKanban"
+        ng-click="vm.toggleUserStats()" ng-blur="vm.closeUserStatsOnBlur($event)"
+        ng-class="{active: vm.showUserStats}"
+        title="Rank — points from cards, benchmarks, projects & archived">
+        <span class="rank-insignia rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
+          <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
+          <span class="rank-stars"><i ng-repeat="s in vm.chevronArray(vm.userRank(vm.userStats()).stars) track by $index" class="rank-star">★</i></span>
+        </span>
+        {{vm.userRankTitle(vm.userStats())}} ▾</button>
+      <div class="user-stats-popup" ng-if="vm.showUserStats" ng-blur="vm.closeUserStatsOnBlur($event)" tabindex="0">
+        <div class="user-stats-popup-title">
+          <span class="rank-insignia rank-insignia-lg rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
+            <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
+            <span class="rank-stars"><i ng-repeat="s in vm.chevronArray(vm.userRank(vm.userStats()).stars) track by $index" class="rank-star">★</i></span>
+          </span>
+          {{vm.userRankTitle(vm.userStats())}}
+        </div>
+        <span class="header-stat" title="Cards done — {{vm.userStats().done}} across {{vm.userStats().archived}} archived">✅
+          {{vm.userStats().done}} done</span>
+        <span class="header-stat" title="Finished this week">📅 {{vm.userStats().doneThisWeek}} this week</span>
+        <span class="header-stat" title="Daily streak">🔥 {{vm.userStats().streak}} day streak</span>
+        <span class="header-stat" title="Best benchmark score">📊 {{vm.userStats().bestScore}}% best score</span>
+        <span class="header-stat" title="Total archived cards">🗄 {{vm.userStats().archived}} archived</span>
+      </div>
       <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
         ng-change="vm.changeProject()"></select>
@@ -452,6 +476,13 @@
               style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
               <span>🧠 Meta-Plan: {{card._metaPlan.summary}} <span class="text-xs"
                   style="margin-left:4px;opacity:0.6;">(Complexity: {{card._metaPlan.complexity}}/10)</span></span>
+              <span class="log-font-controls">
+                <button class="log-font-btn" ng-click="vm.decreaseMetaPlanFont(); $event.stopPropagation()"
+                  title="Decrease font size">−</button>
+                <span class="log-font-size-label">{{vm.metaPlanFontSize}}px</span>
+                <button class="log-font-btn" ng-click="vm.increaseMetaPlanFont(); $event.stopPropagation()"
+                  title="Increase font size">+</button>
+              </span>
               <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
                 style="font-size:10px; padding: 0 4px; line-height: 1.2;"
                 title="Clear meta-plan and restart">🗑</button>
@@ -459,14 +490,15 @@
             <div class="meta-plan-items">
               <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
                 ng-class="{'meta-plan-done': sp.done}"
-                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                ng-style="{'font-size': vm.metaPlanFontSize + 'px'}"
+                style="display: flex; gap: 6px; margin-bottom: 4px;">
                 <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
                 <div class="meta-plan-body" style="flex: 1; min-width: 0;">
                   <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
                   <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
                   <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
                     <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
-                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace;">{{f}}</span>
                   </div>
                 </div>
               </div>
@@ -492,8 +524,9 @@
               <pre class="streaming-text" ng-style="{'font-size': vm.planFontSize + 'px'}"
                 ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
               <div ng-if="vm.planItems.length || vm.streamingSteps.length" class="plan-items-list"
-                ng-style="{'font-size': vm.planFontSize + 'px'}" style="margin-top: 8px;">
+                style="margin-top: 8px;">
                 <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
+                  ng-style="{'font-size': vm.planFontSize + 'px'}"
                   ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
                   <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                     '⬜'}}</span>
@@ -506,30 +539,30 @@
                       <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
-                        style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                        style="cursor:pointer;opacity:0.5;font-size:0.87em;flex-shrink:0;" title="Show edit details">
                         {{item._showDetail ? '▲' : '▼'}}
                       </span>
                     </div>
-                    <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:10px;">
+                    <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:0.87em;">
                       <span ng-repeat="d in item.diffs" style="display:block;margin:1px 0;">
                         <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)" title="Click to preview diff">
                           <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
                           <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
-                          <code style="font-size:9px;opacity:0.8;">{{d.split('/').pop()}}</code>
+                          <code style="font-size:0.9em;opacity:0.8;">{{d.split('/').pop()}}</code>
                         </span>
-                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:8px;padding:0 3px;">Apply</button>
-                        <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);font-size:9px;">✓</span>
-                        <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:8px;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
-                        <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:8px;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
-                        <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:9px;">deleting…</span>
-                        <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg2);border-radius:3px;max-height:120px;overflow-y:auto;font-family:monospace;font-size:9px;white-space:pre-wrap;word-break:break-all;">
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;">Apply</button>
+                        <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);font-size:0.9em;">✓</span>
+                        <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
+                        <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg2);border-radius:3px;max-height:120px;overflow-y:auto;font-family:monospace;font-size:0.9em;white-space:pre-wrap;word-break:break-all;">
                           <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
                         </div>
-                        <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:0.9em;">{{item._previews[d].error}}</div>
                       </span>
                     </div>
                     <div ng-if="item._showDetail" class="plan-item-detail"
-                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
                       <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
                         item.oldString.slice(0,200) + '…' : item.oldString}}</div>
                       <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
@@ -542,15 +575,15 @@
                             <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                             <code>{{d.split('/').pop()}}</code>
                           </span>
-                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:9px;padding:1px 4px;">Apply</button>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;">Apply</button>
                           <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);">✓</span>
-                          <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:9px;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
-                          <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:9px;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
-                          <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:9px;">deleting…</span>
-                          <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:10px;white-space:pre-wrap;word-break:break-all;">
+                          <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                          <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                          <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
+                          <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:1em;white-space:pre-wrap;word-break:break-all;">
                             <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
                           </div>
-                          <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:9px;">{{item._previews[d].error}}</div>
+                          <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:0.9em;">{{item._previews[d].error}}</div>
                         </span>
                       </div>
                     </div>
@@ -558,6 +591,7 @@
                 </div>
                 <div ng-repeat="s in vm.streamingSteps track by s.index" ng-if="s.type==='plan' || s.type==='explore'"
                   class="plan-item-row"
+                  ng-style="{'font-size': vm.planFontSize + 'px'}"
                   ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
                   <span class="plan-item-icon">
                     {{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}
@@ -570,11 +604,11 @@
                         ''}}</span>
                     </div>
                     <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail"
-                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
                       {{s.thinking}}
                     </div>
                     <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
-                      style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;font-size:10px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
+                      style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
                       {{s.error}}
                     </div>
                   </div>
@@ -1024,8 +1058,8 @@
 
         <!-- ===== TAB: Appearance ===== -->
         <div ng-show="vm.settingsTab === 'appearance'">
-          <details open>
-            <summary class="settings-header">IDE Editor Theme (CodeMirror)</summary>
+          <details>
+            <summary class="settings-header">IDE Editor Theme</summary>
             <div class="form-row theme-picker">
               <input ng-model="vm.ideThemeFilter" placeholder="Search themes…" class="theme-search" />
               <div class="theme-card-grid">
@@ -1044,7 +1078,7 @@
             </div>
           </details>
 
-          <details open>
+          <details>
             <summary class="settings-header">Overall App Theme</summary>
             <div class="form-row theme-picker">
               <!-- Preset quick themes as visual cards -->
@@ -1063,26 +1097,104 @@
                 </button>
               </div>
 
-              <!-- Save current colors under a name -->
-              <div class="theme-section-label">Save current colors as a theme</div>
-              <div class="theme-save-row">
-                <input ng-model="vm.newThemeName" placeholder="Name, e.g. Ocean Night"
-                  ng-keydown="$event.key === 'Enter' && vm.saveCurrentTheme()" />
-                <button ng-click="vm.saveCurrentTheme()" class="small primary" ng-disabled="!vm.newThemeName.trim()">💾 Save theme</button>
+              <!-- Theme change diff: shows exactly which colors a preset/import altered -->
+              <div class="theme-diff" ng-if="vm.themeDiff">
+                <div class="theme-diff-head">
+                  <span class="theme-diff-title">{{vm.themeDiff.title}}</span>
+                  <button type="button" class="theme-diff-close" ng-click="vm.clearThemeDiff()"
+                    title="Dismiss" aria-label="Dismiss diff">✕</button>
+                </div>
+                <div class="theme-diff-empty" ng-if="vm.themeDiff.rows.length === 0">
+                  No color variables would change — the theme matches your current colors.
+                </div>
+                <div class="theme-diff-list" ng-if="vm.themeDiff.rows.length > 0">
+                  <div class="theme-diff-row" ng-repeat="r in vm.themeDiff.rows">
+                    <code class="theme-diff-key">{{r.key}}</code>
+                    <span class="theme-diff-swatch" ng-style="{'background': r.from}" title="{{r.from}}"></span>
+                    <span class="theme-diff-val theme-diff-old">{{r.from}}</span>
+                    <span class="theme-diff-arrow">→</span>
+                    <span class="theme-diff-swatch" ng-style="{'background': r.to}" title="{{r.to}}"></span>
+                    <span class="theme-diff-val theme-diff-new">{{r.to}}</span>
+                  </div>
+                </div>
               </div>
 
-              <!-- Export / import theme JSON -->
-              <div class="theme-section-label">Share theme (export / import)</div>
-              <div class="theme-transfer-row">
-                <button ng-click="vm.exportThemeJson()" class="small" title="Copy the current colors to the clipboard as JSON">📤 Copy as JSON</button>
-                <button ng-click="vm.importThemeFromClipboard()" class="small" title="Read a theme JSON from the clipboard and apply it">📥 Paste from clipboard</button>
+              <!-- Save / share theme — advanced, tucked behind a collapsed expander -->
+              <div class="theme-share-wrap">
+                <button type="button" class="theme-share-head"
+                  ng-click="vm.themeShareOpen = !vm.themeShareOpen"
+                  aria-expanded="{{vm.themeShareOpen}}">
+                  <span class="theme-share-chevron">{{vm.themeShareOpen ? '▾' : '▸'}}</span>
+                  <span class="theme-share-title">Save &amp; share theme</span>
+                  <span class="theme-share-hint" ng-if="!vm.themeShareOpen">backup, export &amp; import</span>
+                </button>
+
+                <div class="theme-share-body" ng-if="vm.themeShareOpen">
+                  <div class="theme-save-row">
+                    <input ng-model="vm.newThemeName" placeholder="Name, e.g. Ocean Night"
+                      ng-keydown="$event.key === 'Enter' && vm.saveCurrentTheme()" />
+                    <button ng-click="vm.saveCurrentTheme()" class="small primary" ng-disabled="!vm.newThemeName.trim()">💾 Save theme</button>
+                  </div>
+
+                  <!-- Live JSON preview: auto-fills with the current colors on
+                       every change (presets, saved themes, and live picker drags),
+                       with a copy button right on the box. Also a drop zone for
+                       importing a .json theme file. -->
+                  <div class="theme-json-box"
+                    ng-class="{'theme-drop-active': vm.themeDragOver}"
+                    ng-dragenter="vm.onThemeDragEnter($event)"
+                    ng-dragover="vm.onThemeDragOver($event)"
+                    ng-dragleave="vm.onThemeDragLeave()"
+                    ng-drop="vm.onThemeDrop($event)">
+                    <div class="theme-json-head">
+                      <label class="theme-json-label">Current colors (JSON) — updates as you drag</label>
+                      <button type="button" class="theme-json-copy" ng-click="vm.copyCurrentThemeJson()"
+                        title="Copy the current colors to the clipboard as JSON">📋 Copy</button>
+                    </div>
+                    <textarea readonly class="theme-json-preview" rows="7" spellcheck="false"
+                      ng-model="vm.themeJsonPreview"></textarea>
+                    <div class="theme-drop-hint" ng-class="{'active': vm.themeDragOver}">
+                      <span ng-if="!vm.themeDragOver">💾 Drop a <strong>.json</strong> theme file here to import it</span>
+                      <span ng-if="vm.themeDragOver">Release to import theme…</span>
+                    </div>
+                  </div>
+
+                  <div class="theme-transfer-row">
+                    <button ng-click="vm.importThemeFromClipboard()" class="small" title="Read a theme JSON from the clipboard and apply it">📥 Paste from clipboard</button>
+                  </div>
+                  <div class="theme-transfer-paste">
+                    <textarea ng-model="vm.themeImportText" rows="4"
+                      ng-change="vm.previewPastedThemeDiff()"
+                      placeholder='Paste a theme JSON here, e.g. {"--bg":"#071025","--accent":"#06b6d4"}'></textarea>
+                    <button ng-click="vm.importThemeJson(vm.themeImportText)" class="small primary"
+                      ng-disabled="!vm.themeImportText.trim()">Apply pasted theme</button>
+                  </div>
+
+                  <!-- Live preview of what the pasted theme will change (before applying) -->
+                  <div class="theme-import-preview" ng-if="vm.themeImportPreview">
+                    <div class="theme-import-preview-title" ng-if="vm.themeImportPreview.invalid">
+                      ⚠ No valid color variables found — expected like {"--bg": "#071025"}
+                    </div>
+                    <div class="theme-import-preview-title" ng-if="!vm.themeImportPreview.invalid && vm.themeImportPreview.rows.length === 0">
+                      ✓ No color changes — this theme matches your current colors.
+                    </div>
+                    <div class="theme-import-preview-title" ng-if="!vm.themeImportPreview.invalid && vm.themeImportPreview.rows.length > 0">
+                      Will change {{vm.themeImportPreview.rows.length}} color{{vm.themeImportPreview.rows.length === 1 ? '' : 's'}}:
+                    </div>
+                    <div class="theme-diff-list" ng-if="vm.themeImportPreview.rows.length > 0">
+                      <div class="theme-diff-row" ng-repeat="r in vm.themeImportPreview.rows">
+                        <code class="theme-diff-key">{{r.key}}</code>
+                        <span class="theme-diff-swatch" ng-style="{'background': r.from}" title="{{r.from}}"></span>
+                        <span class="theme-diff-val theme-diff-old">{{r.from}}</span>
+                        <span class="theme-diff-arrow">→</span>
+                        <span class="theme-diff-swatch" ng-style="{'background': r.to}" title="{{r.to}}"></span>
+                        <span class="theme-diff-val theme-diff-new">{{r.to}}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="theme-transfer-msg" ng-if="vm.themeTransferMsg">{{vm.themeTransferMsg}}</div>
+                </div>
               </div>
-              <div class="theme-transfer-paste">
-                <textarea ng-model="vm.themeImportText" rows="4" placeholder='Paste a theme JSON here, e.g. {"--bg":"#071025","--accent":"#06b6d4"}'></textarea>
-                <button ng-click="vm.importThemeJson(vm.themeImportText)" class="small primary"
-                  ng-disabled="!vm.themeImportText.trim()">Apply pasted theme</button>
-              </div>
-              <div class="theme-transfer-msg" ng-if="vm.themeTransferMsg">{{vm.themeTransferMsg}}</div>
 
               <!-- Saved named themes: apply / rename / delete -->
               <div class="theme-section-label" ng-if="vm.savedThemes.length">Your saved themes</div>
@@ -1112,43 +1224,43 @@
               <div class="theme-section-label">Fine-tune colors</div>
               <div class="theme-color-grid">
                 <div class="theme-color-item"><label>Background</label>
-                  <input type="color" ng-model="vm.themeColors['--bg']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--bg']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--bg']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Surface</label>
-                  <input type="color" ng-model="vm.themeColors['--surface']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--surface']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--surface']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Panel</label>
-                  <input type="color" ng-model="vm.themeColors['--panel']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--panel']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--panel']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Text</label>
-                  <input type="color" ng-model="vm.themeColors['--text']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--text']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--text']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Muted</label>
-                  <input type="color" ng-model="vm.themeColors['--muted']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--muted']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--muted']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Accent</label>
-                  <input type="color" ng-model="vm.themeColors['--accent']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--accent']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--accent']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Accent 2</label>
-                  <input type="color" ng-model="vm.themeColors['--accent-2']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--accent-2']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--accent-2']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Success</label>
-                  <input type="color" ng-model="vm.themeColors['--success']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--success']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--success']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Warning</label>
-                  <input type="color" ng-model="vm.themeColors['--warning']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--warning']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--warning']}}</code>
                 </div>
                 <div class="theme-color-item"><label>Error</label>
-                  <input type="color" ng-model="vm.themeColors['--error']" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <input type="color" ng-model="vm.themeColors['--error']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
                   <code>{{vm.themeColors['--error']}}</code>
                 </div>
               </div>
@@ -1567,34 +1679,43 @@
 
         <!-- Run a benchmark -->
         <div class="bench-section">
-          <div class="bench-section-head">
+          <div class="bench-section-head bench-head-toggle" ng-click="vm.toggleBenchSection('run')"
+            role="button" tabindex="0"
+            ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchSection('run'); $event.preventDefault()"
+            ng-class="{open: vm.benchSectionOpen.run}"
+            title="Click to expand / collapse">
             <div>
-              <div class="bench-section-title">Run a benchmark</div>
+              <span class="bench-chevron">{{vm.benchSectionOpen.run ? '▾' : '▸'}}</span>
+              <div class="bench-section-title">Run a benchmark
+                <span class="bench-count" ng-if="vm.benchmarkPlans.length > 0">{{vm.benchmarkPlans.length}} plan{{vm.benchmarkPlans.length === 1 ? '' : 's'}}</span>
+              </div>
               <div class="bench-section-sub">Each run sends a coding task through the agent and scores the edits it makes.</div>
             </div>
-            <button ng-click="vm.startBenchmarkAll()" class="primary small nowrap"
+            <button ng-click="vm.startBenchmarkAll(); $event.stopPropagation()" class="primary small nowrap"
               ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run All</button>
           </div>
 
-          <div ng-if="vm.benchmarkRunning" class="bench-running">
-            <span class="bench-spinner"></span>
-            Benchmark <strong>{{vm.benchmarkLevelName(vm.benchmarkLevel)}}</strong> running
-            <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>…
-          </div>
-
-          <div ng-if="vm.benchmarkPlans.length > 0">
-            <div ng-repeat="plan in vm.benchmarkPlans" class="bench-plan-card">
-              <span class="bench-plan-chip">L{{plan.level}}</span>
-              <div class="bench-plan-body">
-                <div class="bench-plan-name">{{plan.name}}</div>
-                <div class="bench-plan-desc">{{plan.description}}</div>
-              </div>
-              <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
-                ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run</button>
+          <div class="bench-section-body" ng-if="vm.benchSectionOpen.run">
+            <div ng-if="vm.benchmarkRunning" class="bench-running">
+              <span class="bench-spinner"></span>
+              Benchmark <strong>{{vm.benchmarkLevelName(vm.benchmarkLevel)}}</strong> running
+              <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>…
             </div>
-          </div>
-          <div ng-if="vm.benchmarkPlans.length === 0" class="bench-empty">
-            No benchmark plans available.
+
+            <div ng-if="vm.benchmarkPlans.length > 0">
+              <div ng-repeat="plan in vm.benchmarkPlans" class="bench-plan-card">
+                <span class="bench-plan-chip">L{{plan.level}}</span>
+                <div class="bench-plan-body">
+                  <div class="bench-plan-name">{{plan.name}}</div>
+                  <div class="bench-plan-desc">{{plan.description}}</div>
+                </div>
+                <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
+                  ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run</button>
+              </div>
+            </div>
+            <div ng-if="vm.benchmarkPlans.length === 0" class="bench-empty">
+              No benchmark plans available.
+            </div>
           </div>
         </div>
 
@@ -1622,26 +1743,34 @@
 
         <!-- Local Scores -->
         <div class="bench-section">
-          <div class="bench-section-head">
+          <div class="bench-section-head bench-head-toggle" ng-click="vm.toggleBenchSection('local')"
+            role="button" tabindex="0"
+            ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchSection('local'); $event.preventDefault()"
+            ng-class="{open: vm.benchSectionOpen.local}"
+            title="Click to expand / collapse">
             <div>
-              <div class="bench-section-title">Local scores</div>
+              <span class="bench-chevron">{{vm.benchSectionOpen.local ? '▾' : '▸'}}</span>
+              <div class="bench-section-title">Local scores
+                <span class="bench-count" ng-if="vm.benchmarkScores.length > 0">{{vm.benchmarkScores.length}}</span>
+              </div>
               <div class="bench-section-sub" ng-if="vm.benchmarkScores.length > 0 && !vm.compareMode">Click a card for details, send, or delete.</div>
               <div class="bench-section-sub" ng-if="vm.benchmarkScores.length > 0 && vm.compareMode">Pick two cards — the comparison panel shows which edits differed.</div>
               <div class="bench-section-sub" ng-if="vm.benchmarkScores.length === 0">No local scores yet — run a benchmark above.</div>
             </div>
             <div class="bench-section-actions">
-              <button ng-if="!vm.compareMode" ng-click="vm.startCompareMode()" class="small nowrap"
+              <button ng-if="!vm.compareMode" ng-click="vm.startCompareMode(); $event.stopPropagation()" class="small nowrap"
                 ng-disabled="vm.benchmarkScores.length < 2"
                 title="Compare two runs side-by-side">⚖ Compare</button>
-              <button ng-if="vm.compareMode" ng-click="vm.exitCompareMode()" class="small nowrap"
+              <button ng-if="vm.compareMode" ng-click="vm.exitCompareMode(); $event.stopPropagation()" class="small nowrap"
                 title="Exit compare mode">✕ Exit compare</button>
-              <button ng-click="vm.fetchBenchmarksFromServer()" class="small nowrap" ng-disabled="vm.fetchingBenchmarks">
+              <button ng-click="vm.fetchBenchmarksFromServer(); $event.stopPropagation()" class="small nowrap" ng-disabled="vm.fetchingBenchmarks">
                 {{vm.fetchingBenchmarks ? 'Fetching…' : '📥 Fetch from Server'}}
               </button>
             </div>
           </div>
 
           <!-- Comparison panel -->
+          <div class="bench-section-body" ng-if="vm.benchSectionOpen.local">
           <div class="bench-compare" ng-if="vm.compareResult">
             <div class="bench-compare-cards">
               <div class="bench-compare-card" ng-class="{selected: vm.compareA === vm.compareResult.a}">
@@ -1766,6 +1895,7 @@
               </div>
             </div>
           </div>
+          </div>
         </div>
 
         <!-- Server Benchmarks (fetched) -->
@@ -1810,17 +1940,25 @@
 
         <!-- System Specs -->
         <div class="bench-section">
-          <div class="bench-section-head">
+          <div class="bench-section-head bench-head-toggle" ng-click="vm.toggleBenchSection('specs')"
+            role="button" tabindex="0"
+            ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchSection('specs'); $event.preventDefault()"
+            ng-class="{open: vm.benchSectionOpen.specs}"
+            title="Click to expand / collapse">
             <div>
-              <div class="bench-section-title">System specs</div>
+              <span class="bench-chevron">{{vm.benchSectionOpen.specs ? '▾' : '▸'}}</span>
+              <div class="bench-section-title">System specs
+                <span class="bench-count" ng-if="vm.systemSpecCount() > 0">{{vm.systemSpecCount()}}</span>
+              </div>
               <div class="bench-section-sub">Reported with your scores so results are comparable.</div>
             </div>
-            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor" class="small nowrap"
+            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor; $event.stopPropagation()" class="small nowrap"
               ng-if="!vm.showSystemInfoEditor">✎ Edit</button>
-            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor" class="small nowrap"
+            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor; $event.stopPropagation()" class="small nowrap"
               ng-if="vm.showSystemInfoEditor">✔ Done</button>
           </div>
 
+          <div class="bench-section-body" ng-if="vm.benchSectionOpen.specs">
           <div ng-if="!vm.showSystemInfoEditor" class="bench-spec-grid">
             <div class="bench-spec-item"><span class="muted">OS</span><span>{{vm.systemInfoCustom.os || vm.systemInfoDetected.os || '—'}}</span></div>
             <div class="bench-spec-item"><span class="muted">CPU</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '—'}}</span></div>
@@ -1853,6 +1991,7 @@
               <button ng-click="vm.resetSystemInfo()" class="small">Reset to Detected</button>
               <span ng-if="vm.systemInfoSaved" class="bench-saved">✓ Saved</span>
             </div>
+          </div>
           </div>
         </div>
 
@@ -1969,6 +2108,7 @@
   <script src="/terminal.js"></script>
   <script src="/agent.js"></script>
   <script src="/voice-input.js"></script>
+  <script src="/filetree.js"></script>
   <script src="/ide.js"></script>
   <script src="/notes.js"></script>
   <script src="/meeting.js"></script>

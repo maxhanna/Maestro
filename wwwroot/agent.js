@@ -502,6 +502,8 @@ angular.module('kanbanApp')
                                                                         mvCard.agentLog = angular.copy(run.log);
                                                                         vm.state.done.push(mvCard);
                                                                         vm.saveCards();
+                                                                        // Concurrently-finished regular card → suggest improvements too.
+                                                                        if (vm.suggestImprovements && mvCol === 'doing' && !mvCard.selfImproving) vm.suggestImprovements(mvCard, concAnalysis.summary, proj);
                                                                     } else if (vm.saveCards) { vm.saveCards(); }
                                                                     $scope.$applyAsync(); return;
                                                                 }
@@ -584,6 +586,11 @@ angular.module('kanbanApp')
                                                                     if (!incomplete) {
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
+                                                                        // Successfully finished → kick off improvement-suggestion generation
+                                                                        // for the card while it sits in the Done column. Suggestions are a
+                                                                        // Done-column feature, so skip self-improving cards (they round-robin
+                                                                        // back to the Self-Improving column, which never renders them).
+                                                                        if (vm.suggestImprovements && !card.selfImproving) vm.suggestImprovements(card, finalSummary, proj);
                                                                         $timeout(function () {
                                                                             if (!vm.autoQueue) return;
                                                                             vm.processQueuedCards();
@@ -701,6 +708,47 @@ angular.module('kanbanApp')
                     vm.refreshStreamingActive();
                     if (wasCurrent) pushAgentLog(vm, 'warn', 'Agent run stopped by user.');
                     if (run && run.log) run.log.push({ ts: new Date().toLocaleTimeString(), level: 'warn', message: 'Agent run stopped by user.', detail: undefined });
+                };
+
+                // ── Improvement suggestions for completed cards ─────────────
+                // Called when a card finishes successfully (moved to Done). Sets a
+                // pulsing "Suggesting improvements…" flag on the card, asks the
+                // backend to generate 0-3 LLM suggestions (with file attachments),
+                // then persists them onto the card and notifies the user.
+                vm.suggestImprovements = function (card, summary, project) {
+                    if (!card || card._suggestions || card._suggestionsRequested) return;
+                    var proj = project || card.filePath || vm.selectedProject;
+                    if (!proj) return;
+                    card._suggestionsRequested = true;
+                    card._suggestionsGenerating = true;
+                    card._suggestionsError = null;
+                    vm.saveCards();
+                    pushAgentLog(vm, 'info', '💡 Suggesting improvements for completed card…');
+                    var filesEdited = (vm.streamingFilesEdited || []).map(function (f) { return f && f.path ? f.path : null; }).filter(function (p) { return !!p; });
+                    $http.post('/api/agent/suggest-improvements', {
+                        project: proj,
+                        cardId: card.id,
+                        cardText: card.text,
+                        summary: summary || (card.agentAnalysis && card.agentAnalysis.summary) || '',
+                        filesEdited: filesEdited
+                    }).then(function (resp) {
+                        var suggestions = (resp.data && resp.data.suggestions) || [];
+                        card._suggestionsGenerating = false;
+                        card._suggestions = suggestions;
+                        vm.saveCards();
+                        if (suggestions.length) {
+                            pushAgentLog(vm, 'success', '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card.');
+                            if (vm.showSideToast) vm.showSideToast('💡 ' + suggestions.length + ' improvement suggestion(s) added to the card');
+                        } else {
+                            pushAgentLog(vm, 'info', '💡 No improvement suggestions generated for this card.');
+                        }
+                    }, function (err) {
+                        card._suggestionsGenerating = false;
+                        card._suggestionsError = (err && (err.data && err.data.error || err.statusText)) || 'Suggestion generation failed';
+                        card._suggestions = card._suggestions || [];
+                        vm.saveCards();
+                        pushAgentLog(vm, 'warn', '💡 Suggestion generation failed: ' + card._suggestionsError);
+                    });
                 };
 
                 vm.askAI = function () {
@@ -874,6 +922,14 @@ angular.module('kanbanApp')
 
                 vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
+                // Collapsible benchmark sections — headers expand/collapse their
+                // bodies, and everything starts collapsed so the panel opens
+                // compact and the user can expand what they need.
+                vm.benchSectionOpen = { run: false, local: false, specs: false };
+                vm.toggleBenchSection = function (key) {
+                    if (!vm.benchSectionOpen) vm.benchSectionOpen = {};
+                    vm.benchSectionOpen[key] = !vm.benchSectionOpen[key];
+                };
                 vm.benchmarkLevelName = function (level) {
                     if (level === undefined || level === null) return '';
                     var p = (vm.benchmarkPlans || []).find(function (x) { return x.level === level; });
@@ -881,6 +937,10 @@ angular.module('kanbanApp')
                 };
                 vm._runBenchmarkLevel = function (plan) {
                     vm.benchmarkRunning = true; vm.benchmarkLevel = plan.level;
+                    // A running benchmark auto-expands the run section so the
+                    // live progress stays visible even though it starts collapsed.
+                    if (!vm.benchSectionOpen) vm.benchSectionOpen = {};
+                    vm.benchSectionOpen.run = true;
                     var card = { id: 'benchmark_' + plan.level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', _benchmark: true, _benchmarkLevel: plan.level, ready: true };
                     vm.state.todo.push(card); vm.saveCards(); vm.executeAgent(card);
                 };
@@ -1059,6 +1119,20 @@ angular.module('kanbanApp')
                     });
                     var avg = total ? Math.round((ok / (ok + fail || 1)) * 100) : 0;
                     return { runs: total, ok: ok, fail: fail, points: pts, avgPass: avg };
+                };
+
+                // Count of populated spec rows, for the System specs header badge.
+                vm.systemSpecCount = function () {
+                    var custom = vm.systemInfoCustom || {};
+                    var det = vm.systemInfoDetected || {};
+                    var vals = [
+                        custom.os || det.os,
+                        custom.cpu || det.cpu,
+                        custom.ramGb || det.ramBytes,
+                        custom.gpu || det.gpu,
+                        custom.model
+                    ];
+                    return vals.filter(function (v) { return v !== undefined && v !== null && v !== ''; }).length;
                 };
 
                 // ── Compare two local scores side-by-side ────────────────────────

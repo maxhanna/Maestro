@@ -496,6 +496,257 @@ header h1 {
 	overflow: hidden !important;
 }
 
+/* Theme save / share — tucked behind a collapsed expander */
+.theme-share-wrap {
+	margin-top: 8px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 8px;
+	overflow: hidden;
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.theme-share-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 8px 10px;
+	background: none;
+	border: none;
+	cursor: pointer;
+	font: inherit;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text);
+	text-align: left;
+}
+
+.theme-share-head:hover {
+	background: rgba(255, 255, 255, 0.04);
+}
+
+.theme-share-head:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
+	border-radius: 8px;
+}
+
+.theme-share-chevron {
+	font-size: 10px;
+	color: var(--muted);
+	width: 10px;
+}
+
+.theme-share-title {
+	flex: 1;
+}
+
+.theme-share-hint {
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--muted);
+}
+
+.theme-share-body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 10px;
+	border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.theme-json-box {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	border: 1px dashed transparent;
+	border-radius: 6px;
+	padding: 6px;
+	margin: -6px;
+	transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.theme-json-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.theme-json-label {
+	font-size: 11px;
+	color: var(--muted);
+}
+
+.theme-json-copy {
+	flex-shrink: 0;
+	font-size: 11px;
+	padding: 3px 8px;
+	border: 1px solid rgba(255, 255, 255, 0.15);
+	border-radius: 5px;
+	background: rgba(255, 255, 255, 0.05);
+	color: var(--text);
+	cursor: pointer;
+	font: inherit;
+}
+
+.theme-json-copy:hover {
+	background: rgba(255, 255, 255, 0.1);
+	border-color: var(--accent);
+}
+
+.theme-json-copy:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
+}
+
+.theme-json-preview {
+	width: 100%;
+	font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+	font-size: 11px;
+	line-height: 1.5;
+	resize: vertical;
+	color: var(--text);
+	background: rgba(0, 0, 0, 0.25);
+}
+
+/* Live preview of pasted theme import */
+.theme-import-preview {
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.03);
+	overflow: hidden;
+}
+
+.theme-import-preview-title {
+	padding: 6px 10px;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--text);
+	background: rgba(255, 255, 255, 0.04);
+}
+
+.theme-import-preview .theme-diff-list {
+	max-height: 140px;
+}
+
+/* Theme change diff view */
+.theme-diff {
+	margin-top: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 8px;
+	background: rgba(255, 255, 255, 0.03);
+	overflow: hidden;
+}
+
+.theme-diff-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 10px;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text);
+	background: rgba(255, 255, 255, 0.04);
+}
+
+.theme-diff-close {
+	font-size: 11px;
+	line-height: 1;
+	padding: 3px 6px;
+	border: none;
+	background: none;
+	color: var(--muted);
+	cursor: pointer;
+}
+
+.theme-diff-close:hover {
+	color: var(--text);
+}
+
+.theme-diff-empty {
+	padding: 8px 10px;
+	font-size: 12px;
+	color: var(--muted);
+}
+
+.theme-diff-list {
+	max-height: 180px;
+	overflow-y: auto;
+}
+
+.theme-diff-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	font-size: 11px;
+	font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
+.theme-diff-row:nth-child(odd) {
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.theme-diff-key {
+	width: 92px;
+	flex-shrink: 0;
+	color: var(--muted);
+}
+
+.theme-diff-swatch {
+	width: 14px;
+	height: 14px;
+	border-radius: 3px;
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	flex-shrink: 0;
+}
+
+.theme-diff-val {
+	min-width: 60px;
+}
+
+.theme-diff-old {
+	color: #f87171;
+	text-decoration: line-through;
+}
+
+.theme-diff-new {
+	color: #4ade80;
+	font-weight: 600;
+}
+
+.theme-diff-arrow {
+	color: var(--muted);
+}
+
+/* Drag & drop zone for .json theme files */
+.theme-json-box {
+	border: 1px dashed transparent;
+	border-radius: 6px;
+	padding: 6px;
+	margin: -6px;
+	transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.theme-json-box.theme-drop-active {
+	border-color: var(--accent);
+	background: rgba(6, 182, 212, 0.07);
+}
+
+.theme-drop-hint {
+	font-size: 11px;
+	color: var(--muted);
+	text-align: center;
+	padding: 3px 0 0;
+}
+
+.theme-drop-hint.active {
+	color: var(--accent);
+	font-weight: 600;
+}
+
 /* Theme export / import */
 .theme-transfer-row {
 	display: flex;
@@ -1614,6 +1865,153 @@ header h1 span.brand-badge {
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	position: relative; /* anchor the rank → user-stats popup */
+}
+
+/* Rank chip next to the Project picker — click opens the user-stats popup. */
+.rank-trigger {
+	cursor: pointer;
+	border: 1px solid rgba(6, 182, 212, 0.35);
+	background: rgba(6, 182, 212, 0.08);
+}
+
+.rank-trigger.active {
+	color: var(--brand-secondary);
+	border-color: var(--brand-secondary);
+	box-shadow: var(--brand-glow);
+}
+
+/* ── Military-style rank insignia ────────────────────────────────────────
+   Each rank renders its own insignia: up-pointing chevrons (enlisted
+   stripes) plus officer stars, tinted by grade color (bronze → silver →
+   gold → platinum). Drawn with CSS so it scales crisply at any size. */
+.rank-insignia {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	margin-right: 6px;
+	vertical-align: -1px;
+}
+
+.rank-chevrons {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 1px;
+}
+
+.rank-chevron {
+	width: 11px;
+	height: 5px;
+	background: currentColor;
+	clip-path: polygon(0 0, 100% 0, 50% 100%);
+	opacity: 0.9;
+}
+
+.rank-stars {
+	display: inline-flex;
+	align-items: center;
+	gap: 1px;
+}
+
+.rank-star {
+	font-size: 9px;
+	font-style: normal;
+	line-height: 1;
+	text-shadow: 0 0 4px currentColor;
+}
+
+.rank-insignia-lg {
+	gap: 5px;
+	margin-right: 8px;
+}
+
+.rank-insignia-lg .rank-chevron {
+	width: 15px;
+	height: 7px;
+}
+
+.rank-insignia-lg .rank-star {
+	font-size: 12px;
+}
+
+/* Grade colors — the insignia metal the rank is stamped from. */
+.rank-grade-platinum { color: #e5e4e2; }
+.rank-grade-gold { color: #ffd700; }
+.rank-grade-silver { color: #c0c0c0; }
+.rank-grade-bronze { color: #cd7f32; }
+.rank-grade-recruit { color: rgba(255, 255, 255, 0.35); }
+
+.user-stats-popup {
+	position: absolute;
+	top: 44px;
+	left: 0;
+	min-width: 220px;
+	background: var(--panel);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 10px;
+	box-shadow: 0 10px 34px rgba(0, 0, 0, 0.65), 0 0 18px rgba(6, 182, 212, 0.12);
+	padding: 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	z-index: 1300;
+	animation: popIn 0.18s ease;
+}
+
+.user-stats-popup .header-stat {
+	width: fit-content;
+}
+
+.user-stats-popup-title {
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--brand-secondary);
+	padding-bottom: 6px;
+	margin-bottom: 2px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	letter-spacing: 0.3px;
+}
+
+@keyframes popIn {
+	from { opacity: 0; transform: translateY(-4px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+.header-user-stats {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+
+.header-stat {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--muted);
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 999px;
+	padding: 3px 10px;
+	white-space: nowrap;
+	transition: all 0.2s ease;
+}
+
+.header-stat:hover {
+	color: var(--text);
+	border-color: var(--brand-secondary);
+	box-shadow: var(--brand-glow);
+	transform: translateY(-1px);
+}
+
+.header-stat-rank {
+	color: var(--brand-secondary);
+	border-color: rgba(6, 182, 212, 0.35);
+	font-weight: 700;
 }
 
 .project-desc {
@@ -3922,6 +4320,44 @@ h3 .small.ghost:hover {
   gap: 12px;
   margin-bottom: 10px;
 }
+/* Clickable collapsible section headers (Benchmarks panel) */
+.bench-head-toggle {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: -6px -8px 4px;
+  transition: background 0.15s ease;
+}
+.bench-head-toggle:hover { background: var(--bg2); }
+.bench-head-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bench-head-toggle > div:first-child { min-width: 0; }
+.bench-chevron {
+  display: inline-block;
+  width: 14px;
+  margin-left: -2px;
+  font-size: 11px;
+  color: var(--muted);
+  transition: color 0.15s ease;
+  vertical-align: middle;
+}
+/* The glyph itself swaps ▸/▾ with the open state — no rotation needed. */
+.bench-head-toggle .bench-section-title { display: inline-block; }
+/* Small count badge on each collapsed section header (e.g. “3 plans”, “12”) */
+.bench-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
+  vertical-align: middle;
+  border-radius: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.bench-section-body { padding-top: 2px; }
 .bench-section-title { font-size: 13px; font-weight: 700; }
 .bench-section-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .bench-running {
@@ -4317,6 +4753,8 @@ h3 .small.ghost:hover {
   overflow: hidden;
   min-height: 0;
   position: relative;
+  /* Panel-wide text size — overridden per-user via ng-style on meeting-body */
+  --meeting-font: 12px;
 }
 
 .meeting-canvas {
@@ -4325,6 +4763,58 @@ h3 .small.ghost:hover {
   display: block;
   background: #101a30;
   min-height: 0;
+}
+
+.meeting-sound-tip {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 82%;
+  padding: 6px 8px 6px 12px;
+  border-radius: 8px;
+  font-size: var(--meeting-font, 12px);
+  line-height: 1.4;
+  color: var(--text);
+  background: rgba(12, 22, 36, 0.92);
+  border: 1px solid rgba(6, 182, 212, 0.45);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+  user-select: none;
+  animation: meeting-sound-tip-in 0.25s ease-out;
+}
+
+.meeting-sound-tip-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.meeting-sound-tip-text strong {
+  color: var(--accent);
+}
+
+.meeting-sound-tip-close {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px 5px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: var(--meeting-font, 12px);
+  cursor: pointer;
+}
+
+.meeting-sound-tip-close:hover {
+  color: var(--text);
+}
+
+@keyframes meeting-sound-tip-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 .meeting-replay-badge {
@@ -4337,7 +4827,7 @@ h3 .small.ghost:hover {
   gap: 6px;
   padding: 4px 10px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: var(--meeting-font, 12px);
   font-weight: 700;
   letter-spacing: 1.5px;
   color: #ffd866;
@@ -4358,6 +4848,23 @@ h3 .small.ghost:hover {
 .replay-speed-btn {
   min-width: 40px;
   font-variant-numeric: tabular-nums;
+}
+
+.meeting-font-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  padding-left: 4px;
+}
+
+.meeting-font-label {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #888);
+  min-width: 26px;
+  text-align: center;
+  user-select: none;
 }
 
 .meeting-scrubber {
@@ -4389,7 +4896,7 @@ h3 .small.ghost:hover {
 }
 
 .meeting-scrubber-time {
-  font-size: 10px;
+  font-size: calc(var(--meeting-font, 12px) - 2px);
   font-variant-numeric: tabular-nums;
   color: var(--muted, #888);
   white-space: nowrap;
@@ -4413,7 +4920,7 @@ h3 .small.ghost:hover {
 }
 
 .meeting-ticker-label {
-  font-size: 9px;
+  font-size: calc(var(--meeting-font, 12px) - 3px);
   font-weight: 700;
   letter-spacing: 1.2px;
   color: var(--muted, #777);
@@ -4441,7 +4948,7 @@ h3 .small.ghost:hover {
 .meeting-ticker-item {
   display: inline-block;
   margin-right: 28px;
-  font-size: 11px;
+  font-size: var(--meeting-font, 12px);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4471,7 +4978,7 @@ h3 .small.ghost:hover {
 }
 
 .meeting-gossip-log-title {
-  font-size: 9px;
+  font-size: calc(var(--meeting-font, 12px) - 3px);
   font-weight: 700;
   letter-spacing: 1.2px;
   color: var(--muted, #777);
@@ -4481,7 +4988,7 @@ h3 .small.ghost:hover {
   background: none;
   border: none;
   color: var(--muted, #777);
-  font-size: 10px;
+  font-size: calc(var(--meeting-font, 12px) - 2px);
   cursor: pointer;
   padding: 0 2px;
   line-height: 1;
@@ -4500,7 +5007,7 @@ h3 .small.ghost:hover {
 }
 
 .meeting-gossip-line {
-  font-size: 11px;
+  font-size: var(--meeting-font, 12px);
   line-height: 1.5;
   white-space: nowrap;
   overflow: hidden;
@@ -4508,7 +5015,7 @@ h3 .small.ghost:hover {
 }
 
 .meeting-gossip-time {
-  font-size: 9px;
+  font-size: calc(var(--meeting-font, 12px) - 3px);
   font-variant-numeric: tabular-nums;
   color: var(--muted, #666);
   margin-right: 6px;
@@ -4540,7 +5047,7 @@ h3 .small.ghost:hover {
   padding: 5px 12px;
   background: var(--bg2, #252526);
   border-top: 1px solid var(--border, #444);
-  font-size: 11px;
+  font-size: var(--meeting-font, 12px);
   color: var(--muted, #888);
   min-height: 26px;
 }

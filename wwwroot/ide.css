@@ -58,6 +58,18 @@
     padding: 1px 4px;
 }
 
+/* Active state for toggles that are currently on (e.g. show-hidden-dirs). */
+.ide-panel-btn--active {
+    background: rgba(125, 211, 252, 0.18);
+    border-color: rgba(125, 211, 252, 0.5);
+    color: #7dd3fc;
+}
+
+.ide-panel-btn--active:hover:not(:disabled) {
+    background: rgba(125, 211, 252, 0.26);
+    border-color: rgba(125, 211, 252, 0.7);
+}
+
 /* Panel Body */
 .ide-panel-body {
     display: flex;
@@ -92,6 +104,63 @@
     font-weight: 600;
     color: var(--text-muted, #888);
     border-bottom: 1px solid var(--border);
+    gap: 4px;
+}
+
+.ide-tree-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+}
+
+/* Breadcrumb path bar above the tree */
+.ide-file-breadcrumbs {
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+    overflow: hidden;
+    padding: 3px 8px;
+    font-size: 10.5px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-muted, #888);
+}
+
+.ide-breadcrumb-seg {
+    cursor: pointer;
+    padding: 1px 3px;
+    border-radius: 3px;
+    color: var(--text-muted, #888);
+    flex-shrink: 0;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.12s, color 0.12s;
+}
+
+.ide-breadcrumb-seg:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--accent);
+}
+
+.ide-breadcrumb-seg--last {
+    color: var(--text);
+    font-weight: 600;
+    cursor: default;
+    max-width: none;
+}
+
+.ide-breadcrumb-seg--last:hover {
+    background: none;
+    color: var(--text);
+}
+
+.ide-breadcrumb-seg + .ide-breadcrumb-seg::before {
+    content: '›';
+    margin: 0 2px;
+    opacity: 0.45;
+    pointer-events: none;
 }
 
 .ide-file-filter {
@@ -142,9 +211,47 @@
     background: rgba(255, 255, 255, 0.05);
 }
 
+.ide-tree-entry:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    background: rgba(98, 114, 255, 0.12);
+}
+
 .ide-tree-entry--selected {
     background: rgba(98, 114, 255, 0.15);
     color: var(--accent);
+}
+
+/* '⋯' more-actions button — keyboard/touch fallback for the right-click menu.
+   Hidden until the entry is hovered or focused so it never clutters the tree. */
+.ide-tree-more {
+    opacity: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted, #888);
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 3px;
+    margin-left: 2px;
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: opacity 0.1s, background 0.1s;
+}
+
+.ide-tree-entry:hover .ide-tree-more,
+.ide-tree-entry:focus-within .ide-tree-more,
+.ide-tree-entry--selected .ide-tree-more {
+    opacity: 1;
+}
+
+.ide-tree-more:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text);
+}
+
+.ide-tree-more:focus-visible {
+    outline: 1px solid var(--accent);
 }
 
 .ide-tree-toggle {
@@ -233,8 +340,10 @@
     white-space: nowrap;
 }
 
-.ide-ctx-item:hover {
+.ide-ctx-item:hover,
+.ide-ctx-item:focus-visible {
     background: rgba(98, 114, 255, 0.18);
+    outline: none;
 }
 
 .ide-ctx-danger {

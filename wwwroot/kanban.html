@@ -2,21 +2,21 @@
   <div class="search-container">
     <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
     <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕ Clear</button>
-    <button ng-click="vm.showTodo = !vm.showTodo" class="{{vm.showTodo ? 'active' : 'ghost'}}" title="Toggle To Do column">
+    <button ng-click="vm.toggleColumn('todo')" class="{{vm.showTodo ? 'active' : 'ghost'}}" title="Toggle To Do column">
       📋 To Do ({{vm.cardsForProject('todo').length}})
     </button>
-    <button ng-click="vm.showDoing = !vm.showDoing" class="{{vm.showDoing ? 'active' : 'ghost'}}" title="Toggle Doing column">
+    <button ng-click="vm.toggleColumn('doing')" class="{{vm.showDoing ? 'active' : 'ghost'}}" title="Toggle Doing column">
       ⚡ Doing ({{vm.cardsForProject('doing').length}})
     </button>
-    <button ng-click="vm.showDone = !vm.showDone" class="{{vm.showDone ? 'active' : 'ghost'}}" title="Toggle Done column">
+    <button ng-click="vm.toggleColumn('done')" class="{{vm.showDone ? 'active' : 'ghost'}}" title="Toggle Done column">
       ✅ Done ({{vm.cardsForProject('done').length}})
     </button>
-    <button ng-click="vm.showSelfImproving = !vm.showSelfImproving"
+    <button ng-click="vm.toggleColumn('selfImproving')"
       class="{{vm.showSelfImproving || vm.selfImprovingAgentActive ? 'active' : 'ghost'}}"
       title="Self-improving cards — {{vm.selfImprovingAgentActive ? 'cycle ACTIVE (runs while no regular card is active)' : 'cycle off'}}">
       📈 Improve ({{vm.cardsForProject('selfImproving').length}}){{vm.selfImprovingAgentActive ? ' ♾️' : ''}}
     </button>
-    <button ng-click="vm.showArchived = !vm.showArchived" class="{{vm.showArchived ? 'active' : 'ghost'}}" title="Toggle Archived view">
+    <button ng-click="vm.toggleColumn('archived')" class="{{vm.showArchived ? 'active' : 'ghost'}}" title="Toggle Archived view">
       🗄 Archived ({{vm.cardsForProject('archived').length}})
     </button>
     <button class="close-button" ng-click="vm.showKanban = false; vm.saveSettings()" title="Close board">✕</button>
@@ -701,6 +701,28 @@
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
               <a ng-href="{{card.prStatus.prUrl}}" target="_blank" rel="noopener" ng-click="$event.stopPropagation()">🔗 PR</a>
             </span>
+          </div>
+
+          <!-- Improvement suggestions (generated when the card finished) -->
+          <div class="suggest-generating" ng-if="card._suggestionsGenerating">
+            <span class="suggest-spinner"></span> 💡 Suggesting improvements…
+          </div>
+          <div class="suggest-error" ng-if="card._suggestionsError">💡 {{card._suggestionsError}}</div>
+          <div class="card-section card-section-suggestions" ng-if="card._suggestions && card._suggestions.length">
+            <div class="section-suggest-title">💡 Improvement suggestions ({{card._suggestions.length}})</div>
+            <div class="section-body">
+              <div class="suggestion" ng-repeat="s in card._suggestions track by s.id" ng-class="{'suggestion-added': s.added}">
+                <div class="suggestion-desc">{{s.description}}</div>
+                <div class="suggestion-files" ng-if="s.files && s.files.length">
+                  <span class="file-edit-chip" ng-repeat="f in s.files" title="{{f}}">{{f}}</span>
+                </div>
+                <div class="suggestion-actions">
+                  <button class="small" ng-if="!s.added" ng-click="vm.addSuggestionAsCard(card, s); $event.stopPropagation();"
+                    title="Create a new To Do card from this suggestion, pre-attached to its files">＋ Add as card</button>
+                  <span class="suggestion-added-tag" ng-if="s.added">✓ Added to To Do</span>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Attachments -->

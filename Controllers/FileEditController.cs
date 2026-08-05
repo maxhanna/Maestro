@@ -81,7 +81,7 @@ public class FileEditController : ControllerBase
         catch (Exception ex) { return StatusCode(500, ex.Message); }
     }
     [HttpGet("list")]
-    public IActionResult List([FromQuery] string project = "", [FromQuery] string path = "", [FromQuery] string search = "", [FromQuery] bool recursive = false)
+    public IActionResult List([FromQuery] string project = "", [FromQuery] string path = "", [FromQuery] string search = "", [FromQuery] bool recursive = false, [FromQuery] bool showHidden = false)
     {
         var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
         string workspaceRoot = !string.IsNullOrWhiteSpace(configuredRoot)
@@ -91,6 +91,9 @@ public class FileEditController : ControllerBase
         var projectRoot = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
         var projectRootPrefix = projectRoot.EndsWith(Path.DirectorySeparatorChar.ToString())
             ? projectRoot : projectRoot + Path.DirectorySeparatorChar;
+        // Ignored dirs (node_modules, bin, obj, .git, ...) are hidden from the explorer
+        // unless the client asks to reveal them. Configurable via Editor:IgnoreDirs.
+        var ignoreDirs = showHidden ? null : GetIgnoreDirs();
         try
         {
             // Recursive search when a search term is provided
@@ -106,7 +109,8 @@ public class FileEditController : ControllerBase
                     return BadRequest("Path outside project root is not allowed.");
                 }
                 var matchingDirs = Directory.EnumerateDirectories(searchRoot, "*", SearchOption.AllDirectories)
-                    .Where(d => Path.GetFileName(d).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .Where(d => Path.GetFileName(d).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0
+                        && !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, d).Replace("\\", "/"), ignoreDirs))
                     .Select(d => new
                     {
                         name = Path.GetFileName(d),
@@ -114,7 +118,8 @@ public class FileEditController : ControllerBase
                         isDirectory = true
                     });
                 var matchingFiles = Directory.EnumerateFiles(searchRoot, "*", SearchOption.AllDirectories)
-                    .Where(f => Path.GetFileName(f).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .Where(f => Path.GetFileName(f).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0
+                        && !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, f).Replace("\\", "/"), ignoreDirs))
                     .Select(f => new
                     {
                         name = Path.GetFileName(f),
@@ -134,6 +139,7 @@ public class FileEditController : ControllerBase
                 if (!Directory.Exists(recRoot))
                     return NotFound("Path not found.");
                 var recDirs = Directory.EnumerateDirectories(recRoot, "*", SearchOption.AllDirectories)
+                    .Where(d => !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, d).Replace("\\", "/"), ignoreDirs))
                     .Select(d => new
                     {
                         name = Path.GetFileName(d),
@@ -141,6 +147,7 @@ public class FileEditController : ControllerBase
                         isDirectory = true
                     });
                 var recFiles = Directory.EnumerateFiles(recRoot, "*", SearchOption.AllDirectories)
+                    .Where(f => !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, f).Replace("\\", "/"), ignoreDirs))
                     .Select(f => new
                     {
                         name = Path.GetFileName(f),
@@ -175,18 +182,22 @@ public class FileEditController : ControllerBase
             {
                 return NotFound("Path not found.");
             }
-            var dirs = Directory.GetDirectories(targetFull).Select(d => new
-            {
-                name = Path.GetFileName(d),
-                path = Path.GetRelativePath(projectRoot, d).Replace("\\", "/"),
-                isDirectory = true
-            });
-            var files = Directory.GetFiles(targetFull).Select(f => new
-            {
-                name = Path.GetFileName(f),
-                path = Path.GetRelativePath(projectRoot, f).Replace("\\", "/"),
-                isDirectory = false
-            });
+            var dirs = Directory.GetDirectories(targetFull)
+                .Where(d => !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, d).Replace("\\", "/"), ignoreDirs))
+                .Select(d => new
+                {
+                    name = Path.GetFileName(d),
+                    path = Path.GetRelativePath(projectRoot, d).Replace("\\", "/"),
+                    isDirectory = true
+                });
+            var files = Directory.GetFiles(targetFull)
+                .Where(f => !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, f).Replace("\\", "/"), ignoreDirs))
+                .Select(f => new
+                {
+                    name = Path.GetFileName(f),
+                    path = Path.GetRelativePath(projectRoot, f).Replace("\\", "/"),
+                    isDirectory = false
+                });
             var entries = dirs.Concat(files).OrderByDescending(x => x.isDirectory).ThenBy(x => x.name);
             return Ok(new { path = Path.GetRelativePath(projectRoot, targetFull).Replace("\\", "/"), entries });
         }
@@ -195,6 +206,89 @@ public class FileEditController : ControllerBase
             return StatusCode(500, ex.Message);
         }
     }
+    /// <summary>
+    /// Default ignore-list for build/vcs/dependency folders. Users can extend it via
+    /// the Editor:IgnoreDirs config key (array or comma-separated). Entries prefixed
+    /// with '-' remove a default (e.g. "-bin" re-shows a legit bin source dir).
+    /// </summary>
+    private static readonly string[] DefaultIgnoreDirs =
+    {
+        "node_modules", "bin", "obj", ".git", "dist", "build", "out", ".vs", ".idea",
+        ".vscode", ".angular", ".next", ".nuxt", "coverage", ".cache", ".parcel-cache",
+        ".pytest_cache", "__pycache__", ".venv", "venv", ".gradle", ".mypy_cache",
+        ".tox", ".ruff_cache", ".turbo", "target", "Debug", "Release"
+    };
+
+    /// <summary>
+    /// Builds the effective ignore set: config entries are parsed first (each may be a
+    /// single segment or a slash-separated path like "node_modules/.cache"), then the
+    /// defaults are added. A '-' prefix on any config entry removes it from the final
+    /// set, so a user can un-hide a default like "bin" when it's real source.
+    /// </summary>
+    private HashSet<string> GetIgnoreDirs()
+    {
+        var raw = new List<string>();
+        // Support both an array config and a comma-separated string.
+        var section = _config.GetSection("Editor:IgnoreDirs");
+        if (section.GetChildren().Any())
+        {
+            foreach (var child in section.GetChildren())
+                if (!string.IsNullOrWhiteSpace(child.Value))
+                    raw.Add(child.Value!);
+        }
+        var csv = _config.GetValue<string>("Editor:IgnoreDirs");
+        if (!string.IsNullOrWhiteSpace(csv)) raw.Add(csv);
+        return MergeIgnoreDirs(raw);
+    }
+
+    /// <summary>
+    /// Pure merge of raw config entries with the built-in defaults. Kept separate from
+    /// GetIgnoreDirs so the exact-match semantics are unit-testable without an
+    /// IConfiguration.
+    /// </summary>
+    public static HashSet<string> MergeIgnoreDirs(IEnumerable<string> configEntries)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var removals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddRaw(string raw)
+        {
+            foreach (var seg in raw.Split(new[] { ',', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (seg.StartsWith('-'))
+                {
+                    var un = seg[1..].Trim();
+                    if (un.Length > 0) removals.Add(un);
+                }
+                else if (seg.Length > 0)
+                {
+                    set.Add(seg);
+                }
+            }
+        }
+
+        foreach (var entry in configEntries)
+            if (!string.IsNullOrWhiteSpace(entry))
+                AddRaw(entry);
+
+        foreach (var d in DefaultIgnoreDirs) set.Add(d);
+        foreach (var r in removals) set.Remove(r);
+        return set;
+    }
+
+    /// <summary>
+    /// True when any path segment of the project-relative path matches an ignored dir,
+    /// which hides both the dir itself and everything nested inside it (e.g. a file
+    /// under node_modules).
+    /// </summary>
+    private static bool ContainsIgnoredSegment(string relPath, HashSet<string>? ignoreDirs)
+    {
+        if (ignoreDirs == null || ignoreDirs.Count == 0) return false;
+        foreach (var seg in relPath.Split('/'))
+            if (ignoreDirs.Contains(seg)) return true;
+        return false;
+    }
+
     [HttpGet("content")]
     public IActionResult GetContent([FromQuery] string project = "", [FromQuery] string path = "")
     {

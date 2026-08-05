@@ -483,6 +483,29 @@ angular.module('kanbanApp', [])
       vm.logFontSize = 18;
       vm.llmFontSize = 14;
       vm.planFontSize = 14;
+      vm.metaPlanFontSize = 12;
+      // Font sizes persist across reloads (same pattern as the meeting view's font).
+      try {
+        var _lf = parseInt(window.localStorage.getItem('weaver.font.log'), 10);
+        if (_lf >= 6 && _lf <= 32) vm.logFontSize = _lf;
+        var _llf = parseInt(window.localStorage.getItem('weaver.font.llm'), 10);
+        if (_llf >= 6 && _llf <= 32) vm.llmFontSize = _llf;
+        var _pf = parseInt(window.localStorage.getItem('weaver.font.plan'), 10);
+        if (_pf >= 6 && _pf <= 32) vm.planFontSize = _pf;
+        var _mpf = parseInt(window.localStorage.getItem('weaver.font.metaplan'), 10);
+        if (_mpf >= 6 && _mpf <= 32) vm.metaPlanFontSize = _mpf;
+      } catch (e) { }
+      function persistFontSizes() {
+        try {
+          window.localStorage.setItem('weaver.font.log', String(vm.logFontSize));
+          window.localStorage.setItem('weaver.font.llm', String(vm.llmFontSize));
+          window.localStorage.setItem('weaver.font.plan', String(vm.planFontSize));
+          window.localStorage.setItem('weaver.font.metaplan', String(vm.metaPlanFontSize));
+        } catch (e) { }
+        // Push to the backend config too (like the meeting view) so the sizes
+        // sync across browsers/devices, not just this browser profile.
+        if (vm.saveSettings) vm.saveSettings(true);
+      }
 
       vm.scrollToBottom = function () {
         $timeout(function () {
@@ -491,12 +514,14 @@ angular.module('kanbanApp', [])
         }, 10, false);
       };
 
-      vm.increaseLogFont = function () { vm.logFontSize = Math.min(vm.logFontSize + 2, 32); };
-      vm.decreaseLogFont = function () { vm.logFontSize = Math.max(vm.logFontSize - 2, 6); };
-      vm.increaseLlmFont = function () { vm.llmFontSize = Math.min(vm.llmFontSize + 2, 32); };
-      vm.decreaseLlmFont = function () { vm.llmFontSize = Math.max(vm.llmFontSize - 2, 6); };
-      vm.increasePlanFont = function () { vm.planFontSize = Math.min(vm.planFontSize + 2, 32); };
-      vm.decreasePlanFont = function () { vm.planFontSize = Math.max(vm.planFontSize - 2, 6); };
+      vm.increaseLogFont = function () { vm.logFontSize = Math.min(vm.logFontSize + 2, 32); persistFontSizes(); };
+      vm.decreaseLogFont = function () { vm.logFontSize = Math.max(vm.logFontSize - 2, 6); persistFontSizes(); };
+      vm.increaseLlmFont = function () { vm.llmFontSize = Math.min(vm.llmFontSize + 2, 32); persistFontSizes(); };
+      vm.decreaseLlmFont = function () { vm.llmFontSize = Math.max(vm.llmFontSize - 2, 6); persistFontSizes(); };
+      vm.increasePlanFont = function () { vm.planFontSize = Math.min(vm.planFontSize + 2, 32); persistFontSizes(); };
+      vm.decreasePlanFont = function () { vm.planFontSize = Math.max(vm.planFontSize - 2, 6); persistFontSizes(); };
+      vm.increaseMetaPlanFont = function () { vm.metaPlanFontSize = Math.min(vm.metaPlanFontSize + 2, 32); persistFontSizes(); };
+      vm.decreaseMetaPlanFont = function () { vm.metaPlanFontSize = Math.max(vm.metaPlanFontSize - 2, 6); persistFontSizes(); };
 
       vm.addLogEntry = function (entry) {
         if (vm.agentActivityLogLength > 0) {
@@ -505,6 +530,88 @@ angular.module('kanbanApp', [])
         }
         vm.agentActivityLog.push(entry);
         vm.agentActivityLogLength = vm.agentActivityLog.length;
+      };
+
+      // ── Generic floating-panel auto-dodge ───────────────────────────────
+      // The IDE / Notes / Meeting panels are position:fixed overlays that can
+      // open on top of the Agent panel / Ask AI column (which live in the
+      // right panel column) and the kanban columns. On open we check the
+      // panel's rect against the live bounding boxes of those regions and
+      // nudge it to the first free spot (preferring the current position so a
+      // deliberate user drag is respected), always clamped to the viewport.
+      vm._clampFloatingPanel = function (panel) {
+        if (!panel) return;
+        var vw = window.innerWidth || 1280;
+        var vh = window.innerHeight || 800;
+        var pw = Math.min(panel.width || 600, vw);
+        var ph = Math.min(panel.height || 400, vh);
+        panel.left = Math.max(0, Math.min(panel.left || 0, vw - pw));
+        panel.top = Math.max(0, Math.min(panel.top || 0, vh - ph));
+      };
+      vm._dodgeFloatingPanel = function (panel, opts) {
+        opts = opts || {};
+        if (!panel) return;
+        var vw = window.innerWidth || 1280;
+        var vh = window.innerHeight || 800;
+        var pw = Math.min(panel.width || opts.width || 600, vw);
+        var ph = Math.min(panel.height || opts.height || 400, vh);
+        var margin = opts.margin || 8;
+
+        // Blockers: the panel column (Ask AI + Agent) and its panels, plus any
+        // other floating panels that are currently visible (so IDE/Notes/Meeting
+        // never stack invisibly on top of each other).
+        var blockers = [];
+        function add(el) {
+          if (!el) return;
+          var r = el.getBoundingClientRect();
+          if (r.width > 2 && r.height > 2) blockers.push({ l: r.left - margin, t: r.top - margin, r: r.right + margin, b: r.bottom + margin });
+        }
+        document.querySelectorAll('.right-panel, .right-panel .panel, [data-panel-id="agent-panel"], [data-panel-id="ask-ai-panel"]').forEach(add);
+        ['meeting-floating-panel', 'notes-floating-panel', 'ide-floating-panel'].forEach(function (cls) {
+          if (cls !== opts.selfCls) {
+            var el = document.querySelector('.' + cls);
+            if (el) add(el);
+          }
+        });
+
+        function hit(x, y) {
+          var pr = { l: x, t: y, r: x + pw, b: y + ph };
+          for (var i = 0; i < blockers.length; i++) {
+            var b = blockers[i];
+            if (pr.l < b.r && pr.r > b.l && pr.t < b.b && pr.b > b.t) return true;
+          }
+          return false;
+        }
+        function fit(c) {
+          return { x: Math.max(0, Math.min(c.x, vw - pw)), y: Math.max(0, Math.min(c.y, vh - ph)) };
+        }
+
+        // Occupied zone = union of blocker rects (for 'right of' / 'below' moves).
+        var zone = null;
+        blockers.forEach(function (b) {
+          if (!zone) zone = { l: b.l, t: b.t, r: b.r, b: b.b };
+          else {
+            zone.l = Math.min(zone.l, b.l); zone.t = Math.min(zone.t, b.t);
+            zone.r = Math.max(zone.r, b.r); zone.b = Math.max(zone.b, b.b);
+          }
+        });
+        var curX = panel.left || 0, curY = panel.top || 0;
+        var candidates = [
+          { x: curX, y: curY },                                  // current (respect user drag)
+          zone ? { x: curX, y: zone.b + margin } : null,          // below the panel column
+          zone ? { x: zone.r + margin, y: curY } : null,          // right of the panel column
+          { x: vw - pw - 16, y: vh - ph - 16 },                   // bottom-right corner
+          { x: 16, y: vh - ph - 16 },                             // bottom-left (over the board)
+          { x: vw - pw - 16, y: 16 },                             // top-right
+          { x: 16, y: 16 }                                        // top-left
+        ];
+        for (var i = 0; i < candidates.length; i++) {
+          var c = candidates[i];
+          if (!c) continue;
+          var f = fit(c);
+          if (!hit(f.x, f.y)) { panel.left = f.x; panel.top = f.y; return; }
+        }
+        vm._clampFloatingPanel(panel); // nothing free — stay on-screen
       };
 
       // === Initialize Mixins ===

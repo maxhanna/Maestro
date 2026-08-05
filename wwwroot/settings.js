@@ -10,9 +10,16 @@ angular.module('kanbanApp')
             '--error': '#f87171'
         };
 
+        // NOTE: DEFAULT_THEME must stay declared above PRESET_THEMES — 'Default'
+        // below snapshots it by value so the reset preset can never drift from
+        // the actual default palette (and isPresetActive('Default') keeps
+        // matching via themeEquals against DEFAULT_THEME's keys).
         var PRESET_THEMES = {
+            // 'Default' resets to the stock palette so users can one-click back
+            // to the out-of-the-box look.
+            'Default': Object.assign({}, DEFAULT_THEME),
             'Dracula': {
-                '--bg': '#282a36', '--surface': '#2d2f3e', '--panel': '#21222c',
+                '--bg': '#282a36', '--surface': '#2d2f3e', '--panel': '#2e394e',
                 '--muted': '#6272a4', '--text': '#f8f8f2', '--accent': '#bd93f9',
                 '--accent-2': '#ff79c6', '--success': '#50fa7b', '--warning': '#f1fa8c',
                 '--error': '#ff5555'
@@ -40,6 +47,84 @@ angular.module('kanbanApp')
                 '--muted': '#565f89', '--text': '#c0caf5', '--accent': '#7aa2f7',
                 '--accent-2': '#bb9af7', '--success': '#9ece6a', '--warning': '#e0af68',
                 '--error': '#f7768e'
+            },
+            'One Dark': {
+                '--bg': '#282c34', '--surface': '#21252b', '--panel': '#2c313a',
+                '--muted': '#5c6370', '--text': '#abb2bf', '--accent': '#61afef',
+                '--accent-2': '#c678dd', '--success': '#98c379', '--warning': '#e5c07b',
+                '--error': '#e06c75'
+            },
+            'Monokai': {
+                '--bg': '#272822', '--surface': '#1e1f1c', '--panel': '#2d2e2b',
+                '--muted': '#75715e', '--text': '#f8f8f2', '--accent': '#66d9ef',
+                '--accent-2': '#ae81ff', '--success': '#a6e22e', '--warning': '#e6db74',
+                '--error': '#f92672'
+            },
+            'Gruvbox Dark': {
+                '--bg': '#282828', '--surface': '#1d2021', '--panel': '#32302f',
+                '--muted': '#a89984', '--text': '#ebdbb2', '--accent': '#83a598',
+                '--accent-2': '#d3869b', '--success': '#b8bb26', '--warning': '#fabd2f',
+                '--error': '#fb4934'
+            },
+            'Rosé Pine': {
+                '--bg': '#191724', '--surface': '#1f1d2e', '--panel': '#26233a',
+                '--muted': '#6e6a86', '--text': '#e0def4', '--accent': '#c4a7e7',
+                '--accent-2': '#ebbcba', '--success': '#9ccfd8', '--warning': '#f6c177',
+                '--error': '#eb6f92'
+            },
+            'Night Owl': {
+                '--bg': '#011627', '--surface': '#0b2942', '--panel': '#122d42',
+                '--muted': '#607a93', '--text': '#d6deeb', '--accent': '#82aaff',
+                '--accent-2': '#c792ea', '--success': '#addb67', '--warning': '#f78c6c',
+                '--error': '#ef5350'
+            },
+            'Synthwave 84': {
+                '--bg': '#241b2f', '--surface': '#1a1625', '--panel': '#2c2340',
+                '--muted': '#7d6ba8', '--text': '#e0e0ff', '--accent': '#ff7edb',
+                '--accent-2': '#36f9f6', '--success': '#53fc9f', '--warning': '#fcee4b',
+                '--error': '#fe4450'
+            },
+            'Cyberpunk': {
+                '--bg': '#0d0221', '--surface': '#10002b', '--panel': '#240046',
+                '--muted': '#7b2cbf', '--text': '#e0aaff', '--accent': '#ff3864',
+                '--accent-2': '#00f5d4', '--success': '#01fdf6', '--warning': '#fcee4b',
+                '--error': '#ff1e56'
+            },
+            'GitHub Dark': {
+                '--bg': '#0d1117', '--surface': '#161b22', '--panel': '#010409',
+                '--muted': '#8b949e', '--text': '#c9d1d9', '--accent': '#58a6ff',
+                '--accent-2': '#bc8cff', '--success': '#3fb950', '--warning': '#d29922',
+                '--error': '#f85149'
+            },
+            'Material Ocean': {
+                '--bg': '#0f111a', '--surface': '#090a0f', '--panel': '#131620',
+                '--muted': '#6f7f92', '--text': '#c0c5ce', '--accent': '#8fa1b3',
+                '--accent-2': '#b48ead', '--success': '#a3be8c', '--warning': '#ebcb8b',
+                '--error': '#bf616a'
+            },
+            'Everforest': {
+                '--bg': '#2d353b', '--surface': '#272e33', '--panel': '#343f44',
+                '--muted': '#859289', '--text': '#d3c6aa', '--accent': '#7fbbb3',
+                '--accent-2': '#d699b6', '--success': '#a7c080', '--warning': '#dbbc7f',
+                '--error': '#e67e80'
+            },
+            'Palenight': {
+                '--bg': '#292d3e', '--surface': '#202331', '--panel': '#32374d',
+                '--muted': '#676e95', '--text': '#a6accd', '--accent': '#82aaff',
+                '--accent-2': '#c792ea', '--success': '#c3e88d', '--warning': '#ffcb6b',
+                '--error': '#f07178'
+            },
+            'Horizon': {
+                '--bg': '#1c1e26', '--surface': '#16161e', '--panel': '#232530',
+                '--muted': '#6c6f93', '--text': '#e3e6ee', '--accent': '#26bbd9',
+                '--accent-2': '#e95678', '--success': '#29d398', '--warning': '#fab795',
+                '--error': '#e95678'
+            },
+            'Ayu Mirage': {
+                '--bg': '#1f2430', '--surface': '#191e2a', '--panel': '#242936',
+                '--muted': '#707a8c', '--text': '#cbccc6', '--accent': '#73d0ff',
+                '--accent-2': '#ffcc66', '--success': '#aad94c', '--warning': '#ffb454',
+                '--error': '#f07178'
             }
         };
 
@@ -52,6 +137,19 @@ angular.module('kanbanApp')
                 });
             }
             return merged;
+        }
+
+        function isHexColor(v) {
+            return typeof v === 'string' && /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8})$/i.test(v.trim());
+        }
+
+        // Returns the keys of a parsed theme object that look like real color
+        // variables (--name: hex). Shared by the import path and the live
+        // paste-preview so both agree on what is importable.
+        function validThemeSourceKeys(parsed) {
+            return Object.keys(parsed || {}).filter(function (k) {
+                return /^--[a-z0-9-]+$/i.test(k) && isHexColor(parsed[k]);
+            });
         }
 
         function applyTheme(el, themeColors) {
@@ -105,8 +203,6 @@ angular.module('kanbanApp')
                 vm.diffContextSummaryChars = 6000;
                 vm.llmTimeoutMinutes = 0;
                 vm.llmInfiniteTimeout = true;
-                // When the user turns "Infinite" off, default the slider to the 5-minute floor
-                // instead of leaving a stale 0 that sits below the slider's min.
                 vm.onLlmInfiniteToggle = function () {
                     if (!vm.llmInfiniteTimeout && vm.llmTimeoutMinutes < 5) vm.llmTimeoutMinutes = 5;
                 };
@@ -118,6 +214,30 @@ angular.module('kanbanApp')
                 vm.newThemeName = '';
                 vm.themeImportText = '';
                 vm.themeTransferMsg = '';
+                vm.themeShareOpen = false;
+                vm.currentThemeJson = function () {
+                    return JSON.stringify(vm.themeColors || {}, null, 2);
+                };
+                vm.themeJsonPreview = vm.currentThemeJson();
+                $scope.$watch(function () { return vm.currentThemeJson(); }, function (v) {
+                    vm.themeJsonPreview = v;
+                });
+                vm.copyCurrentThemeJson = function () {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(vm.currentThemeJson()).then(function () {
+                            vm.themeTransferMsg = '✓ Theme JSON copied to clipboard';
+                            $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
+                        }, function () {
+                            vm._copyFallback(vm.currentThemeJson());
+                            vm.themeTransferMsg = '✓ Theme JSON copied to clipboard';
+                            $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
+                        });
+                    } else {
+                        vm._copyFallback(vm.currentThemeJson());
+                        vm.themeTransferMsg = '✓ Theme JSON copied to clipboard';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
+                    }
+                };
                 vm.ideThemeFilter = '';
                 vm.ideTheme = 'weaver-dark';
                 vm.ideThemeList = [
@@ -133,28 +253,17 @@ angular.module('kanbanApp')
                     { name: 'Neo (light)', value: 'neo' }
                 ];
 
-                // Settings tab state
                 vm.settingsTab = 'appearance';
-
-                // UI Panels
                 vm.showProjectOptions = false;
                 vm.showEditProjectsPanel = false;
                 vm.showSettingsPanel = false;
                 vm.showDiscordPanel = false;
-
-                // Projects UI
                 vm.newProjectName = '';
                 vm.newProjectPath = '';
                 vm.newProjectDescription = '';
                 vm.newProjectBuildCommands = '';
-
-                // File hints
                 vm.fileHintsData = [];
-
-                // Email Accounts
                 vm.emailAccounts = [];
-
-                // Agent Tools
                 vm.toolList = [
                     { key: '_explore', label: 'Explore files for reference', enabled: true },
                     { key: '_discover', label: 'Project-wide context search (BM25 + AI)', enabled: true },
@@ -168,12 +277,9 @@ angular.module('kanbanApp')
                     { key: '_delete_file', label: 'Delete files', enabled: true },
                     { key: '_show', label: 'Display text to user', enabled: true }
                 ];
-
-                // Discord/Update
                 vm.appVersion = null;
                 vm.updating = false;
 
-                // === Methods ===
                 function loadLocalSettings() {
                     try {
                         var raw = $window.localStorage.getItem(SETTINGS_KEY);
@@ -181,16 +287,26 @@ angular.module('kanbanApp')
                             var s = JSON.parse(raw);
                             vm.autoQueue = s.autoQueue !== false;
                             if (typeof s.selfImprovingAgentActive === 'boolean') vm.selfImprovingAgentActive = s.selfImprovingAgentActive;
-                            // Stash the saved minimap state so IDEMixin.init (which runs after
-                            // this mixin) can restore it synchronously before config loads.
                             if (typeof s.ideMinimapVisible === 'boolean') vm._savedIdeMinimapVisible = s.ideMinimapVisible;
+                            if (typeof s.ideShowHiddenEntries === 'boolean') vm._savedIdeShowHiddenEntries = s.ideShowHiddenEntries;
+                            if (s.expandedDirsByProject && typeof s.expandedDirsByProject === 'object') vm._savedExpandedDirsByProject = s.expandedDirsByProject;
+                            // Persistent workspace: kanban column widths + visibility and
+                            // floating-panel geometry all live in this store so a reload
+                            // restores the exact layout. Stashed on vm._saved* so the
+                            // feature mixins (Kanban/IDE/Notes, which init after Settings)
+                            // can read them synchronously.
+                            if (s.kanbanColWidths && typeof s.kanbanColWidths === 'object') vm._savedKanbanColWidths = s.kanbanColWidths;
+                            if (typeof s.showTodo === 'boolean') vm.showTodo = s.showTodo;
+                            if (typeof s.showDoing === 'boolean') vm.showDoing = s.showDoing;
+                            if (typeof s.showDone === 'boolean') vm.showDone = s.showDone;
+                            if (typeof s.showArchived === 'boolean') vm.showArchived = s.showArchived;
+                            if (typeof s.showSelfImproving === 'boolean') vm.showSelfImproving = s.showSelfImproving;
+                            if (s.idePanel && typeof s.idePanel === 'object') vm._savedIdePanel = s.idePanel;
+                            if (s.notesPanel && typeof s.notesPanel === 'object') vm._savedNotesPanel = s.notesPanel;
                         }
                     } catch (e) { }
                 }
                 loadLocalSettings();
-
-                // Lightweight single-key persist (no full config round-trip) so arming the
-                // self-improving cycle from the queue code survives a reload.
                 vm.persistSelfImprovingAgent = function () {
                     try {
                         var raw = $window.localStorage.getItem(SETTINGS_KEY);
@@ -202,13 +318,58 @@ angular.module('kanbanApp')
 
                 function saveLocalSettings() {
                     try {
-                        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-                            autoQueue: vm.autoQueue,
-                            selfImprovingAgentActive: vm.selfImprovingAgentActive === true,
-                            ideMinimapVisible: vm.ide ? vm.ide.minimapVisible !== false : true
-                        }));
+                        var raw = $window.localStorage.getItem(SETTINGS_KEY);
+                        var s = raw ? JSON.parse(raw) : {};
+                        s.autoQueue = vm.autoQueue;
+                        s.selfImprovingAgentActive = vm.selfImprovingAgentActive === true;
+                        s.ideMinimapVisible = vm.ide ? vm.ide.minimapVisible !== false : true;
+                        s.ideShowHiddenEntries = !!(vm.ide && vm.ide.showHiddenEntries);
+                        // Persistent workspace: capture the live kanban layout + panel
+                        // geometry every save so all of it survives a reload.
+                        s.kanbanColWidths = vm._kanbanColWidths || {};
+                        s.showTodo = vm.showTodo === true;
+                        s.showDoing = vm.showDoing === true;
+                        s.showDone = vm.showDone === true;
+                        s.showArchived = vm.showArchived === true;
+                        s.showSelfImproving = vm.showSelfImproving === true;
+                        if (vm.ide) s.idePanel = { left: vm.ide.left, top: vm.ide.top, width: vm.ide.width, height: vm.ide.height };
+                        if (vm.notes) s.notesPanel = { left: vm.notes.left, top: vm.notes.top, width: vm.notes.width, height: vm.notes.height };
+                        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
                     } catch (e) { }
                 }
+
+                vm.persistExpandedDirs = function () {
+                    try {
+                        var raw = $window.localStorage.getItem(SETTINGS_KEY);
+                        var s = raw ? JSON.parse(raw) : {};
+                        if (!s.expandedDirsByProject || typeof s.expandedDirsByProject !== 'object') s.expandedDirsByProject = {};
+                        var dirs = {};
+                        Object.keys(vm._expandedDirs || {}).forEach(function (k) {
+                            if (k && k.indexOf('__') !== 0 && vm._expandedDirs[k]) dirs[k] = true;
+                        });
+                        s.expandedDirsByProject[vm.selectedProject || ''] = dirs;
+                        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+                    } catch (e) { }
+                };
+
+                // Lightweight single-key write (no full config round-trip) so the
+                // kanban column widths/visibility and floating-panel geometry survive
+                // a reload — the persistent-workspace counterpart to saveLocalSettings.
+                vm.persistWorkspaceLayout = function () {
+                    try {
+                        var raw = $window.localStorage.getItem(SETTINGS_KEY);
+                        var s = raw ? JSON.parse(raw) : {};
+                        s.kanbanColWidths = vm._kanbanColWidths || {};
+                        s.showTodo = vm.showTodo === true;
+                        s.showDoing = vm.showDoing === true;
+                        s.showDone = vm.showDone === true;
+                        s.showArchived = vm.showArchived === true;
+                        s.showSelfImproving = vm.showSelfImproving === true;
+                        if (vm.ide) s.idePanel = { left: vm.ide.left, top: vm.ide.top, width: vm.ide.width, height: vm.ide.height };
+                        if (vm.notes) s.notesPanel = { left: vm.notes.left, top: vm.notes.top, width: vm.notes.width, height: vm.notes.height };
+                        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+                    } catch (e) { }
+                };
 
                 vm.countArchivedCards = function () {
                     if (!vm.state || !vm.state.archived) { vm.archiveCardCount = 0; return; }
@@ -239,6 +400,35 @@ angular.module('kanbanApp')
                             if (typeof cfg.showNotes === 'boolean') vm.showNotes = cfg.showNotes;
                             if (typeof cfg.showMeeting === 'boolean') vm.showMeeting = cfg.showMeeting;
                             if (typeof cfg.meetingMuted === 'boolean') vm.meetingMuted = cfg.meetingMuted;
+                            // Font sizes sync across devices via the backend config; mirror
+                            // them into localStorage so reloads show them before the async
+                            // config load resolves. Backend wins over the local cache.
+                            if (cfg.fontSizes && typeof cfg.fontSizes === 'object') {
+                                var _fs = cfg.fontSizes;
+                                if (typeof _fs.log === 'number' && _fs.log >= 6 && _fs.log <= 32) vm.logFontSize = _fs.log;
+                                if (typeof _fs.llm === 'number' && _fs.llm >= 6 && _fs.llm <= 32) vm.llmFontSize = _fs.llm;
+                                if (typeof _fs.plan === 'number' && _fs.plan >= 6 && _fs.plan <= 32) vm.planFontSize = _fs.plan;
+                                if (typeof _fs.metaplan === 'number' && _fs.metaplan >= 6 && _fs.metaplan <= 32) vm.metaPlanFontSize = _fs.metaplan;
+                                try {
+                                    $window.localStorage.setItem('weaver.font.log', String(vm.logFontSize));
+                                    $window.localStorage.setItem('weaver.font.llm', String(vm.llmFontSize));
+                                    $window.localStorage.setItem('weaver.font.plan', String(vm.planFontSize));
+                                    $window.localStorage.setItem('weaver.font.metaplan', String(vm.metaPlanFontSize));
+                                } catch (e) { }
+                            }
+                            if (cfg.meetingPanel && typeof cfg.meetingPanel === 'object') {
+                                vm._meetingPanelCfg = cfg.meetingPanel;
+                                if (vm.meeting) {
+                                    if (typeof cfg.meetingPanel.left === 'number') vm.meeting.left = cfg.meetingPanel.left;
+                                    if (typeof cfg.meetingPanel.top === 'number') vm.meeting.top = cfg.meetingPanel.top;
+                                    if (typeof cfg.meetingPanel.width === 'number') vm.meeting.width = cfg.meetingPanel.width;
+                                    if (typeof cfg.meetingPanel.height === 'number') vm.meeting.height = cfg.meetingPanel.height;
+                                    if (vm._clampMeetingPanel) vm._clampMeetingPanel();
+                                    // A stale saved position could still sit on the
+                                    // Agent panel / panel columns — nudge it away.
+                                    if (vm.showMeeting && vm._dodgeFloatingPanel) vm._dodgeFloatingPanel(vm.meeting, { selfCls: 'meeting-floating-panel', margin: 10 });
+                                }
+                            }
                             if (typeof cfg.useVSCodeInsteadOfIDE === 'boolean') vm.useVSCodeInsteadOfIDE = cfg.useVSCodeInsteadOfIDE;
                             if (typeof cfg.ideTheme === 'string') vm.ideTheme = cfg.ideTheme;
                             if (typeof cfg.ideMinimapVisible === 'boolean' && vm.ide) vm.ide.minimapVisible = cfg.ideMinimapVisible;
@@ -283,7 +473,6 @@ angular.module('kanbanApp')
                             vm.themeColors = mergeTheme(cfg.themeColors);
                             vm.savedThemes = (cfg.savedThemes || []).map(function (t) { return { name: t.name || 'Untitled', colors: mergeTheme(t.colors), _editing: false, _editName: '' }; });
                             applyTheme(null, vm.themeColors);
-                            // Auto-load file picker if IDE sidebar is already open
                             if (vm.ide && vm.ide.showSidebar && vm.loadFilePickerEntries) {
                                 $timeout(function () { vm.loadFilePickerEntries(); }, 100);
                             }
@@ -319,14 +508,15 @@ angular.module('kanbanApp')
                         cfg.compactThinkingContext = vm.compactThinkingContext !== false;
                         cfg.summarizeDiffContext = vm.summarizeDiffContext !== false;
                         cfg.diffContextSummaryChars = vm.diffContextSummaryChars || 6000;
-                        // LLM request timeout: 0 (or unchecked infinite) = no timeout, otherwise >= 5 minutes.
                         cfg.llmTimeoutMinutes = vm.llmInfiniteTimeout || !vm.llmTimeoutMinutes ? 0 : Math.max(5, vm.llmTimeoutMinutes);
                         cfg.showNotes = vm.showNotes === true;
                         cfg.showMeeting = vm.showMeeting === true;
                         cfg.meetingMuted = vm.meetingMuted === true;
+                        if (vm.meeting) cfg.meetingPanel = { left: vm.meeting.left, top: vm.meeting.top, width: vm.meeting.width, height: vm.meeting.height };
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
                         cfg.ideTheme = vm.ideTheme || 'weaver-dark';
                         cfg.ideMinimapVisible = !!(vm.ide && vm.ide.minimapVisible);
+                        cfg.fontSizes = { log: vm.logFontSize, llm: vm.llmFontSize, plan: vm.planFontSize, metaplan: vm.metaPlanFontSize };
                         cfg.emailAccounts = vm.emailAccounts.map(function (a) { return { imapServer: a.imapServer, imapPort: a.imapPort, useSsl: a.useSsl, username: a.username, password: a.password, label: a.label }; });
                         cfg.bughostedUrl = vm.bughostedUrl || '';
                         cfg.bughostedUsername = vm.bughostedUsername || '';
@@ -339,7 +529,6 @@ angular.module('kanbanApp')
                     }).then(function () {
                         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
                         if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
-                       // vm.loadConfig(vm.defaultProject);
                         if (!skipCloseSettingsPanel) vm.closeSettingsPanel();
                     }, function (err) { $window.alert('Failed to save settings: ' + (err.data || err.statusText || err)); });
                 };
@@ -408,6 +597,15 @@ angular.module('kanbanApp')
 
                 vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
                 vm.closeOptionsOnBlur = function (event) { $timeout(function () { vm.showProjectOptions = false; $timeout(function () { vm.saveSettings(true); }, 300); }, 300); };
+
+                // ── Rank chip → user-stats popup ──────────────────────────────
+                // The header rank button (next to the Project picker) opens a small
+                // popup showing the same stats the old chip row displayed inline.
+                vm.showUserStats = false;
+                vm.toggleUserStats = function () { vm.showUserStats = !vm.showUserStats; };
+                vm.closeUserStatsOnBlur = function () {
+                    $timeout(function () { vm.showUserStats = false; }, 200);
+                };
                 vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); };
                 vm.openEditProjectsPanel = function () { vm.newProjectName = ''; vm.newProjectPath = ''; vm.newProjectDescription = ''; vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.projects.forEach(function (p) { p._origPath = p.Path; }); vm.showEditProjectsPanel = true; };
                 vm.closeEditProjectsPanel = function () { vm.saveSettings(true); vm.showEditProjectsPanel = false; };
@@ -531,9 +729,55 @@ angular.module('kanbanApp')
                 vm.applyPresetTheme = function (name) {
                     var preset = PRESET_THEMES[name];
                     if (!preset) return;
+                    var diff = vm.computeThemeDiff(vm.themeColors, preset);
                     Object.keys(preset).forEach(function (k) { vm.themeColors[k] = preset[k]; });
                     applyTheme(null, vm.themeColors);
                     vm.saveSettings(true);
+                    vm.showThemeDiff('Applied preset “' + name + '”', diff);
+                };
+
+                // ── Theme change diff ────────────────────────────────────────────────
+                // Shows exactly which color variables a preset/import will alter.
+                vm.themeDiff = null; // { title, rows: [{key, from, to}] }
+                vm.computeThemeDiff = function (before, after) {
+                    var rows = [];
+                    var keys = {};
+                    Object.keys(before || {}).forEach(function (k) { keys[k] = 1; });
+                    Object.keys(after || {}).forEach(function (k) { keys[k] = 1; });
+                    Object.keys(keys).sort().forEach(function (k) {
+                        var a = (before && before[k]) || '';
+                        var b = (after && after[k]) || '';
+                        if (a.toLowerCase() !== b.toLowerCase()) {
+                            rows.push({ key: k, from: a, to: b });
+                        }
+                    });
+                    return rows;
+                };
+                vm.showThemeDiff = function (title, rows) {
+                    vm.themeDiff = { title: title, rows: rows };
+                };
+                vm.clearThemeDiff = function () { vm.themeDiff = null; };
+                // Live preview as the user types/pastes JSON: parse (without applying),
+                // then show what would change so they can commit deliberately. Rendered
+                // right under the paste box (vm.themeImportPreview), separate from the
+                // post-apply diff panel (vm.themeDiff) shown near the presets.
+                vm.themeImportPreview = null;
+                vm.previewPastedThemeDiff = function () {
+                    var text = vm.themeImportText || '';
+                    if (!text.trim()) { vm.themeImportPreview = null; return; }
+                    var parsed = null;
+                    try { parsed = JSON.parse(text); } catch (e) { vm.themeImportPreview = null; return; }
+                    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { vm.themeImportPreview = null; return; }
+                    // Same source-key validation as importThemeJson so the preview only
+                    // shows changes for JSON that can actually be applied.
+                    var sourceKeys = validThemeSourceKeys(parsed);
+                    if (sourceKeys.length === 0) {
+                        vm.themeImportPreview = { invalid: true, rows: [] };
+                        return;
+                    }
+                    var merged = mergeTheme(parsed);
+                    var rows = vm.computeThemeDiff(vm.themeColors, merged);
+                    vm.themeImportPreview = { invalid: false, rows: rows };
                 };
 
                 // ── Named theme presets ───────────────────────────────────────────
@@ -571,9 +815,11 @@ angular.module('kanbanApp')
                 };
                 vm.applySavedTheme = function (t) {
                     if (!t || !t.colors) return;
+                    var diff = vm.computeThemeDiff(vm.themeColors, t.colors);
                     Object.keys(t.colors).forEach(function (k) { vm.themeColors[k] = t.colors[k]; });
                     applyTheme(null, vm.themeColors);
                     vm.saveSettings(true);
+                    vm.showThemeDiff('Applied saved theme “' + t.name + '”', diff);
                 };
                 vm.startRenameTheme = function (t) {
                     t._editing = true;
@@ -615,23 +861,6 @@ angular.module('kanbanApp')
                     try { document.execCommand('copy'); } catch (e) { }
                     document.body.removeChild(ta);
                 };
-                vm.exportThemeJson = function () {
-                    var json = JSON.stringify(vm.themeColors, null, 2);
-                    if (navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(json).then(function () {
-                            vm.themeTransferMsg = '✓ Theme copied to clipboard as JSON';
-                            $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
-                        }, function () {
-                            vm._copyFallback(json);
-                            vm.themeTransferMsg = '✓ Theme copied to clipboard';
-                            $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
-                        });
-                    } else {
-                        vm._copyFallback(json);
-                        vm.themeTransferMsg = '✓ Theme copied to clipboard';
-                        $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
-                    }
-                };
                 vm.importThemeJson = function (json) {
                     if (!json || !json.trim()) return;
                     var parsed = null;
@@ -647,20 +876,22 @@ angular.module('kanbanApp')
                         $timeout(function () { vm.themeTransferMsg = ''; }, 3000);
                         return;
                     }
-                    var isHex = function (v) { return typeof v === 'string' && /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8})$/i.test(v.trim()); };
                     // Validate the SOURCE keys before merging — mergeTheme backfills defaults,
                     // so checking merged alone would always pass.
-                    var sourceKeys = Object.keys(parsed).filter(function (k) { return /^--[a-z0-9-]+$/i.test(k) && isHex(parsed[k]); });
+                    var sourceKeys = validThemeSourceKeys(parsed);
                     if (sourceKeys.length === 0) {
                         vm.themeTransferMsg = '✗ No valid color variables found (expected "--bg": "#071025")';
                         $timeout(function () { vm.themeTransferMsg = ''; }, 3500);
                         return;
                     }
                     var merged = mergeTheme(parsed);
+                    var before = vm.themeColors;
                     vm.themeColors = merged;
                     applyTheme(null, vm.themeColors);
                     vm.saveSettings(true);
                     vm.themeImportText = '';
+                    vm.themeImportPreview = null;
+                    vm.showThemeDiff('Imported theme', vm.computeThemeDiff(before, merged));
                     vm.themeTransferMsg = '✓ Theme imported (' + sourceKeys.length + ' colors)';
                     $timeout(function () { vm.themeTransferMsg = ''; }, 2500);
                 };
@@ -676,6 +907,57 @@ angular.module('kanbanApp')
                         vm.themeTransferMsg = '⚠ Clipboard API unavailable — paste the JSON below instead';
                         $timeout(function () { vm.themeTransferMsg = ''; }, 3000);
                     }
+                };
+                // ── Drag & drop a .json theme file onto the JSON preview box ──────
+                // Counter-based so dragging over the box's children doesn't flicker
+                // the highlight. Reading happens via FileReader; importThemeJson does
+                // the parse/validate/apply/save.
+                vm.themeDragOver = false;
+                vm._themeDragDepth = 0;
+                vm.onThemeDragEnter = function (e) {
+                    if (e && e.preventDefault) e.preventDefault();
+                    vm._themeDragDepth++;
+                    vm.themeDragOver = true;
+                };
+                vm.onThemeDragOver = function (e) {
+                    if (e && e.preventDefault) e.preventDefault();
+                    if (e && e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                };
+                vm.onThemeDragLeave = function () {
+                    vm._themeDragDepth = Math.max(0, vm._themeDragDepth - 1);
+                    if (vm._themeDragDepth === 0) vm.themeDragOver = false;
+                };
+                vm.onThemeDrop = function (e) {
+                    vm._themeDragDepth = 0;
+                    vm.themeDragOver = false;
+                    if (!e) return;
+                    if (e.preventDefault) e.preventDefault();
+                    if (e.stopPropagation) e.stopPropagation();
+                    var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+                    if (!file) {
+                        vm.themeTransferMsg = '⚠ No file dropped — paste the JSON below instead';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3000);
+                        return;
+                    }
+                    if (!/\.json$/i.test(file.name || '')) {
+                        vm.themeTransferMsg = '✗ "' + file.name + '" is not a .json file — dropping ignored';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3500);
+                        return;
+                    }
+                    if (file.size > 2 * 1024 * 1024) {
+                        vm.themeTransferMsg = '✗ "' + file.name + '" is over 2 MB — too large for a theme file';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3500);
+                        return;
+                    }
+                    var reader = new FileReader();
+                    reader.onload = function (ev) {
+                        vm.importThemeJson(String(ev.target.result || ''));
+                    };
+                    reader.onerror = function () {
+                        vm.themeTransferMsg = '✗ Could not read "' + file.name + '" — try pasting the JSON below instead';
+                        $timeout(function () { vm.themeTransferMsg = ''; }, 3500);
+                    };
+                    reader.readAsText(file);
                 };
 
                 vm.applyIdeTheme = function (name) {
@@ -697,7 +979,6 @@ angular.module('kanbanApp')
                     vm.saveSettings(true);
                 };
 
-                // ── Real CodeMirror previews on the IDE theme cards ─────────────────
                 var _previewCssLoaded = false;
                 var _previewSample =
                     'const fib = (n) => {\n' +
@@ -710,7 +991,7 @@ angular.module('kanbanApp')
                     if (_previewCssLoaded || !vm.ideThemeList) return;
                     _previewCssLoaded = true;
                     vm.ideThemeList.forEach(function (t) {
-                        if (t.value === 'weaver-dark') return; // built-in styles already loaded
+                        if (t.value === 'weaver-dark') return;
                         var id = 'cm-theme-css-' + t.value;
                         if (document.getElementById(id)) return;
                         var link = document.createElement('link');
@@ -764,8 +1045,6 @@ angular.module('kanbanApp')
                     }
                 };
 
-                // Re-render previews whenever the IDE theme search filter changes or the
-                // user switches back to the Appearance tab (ng-repeat rebuilds the cards).
                 $scope.$watch(function () { return vm.ideThemeFilter + '|' + vm.settingsTab; }, function () {
                     if (vm.showSettingsPanel) {
                         $timeout(function () { vm.renderThemePreviews(); }, 0);
@@ -780,7 +1059,6 @@ angular.module('kanbanApp')
                     var backdrop = document.getElementById('backdrop'); if (backdrop) backdrop.style.display = 'none';
                 };
 
-                // Pre-load file hints
                 $http.get('/api/filehints').then(function (resp) {
                     try { var store = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data; if (store && store.Projects) vm._preloadedFileHints = store.Projects; } catch (e) { }
                 });

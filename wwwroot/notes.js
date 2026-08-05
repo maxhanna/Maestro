@@ -17,6 +17,15 @@ angular.module('kanbanApp').factory('NotesMixin', function ($http, $timeout) {
         resizeStartW: 0,
         resizeStartH: 0
       };
+      // Restore a persisted panel position/size (stashed by SettingsMixin) so the
+      // notes open exactly where the user left them.
+      if (vm._savedNotesPanel) {
+        var _np = vm._savedNotesPanel;
+        if (typeof _np.left === 'number') vm.notes.left = _np.left;
+        if (typeof _np.top === 'number') vm.notes.top = _np.top;
+        if (typeof _np.width === 'number') vm.notes.width = _np.width;
+        if (typeof _np.height === 'number') vm.notes.height = _np.height;
+      }
 
       vm.notesProject = '';
       vm.notesContent = '';
@@ -72,6 +81,11 @@ angular.module('kanbanApp').factory('NotesMixin', function ($http, $timeout) {
         if (newVal) {
           vm.notesProject = vm.selectedProject || '';
           vm.loadNotes();
+          // Auto-dodge: keep the panel off the Agent panel / panel columns
+          // (notes defaults to 100,100 — right on top of them).
+          $timeout(function () {
+            if (vm._dodgeFloatingPanel) vm._dodgeFloatingPanel(vm.notes, { selfCls: 'notes-floating-panel', margin: 10 });
+          }, 0);
         }
       });
 
@@ -92,14 +106,17 @@ angular.module('kanbanApp').factory('NotesMixin', function ($http, $timeout) {
 
         var onMove = function (e) {
           if (!vm.notes.dragging) return;
-          vm.notes.left = Math.max(0, e.clientX - vm.notes.dragStartX);
-          vm.notes.top = Math.max(0, e.clientY - vm.notes.dragStartY);
+          vm.notes.left = e.clientX - vm.notes.dragStartX;
+          vm.notes.top = e.clientY - vm.notes.dragStartY;
+          if (vm._clampFloatingPanel) vm._clampFloatingPanel(vm.notes);
+          else { vm.notes.left = Math.max(0, vm.notes.left); vm.notes.top = Math.max(0, vm.notes.top); }
           $scope.$apply();
         };
         var onUp = function () {
           vm.notes.dragging = false;
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
+          if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout(); // persist the new position
         };
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
@@ -128,6 +145,7 @@ angular.module('kanbanApp').factory('NotesMixin', function ($http, $timeout) {
           vm.notes.resizing = false;
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
+          if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout(); // persist the new size
         };
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);

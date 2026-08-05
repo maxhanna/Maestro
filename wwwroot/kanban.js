@@ -176,6 +176,29 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }, 0);
       };
 
+      // Creates a brand-new To Do card from a finished card's improvement
+      // suggestion, pre-attaching the suggestion's file paths as discovery
+      // context so the orchestrator can hand them straight to the agent.
+      vm.addSuggestionAsCard = function (card, suggestion) {
+        if (!suggestion || suggestion.added) return;
+        var newCard = {
+          id: uid(),
+          text: suggestion.description,
+          filePath: (card && card.filePath) || vm.selectedProject,
+          createdAt: new Date().toISOString(),
+          priority: 'medium',
+          attached: (suggestion.files || []).slice(),
+          autoPr: vm.prByDefault !== false,
+          selfImproving: false,
+          createTests: false,
+          llmEndpointId: (card && card.llmEndpointId) || ''
+        };
+        vm.state.todo.push(newCard);
+        suggestion.added = true;
+        vm.saveCards();
+        if (vm.showSideToast) vm.showSideToast('💡 Suggestion added to To Do');
+      };
+
       vm.clearDoneCards = function () {
         if (!$window.confirm('Delete all done tasks?')) return;
         vm.state.done = [];
@@ -491,11 +514,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             // Clear previous analysis when starting a fresh run
             delete card.agentAnalysis;
             delete card.agentLog;
+            delete card._meetingReplay; // stale replay — the new run re-records it
             vm.executeAgent(card);
           }
           if (from === 'selfImproving' && to === 'doing' && card.ready) {
             delete card.agentAnalysis;
             delete card.agentLog;
+            delete card._meetingReplay; // stale replay — the new run re-records it
             vm.executeAgent(card);
           }
           vm.saveCards();
@@ -773,11 +798,36 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
       };
 
+      // Persistent workspace: per-column widths survive reloads. Seeded from the
+      // settings localStorage store (stashed by SettingsMixin before this mixin).
+      vm._kanbanColWidths = {};
+      if (vm._savedKanbanColWidths && typeof vm._savedKanbanColWidths === 'object') {
+        vm._kanbanColWidths = vm._savedKanbanColWidths;
+      }
+
       vm.initColumnResizers = function () {
         try {
           var existing = document.querySelectorAll('.col-resizer');
           existing.forEach(function (el) { el.remove(); });
           var cols = Array.prototype.slice.call(document.querySelectorAll('#board .column'));
+          if (!cols.length) {
+            // The board template is ng-included asynchronously — retry briefly
+            // so the resizers attach as soon as the columns exist.
+            if (vm._resizerRetries === undefined) vm._resizerRetries = 0;
+            if (vm._resizerRetries < 25) {
+              vm._resizerRetries++;
+              $timeout(function () { vm.initColumnResizers(); }, 200);
+            }
+            return;
+          }
+          vm._resizerRetries = 0;
+          // Restore persisted widths (keyed by data-col) so the layout comes
+          // back exactly as the user left it.
+          var savedW = vm._kanbanColWidths || {};
+          cols.forEach(function (c) {
+            var key = c.getAttribute('data-col');
+            if (key && savedW[key]) c.style.flex = '0 0 ' + Math.round(savedW[key]) + 'px';
+          });
           for (var i = 0; i < cols.length - 1; i++) {
             (function (leftCol) {
               var resizer = document.createElement('div');
@@ -793,12 +843,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
                 var leftW = leftRect.width;
                 var rightW = rightRect.width;
                 var min = 200;
+                var nl = leftW, nr = rightW;
                 document.body.style.userSelect = 'none';
                 resizer.classList.add('active');
                 function onMove(ev) {
                   var dx = ev.clientX - startX;
-                  var nl = leftW + dx;
-                  var nr = rightW - dx;
+                  nl = leftW + dx;
+                  nr = rightW - dx;
                   var total = leftW + rightW;
                   if (nl < min) { nl = min; nr = total - min; }
                   if (nr < min) { nr = min; nl = total - min; }
@@ -810,16 +861,40 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
                   document.removeEventListener('pointerup', stopDrag);
                   document.body.style.userSelect = '';
                   resizer.classList.remove('active');
+                  // Persist the new widths so the layout survives a reload.
+                  var lk = leftCol.getAttribute('data-col');
+                  var rk = rightCol.getAttribute('data-col');
+                  var saved = vm._kanbanColWidths = vm._kanbanColWidths || {};
+                  if (lk) saved[lk] = Math.round(nl);
+                  if (rk) saved[rk] = Math.round(nr);
+                  if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout();
                 }
                 document.addEventListener('pointermove', onMove);
                 document.addEventListener('pointerup', stopDrag);
               });
               resizer.addEventListener('dblclick', function () {
-                cols.forEach(function (c) { c.style.flex = ''; c.style.width = ''; });
+                cols.forEach(function (c) {
+                  c.style.flex = ''; c.style.width = '';
+                  var key = c.getAttribute('data-col');
+                  if (key && vm._kanbanColWidths) delete vm._kanbanColWidths[key];
+                });
+                if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout();
               });
             })(cols[i]);
           }
         } catch (e) { console.error('resizer error', e); }
+      };
+
+      // Toggle a board column's visibility and persist it, re-attaching resizers
+      // afterwards since ng-if re-renders the column DOM.
+      vm.toggleColumn = function (col) {
+        if (col === 'todo') vm.showTodo = !vm.showTodo;
+        else if (col === 'doing') vm.showDoing = !vm.showDoing;
+        else if (col === 'done') vm.showDone = !vm.showDone;
+        else if (col === 'archived') vm.showArchived = !vm.showArchived;
+        else if (col === 'selfImproving') vm.showSelfImproving = !vm.showSelfImproving;
+        $timeout(function () { vm.initColumnResizers(); }, 0);
+        if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout();
       };
 
       vm.setupDragDrop = function () {
@@ -982,7 +1057,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         } catch (e) { console.error('dragdrop error', e); }
       };
 
-      $timeout(function () { vm.setupDragDrop(); }, 500);
+      $timeout(function () { vm.setupDragDrop(); vm.initColumnResizers(); }, 500);
+      // The board is ng-if'd on vm.showKanban, so closing it destroys the column
+      // DOM (inline widths + attached resizers). Re-attach and re-apply saved
+      // widths whenever the board re-opens.
+      $scope.$watch(function () { return vm.showKanban; }, function (v) {
+        if (v) $timeout(function () { vm.initColumnResizers(); }, 100);
+      });
     }
   };
 });

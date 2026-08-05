@@ -36,6 +36,14 @@ public class SavedThemeConfig
     public Dictionary<string, string> colors { get; set; } = new();
 }
 
+public class FontSizesConfig
+{
+    public int log { get; set; } = 18;
+    public int llm { get; set; } = 14;
+    public int plan { get; set; } = 14;
+    public int metaplan { get; set; } = 12;
+}
+
 public class FrontendConfig
 {
     public List<ProjectDto> projects { get; set; } = new();
@@ -86,6 +94,7 @@ public class FrontendConfig
     public bool useVSCodeInsteadOfIDE { get; set; } = false;
     public string ideTheme { get; set; } = "weaver-dark";
     public bool ideMinimapVisible { get; set; } = true;
+    public FontSizesConfig fontSizes { get; set; } = new();
 }
 
 public class ConfigFileService

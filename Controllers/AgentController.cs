@@ -8784,27 +8784,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             NewString = s.NewString,
             done = runningIndex == null || idx < runningIndex.Value
         }).ToList<object>();
-        if (stepItems.Count > 0)
+        // Always emit the activity row — even before the first step is committed
+        // (stepItems empty) — so the UI streams verbose thinking/planning/editing
+        // updates instead of freezing on the initial "Reading task…" placeholder
+        // during the (often minutes-long) discovery + pre-plan thinking phase.
+        var items = stepItems.Concat(new[] {
+            new {
+                File = activityFile,
+                Change = activityChange,
+                Line = 0,
+                OldString = "",
+                NewString = "",
+                done = activityFile != "_planning"
+            }
+        }).ToList();
+        await SendSse(Response, "plan", new
         {
-            var items = stepItems.Concat(new[] {
-                new {
-                    File = activityFile,
-                    Change = activityChange,
-                    Line = 0,
-                    OldString = "",
-                    NewString = "",
-                    done = activityFile != "_planning"
-                }
-            }).ToList();
-            await SendSse(Response, "plan", new
-            {
-                thinking = thinkingLog.ToString(),
-                summary = summary,
-                items = items,
-                incremental = true,
-                live = true
-            }, ct);
-        }
+            thinking = thinkingLog.ToString(),
+            summary = summary,
+            items = items,
+            incremental = true,
+            live = true
+        }, ct);
     }
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
@@ -15789,6 +15790,168 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var steps = _cancelledSteps.GetOrAdd(req.CardId, _ => new HashSet<int>());
         lock (steps) { steps.Add(req.StepIndex); }
         return Ok(new { status = "cancelled", cardId = req.CardId, stepIndex = req.StepIndex });
+    }
+
+    // ── Improvement suggestions for a completed card ──────────────────────
+    // When a card finishes successfully, the front end calls this endpoint to
+    // generate 0-3 LLM suggestions (each with file attachments for discovery
+    // context). Suggestions are persisted onto the card in board data
+    // (_suggestions) so they survive reloads and render in the Done column.
+    [HttpPost("suggest-improvements")]
+    public async Task<IActionResult> SuggestImprovements([FromBody] JsonElement payload)
+    {
+        string project = "", cardId = "", cardText = "", summary = "";
+        List<string> filesEdited = new();
+        if (payload.TryGetProperty("project", out var projEl)) project = projEl.GetString() ?? "";
+        if (payload.TryGetProperty("cardId", out var cidEl)) cardId = cidEl.GetString() ?? "";
+        if (payload.TryGetProperty("cardText", out var txtEl)) cardText = txtEl.GetString() ?? "";
+        if (payload.TryGetProperty("summary", out var sumEl)) summary = sumEl.GetString() ?? "";
+        if (payload.TryGetProperty("filesEdited", out var feEl) && feEl.ValueKind == JsonValueKind.Array)
+            foreach (var f in feEl.EnumerateArray())
+                if (f.ValueKind == JsonValueKind.String) filesEdited.Add(f.GetString() ?? "");
+        if (string.IsNullOrWhiteSpace(cardId) || string.IsNullOrWhiteSpace(project))
+            return BadRequest(new { error = "cardId and project are required" });
+
+        try
+        {
+            // Already generated? Return the stored suggestions without re-running the LLM.
+            var existing = await ReadCardSuggestionsAsync(cardId);
+            if (existing != null)
+                return Ok(new { suggestions = existing });
+
+            var projectRoot = Path.GetFullPath(project);
+            var sb = new StringBuilder();
+            sb.AppendLine("A card on the kanban board was just completed successfully.");
+            sb.AppendLine("Generate 0-3 concrete, meaningful suggestions to improve, expand, or follow up on this work. ");
+            sb.AppendLine("Each suggestion must be actionable and align with the original vision of the task.");
+            sb.AppendLine("Each suggestion MUST include file attachments (existing project-relative paths) that would serve as ");
+            sb.AppendLine("discovery context for implementing it — pick real files that actually exist in the project.");
+            sb.AppendLine();
+            sb.AppendLine($"CARD TASK:\n{cardText}");
+            if (!string.IsNullOrWhiteSpace(summary)) sb.AppendLine($"\nCOMPLETION SUMMARY:\n{summary}");
+            if (filesEdited.Count > 0) sb.AppendLine($"\nFILES CHANGED:\n{string.Join("\n", filesEdited.Select(f => "  - " + f))}");
+            sb.AppendLine();
+            sb.AppendLine("Reply ONLY with a JSON array of 0-3 objects, each shaped:");
+            sb.AppendLine(@"[{""description"": ""<suggestion text>"", ""files"": [""rel/path/file.ts"", ""rel/path/other.cs""]}]
+If nothing meaningful remains, reply with an empty array [] — never invent work.");
+
+            var (raw, _, err) = await CallLlmRaw(
+                "You are an expert product engineer. Output ONLY valid JSON. No markdown, no explanation.",
+                sb.ToString(), CancellationToken.None, requestTimeout: _infiniteTimeout, maxTokens: 1024);
+            var suggestions = new List<object>();
+            // NOTE: CallLlmRaw's ParseAgentResponse mangles JSON arrays (it slices
+            // from first { to last }, destroying the array wrapper), so it reports
+            // "JSON parse failed" for array payloads. The raw content is still
+            // returned intact — we parse it ourselves here, so ignore err.
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                var cleaned = raw.Trim();
+                if (cleaned.StartsWith("```"))
+                {
+                    var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                    if (m.Success) cleaned = m.Groups[1].Value.Trim();
+                }
+                var fb = cleaned.IndexOf('[');
+                var lb = cleaned.LastIndexOf(']');
+                if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+                try
+                {
+                    using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    foreach (var el in doc.RootElement.EnumerateArray())
+                    {
+                        if (suggestions.Count >= 3) break;
+                        if (el.ValueKind != JsonValueKind.Object) continue;
+                        var desc = el.TryGetProperty("description", out var dEl) ? dEl.GetString() : null;
+                        if (string.IsNullOrWhiteSpace(desc)) continue;
+                        var files = new List<string>();
+                        if (el.TryGetProperty("files", out var fEl) && fEl.ValueKind == JsonValueKind.Array)
+                            foreach (var fp in fEl.EnumerateArray())
+                            {
+                                var path = fp.GetString()?.Replace('\\', '/').Trim().TrimStart('/');
+                                if (string.IsNullOrWhiteSpace(path)) continue;
+                                // Only attach paths that actually exist in the project.
+                                var full = Path.GetFullPath(Path.Combine(projectRoot, path));
+                                if (full.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(full))
+                                    files.Add(path);
+                            }
+                        suggestions.Add(new
+                        {
+                            id = Guid.NewGuid().ToString("N")[..8],
+                            description = desc.Trim(),
+                            files = files,
+                            createdAt = DateTime.UtcNow.ToString("o")
+                        });
+                    }
+                }
+                catch { /* partial or malformed JSON — keep what we have */ }
+            }
+
+            await PersistCardSuggestionsAsync(cardId, suggestions);
+            if (suggestions.Count == 0)
+                Console.WriteLine($"[SUGGEST IMPROVEMENTS] no suggestions for card {cardId} (rawlen={(raw?.Length ?? 0)} err={(string.IsNullOrWhiteSpace(err) ? "none" : err)})");
+            return Ok(new { suggestions });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SUGGEST IMPROVEMENTS] {ex.Message}");
+            return Ok(new { suggestions = new List<object>() });
+        }
+    }
+    private async Task<List<object>?> ReadCardSuggestionsAsync(string cardId)
+    {
+        var raw = await _boardData.LoadRawAsync();
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        using var jsonDoc = JsonDocument.Parse(raw);
+        var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+        if (root == null) return null;
+        var columns = new[] { "todo", "doing", "done", "archived", "selfImproving" };
+        foreach (var column in columns)
+        {
+            if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                continue;
+            foreach (var item in columnItems)
+            {
+                if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                    continue;
+                // A stored _suggestions property (even an empty array) means
+                // generation already completed — return it so the LLM is never
+                // re-run for a card that legitimately earned 0 suggestions.
+                if (cardObj["_suggestions"] is JsonArray arr)
+                    return JsonSerializer.Deserialize<List<object>>(arr.ToJsonString()) ?? new List<object>();
+                return null;
+            }
+        }
+        return null;
+    }
+    private async Task PersistCardSuggestionsAsync(string cardId, List<object> suggestions)
+    {
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "archived", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    cardObj["_suggestions"] = JsonNode.Parse(JsonSerializer.Serialize(suggestions));
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SUGGEST IMPROVEMENTS PERSIST] {ex.Message}");
+        }
     }
     private async Task<bool> CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
     {

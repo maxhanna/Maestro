@@ -14,6 +14,8 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         filePickerEntries: [],
         filePickerError: '',
         filePickerLoading: false,
+        // Path of the last-clicked entry, rendered as clickable breadcrumbs above the tree.
+        breadcrumbPath: '',
         searchFilter: '',
         lastSavedContent: null,
         pendingFileListing: null,
@@ -32,6 +34,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         // Restored from the settings localStorage store (stashed by SettingsMixin)
         // so the on/off state survives a page reload; defaults to visible.
         minimapVisible: vm._savedIdeMinimapVisible === undefined ? true : vm._savedIdeMinimapVisible,
+        // Hide build/vcs/dependency dirs (node_modules, bin, obj, .git, ...) from the
+        // file tree by default; the toggle reveals them. Restored from settings.
+        showHiddenEntries: vm._savedIdeShowHiddenEntries === true,
         gitDiffVisible: false,
         gitDiffLoading: false,
         gitDiffData: null,
@@ -50,6 +55,15 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         width: 600,
         height: 400
       };
+      // Restore a persisted panel position/size (stashed by SettingsMixin) so the
+      // IDE opens exactly where the user left it.
+      if (vm._savedIdePanel) {
+        var _ip = vm._savedIdePanel;
+        if (typeof _ip.left === 'number') vm.ide.left = _ip.left;
+        if (typeof _ip.top === 'number') vm.ide.top = _ip.top;
+        if (typeof _ip.width === 'number') vm.ide.width = _ip.width;
+        if (typeof _ip.height === 'number') vm.ide.height = _ip.height;
+      }
       var _searchMarks = [];
       var _searchDebounce = null;
       var _minimapEl = null;
@@ -152,6 +166,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           // Load entire tree recursively so folders can be expanded without replacing the list
           params.recursive = true;
         }
+        params.showHidden = !!vm.ide.showHiddenEntries;
         if (!search && vm.ide.filePickerPath) {
           params.path = vm.ide.filePickerPath;
         }
@@ -181,51 +196,129 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       // can't assume a folder's entry arrives before its children. Every node
       // is attached to its parent exactly once via the path->node map, which
       // prevents phantom folders, duplicate folders, and orphaned subtrees.
+      // The builder itself is the pure, tested WeaverFileTree.buildFileTree
+      // (wwwroot/filetree.js) — the seeded-fuzz corpus in
+      // FileTreeOrderIndependenceTests.cs locks it against regression.
       vm._expandedDirs = {};
+      vm._expandedDirsProject = null;   // project path the current expansion state belongs to
+      vm._expandedDirsSaveTimer = null;
       vm._buildFileTree = function(entries) {
-        var root = { name: '', path: '', isDirectory: true, children: [], depth: 0 };
-        var map = { '': root };
-        // Ensure a directory node exists for path and is attached to its parent.
-        function ensureDir(path) {
-          if (map[path]) return map[path];
-          var node = { name: path.split('/').pop(), path: path, isDirectory: true, children: [], depth: 0 };
-          map[path] = node;
-          var slash = path.lastIndexOf('/');
-          var parentPath = slash <= 0 ? '' : path.slice(0, slash);
-          ensureDir(parentPath).children.push(node);
-          return node;
-        }
-        entries.forEach(function(e) {
-          if (!e || !e.path) return;
-          var path = e.path.replace(/\\/g, '/');
-          var slash = path.lastIndexOf('/');
-          var parentPath = slash <= 0 ? '' : path.slice(0, slash);
-          var parent = ensureDir(parentPath);
-          // If the entry is the real directory record, reuse (don't duplicate)
-          // the node the children may have already created implicitly, and
-          // adopt the backend's authoritative display name.
-          if (e.isDirectory) {
-            var dn = ensureDir(path);
-            if (e.name) dn.name = e.name;
-          } else {
-            var node = { name: e.name || path.split('/').pop(), path: path, isDirectory: false, children: null, depth: 0 };
-            if (!map[path]) map[path] = node;
-            // Dedupe: a file path can appear once per listing, but guard anyway.
-            if (parent.children.indexOf(map[path]) === -1) parent.children.push(map[path]);
+        vm.ide._treeRoot = WeaverFileTree.buildFileTree(entries);
+        // Restore per-project expansion state when (re)opening the IDE or switching
+        // projects: the saved dirs win for the newly selected project, while a live
+        // refresh of the SAME project keeps the current (possibly unsaved) state.
+        var projKey = vm.selectedProject || '';
+        if (vm._expandedDirsProject !== projKey) {
+          vm._expandedDirs = {};
+          var saved = (vm._savedExpandedDirsByProject || {})[projKey];
+          if (saved && typeof saved === 'object') {
+            Object.keys(saved).forEach(function (k) { if (saved[k]) vm._expandedDirs[k] = true; });
           }
-        });
-        // Stable ordering: directories first, then files, both alphabetical.
-        function sortChildren(node) {
-          if (!node.children) return;
-          node.children.sort(function (a, b) {
-            if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-            return (a.name || '').localeCompare(b.name || '');
-          });
-          node.children.forEach(sortChildren);
+          vm._expandedDirsProject = projKey;
         }
-        sortChildren(root);
-        vm.ide._treeRoot = root;
         vm._rebuildTreeDisplay();
+      };
+
+      // Debounced write-back of the expansion state so a burst of toggles hits
+      // localStorage once (400ms after the last one).
+      vm._persistExpandedDirsSoon = function () {
+        if (vm._expandedDirsSaveTimer) $timeout.cancel(vm._expandedDirsSaveTimer);
+        vm._expandedDirsSaveTimer = $timeout(function () {
+          vm._expandedDirsSaveTimer = null;
+          if (vm.persistExpandedDirs) vm.persistExpandedDirs();
+        }, 400, false);
+      };
+
+      // 'Collapse all' keeps only the top-level entries visible; 'Expand all' opens
+      // every folder in the current tree. Both persist the resulting state.
+      vm.collapseAllTree = function () {
+        var rootOnly = { __root__: true };
+        vm._expandedDirs = rootOnly;
+        vm._expandedDirsProject = vm.selectedProject || '';
+        vm.ide.breadcrumbPath = '';
+        vm._rebuildTreeDisplay();
+        vm._persistExpandedDirsSoon();
+      };
+
+      vm.expandAllTree = function () {
+        var expanded = { __root__: true };
+        (function walk(node) {
+          if (!node || !node.children) return;
+          if (node.path) expanded[node.path] = true;
+          node.children.forEach(walk);
+        })(vm.ide._treeRoot);
+        vm._expandedDirs = expanded;
+        vm._expandedDirsProject = vm.selectedProject || '';
+        vm._rebuildTreeDisplay();
+        vm._persistExpandedDirsSoon();
+      };
+
+      // ── Breadcrumb path bar ───────────────────────────────────────────────────
+      // Mirrors VS Code's explorer breadcrumb: every segment of the last-clicked
+      // entry is clickable — directories jump to (and expand) that folder, the
+      // root segment collapses back to top-level, file segments re-open the file.
+      // Memoized by (project, path) so the SAME array reference is returned while the
+      // location is unchanged. It's used directly in ng-repeat, and Angular's
+      // $watchCollection marks a freshly-built array dirty on every digest — which
+      // would loop forever ($rootScope:infdig). Rebuilding only when the breadcrumb
+      // location actually changes keeps the watcher stable.
+      vm._breadcrumbCacheKey = null;
+      vm._breadcrumbCache = [];
+      vm.breadcrumbSegments = function () {
+        var path = vm.ide.breadcrumbPath || '';
+        var key = (vm.selectedProject || '') + '|' + path;
+        if (vm._breadcrumbCacheKey === key) return vm._breadcrumbCache;
+        var parts = path.split('/').filter(Boolean);
+        var segs = [{ name: '📁', path: '', title: vm.selectedProject || 'Project root' }];
+        var acc = '';
+        for (var i = 0; i < parts.length; i++) {
+          acc = acc ? acc + '/' + parts[i] : parts[i];
+          segs.push({ name: parts[i], path: acc });
+        }
+        vm._breadcrumbCacheKey = key;
+        vm._breadcrumbCache = segs;
+        return segs;
+      };
+
+      vm._treeNodeByPath = function (path) {
+        var found = null;
+        (function walk(node) {
+          if (found || !node) return;
+          if (node.path === path) { found = node; return; }
+          if (node.children) node.children.forEach(walk);
+        })(vm.ide._treeRoot);
+        return found;
+      };
+
+      vm.breadcrumbNavigate = function (path) {
+        if (!path) {
+          // Root segment — collapse back to the top-level view.
+          var rootOnly = { __root__: true };
+          vm._expandedDirs = rootOnly;
+          vm._expandedDirsProject = vm.selectedProject || '';
+          vm.ide.breadcrumbPath = '';
+          vm._rebuildTreeDisplay();
+          vm._persistExpandedDirsSoon();
+          return;
+        }
+        var node = vm._treeNodeByPath(path);
+        if (!node) return;
+        if (!node.isDirectory) {
+          vm.ide.breadcrumbPath = path;
+          vm.openFile(path);
+          return;
+        }
+        // Expand every ancestor so the clicked folder is visible in the tree.
+        var parts = path.split('/');
+        var acc = '';
+        for (var i = 0; i < parts.length; i++) {
+          acc = acc ? acc + '/' + parts[i] : parts[i];
+          vm._expandedDirs[acc] = true;
+        }
+        vm._expandedDirsProject = vm.selectedProject || '';
+        vm.ide.breadcrumbPath = path;
+        vm._rebuildTreeDisplay();
+        vm._persistExpandedDirsSoon();
       };
 
       vm._rebuildTreeDisplay = function() {
@@ -247,6 +340,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
 
       vm.toggleTreeDir = function(node) {
         if (!node.isDirectory) {
+          vm.ide.breadcrumbPath = node.path;
           vm.openFile(node.path);
           return;
         }
@@ -256,11 +350,18 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         } else {
           vm._expandedDirs[key] = true;
         }
+        vm._expandedDirsProject = vm.selectedProject || '';
+        vm.ide.breadcrumbPath = node.path;
         vm._rebuildTreeDisplay();
+        vm._persistExpandedDirsSoon();
       };
 
       vm.refreshFileTree = function() {
-        vm._expandedDirs = {};
+        // Keep the current expansion state across a refresh (stale keys for
+        // deleted paths are harmless — the display walk only visits live nodes),
+        // and make sure the live state is persisted before the reload.
+        vm._expandedDirsProject = vm.selectedProject || '';
+        if (vm.persistExpandedDirs) vm.persistExpandedDirs();
         vm.ide.filePickerPath = '';
         vm.loadFilePickerEntries();
       };
@@ -305,18 +406,143 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         if ($event.button !== 2) return; // left/middle click: normal behavior
         $event.preventDefault();
         $event.stopPropagation();
+        vm.openTreeMenuFor(e, $event);
+      };
+
+      // Open the context menu for a tree entry. Works from either a real right-click
+      // (mouse coords) or a keyboard/button trigger (anchored to the entry element),
+      // so Shift+F10 / ContextMenu key and the '⋯' fallback button land in the same
+      // code path. The menu keeps the entry model so keyboard focus can be returned
+      // to it after the menu closes.
+      vm.openTreeMenuFor = function(e, $event) {
         vm._treeDragPath = null;
         vm._treeDropPath = null;
         vm.ide.treeMenu.visible = false;
-        // Position menu clamped to viewport
         var menuW = 190, menuH = 210;
-        var x = Math.min($event.clientX, window.innerWidth - menuW);
-        var y = Math.min($event.clientY, window.innerHeight - menuH);
+        var x, y;
+        if ($event && typeof $event.clientX === 'number') {
+          // Mouse right-click: position at the cursor.
+          x = Math.min($event.clientX, window.innerWidth - menuW);
+          y = Math.min($event.clientY, window.innerHeight - menuH);
+        } else {
+          // Keyboard/touch: anchor the menu to the entry itself, below it.
+          var srcEl = $event && $event.currentTarget
+            ? ($event.currentTarget.closest ? $event.currentTarget.closest('.ide-tree-entry') : null)
+            : null;
+          if (srcEl) {
+            var r = srcEl.getBoundingClientRect();
+            x = Math.min(r.left, window.innerWidth - menuW);
+            y = Math.min(r.bottom + 2, window.innerHeight - menuH);
+          } else {
+            x = 0; y = 0;
+          }
+        }
         vm.ide.treeMenu = { visible: true, x: Math.max(0, x), y: Math.max(0, y), entry: e };
+        // Keyboard-opened menus get immediate focus into the first item so arrows work
+        // without an extra Tab (mousedown-opened menus keep normal mouse behavior).
+        if (!($event && $event.clientX)) {
+          $timeout(function() { vm.focusTreeMenuItem(0); }, 0, false);
+        }
+      };
+
+      // Keyboard access to the context menu on a focused tree entry:
+      //  - ContextMenu key (key 93) or Shift+F10 opens the menu (standard pattern)
+      //  - Enter opens the entry (dir toggle / file), mirroring a left click
+      vm.onTreeEntryKeydown = function($event, e) {
+        var isMenuKey = $event.key === 'ContextMenu' || $event.keyCode === 93;
+        var isShiftF10 = $event.key === 'F10' && $event.shiftKey;
+        if (isMenuKey || isShiftF10) {
+          $event.preventDefault();
+          $event.stopPropagation();
+          vm.openTreeMenuFor(e, $event);
+          return;
+        }
+        if ($event.key === 'Enter' && !vm.ide.renamingPath) {
+          $event.preventDefault();
+          vm.toggleTreeDir(e);
+        }
+      };
+
+      // Focus the tree entry that opened the menu (keyboard flows only). Iterates the
+      // rendered entries and compares data-tree-path directly — the ng-repeat DOM is
+      // re-created on digest (stale element refs) AND building a CSS selector string
+      // from a filename is fragile for paths containing quotes/brackets.
+      vm._restoreTreeMenuFocus = function() {
+        var entry = vm.ide.treeMenu && vm.ide.treeMenu.entry;
+        if (!entry || !entry.path) return;
+        var nodes = document.querySelectorAll('.ide-tree-entry');
+        for (var i = 0; i < nodes.length; i++) {
+          if (nodes[i].getAttribute('data-tree-path') === entry.path) {
+            nodes[i].focus();
+            return;
+          }
+        }
       };
 
       vm.closeTreeMenu = function() {
         vm.ide.treeMenu.visible = false;
+        vm._restoreTreeMenuFocus();
+      };
+
+      // Map a tree-entry DOM element back to its model entry (via data-tree-path),
+      // used by the document-level Menu-key fallback to find the entry to act on.
+      vm._treeEntryFromEl = function(el) {
+        if (!el || !el.getAttribute) return null;
+        var path = el.getAttribute('data-tree-path');
+        if (!path) return null;
+        var list = vm.ide.filePickerEntries || [];
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].path === path) return list[i];
+        }
+        return null;
+      };
+
+      // Focus the Nth visible context-menu item (used by keyboard open + arrow nav).
+      vm.focusTreeMenuItem = function(index) {
+        var items = document.querySelectorAll('.ide-context-menu .ide-ctx-item');
+        if (!items.length) return;
+        var idx = Math.max(0, Math.min(index, items.length - 1));
+        items[idx].focus();
+      };
+
+      // Arrow-key navigation + Enter activation inside the context menu. Home/End
+      // jump to the first/last item; Tab past the last (or Shift+Tab before the
+      // first) closes the menu and returns focus to the tree entry so keyboard
+      // users never get stranded in an open-but-inert menu. This runs on the menu's
+      // keydown and relies on the menu items being focusable (tabindex="0").
+      vm.onTreeMenuKeydown = function($event) {
+        var items = document.querySelectorAll('.ide-context-menu .ide-ctx-item');
+        if (!items.length) return;
+        var current = document.activeElement;
+        var idx = Array.prototype.indexOf.call(items, current);
+        if ($event.key === 'ArrowDown' || $event.key === 'ArrowUp') {
+          $event.preventDefault();
+          if (idx === -1) { vm.focusTreeMenuItem($event.key === 'ArrowDown' ? 0 : items.length - 1); return; }
+          var next = $event.key === 'ArrowDown' ? idx + 1 : idx - 1;
+          if (next < 0) next = items.length - 1;
+          if (next >= items.length) next = 0;
+          vm.focusTreeMenuItem(next);
+          return;
+        }
+        if ($event.key === 'Home') { $event.preventDefault(); vm.focusTreeMenuItem(0); return; }
+        if ($event.key === 'End') { $event.preventDefault(); vm.focusTreeMenuItem(items.length - 1); return; }
+        if ($event.key === 'Enter' || $event.key === ' ') {
+          if (idx !== -1) {
+            $event.preventDefault();
+            items[idx].click();
+          }
+          return;
+        }
+        if ($event.key === 'Tab') {
+          // Tab off the end (or Shift+Tab off the start) of the menu closes it and
+          // hands focus back to the tree entry.
+          var last = idx >= items.length - 1;
+          var first = idx <= 0;
+          if ((!$event.shiftKey && last) || ($event.shiftKey && first)) {
+            $event.preventDefault();
+            vm.closeTreeMenu();
+          }
+        }
       };
 
       vm.treeMenuAction = function(action) {
@@ -525,8 +751,32 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       document.addEventListener('keydown', function(ev) {
         if (ev.key === 'Escape' && vm.ide.treeMenu && vm.ide.treeMenu.visible) {
           vm.ide.treeMenu.visible = false;
+          // Return focus to the entry that opened the menu so keyboard users stay
+          // in the tree instead of dropping focus to <body>. Runs after the digest
+          // so the freshly re-rendered entry node is the one focused.
           $scope.$digest();
+          $timeout(function() { vm._restoreTreeMenuFocus(); }, 0, false);
         }
+      });
+      // Menu-key fallback for keyboard-only users: if the document (not a tree entry)
+      // has focus but an entry is logically selected/active, open the menu on it.
+      document.addEventListener('keydown', function(ev) {
+        if (vm.ide.treeMenu && vm.ide.treeMenu.visible) return;
+        if (ev.key !== 'ContextMenu' && !(ev.key === 'F10' && ev.shiftKey) && ev.keyCode !== 93) return;
+        var inTree = ev.target && ev.target.closest ? ev.target.closest('.ide-file-tree') : null;
+        if (!inTree) return;
+        // Don't hijack the Menu key while typing in the filter box — let the native
+        // text-edit context menu stay available there.
+        if (ev.target && ev.target.tagName === 'INPUT') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        // Prefer a focused entry; fall back to the first visible entry.
+        var focused = inTree.querySelector ? inTree.querySelector('.ide-tree-entry:focus') : null;
+        var entries = inTree.querySelectorAll ? inTree.querySelectorAll('.ide-tree-entry') : null;
+        var target = focused || (entries && entries.length ? entries[0] : null);
+        if (!target || !vm._treeEntryFromEl) return;
+        var e = vm._treeEntryFromEl(target);
+        if (e) vm.openTreeMenuFor(e, { currentTarget: target });
       });
       // The file explorer renders its own context menu (opened on mousedown
       // button 2). The native browser/OS menu fires on the separate
@@ -556,6 +806,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
 
       vm.openFile = function(path) {
         vm.ide.sharedEditorActive = false;
+        vm.ide.breadcrumbPath = path;
         var existing = vm.findTab(path);
         if (existing) {
           vm.switchTab(path);
@@ -997,6 +1248,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       // or re-create it and force a re-measure once the panel is laid out.
       $scope.$watch(function () { return vm.showIDE; }, function (visible) {
         if (!visible) return;
+        // Auto-dodge: keep the panel off the Agent panel / panel columns
+        // (IDE defaults to 60,60 — right on top of them).
+        if (vm._dodgeFloatingPanel) vm._dodgeFloatingPanel(vm.ide, { selfCls: 'ide-floating-panel', margin: 10 });
         $timeout(function () {
           if (vm._editor) {
             var wrapper = vm._editor.getWrapperElement();
@@ -1132,6 +1386,16 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm.ide.minimapVisible = !vm.ide.minimapVisible;
         if (_minimapEl) _minimapEl.classList.toggle('ide-minimap--hidden', !vm.ide.minimapVisible);
         _scheduleMinimapDraw();
+        // Persist so the toggle survives a reload (localStorage store + config endpoint).
+        if (vm.saveSettings) vm.saveSettings(true);
+      };
+
+      // Show/hide ignored build/vcs/dependency dirs in the file tree. Fetches the
+      // tree again so the backend filters out heavy folders (node_modules, bin, obj,
+      // .git, ...) or reveals them.
+      vm.toggleHiddenEntries = function () {
+        vm.ide.showHiddenEntries = !vm.ide.showHiddenEntries;
+        if (vm.loadFilePickerEntries) vm.loadFilePickerEntries();
         // Persist so the toggle survives a reload (localStorage store + config endpoint).
         if (vm.saveSettings) vm.saveSettings(true);
       };
@@ -1814,13 +2078,16 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         var viewW = window.innerWidth;
         var viewH = window.innerHeight;
         function onMove(e) {
-          vm.ide.left = Math.max(0, Math.min(viewW - 100, startLeft + (e.clientX - startX)));
-          vm.ide.top = Math.max(0, Math.min(viewH - 60, startTop + (e.clientY - startY)));
+          vm.ide.left = startLeft + (e.clientX - startX);
+          vm.ide.top = startTop + (e.clientY - startY);
+          if (vm._clampFloatingPanel) vm._clampFloatingPanel(vm.ide);
+          else { vm.ide.left = Math.max(0, Math.min(viewW - 100, vm.ide.left)); vm.ide.top = Math.max(0, Math.min(viewH - 60, vm.ide.top)); }
           $scope.$digest();
         }
         function onUp() {
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
+          if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout(); // persist the new position
         }
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
@@ -1851,6 +2118,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         function onUp() {
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
+          if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout(); // persist the new size
         }
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
