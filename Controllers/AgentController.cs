@@ -8083,6 +8083,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.PlanComplete)
             {
+                // Benchmark edit-strategy tasks must produce an actual edit. A weak model can
+                // incorrectly declare a read-only inspection complete; accepting that response
+                // would cause the client to replay the same no-op until max iterations.
+                var hasSuccessfulEdit = allResults.OfType<Dictionary<string, object?>>().Any(r =>
+                    (r.GetValueOrDefault("type")?.ToString() is "edit" or "create") &&
+                    (r.GetValueOrDefault("status")?.ToString() is "done" or "created" or "modified"));
+                if (_isBenchmark && planSoFar.Count == 0 && !hasSuccessfulEdit &&
+                    AgentUtilities.TaskExpectsFileChanges(prompt))
+                {
+                    rejectionFeedback.Add("This benchmark explicitly requires a file change. Do not return planComplete=true before proposing and successfully applying the required edit.");
+                    await EmitLog(emitSse, "warn", "Benchmark rejected premature planComplete response — no edit has been applied yet.", ct: ct);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
                 if (emitSse)
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
                 await EmitLog(emitSse, "success",
@@ -12822,7 +12836,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 req.Prompt, projectRoot, emitSse: true,
                 ct: Response.HttpContext.RequestAborted,
                 attachedFiles: req.Files?.Count > 0 ? req.Files : null,
-                steeringContext: req.SteeringContext,
+                // Benchmark fixtures and their attached files are server-selected; do not pause
+                // these isolated runs for an interactive context-review modal.
+                skipContextReview: isBenchmark,
+                steeringContext: isBenchmark
+                    ? "This is an edit benchmark. You must make the requested file change using the attached fixture. Do not declare planComplete=true until the edit has been applied and verified."
+                        + (string.IsNullOrWhiteSpace(req.SteeringContext) ? "" : "\n\n" + req.SteeringContext)
+                    : req.SteeringContext,
                 existingPlan: existingPlan,
                 completedStepIndices: completedIndices,
                 cardId: req.CardId,
@@ -12832,11 +12852,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
             if (isBenchmark)
             {
-                var anyStepsAttempted = allSteps.OfType<Dictionary<string, object?>>()
-                    .Any(s => s.TryGetValue("type", out var t) &&
-                              t?.ToString() is "plan_step" or "command" or "edit" or "create");
+                var successfulBenchmarkStep = allSteps.OfType<Dictionary<string, object?>>()
+                    .Any(s => (s.GetValueOrDefault("type")?.ToString() is "command" or "edit" or "create") &&
+                              (s.GetValueOrDefault("status")?.ToString() is "done" or "created" or "modified" or "skipped"));
                 var planAlreadyDone = existingPlan != null && completedIndices != null && completedIndices.Count >= existingPlan.Plan.Count;
-                complete = anyStepsAttempted || planAlreadyDone;
+                complete = successfulBenchmarkStep || planAlreadyDone;
                 // Do not claim edits were applied merely because a benchmark pipeline ran.
                 // This value drives client retry behavior and must reflect actual artifacts.
                 editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
