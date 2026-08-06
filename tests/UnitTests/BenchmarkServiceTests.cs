@@ -142,6 +142,18 @@ public sealed class BenchmarkServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareAsync_WritesJsonFixturesWithoutUtf8Bom()
+    {
+        var service = new BenchmarkService(Path.Combine(_root, "data"));
+        var prepared = await service.PrepareAsync(15, service.SandboxRoot);
+        var fixture = Path.Combine(prepared.RunRoot, "edit_strategy", "json", "settings.json");
+        var bytes = await File.ReadAllBytesAsync(fixture);
+
+        Assert.False(bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF);
+        Assert.Contains("\"pageSize\": 20", await File.ReadAllTextAsync(fixture));
+    }
+
+    [Fact]
     public async Task PrepareAsync_CreatesDeterministicEditFixture()
     {
         var service = new BenchmarkService(Path.Combine(_root, "data"));

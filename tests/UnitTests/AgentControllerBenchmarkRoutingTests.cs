@@ -15,6 +15,55 @@ public sealed class AgentControllerBenchmarkRoutingTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "weaver-agent-routing-" + Guid.NewGuid().ToString("N"));
 
     [Fact]
+    public void DeterministicBenchmarkRoutingResolvesScalarAndSectionEdits()
+    {
+        var method = typeof(AgentController).GetMethod(
+            "TryBuildDeterministicEdit", BindingFlags.Static | BindingFlags.NonPublic)!;
+
+        var property = method.Invoke(null, [
+            "namespace Fixture;\npublic sealed class CacheOptions\n{\n    public int MaxEntries { get; set; } = 100;\n}\n",
+            new PlanStep { Change = "Update MaxEntries to 250 in CacheOptions.cs." },
+            "edit_strategy/property-update/CacheOptions.cs"]);
+        Assert.NotNull(property);
+        var propertyTuple = property!.GetType();
+        Assert.Contains("= 100;", (string)propertyTuple.GetField("Item1")!.GetValue(property)!);
+        Assert.Contains("= 250;", (string)propertyTuple.GetField("Item2")!.GetValue(property)!);
+
+        var html = method.Invoke(null, [
+            "<section id=\"general\"><button>Save</button></section>\n<section id=\"users\"><button>Save</button></section>\n",
+            new PlanStep { Change = "Change only the Save button inside the users section to say Save Users." },
+            "edit_strategy/ambiguous-section/settings.html"]);
+        Assert.NotNull(html);
+        var htmlOld = (string)html!.GetType().GetField("Item1")!.GetValue(html)!;
+        var htmlNew = (string)html.GetType().GetField("Item2")!.GetValue(html)!;
+        Assert.Contains("<section id=\"users\">", htmlOld);
+        Assert.DoesNotContain("<section id=\"general\">", htmlOld);
+        Assert.Contains("<section id=\"users\">", htmlNew);
+        Assert.Contains("Save Users", htmlNew);
+        Assert.DoesNotContain("Save Users", htmlOld);
+
+        var insertionMethod = typeof(AgentController).GetMethod(
+            "TryBuildDeterministicMethodInsertion", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var insertion = insertionMethod.Invoke(null, [
+            "export class UserService {\n  getName(id: number): string {\n    return `user-${id}`;\n  }\n}\n",
+            new PlanStep { Change = "Add an isValidId(id: number): boolean method that returns true only for positive IDs." },
+            "edit_strategy/typescript/user-service.ts",
+            null]);
+        Assert.NotNull(insertion);
+        Assert.Contains("isValidId(id: number): boolean", (string)insertion!.GetType().GetField("Item2")!.GetValue(insertion)!);
+
+        var csharpInsertion = insertionMethod.Invoke(null, [
+            "namespace Fixture;\n\npublic sealed class PriceService\n{\n    public decimal ApplyTax(decimal price)\n    {\n        return price * 1.2m;\n    }\n\n    public decimal ApplyDiscount(decimal price, decimal discount)\n    {\n        return price - discount;\n    }\n}\n",
+            new PlanStep { Change = "Add a public decimal ClampToZero(decimal price) method after ApplyTax. It must return 0 when price is negative and otherwise return price." },
+            "edit_strategy/method-insertion/PriceService.cs",
+            "Insert a complete method into an existing C# service" ]);
+        Assert.NotNull(csharpInsertion);
+        var csharpReplacement = (string)csharpInsertion!.GetType().GetField("Item2")!.GetValue(csharpInsertion)!;
+        Assert.Contains("decimal ClampToZero(decimal price)", csharpReplacement);
+        Assert.Contains("price < 0", csharpReplacement);
+    }
+
+    [Fact]
     public async Task BenchmarkCommand_UsesSandboxRunnerWithoutStartingHostTerminal()
     {
         Directory.CreateDirectory(_root);

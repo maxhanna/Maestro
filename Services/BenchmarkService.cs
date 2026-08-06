@@ -303,7 +303,9 @@ public class BenchmarkService
             // Older fixture declarations used raw strings containing visible escape sequences.
             // Materialize those sequences so the agent receives valid source files.
             var content = setup.Content.Replace("\\r\\n", "\n").Replace("\\n", "\n").Replace("\\\"", "\"");
-            await File.WriteAllTextAsync(path, content, Encoding.UTF8, ct);
+            // External benchmark commands (notably Python's json.tool) must receive BOM-free
+            // fixture files. User-file encoding is handled separately by the edit pipeline.
+            await File.WriteAllTextAsync(path, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), ct);
         }
         return new(runId, root);
     }
