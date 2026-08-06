@@ -5,14 +5,25 @@ using Weaver.Hubs;
 
 WeaverLogo.DisplayLogo();
 var builder = WebApplication.CreateBuilder(args);
+var basePath = builder.Environment.ContentRootPath;
+var weaverDataDir = Path.Combine(basePath, "data");
+var configPath = Path.Combine(basePath, "weaverconfig.json");
+
+// Database lives in Weaver's data/ folder alongside other persisted data
+var dbPath = Path.Combine(weaverDataDir, "weaver.db");
+
+// DatabaseService (central SQLite store — replaces all JSON file storage)
+var dbService = new DatabaseService(dbPath, weaverDataDir, configPath);
+builder.Services.AddSingleton(dbService);
+
 builder.Services.AddSingleton<TerminalService>();
 builder.Services.AddSingleton<IBenchmarkTerminalRunner, DockerBenchmarkTerminalRunner>();
-builder.Services.AddSingleton<ConfigFileService>();
+builder.Services.AddSingleton<ConfigFileService>(sp => new ConfigFileService(sp.GetRequiredService<DatabaseService>()));
 builder.Services.AddSingleton<EmailService>();
-var basePath = builder.Environment.ContentRootPath;
-builder.Services.AddSingleton(new FileHintsManager(basePath));
-builder.Services.AddSingleton(new CalendarService(basePath));
+builder.Services.AddSingleton(new FileHintsManager(dbService));
+builder.Services.AddSingleton(new CalendarService(dbService));
 builder.Services.AddSingleton<GitService>();
+builder.Services.AddSingleton<PushNotificationService>(sp => new PushNotificationService(dbService));
 builder.Services.AddHttpClient("llama", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(30);
@@ -21,10 +32,7 @@ builder.Services.AddControllers();
 builder.Services.AddSingleton<BoardDataService>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<BoardDataService>>();
-    var config = sp.GetRequiredService<IConfiguration>();
-    // Assuming you store the path in appsettings.json, or use a default
-    var filePath = config["BoardData:FilePath"] ?? "data/board.json";
-    return new BoardDataService(filePath, logger);
+    return new BoardDataService(dbService, logger);
 });
 builder.Services.AddSignalR();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
@@ -73,6 +81,7 @@ app.MapGet("/{**path}", async context =>
         ".js" => "application/javascript",
         ".css" => "text/css",
         ".html" => "text/html",
+        ".json" => "application/json",
         ".png" => "image/png",
         ".jpg" => "image/jpeg",
         ".svg" => "image/svg+xml",

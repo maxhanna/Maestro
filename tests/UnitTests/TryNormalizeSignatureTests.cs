@@ -16,7 +16,7 @@ public class TryNormalizeSignatureTests
     [InlineData("pub fn main() {", "pub fn main() { ... }")]
     public void NormalizeVariousSignatures(string line, string expected)
     {
-        var ok = AgentUtilities.NormalizeSkeletonSignatureForTest(line, out var sig);
+        var ok = AgentSkeleton.NormalizeSkeletonSignatureForTest(line, out var sig);
         Assert.True(ok);
         Assert.Contains(expected.Split(' ')[0], sig); // sanity: contains the name or leading token
     }

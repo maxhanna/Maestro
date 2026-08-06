@@ -22,6 +22,28 @@ public class EmailAccountConfig
     public string? label { get; set; }
 }
 
+public class LlamaEndpoint
+{
+    public string id { get; set; } = "";
+    public string name { get; set; } = "";
+    public string url { get; set; } = "http://localhost:8080";
+    public string model { get; set; } = "";
+}
+
+public class SavedThemeConfig
+{
+    public string name { get; set; } = "";
+    public Dictionary<string, string> colors { get; set; } = new();
+}
+
+public class FontSizesConfig
+{
+    public int log { get; set; } = 18;
+    public int llm { get; set; } = 14;
+    public int plan { get; set; } = 14;
+    public int metaplan { get; set; } = 12;
+}
+
 public class FrontendConfig
 {
     public List<ProjectDto> projects { get; set; } = new();
@@ -31,22 +53,25 @@ public class FrontendConfig
     public bool showIDE { get; set; } = true;
     public bool showKanban { get; set; } = true;
     public bool showCalendar { get; set; } = false;
+    public bool showNotes { get; set; } = false;
+    public bool showMeeting { get; set; } = false;
+    public bool meetingMuted { get; set; } = false;
+    public int meetingVolume { get; set; } = 70;
     public bool prByDefault { get; set; } = false;
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";
+    public string llamaModel { get; set; } = "lfm2.5-it-1.2b-FLM";
+    public List<LlamaEndpoint> llamaEndpoints { get; set; } = new();
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
     public List<string> disallowedTerminalRoots { get; set; } = new();
-    // Context size limits (tunable via settings panel)
     public int maxFileContextChars { get; set; } = 24000;
     public int maxFullFileTokens { get; set; } = 4096;
     public int maxContextChars { get; set; } = 22000;
     public int fileBodyTruncationChars { get; set; } = 8000;
     public int buildOutputTailChars { get; set; } = 8000;
     public int defaultMaxTokens { get; set; } = 2048;
-    // Multiple email accounts
     public List<EmailAccountConfig> emailAccounts { get; set; } = new();
-    // Legacy single-account fields (kept for backward compat with existing configs)
     public string? emailImapServer { get; set; }
     public int emailImapPort { get; set; } = 993;
     public bool emailUseSsl { get; set; } = true;
@@ -56,32 +81,52 @@ public class FrontendConfig
     public string? bughostedUsername { get; set; }
     public string? bughostedPassword { get; set; }
     public bool bughostedHeartbeatEnabled { get; set; } = false;
-    // CSS theme overrides — keyed by variable name (e.g. "--bg"), value is the color
     public Dictionary<string, string>? themeColors { get; set; }
+    public List<SavedThemeConfig> savedThemes { get; set; } = new();
+    public List<string> enabledTools { get; set; } = new();
+    public bool includeProjectSkeleton { get; set; } = true;
+    public bool includeEditKnowledge { get; set; } = false;
+    public bool extendThinking { get; set; } = true;
+    public int thinkingMaxTokens { get; set; } = 4096;
+    public bool compactThinkingContext { get; set; } = true;
+    public bool summarizeDiffContext { get; set; } = true;
+    public int diffContextSummaryChars { get; set; } = 6000;
+    public int llmTimeoutMinutes { get; set; } = 0;
+    public bool useVSCodeInsteadOfIDE { get; set; } = false;
+    public string ideTheme { get; set; } = "weaver-dark";
+    public bool ideMinimapVisible { get; set; } = true;
+    public FontSizesConfig fontSizes { get; set; } = new();
 }
 
 public class ConfigFileService
 {
-    private static readonly SemaphoreSlim ConfigWriteLock = new(1, 1);
-    private readonly string _configPath;
+    private readonly DatabaseService _db;
     private const string EncryptedPrefix = "DPAPI_B64:";
+    private const string ConfigKey = "config";
 
-    public string ConfigPath => _configPath;
-
-    public ConfigFileService(IWebHostEnvironment env)
+    public ConfigFileService(DatabaseService db)
     {
-        _configPath = Path.Combine(env.ContentRootPath, "weaverconfig.json");
+        _db = db;
     }
 
-    /// <summary>
-    /// Encrypts a password string using Windows DPAPI (CurrentUser scope).
-    /// Returns the encrypted value as base64 with a prefix marker.
-    /// If input is null/empty or already encrypted, returns as-is.
-    /// </summary>
+    // Compatibility constructor for isolated tests and legacy callers. Production
+    // wiring uses the shared DatabaseService registered by Program.cs.
+    public ConfigFileService(IWebHostEnvironment env)
+        : this(CreateCompatibilityDatabase())
+    {
+    }
+
+    private static DatabaseService CreateCompatibilityDatabase()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "weaver-config-compat-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        return new DatabaseService(
+            Path.Combine(root, "weaver.db"), root, Path.Combine(root, "weaverconfig.json"));
+    }
+
     private static string? EncryptPassword(string? plaintext)
     {
         if (string.IsNullOrEmpty(plaintext)) return plaintext;
-        // Don't double-encrypt
         if (plaintext.StartsWith(EncryptedPrefix, StringComparison.Ordinal)) return plaintext;
         if (!OperatingSystem.IsWindows())
             return plaintext;
@@ -94,7 +139,6 @@ public class ConfigFileService
         }
         catch
         {
-            // If DPAPI fails, store as plaintext fallback
             return plaintext;
         }
     }
@@ -115,7 +159,6 @@ public class ConfigFileService
         }
         catch
         {
-            // If decryption fails, return as-is (might be corrupted or different user)
             return encrypted;
         }
     }
@@ -140,7 +183,8 @@ public class ConfigFileService
 
     public async Task EnsureConfigAsync()
     {
-        if (System.IO.File.Exists(_configPath)) return;
+        var existing = _db.GetValue("weaver_config", ConfigKey);
+        if (existing != null) return;
         await WriteConfigAsync(new FrontendConfig());
     }
 
@@ -150,10 +194,11 @@ public class ConfigFileService
         FrontendConfig cfg;
         try
         {
-            var text = await System.IO.File.ReadAllTextAsync(_configPath);
-            cfg = JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
+            var text = _db.GetValue("weaver_config", ConfigKey);
+            cfg = string.IsNullOrWhiteSpace(text)
+                ? new FrontendConfig()
+                : JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
 
-            // Migration: populate emailAccounts from legacy single-account fields
             if (cfg.emailAccounts.Count == 0 &&
                 !string.IsNullOrWhiteSpace(cfg.emailUsername))
             {
@@ -172,29 +217,13 @@ public class ConfigFileService
         {
             cfg = new FrontendConfig();
         }
-        // Always decrypt passwords after loading
         DecryptAccountPasswords(cfg);
         return cfg;
     }
 
     public async Task WriteConfigAsync(FrontendConfig cfg)
     {
-        await ConfigWriteLock.WaitAsync();
-        try
-        {
-            await WriteConfigCoreAsync(cfg);
-        }
-        finally
-        {
-            ConfigWriteLock.Release();
-        }
-    }
-
-    private async Task WriteConfigCoreAsync(FrontendConfig cfg)
-    {
-        // Encrypt passwords before persisting to disk
         EncryptAccountPasswords(cfg);
-        // Sync legacy single-account fields from first email account for backward compat
         if (cfg.emailAccounts.Count > 0)
         {
             var first = cfg.emailAccounts[0];
@@ -212,12 +241,8 @@ public class ConfigFileService
         }
 
         var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
-
-        // Restore plaintext passwords in memory for the caller
         DecryptAccountPasswords(cfg);
 
-        var tmp = _configPath + ".tmp";
-        await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8);
-        System.IO.File.Move(tmp, _configPath, true);
+        _db.SetValue("weaver_config", ConfigKey, json);
     }
 }

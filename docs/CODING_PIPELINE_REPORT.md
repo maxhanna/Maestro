@@ -17,7 +17,7 @@ The `UnifiedPipeline` is the core agentic engine of Weaver. It currently follows
 *   **Impact**: High "edit failure" rate on complex UI components and service classes.
 
 ### B. Heuristic-Based Routing
-*   **Issue**: Routing between terminal commands and code edits relies on `AgentUtilities.ClassifyTask` (regex scoring).
+*   **Issue**: Routing between terminal commands and code edits relies on `AgentPlanParsing.ClassifyTask` (regex scoring).
 *   **Impact**: Ambiguous prompts often route to the wrong pipeline, wasting LLM tokens and time.
 
 ### C. Fragile AST Simulation

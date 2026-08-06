@@ -1,62 +1,56 @@
-﻿using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
-using System.IO;
+using Weaver.Services;
 namespace Weaver.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 public class FileHintsController : ControllerBase
 {
-        private readonly string _filePath;
-        public FileHintsController(IWebHostEnvironment env)
+    private readonly DatabaseService _db;
+
+    public FileHintsController(DatabaseService db)
+    {
+        _db = db;
+    }
+
+    [HttpGet]
+    public IActionResult GetFileHints()
+    {
+        var raw = _db.GetFileHints();
+        if (string.IsNullOrWhiteSpace(raw))
         {
-            _filePath = Path.Combine(env.ContentRootPath, "data/filehints.json");
+            var defaultContent = "{\"Projects\": {}}";
+            _db.SetFileHints(defaultContent);
+            raw = defaultContent;
         }
-        [HttpGet]
-        public IActionResult GetFileHints()
+        try
         {
-            // Check if file exists, if not create it with default structure
-            if (!System.IO.File.Exists(_filePath))
-            {
-                // Ensure the directory exists (good practice)
-                var directory = Path.GetDirectoryName(_filePath);
-                if (directory != null && !Directory.Exists(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                }
-                // Initialize with the default structure expected by the Angular client
-                // Using a raw string ensures the PascalCase "Projects" key matches the JS expectations
-                var defaultContent = "{\"Projects\": {}}";
-                System.IO.File.WriteAllText(_filePath, defaultContent);
-            }
-            var fileContent = System.IO.File.ReadAllText(_filePath);
-            try
-            {
-                var parsed = JsonDocument.Parse(fileContent);
-                return Ok(parsed.RootElement.Clone());
-            }
-            catch
-            {
-                return Ok(fileContent);
-            }
+            var parsed = JsonDocument.Parse(raw);
+            return Ok(parsed.RootElement.Clone());
         }
-        [HttpPut]
-        public IActionResult UpdateFileHints([FromBody] object content)
+        catch
         {
-            try
-            {
-                var json = JsonSerializer.Serialize(content);
-                JsonDocument.Parse(json);
-                System.IO.File.WriteAllText(_filePath, json);
-                return Ok("File hints updated successfully.");
-            }
-            catch (JsonException)
-            {
-                return BadRequest("Invalid JSON format.");
-            }
-            catch (Exception)
-            {
-                return StatusCode(500, "An error occurred while updating file hints.");
-            }
+            return Ok(raw);
         }
     }
+
+    [HttpPut]
+    public IActionResult UpdateFileHints([FromBody] object content)
+    {
+        try
+        {
+            var json = JsonSerializer.Serialize(content);
+            JsonDocument.Parse(json); // validate
+            _db.SetFileHints(json);
+            return Ok("File hints updated successfully.");
+        }
+        catch (JsonException)
+        {
+            return BadRequest("Invalid JSON format.");
+        }
+        catch (Exception)
+        {
+            return StatusCode(500, "An error occurred while updating file hints.");
+        }
+    }
+}

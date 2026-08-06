@@ -19,7 +19,7 @@ public class DebugSkeletonTests
                 "        }",
                 "    }"
             };
-            var s1 = AgentUtilities.GetSkeletonForRange(csharp, 0, csharp.Length);
+            var s1 = AgentSkeleton.GetSkeletonForRange(csharp, 0, csharp.Length);
             Console.WriteLine("--- C# Skeleton ---");
             Console.WriteLine(s1);
 
@@ -32,7 +32,7 @@ public class DebugSkeletonTests
                 "    println!(\"hello\");",
                 "}"
             };
-            var s2 = AgentUtilities.GetSkeletonForRange(go, 0, go.Length);
+            var s2 = AgentSkeleton.GetSkeletonForRange(go, 0, go.Length);
             Console.WriteLine("--- Go/Rust Skeleton ---");
             Console.WriteLine(s2);
 

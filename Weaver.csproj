@@ -8,10 +8,18 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationIcon>WeaverIcon.ico</ApplicationIcon>
+    <!-- Unit tests live in this project (see tests/UnitTests) so `dotnet test`
+         works straight from the repo root with no separate test project. The
+         app already defines its own entry point (top-level Program.cs), so the
+         test SDK must not generate a second one. -->
+    <IsTestProject>true</IsTestProject>
+    <GenerateProgramFile>false</GenerateProgramFile>
   </PropertyGroup> 
 
   <ItemGroup>
-    <Compile Remove="tests\**" />
+    <!-- Test sources (tests/UnitTests) compile into this project via the SDK's
+         default compile glob. The js/ test helper stays out of content and
+         embedded-resource globs. -->
     <EmbeddedResource Remove="tests\**" />
     <None Remove="tests\**" />
   </ItemGroup>
@@ -21,18 +29,63 @@
   </ItemGroup> 
 
   <ItemGroup>
+    <PackageReference Include="AngleSharp.Css" Version="0.18.0" />
     <PackageReference Include="MailKit" Version="4.17.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.12.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.8" />
     <PackageReference Include="System.Management" Version="10.0.9" />
     <PackageReference Include="TreeSitter.DotNet" Version="1.3.0" />
+    <PackageReference Include="WebPush" Version="1.0.13" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Test framework for the in-project unit tests (tests/UnitTests). PrivateAssets
+         keeps the test platform from flowing into consumers / NuGet output; the test
+         DLLs still land in bin/ so `dotnet test` resolves them. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="xunit" Version="2.9.2">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <!-- NOTE: coverlet.collector intentionally omitted. Its build target copies the
+         whole test platform into $(PublishDir), and code-coverage collection
+         (dotnet test with the XPlat coverage collector) is therefore unavailable.
+         To re-enable coverage, add the package AND extend CleanTestPlatformFromPublish
+         below with a coverlet* glob. Plain dotnet test works without it. -->
   </ItemGroup>
 
   <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild">
     <Message Importance="high" Text="Preparing C# Script Environment for JS evaluation..." />
-    <Exec Command="dotnet tool install --global dotnet-script" ContinueOnError="true" StandardOutputImportance="low" />
+    <!-- Install only when missing — `dotnet tool install` is a slow network/disk op
+         that was previously run on EVERY build (and therefore every test run). -->
+    <Exec Command="dotnet tool install --global dotnet-script"
+          Condition="!Exists('$(UserProfile)\.dotnet\tools\dotnet-script.exe')"
+          ContinueOnError="true" StandardOutputImportance="low" />
     <Exec Command="dotnet-script lint.csx" ContinueOnError="false" />
+  </Target>
+
+  <!-- Tests live in this project, so the test platform (testhost, code-coverage
+       profilers, Mono.Cecil, satellite resources) would otherwise leak into the
+       published single-file EXE. The Microsoft.CodeCoverage / TestHost packages
+       force-copy their folders into $(PublishDir) via raw Copy tasks that bypass
+       ResolvedFileToPublish, so the only reliable way to keep them out of the
+       shipped artifact is to delete them after publish completes. `dotnet test`
+       runs from bin/ and is unaffected. -->
+  <Target Name="CleanTestPlatformFromPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <_TestPlatformFiles Include="$(PublishDir)testhost*;$(PublishDir)Microsoft.CodeCoverage*;$(PublishDir)Microsoft.TestPlatform*;$(PublishDir)Microsoft.VisualStudio.TestPlatform*;$(PublishDir)Microsoft.VisualStudio.TraceDataCollector*;$(PublishDir)Microsoft.DiaSymReader*;$(PublishDir)Mono.Cecil*;$(PublishDir)NuGet.*" />
+      <_TestPlatformResources Include="$(PublishDir)*\Microsoft.VisualStudio.TraceDataCollector.resources.dll" />
+    </ItemGroup>
+    <Delete Files="@(_TestPlatformFiles);@(_TestPlatformResources)" />
+    <RemoveDir Directories="$(PublishDir)CodeCoverage;$(PublishDir)InstrumentationEngine;$(PublishDir)cs;$(PublishDir)de;$(PublishDir)es;$(PublishDir)fr;$(PublishDir)it;$(PublishDir)ja;$(PublishDir)ko;$(PublishDir)pl;$(PublishDir)pt-BR;$(PublishDir)ru;$(PublishDir)tr" />
   </Target>
 
 </Project>

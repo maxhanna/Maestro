@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html ng-app="kanbanApp">
 
 <head>
@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/ide.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/codemirror.min.css" />
   <link rel="icon" href="/weavericon.png">
+  <link rel="manifest" href="/manifest.json">
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 
@@ -24,14 +25,14 @@
         <!-- Spider thorax -->
         <circle cx="12" cy="12" r="4" fill="var(--brand-tertiary)" />
         <!-- Spider legs -->
-        <line x1="6" y1="12" x2="2" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="6" y1="12" x2="2" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="18" y1="12" x2="22" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="18" y1="12" x2="22" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="6" x2="8" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="6" x2="16" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="18" x2="8" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="18" x2="16" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="6" y1="12" x2="2" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="6" y1="12" x2="2" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="18" y1="12" x2="22" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="18" y1="12" x2="22" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="6" x2="8" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="6" x2="16" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="18" x2="8" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="18" x2="16" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
         <!-- Spider abdomen details -->
         <circle cx="12" cy="12" r="2.5" fill="var(--brand-secondary)" />
         <circle cx="12" cy="12" r="1.2" fill="white" />
@@ -48,18 +49,18 @@
         <path d="M10 12 L8 14 M14 12 L16 14" stroke="var(--brand-secondary)" stroke-width="1" fill="none" />
         <circle cx="12" cy="18" r="0.5" fill="var(--brand-secondary)" />
         <circle cx="12" cy="18" r="0.2" fill="white" />
-        <circle cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="4" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="4" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="2" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="2" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
         <!-- Additional web pattern details -->
-        <circle cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
+        <circle class="brand-ring" cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
           stroke-dasharray="1,3" />
-        <circle cx="12" cy="12" r="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
+        <circle class="brand-ring" cx="12" cy="12" r="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
           stroke-dasharray="1,3" />
         <!-- Spider web connection lines -->
         <line x1="12" y1="12" x2="12" y2="4" stroke="var(--brand-secondary)" stroke-width="0.5" />
@@ -70,14 +71,14 @@
         <!-- Spider thorax -->
         <circle cx="12" cy="12" r="4" fill="var(--brand-tertiary)" />
         <!-- Spider legs -->
-        <line x1="6" y1="12" x2="2" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="6" y1="12" x2="2" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="18" y1="12" x2="22" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="18" y1="12" x2="22" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="6" x2="8" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="6" x2="16" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="18" x2="8" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
-        <line x1="12" y1="18" x2="16" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="6" y1="12" x2="2" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="6" y1="12" x2="2" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="18" y1="12" x2="22" y2="8" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="18" y1="12" x2="22" y2="16" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="6" x2="8" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="6" x2="16" y2="2" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="18" x2="8" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
+        <line class="brand-leg" x1="12" y1="18" x2="16" y2="22" stroke="var(--brand-secondary)" stroke-width="1.2" />
         <!-- Spider abdomen details -->
         <circle cx="12" cy="12" r="2.5" fill="var(--brand-secondary)" />
         <circle cx="12" cy="12" r="1.2" fill="white" />
@@ -94,18 +95,18 @@
         <path d="M10 12 L8 14 M14 12 L16 14" stroke="var(--brand-secondary)" stroke-width="1" fill="none" />
         <circle cx="12" cy="18" r="0.5" fill="var(--brand-secondary)" />
         <circle cx="12" cy="18" r="0.2" fill="white" />
-        <circle cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="4" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="4" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="2" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="2" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
         <!-- Additional web pattern details -->
-        <circle cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
+        <circle class="brand-ring" cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
           stroke-dasharray="1,3" />
-        <circle cx="12" cy="12" r="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
+        <circle class="brand-ring" cx="12" cy="12" r="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
           stroke-dasharray="1,3" />
         <!-- Spider web connection lines -->
         <line x1="12" y1="12" x2="12" y2="4" stroke="var(--brand-secondary)" stroke-width="0.5" />
@@ -140,18 +141,18 @@
         <!-- Spider fangs -->
         <path d="M10 12 L8 14 M14 12 L16 14" stroke="var(--brand-secondary)" stroke-width="1" fill="none" />
         <!-- Spider web pattern -->
-        <circle cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="4" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="4" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="2" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="2" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
         <!-- Additional web pattern details -->
-        <circle cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
+        <circle class="brand-ring" cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
           stroke-dasharray="1,3" />
-        <circle cx="12" cy="12" r="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
+        <circle class="brand-ring" cx="12" cy="12" r="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
           stroke-dasharray="1,3" />
         <!-- Spider web connection lines -->
         <line x1="12" y1="12" x2="12" y2="4" stroke="var(--brand-secondary)" stroke-width="0.5" />
@@ -163,12 +164,12 @@
         <!-- Spider fangs -->
         <path d="M10 12 L8 14 M14 12 L16 14" stroke="var(--brand-secondary)" stroke-width="1" fill="none" />
         <!-- Spider web pattern -->
-        <circle cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
-        <circle cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
+        <circle class="brand-ring" cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5"
           stroke-dasharray="2,2" />
         <!-- Additional web pattern details -->
-        <circle cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
+        <circle class="brand-ring" cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.3"
           stroke-dasharray="1,3" />
         <!-- Spider web connection lines -->
         <line x1="12" y1="12" x2="12" y2="4" stroke="var(--brand-secondary)" stroke-width="0.5" />
@@ -184,6 +185,41 @@
       <span class="brand-text">Weaver</span>
     </div>
     <div class="project-picker">
+      <button type="button" class="header-stat header-stat-rank rank-trigger" ng-if="vm.showKanban"
+        ng-click="vm.toggleUserStats()" ng-blur="vm.closeUserStatsOnBlur($event)"
+        ng-class="{active: vm.showUserStats}"
+        title="Rank — points from cards, benchmarks, projects & archived">
+        <span class="rank-insignia rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
+          <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
+          <span class="rank-stars"><i ng-repeat="s in vm.chevronArray(vm.userRank(vm.userStats()).stars) track by $index" class="rank-star">★</i></span>
+        </span>
+        {{vm.userRankTitle(vm.userStats())}} ▾</button>
+      <div class="user-stats-popup" ng-if="vm.showUserStats" ng-blur="vm.closeUserStatsOnBlur($event)" tabindex="0"
+        ng-init="rp = vm.userRankProgress(vm.userStats())">
+        <div class="user-stats-popup-title">
+          <span class="rank-insignia rank-insignia-lg rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
+            <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
+            <span class="rank-stars"><i ng-repeat="s in vm.chevronArray(vm.userRank(vm.userStats()).stars) track by $index" class="rank-star">★</i></span>
+          </span>
+          {{vm.userRankTitle(vm.userStats())}}
+        </div>
+        <div class="rank-progress" ng-if="rp.next">
+          <div class="rank-progress-head">
+            <span class="rank-progress-label">{{rp.toNext | number:0}} pts to <b>{{rp.next.title}}</b></span>
+            <span class="rank-progress-pct">{{rp.pct | number:0}}%</span>
+          </div>
+          <div class="rank-progress-track">
+            <div class="rank-progress-fill rank-grade-{{rp.next.grade}}" ng-style="{width: rp.pct + '%'}"></div>
+          </div>
+        </div>
+        <div class="rank-progress rank-progress-max" ng-if="!rp.next">🏆 Top rank reached — you're at the pinnacle</div>
+        <span class="header-stat" title="Cards done — {{vm.userStats().done}} across {{vm.userStats().archived}} archived">✅
+          {{vm.userStats().done}} done</span>
+        <span class="header-stat" title="Finished this week">📅 {{vm.userStats().doneThisWeek}} this week</span>
+        <span class="header-stat" title="Daily streak">🔥 {{vm.userStats().streak}} day streak</span>
+        <span class="header-stat" title="Best benchmark score">📊 {{vm.userStats().bestScore}}% best score</span>
+        <span class="header-stat" title="Total archived cards">🗄 {{vm.userStats().archived}} archived</span>
+      </div>
       <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
         ng-change="vm.changeProject()"></select>
@@ -200,27 +236,32 @@
             Benchmarks</button>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showIDE" /> Show IDE
+              <input type="checkbox" ng-model="vm.showIDE" ng-change="vm.saveSettings(true)" /> Show IDE
             </label>
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showTerminal" /> Show Terminal
+              <input type="checkbox" ng-model="vm.showCalendar" ng-change="vm.saveSettings(true)" /> Show Calendar
             </label>
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showCalendar" /> Show Calendar
+              <input type="checkbox" ng-model="vm.showAI" ng-change="vm.saveSettings(true)" /> Show AI Chat
             </label>
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showAI" /> Show AI Chat
+              <input type="checkbox" ng-model="vm.showKanban" ng-change="vm.saveSettings(true)" /> Show Kanban
             </label>
           </div>
           <div class="form-row">
             <label>
-              <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban
+              <input type="checkbox" ng-model="vm.showNotes" ng-change="vm.saveSettings(true)" /> Show Notes
+            </label>
+          </div>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showMeeting" ng-change="vm.saveSettings(true)" /> Show Meeting View
             </label>
           </div>
         </div>
@@ -289,8 +330,45 @@
               <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span>
               <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize | formatNumber}}
                 tokens</span>
+              <span ng-if="vm.complexityScore != null" class="complexity-tag"
+                title="Complexity: {{vm.complexityScore}}/100 ({{vm.complexityLabel}}). Thinking capped at {{vm.complexityTokenCap}} of {{vm.complexityMaxTokens}} max tokens.{{vm.complexityAtomicSteps ? ' ~' + vm.complexityAtomicSteps + ' atomic step(s) estimated.' : ''}}">
+                🧠 {{vm.complexityLabel}}<span ng-if="vm.complexityAtomicSteps">&nbsp;·&nbsp;~{{vm.complexityAtomicSteps}} steps</span>
+              </span>
             </span>
             <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
+            <span class="endpoint-tag" ng-if="vm.currentRun && vm.currentRun.endpointName"
+              title="{{vm.currentRun.endpointUrl}} / {{vm.currentRun.endpointModel}}">⚡ {{vm.currentRun.endpointName}}<span ng-if="vm.endpointHealthBadge(vm.currentRun.endpointUrl)" class="endpoint-health endpoint-health-{{vm.endpointHealthBadge(vm.currentRun.endpointUrl).level}}" title="{{vm.endpointHealthBadge(vm.currentRun.endpointUrl).title}}">{{vm.endpointHealthBadge(vm.currentRun.endpointUrl).icon}}</span></span>
+          </div>
+
+          <!-- Concurrent agent sections (one per simultaneously-running agent, side by side) -->
+          <div class="agent-run-sections" ng-if="vm.activeRunCount() > 1">
+            <div class="agent-run-section" ng-repeat="run in vm.agentRuns track by run.runId"
+              ng-class="{active: run.active, done: run.status === 'done', error: run.status === 'error'}">
+              <div class="agent-run-header">
+                <span class="agent-run-status">{{run.active ? '●' : (run.status === 'error' ? '✕' : '✓')}}</span>
+                <span class="agent-run-endpoint" title="{{run.endpointUrl}} / {{run.endpointModel}}">⚡ {{run.endpointName}}<span ng-if="vm.endpointHealthBadge(run.endpointUrl)" class="endpoint-health endpoint-health-{{vm.endpointHealthBadge(run.endpointUrl).level}}" title="{{vm.endpointHealthBadge(run.endpointUrl).title}}">{{vm.endpointHealthBadge(run.endpointUrl).icon}}</span></span>
+                <span class="agent-run-task" title="{{run.cardText}}">{{run.cardText | limitTo:40}}</span>
+                <span class="agent-run-progress" ng-if="run.active && run.llmProgressPercent != null">LLM {{run.llmProgressPercent}}%</span>
+                <span class="agent-run-duration">{{ vm.msToDigitalTime(run.elapsed) }}</span>
+                <button ng-if="run.active" ng-click="vm.stopRun(run)" class="small ghost" title="Stop this agent">⏹</button>
+              </div>
+              <details class="agent-run-log">
+                <summary>📋 Log ({{run.log.length}})</summary>
+                <div class="log-entries" style="margin-top:6px;max-height:180px;overflow-y:auto;">
+                  <div class="log-entry" ng-repeat="e in run.log track by $index" ng-class="e.level">
+                    <span class="log-ts">{{e.ts}}</span><span class="log-msg">{{e.message}}</span>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <!-- LLM loading progress (llama.cpp /slots progress forwarded over SSE) -->
+          <div class="llm-progress span-full" ng-if="vm.streamingActive && vm.llmProgressPercent != null">
+            <span class="llm-progress-label">LLM {{vm.llmProgressPercent}}%</span>
+            <div class="llm-progress-track">
+              <div class="llm-progress-fill" ng-style="{width: (vm.llmProgressPercent || 0) + '%'}"></div>
+            </div>
           </div>
 
           <div class="agent-current" ng-if="vm.streamingActive && vm.getActiveStep()">
@@ -409,6 +487,13 @@
               style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
               <span>🧠 Meta-Plan: {{card._metaPlan.summary}} <span class="text-xs"
                   style="margin-left:4px;opacity:0.6;">(Complexity: {{card._metaPlan.complexity}}/10)</span></span>
+              <span class="log-font-controls">
+                <button class="log-font-btn" ng-click="vm.decreaseMetaPlanFont(); $event.stopPropagation()"
+                  title="Decrease font size">−</button>
+                <span class="log-font-size-label">{{vm.metaPlanFontSize}}px</span>
+                <button class="log-font-btn" ng-click="vm.increaseMetaPlanFont(); $event.stopPropagation()"
+                  title="Increase font size">+</button>
+              </span>
               <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
                 style="font-size:10px; padding: 0 4px; line-height: 1.2;"
                 title="Clear meta-plan and restart">🗑</button>
@@ -416,14 +501,15 @@
             <div class="meta-plan-items">
               <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
                 ng-class="{'meta-plan-done': sp.done}"
-                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                ng-style="{'font-size': vm.metaPlanFontSize + 'px'}"
+                style="display: flex; gap: 6px; margin-bottom: 4px;">
                 <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
                 <div class="meta-plan-body" style="flex: 1; min-width: 0;">
                   <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
                   <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
                   <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
                     <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
-                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace;">{{f}}</span>
                   </div>
                 </div>
               </div>
@@ -449,8 +535,9 @@
               <pre class="streaming-text" ng-style="{'font-size': vm.planFontSize + 'px'}"
                 ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
               <div ng-if="vm.planItems.length || vm.streamingSteps.length" class="plan-items-list"
-                ng-style="{'font-size': vm.planFontSize + 'px'}" style="margin-top: 8px;">
+                style="margin-top: 8px;">
                 <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
+                  ng-style="{'font-size': vm.planFontSize + 'px'}"
                   ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
                   <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                     '⬜'}}</span>
@@ -458,25 +545,64 @@
                     <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                       <span ng-if="item.metaGroup" class="plan-item-metagroup"
                         title="Sub-plan group">{{item.metaGroup}}</span>
-                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
+                      <span class="plan-item-change plan-item-thinking" style="flex:1;min-width:0;" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
-                        style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                        style="cursor:pointer;opacity:0.5;font-size:0.87em;flex-shrink:0;" title="Show edit details">
                         {{item._showDetail ? '▲' : '▼'}}
                       </span>
                     </div>
+                    <div ng-if="item.diffs && item.diffs.length" style="margin:2px 0 0 18px;font-size:0.87em;">
+                      <span ng-repeat="d in item.diffs" style="display:block;margin:1px 0;">
+                        <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)" title="Click to preview diff">
+                          <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                          <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <code style="font-size:0.9em;opacity:0.8;">{{d.split('/').pop()}}</code>
+                        </span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;">Apply</button>
+                        <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);font-size:0.9em;">✓</span>
+                        <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
+                        <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg2);border-radius:3px;max-height:120px;overflow-y:auto;font-family:monospace;font-size:0.9em;white-space:pre-wrap;word-break:break-all;">
+                          <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                        </div>
+                        <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:0.9em;">{{item._previews[d].error}}</div>
+                      </span>
+                    </div>
                     <div ng-if="item._showDetail" class="plan-item-detail"
-                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
                       <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
                         item.oldString.slice(0,200) + '…' : item.oldString}}</div>
                       <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
                         item.newString.slice(0,200) + '…' : item.newString}}</div>
+                      <div ng-if="item.diffs && item.diffs.length" style="margin-top:4px;">
+                        <strong>DIFFS:</strong>
+                        <span ng-repeat="d in item.diffs" style="display:block;margin:2px 0;">
+                          <span style="cursor:pointer;" ng-click="vm.previewDiff(d, item)">
+                            <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
+                            <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                            <code>{{d.split('/').pop()}}</code>
+                          </span>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;">Apply</button>
+                          <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);">✓</span>
+                          <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                          <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                          <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
+                          <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:1em;white-space:pre-wrap;word-break:break-all;">
+                            <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
+                          </div>
+                          <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:0.9em;">{{item._previews[d].error}}</div>
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
                 <div ng-repeat="s in vm.streamingSteps track by s.index" ng-if="s.type==='plan' || s.type==='explore'"
                   class="plan-item-row"
+                  ng-style="{'font-size': vm.planFontSize + 'px'}"
                   ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
                   <span class="plan-item-icon">
                     {{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}
@@ -489,11 +615,11 @@
                         ''}}</span>
                     </div>
                     <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail"
-                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
                       {{s.thinking}}
                     </div>
                     <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
-                      style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;font-size:10px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
+                      style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
                       {{s.error}}
                     </div>
                   </div>
@@ -528,7 +654,8 @@
           <div>
             <details ng-attr-open="{{vm.streamingActive ? 'open' : undefined}}">
               <summary>💻 Commands ({{vm.streamingSteps.length}})</summary>
-              <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length">
+              <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length"
+                ng-style="{'font-size': vm.planFontSize + 'px'}">
                 <details class="agent-step-panel" ng-repeat="s in vm.streamingSteps track by s.index"
                   ng-class="s.status || 'pending'"
                   ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
@@ -587,6 +714,30 @@
                         <span class="file-edit-chip" ng-repeat="p in s.suggestions">{{p}}</span>
                       </div>
                       <pre ng-if="s.snippet" class="snippet-hint">{{s.snippet}}</pre>
+                    </div>
+                    <div class="step-detail" ng-if="s.diffs && s.diffs.length">
+                      <strong>Available diffs:</strong>
+                      <div class="diff-item" ng-repeat="d in s.diffs">
+                        <span style="cursor:pointer;" ng-click="vm.previewDiff(d, s)">
+                          <span ng-if="(s._previews && s._previews[d] && s._previews[d].loading)">⏳</span>
+                          <span ng-if="!(s._previews && s._previews[d] && s._previews[d].loading)">{{(s._previews && s._previews[d] && s._previews[d].show) ? '▼' : '▶'}}</span>
+                          <code class="diff-path">{{d.split('/').pop()}}</code>
+                        </span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, s)" ng-disabled="s._applyingDiff || s._diffApplied || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)">
+                          <span ng-if="!s._applyingDiff">Apply</span>
+                          <span ng-if="s._applyingDiff">Applying...</span>
+                        </button>
+                        <span class="diff-applied" ng-if="s._diffApplied || (s._previews && s._previews[d] && s._previews[d].deleted)">✓</span>
+                        <button ng-click="vm.deleteDiff(d, s, $event)" ng-disabled="s._applyingDiff || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:0.64em;padding:0 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                        <button ng-click="vm.openDiffInIde(d, s, $event)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:0.64em;padding:0 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                        <span ng-if="s._previews && s._previews[d] && s._previews[d].deleting" style="color:#e06c75;font-size:0.64em;">deleting…</span>
+                        <span class="step-err" ng-if="s._diffError && d === s._diffPath">({{s._diffError}})</span>
+                        <div ng-if="s._previews && s._previews[d] && s._previews[d].show" style="margin-top:4px;padding:4px;background:var(--bg2);border-radius:3px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:0.71em;white-space:pre-wrap;word-break:break-all;">
+                          <pre style="margin:0;line-height:1.4;">{{s._previews[d].content}}</pre>
+                        </div>
+                        <div ng-if="s._previews && s._previews[d] && s._previews[d].error" style="color:#e06c75;font-size:0.64em;">{{s._previews[d].error}}</div>
+                        <span class="step-err" ng-if="s._previews && s._previews[d] && s._previews[d].deleteError">({{s._previews[d].deleteError}})</span>
+                      </div>
                     </div>
                   </div>
                 </details>
@@ -651,12 +802,30 @@
     </div>
 
     <!-- FLOATING IDE PANEL -->
-    <div class="ide-floating-panel" ng-if="vm.showIDE"
-      ng-style="{left: vm.ide.left + 'px', top: vm.ide.top + 'px', width: vm.ide.width + 'px', height: vm.ide.height + 'px'}">
+    <div class="ide-floating-panel" ng-if="vm.showIDE" ng-mousedown="vm.bringPanelToFront('ide')"
+      ng-style="{left: vm.ide.left + 'px', top: vm.ide.top + 'px', width: vm.ide.width + 'px', height: vm.ide.height + 'px', zIndex: vm.panelZ.ide}">
       <div ng-include="'ide.html'" style="height: 100%; width: 100%; background: var(--bg);"></div>
       <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startResize('e', $event)"></div>
       <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startResize('s', $event)"></div>
       <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startResize('se', $event)"></div>
+    </div>
+
+    <!-- FLOATING NOTES PANEL -->
+    <div class="notes-floating-panel" ng-if="vm.showNotes" ng-mousedown="vm.bringPanelToFront('notes')"
+      ng-style="{left: vm.notes.left + 'px', top: vm.notes.top + 'px', width: vm.notes.width + 'px', height: vm.notes.height + 'px', zIndex: vm.panelZ.notes}">
+      <div ng-include="'notes.html'" style="height: 100%; width: 100%; background: var(--bg);"></div>
+      <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startNotesResize('e', $event)"></div>
+      <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startNotesResize('s', $event)"></div>
+      <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startNotesResize('se', $event)"></div>
+    </div>
+
+    <!-- FLOATING MEETING VIEW PANEL -->
+    <div class="meeting-floating-panel" ng-if="vm.showMeeting" ng-mousedown="vm.bringPanelToFront('meeting')"
+      ng-style="{left: vm.meeting.left + 'px', top: vm.meeting.top + 'px', width: vm.meeting.width + 'px', height: vm.meeting.height + 'px', zIndex: vm.panelZ.meeting}">
+      <div ng-include="'meeting.html'" style="height: 100%; width: 100%; background: var(--bg);"></div>
+      <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startMeetingResize('e', $event)"></div>
+      <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startMeetingResize('s', $event)"></div>
+      <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startMeetingResize('se', $event)"></div>
     </div>
   </main>
 
@@ -874,323 +1043,599 @@
 
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()">
-    <div class="popup-panel settings-panel" style="max-width:480px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel settings-panel" style="max-width:580px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>⚙ Settings</strong>
         <button ng-click="vm.closeSettingsPanel()">✕</button>
       </div>
+
+      <!-- Tab navigation -->
+      <div class="settings-tabs" style="display:flex;border-bottom:1px solid rgba(255,255,255,0.1);overflow-x:auto;gap:0;flex-shrink:0;">
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'appearance'}"
+          ng-click="vm.settingsTab = 'appearance'">🎨 Appearance</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'agent'}"
+          ng-click="vm.settingsTab = 'agent'">🤖 Agent</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'panels'}"
+          ng-click="vm.settingsTab = 'panels'">🖥 Panels</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'integrations'}"
+          ng-click="vm.settingsTab = 'integrations'">🔗 Integrations</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'security'}"
+          ng-click="vm.settingsTab = 'security'">🛡 Security</button>
+        <button class="settings-tab" ng-class="{active: vm.settingsTab === 'files'}"
+          ng-click="vm.settingsTab = 'files'">📁 Files</button>
+      </div>
+
       <div class="popup-body">
 
-        <details>
-          <summary class="settings-header">Auto-queue</summary>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes
-            </label>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Panels</summary>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showCalendar" /> Show Calendar view
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showIDE" /> Show IDE
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.prByDefault" /> PR enabled by default
-            </label>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">OpenAI/llama.cpp/Ollama Endpoint Url</summary>
-          <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
-        </details>
-        <details>
-          <summary class="settings-header">Context Size Limits</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;gap:6px;padding:8px 0;">
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-maxFileContextChars">Max File Context Chars</label>
-                <span>{{vm.maxFileContextChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-maxFileContextChars" ng-model="vm.maxFileContextChars" min="4000" max="64000"
-                step="1000" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-maxFullFileTokens">Max Full File Tokens</label>
-                <span>{{vm.maxFullFileTokens | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-maxFullFileTokens" ng-model="vm.maxFullFileTokens" min="512" max="16384"
-                step="512" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-maxContextChars">Max Context Chars</label>
-                <span>{{vm.maxContextChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-maxContextChars" ng-model="vm.maxContextChars" min="4000" max="64000"
-                step="1000" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-fileBodyTruncation">File Body Truncation Chars</label>
-                <span>{{vm.fileBodyTruncationChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-fileBodyTruncation" ng-model="vm.fileBodyTruncationChars" min="1000"
-                max="32000" step="500" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-buildOutputTail">Build Output Tail Chars</label>
-                <span>{{vm.buildOutputTailChars | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-buildOutputTail" ng-model="vm.buildOutputTailChars" min="1000" max="32000"
-                step="500" style="width:100%;" />
-            </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;">
-                <label for="ctx-defaultMaxTokens">Default Max Tokens</label>
-                <span>{{vm.defaultMaxTokens | formatNumber}}</span>
-              </div>
-              <input type="range" id="ctx-defaultMaxTokens" ng-model="vm.defaultMaxTokens" min="256" max="16384"
-                step="256" style="width:100%;" />
-            </div>
-            <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the
-              agent to handle larger files but consume more tokens.</span>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">CSS Theme</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-              <div><label style="font-size:12px;">Background (--bg)</label>
-                <input type="color" ng-model="vm.themeColors['--bg']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Surface (--surface)</label>
-                <input type="color" ng-model="vm.themeColors['--surface']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Panel (--panel)</label>
-                <input type="color" ng-model="vm.themeColors['--panel']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Text (--text)</label>
-                <input type="color" ng-model="vm.themeColors['--text']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Muted (--muted)</label>
-                <input type="color" ng-model="vm.themeColors['--muted']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Accent (--accent)</label>
-                <input type="color" ng-model="vm.themeColors['--accent']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Accent 2 (--accent-2)</label>
-                <input type="color" ng-model="vm.themeColors['--accent-2']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Success (--success)</label>
-                <input type="color" ng-model="vm.themeColors['--success']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Warning (--warning)</label>
-                <input type="color" ng-model="vm.themeColors['--warning']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
-              </div>
-              <div><label style="font-size:12px;">Error (--error)</label>
-                <input type="color" ng-model="vm.themeColors['--error']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+        <!-- ===== TAB: Appearance ===== -->
+        <div ng-show="vm.settingsTab === 'appearance'">
+          <details>
+            <summary class="settings-header">IDE Editor Theme</summary>
+            <div class="form-row theme-picker">
+              <input ng-model="vm.ideThemeFilter" placeholder="Search themes…" class="theme-search" />
+              <div class="theme-card-grid">
+                <div ng-repeat="t in vm.ideThemeList | filter:vm.ideThemeFilter track by t.value"
+                  ng-click="vm.applyIdeTheme(t.value)" class="theme-card"
+                  ng-class="{'active': vm.ideTheme === t.value}" title="{{t.name}}"
+                  role="button" tabindex="0"
+                  ng-keydown="$event.key === 'Enter' && vm.applyIdeTheme(t.value)">
+                  <div class="theme-card-preview theme-card-preview-cm" data-theme="{{t.value}}"></div>
+                  <span class="theme-card-label">
+                    <span class="theme-card-name">{{t.name}}</span>
+                    <span class="theme-card-mode" ng-if="t.dark === false">light</span>
+                    <span class="theme-card-check" ng-if="vm.ideTheme === t.value">✓</span>
+                  </span>
+                </div>
               </div>
             </div>
-            <button ng-click="vm.resetThemeColors()" style="margin-top:4px;padding:4px 12px;font-size:12px;">Reset to defaults</button>
-            <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
-              <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">Quick Themes</div>
-              <div style="display:flex;flex-wrap:wrap;gap:4px;">
+          </details>
+
+          <details>
+            <summary class="settings-header">Overall App Theme</summary>
+            <div class="form-row theme-picker">
+              <!-- Preset quick themes as visual cards -->
+              <div class="theme-section-label">Preset themes</div>
+              <div class="theme-card-grid">
                 <button ng-repeat="name in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
-                  style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
-                  {{name}}
+                  class="theme-card theme-card-preset" ng-class="{'active': vm.isPresetActive(name)}"
+                  title="Apply {{name}}">
+                  <span class="theme-swatches">
+                    <i ng-repeat="c in vm.presetSwatches(name)" ng-style="{'background': c}"></i>
+                  </span>
+                  <span class="theme-card-label">
+                    <span class="theme-card-name">{{name}}</span>
+                    <span class="theme-card-check" ng-if="vm.isPresetActive(name)">✓</span>
+                  </span>
                 </button>
               </div>
-            </div>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Email (IMAP)</summary>
-          <div class="form-row"
-            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;gap:12px;">
-            <div ng-repeat="acct in vm.emailAccounts track by $index"
-              style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                <span style="font-size:13px;font-weight:600;color:var(--text);">Account {{$index + 1}}</span>
-                <button ng-click="vm.removeEmailAccount($index)"
-                  style="background:none;border:none;color:#ff5252;cursor:pointer;font-size:13px;">✕ Remove</button>
-              </div>
-              <div style="display:flex;gap:8px;margin-bottom:6px;">
-                <input ng-model="acct.label" placeholder="Label (e.g., Gmail, Work)" style="flex:1;" />
-              </div>
-              <div style="display:flex;gap:8px;margin-bottom:6px;">
-                <input ng-model="acct.imapServer" placeholder="imap.example.com" style="flex:1;"
-                  ng-change="vm.checkEmailServer($index)" />
-                <input ng-model="acct.imapPort" type="number" placeholder="993" style="width:80px;" />
-              </div>
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                <input ng-model="acct.username" placeholder="Email username" style="flex:1;" />
-                <input ng-model="acct.password" type="password" placeholder="Password" style="flex:1;" />
-              </div>
-              <div style="display:flex;align-items:center;gap:12px;">
-                <label style="font-size:12px;">
-                  <input type="checkbox" ng-model="acct.useSsl" /> Use SSL
-                </label>
-                <button ng-click="vm.testEmailConnection($index)" ng-disabled="acct.testing"
-                  style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);">
-                  Test Connection</button>
-                <span ng-if="acct.testResult" style="font-size:12px;"
-                  ng-class="acct.testResult.success ? 'success-text' : 'error-text'">{{acct.testResult.message}}</span>
-              </div>
-              <div ng-if="acct.showAppPasswordInstructions" class="app-password-instructions" style="margin-top:8px;">
-                <span class="settings-help">If you have 2FA enabled, you'll need an app password instead of your regular
-                  password.</span>
-                <div class="app-password-steps">
-                  <p ng-if="acct.showAppPasswordInstructions === 'google'">For <strong>Google</strong> accounts:</p>
-                  <p ng-if="acct.showAppPasswordInstructions === 'microsoft'">For <strong>Outlook/Hotmail</strong>
-                    accounts:</p>
-                  <ol>
-                    <li ng-if="acct.showAppPasswordInstructions === 'google'">Go to <a
-                        href="https://myaccount.google.com/apppasswords" target="_blank">Google App Passwords</a></li>
-                    <li ng-if="acct.showAppPasswordInstructions === 'microsoft'">Go to <a
-                        href="https://account.live.com/password/apppasswords" target="_blank">Microsoft App
-                        Passwords</a></li>
-                    <li>Generate a new app password</li>
-                    <li>Copy and paste it into the Password field above</li>
-                  </ol>
+
+              <!-- Theme change diff: shows exactly which colors a preset/import altered -->
+              <div class="theme-diff" ng-if="vm.themeDiff">
+                <div class="theme-diff-head">
+                  <span class="theme-diff-title">{{vm.themeDiff.title}}</span>
+                  <button type="button" class="theme-diff-close" ng-click="vm.clearThemeDiff()"
+                    title="Dismiss" aria-label="Dismiss diff">✕</button>
+                </div>
+                <div class="theme-diff-empty" ng-if="vm.themeDiff.rows.length === 0">
+                  No color variables would change — the theme matches your current colors.
+                </div>
+                <div class="theme-diff-list" ng-if="vm.themeDiff.rows.length > 0">
+                  <div class="theme-diff-row" ng-repeat="r in vm.themeDiff.rows">
+                    <code class="theme-diff-key">{{r.key}}</code>
+                    <span class="theme-diff-swatch" ng-style="{'background': r.from}" title="{{r.from}}"></span>
+                    <span class="theme-diff-val theme-diff-old">{{r.from}}</span>
+                    <span class="theme-diff-arrow">→</span>
+                    <span class="theme-diff-swatch" ng-style="{'background': r.to}" title="{{r.to}}"></span>
+                    <span class="theme-diff-val theme-diff-new">{{r.to}}</span>
+                  </div>
                 </div>
               </div>
-            </div>
-            <button ng-click="vm.addEmailAccount()"
-              style="padding:6px 16px;font-size:13px;background:var(--surface2);border:1px dashed var(--border);border-radius:8px;cursor:pointer;color:var(--accent);width:100%;">+
-              Add Email Account</button>
-            <span class="settings-help">Configure one or more IMAP accounts so the agent can read your email.</span>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
-          <div class="form-row"
-            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-              <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
-              <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
-            </div>
-            <label style="font-size:12px;">
-              <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" /> Enable heartbeat (keep dashboard in
-              sync)
-            </label>
-            <span class="settings-help">
-              When enabled, Weaver will send heartbeats and kanban data to bughosted.com.
-              You can send commands from the dashboard to execute locally.
-              <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
-              <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
-              <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
-              <span ng-if="vm.bughostedTesting" style="color:#ff9800;"> Testing…</span>
-              <span ng-if="vm.bughostedTestResult === 'ok'" style="color:#4caf50;"> Test OK</span>
-              <span ng-if="vm.bughostedTestResult === 'fail'" style="color:#f44336;"> Test failed:
-                {{vm.bughostedTestError}}</span>
-            </span>
-            <div style="display:flex;gap:6px;margin-top:6px;">
-              <button ng-click="vm.bughostedTestConnection()" ng-disabled="vm.bughostedTesting || !vm.bughostedUsername"
-                style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);">
-                Test Connection</button>
-              <button ng-click="vm.bughostedForceReconnect()"
-                style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);">
-                ↻ Reconnect</button>
-            </div>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Terminal Approval</summary>
-          <div>
-            <div>
-              <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
-                <option value="approveEach">Approve every command</option>
-                <option value="approveRoot">Approve command roots</option>
-                <option value="approveAll">Approve all commands</option>
-              </select>
-            </div>
-            <div class="form-row" style="display:flex;flex-direction:column;">
-              <div>
-                <label for="settings-approved-roots" class="settings-header">Approved Roots</label>
-                <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText"
-                  placeholder="git, dotnet, rg, npm" />
-              </div>
-              <div>
-                <label for="settings-disallowed-roots" class="settings-header">Disallowed Roots</label>
-                <input id="settings-disallowed-roots" ng-model="vm.disallowedTerminalRootsText"
-                  placeholder="git, dotnet, rg, npm" />
-              </div>
-              <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
-            </div>
-          </div>
-        </details>
-        <div class="form-row" style="display: flex; flex-direction: column;">
-          <details>
-            <summary
-              style="cursor:pointer;font-weight:700;font-size:1.1em;text-transform:uppercase;letter-spacing:0.5px;color:var(--accent);padding:8px 0;">
-              File Hints
-            </summary>
-            <div style="margin-top:8px;">
-              <span style="font-size:12px;color:var(--muted);margin-bottom:8px;display:block;">
-                Map keywords to files so the agent knows where to look.
-              </span>
-              <details ng-repeat="project in vm.projects track by project.Name" style="margin-bottom:8px;">
-                <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
-                <div ng-repeat="hint in vm.getProjectHints($index) track by $index"
-                  style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
-                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                    <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
-                    <input ng-model="hint.keywords" placeholder="comma-separated keywords"
-                      style="flex:1;padding:4px 8px;font-size:12px;" />
+
+              <!-- Save / share theme — advanced, tucked behind a collapsed expander -->
+              <div class="theme-share-wrap">
+                <button type="button" class="theme-share-head"
+                  ng-click="vm.themeShareOpen = !vm.themeShareOpen"
+                  aria-expanded="{{vm.themeShareOpen}}">
+                  <span class="theme-share-chevron">{{vm.themeShareOpen ? '▾' : '▸'}}</span>
+                  <span class="theme-share-title">Save &amp; share theme</span>
+                  <span class="theme-share-hint" ng-if="!vm.themeShareOpen">backup, export &amp; import</span>
+                </button>
+
+                <div class="theme-share-body" ng-if="vm.themeShareOpen">
+                  <div class="theme-save-row">
+                    <input ng-model="vm.newThemeName" placeholder="Name, e.g. Ocean Night"
+                      ng-keydown="$event.key === 'Enter' && vm.saveCurrentTheme()" />
+                    <button ng-click="vm.saveCurrentTheme()" class="small primary" ng-disabled="!vm.newThemeName.trim()">💾 Save theme</button>
                   </div>
-                  <div style="margin-left:4px;">
-                    <span style="font-size:12px;color:var(--muted);">Files:</span>
-                    <div ng-repeat="file in hint.files track by $index"
-                      style="display:flex;align-items:center;gap:4px;margin:4px 0;">
-                      <input ng-model="hint.files[$index]" placeholder="file path"
-                        style="flex:1;padding:3px 6px;font-size:12px;" />
-                      <button ng-click="vm.removeFileFromHint($parent.$parent.$index, $parent.$index, $index)"
-                        title="Remove file" style="padding:2px 6px;font-size:11px;">✕</button>
+
+                  <!-- Live JSON preview: auto-fills with the current colors on
+                       every change (presets, saved themes, and live picker drags),
+                       with a copy button right on the box. Also a drop zone for
+                       importing a .json theme file. -->
+                  <div class="theme-json-box"
+                    ng-class="{'theme-drop-active': vm.themeDragOver}"
+                    ng-dragenter="vm.onThemeDragEnter($event)"
+                    ng-dragover="vm.onThemeDragOver($event)"
+                    ng-dragleave="vm.onThemeDragLeave()"
+                    ng-drop="vm.onThemeDrop($event)">
+                    <div class="theme-json-head">
+                      <label class="theme-json-label">Current colors (JSON) — updates as you drag</label>
+                      <button type="button" class="theme-json-copy" ng-click="vm.copyCurrentThemeJson()"
+                        title="Copy the current colors to the clipboard as JSON">📋 Copy</button>
                     </div>
-                    <button ng-click="vm.addFileToHint($parent.$index, $index)"
-                      style="padding:2px 8px;font-size:11px;margin-top:2px;">+
-                      File</button>
+                    <textarea readonly class="theme-json-preview" rows="7" spellcheck="false"
+                      ng-model="vm.themeJsonPreview"></textarea>
+                    <div class="theme-drop-hint" ng-class="{'active': vm.themeDragOver}">
+                      <span ng-if="!vm.themeDragOver">💾 Drop a <strong>.json</strong> theme file here to import it</span>
+                      <span ng-if="vm.themeDragOver">Release to import theme…</span>
+                    </div>
                   </div>
-                  <div style="display:flex;justify-content:flex-end;margin-top:6px;">
-                    <button ng-click="vm.removeHint($parent.$index, $index)"
-                      style="padding:2px 8px;font-size:11px;color:var(--error);">✕
-                      Remove</button>
+
+                  <div class="theme-transfer-row">
+                    <button ng-click="vm.importThemeFromClipboard()" class="small" title="Read a theme JSON from the clipboard and apply it">📥 Paste from clipboard</button>
                   </div>
+                  <div class="theme-transfer-paste">
+                    <textarea ng-model="vm.themeImportText" rows="4"
+                      ng-change="vm.previewPastedThemeDiff()"
+                      placeholder='Paste a theme JSON here, e.g. {"--bg":"#071025","--accent":"#06b6d4"}'></textarea>
+                    <button ng-click="vm.importThemeJson(vm.themeImportText)" class="small primary"
+                      ng-disabled="!vm.themeImportText.trim()">Apply pasted theme</button>
+                  </div>
+
+                  <!-- Live preview of what the pasted theme will change (before applying) -->
+                  <div class="theme-import-preview" ng-if="vm.themeImportPreview">
+                    <div class="theme-import-preview-title" ng-if="vm.themeImportPreview.invalid">
+                      ⚠ No valid color variables found — expected like {"--bg": "#071025"}
+                    </div>
+                    <div class="theme-import-preview-title" ng-if="!vm.themeImportPreview.invalid && vm.themeImportPreview.rows.length === 0">
+                      ✓ No color changes — this theme matches your current colors.
+                    </div>
+                    <div class="theme-import-preview-title" ng-if="!vm.themeImportPreview.invalid && vm.themeImportPreview.rows.length > 0">
+                      Will change {{vm.themeImportPreview.rows.length}} color{{vm.themeImportPreview.rows.length === 1 ? '' : 's'}}:
+                    </div>
+                    <div class="theme-diff-list" ng-if="vm.themeImportPreview.rows.length > 0">
+                      <div class="theme-diff-row" ng-repeat="r in vm.themeImportPreview.rows">
+                        <code class="theme-diff-key">{{r.key}}</code>
+                        <span class="theme-diff-swatch" ng-style="{'background': r.from}" title="{{r.from}}"></span>
+                        <span class="theme-diff-val theme-diff-old">{{r.from}}</span>
+                        <span class="theme-diff-arrow">→</span>
+                        <span class="theme-diff-swatch" ng-style="{'background': r.to}" title="{{r.to}}"></span>
+                        <span class="theme-diff-val theme-diff-new">{{r.to}}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="theme-transfer-msg" ng-if="vm.themeTransferMsg">{{vm.themeTransferMsg}}</div>
                 </div>
-                <button ng-click="vm.addHint($index)" style="padding:4px 10px;font-size:12px;margin-top:4px;">+ Add
-                  Keyword
-                  Mapping</button>
-              </details>
-              <button class="small primary" ng-click="vm.saveFileHints()" style="margin-top:8px;">Save File
-                Hints</button>
+              </div>
+
+              <!-- Saved named themes: apply / rename / delete -->
+              <div class="theme-section-label" ng-if="vm.savedThemes.length">Your saved themes</div>
+              <div class="theme-card-grid theme-saved-grid" ng-if="vm.savedThemes.length">
+                <div ng-repeat="t in vm.savedThemes" class="theme-card theme-card-saved"
+                  ng-class="{'active': vm.isSavedThemeActive(t)}" ng-click="vm.applySavedTheme(t)"
+                  title="Click to apply">
+                  <span class="theme-swatches">
+                    <i ng-repeat="c in vm.themeSwatches(t.colors)" ng-style="{'background': c}"></i>
+                  </span>
+                  <span class="theme-card-label">
+                    <span class="theme-card-name" ng-if="!t._editing">{{t.name}}</span>
+                    <input ng-if="t._editing" ng-model="t._editName" class="theme-rename-input"
+                      ng-click="$event.stopPropagation()"
+                      ng-keydown="$event.key === 'Enter' && vm.commitRenameTheme(t); $event.key === 'Escape' && vm.cancelRenameTheme(t)"
+                      ng-blur="vm.commitRenameTheme(t)" />
+                    <span class="theme-card-check" ng-if="vm.isSavedThemeActive(t)">✓</span>
+                  </span>
+                  <span class="theme-card-actions">
+                    <button ng-click="$event.stopPropagation(); vm.startRenameTheme(t)" title="Rename theme">✏️</button>
+                    <button ng-click="$event.stopPropagation(); vm.deleteSavedTheme(t)" title="Delete theme">🗑</button>
+                  </span>
+                </div>
+              </div>
+
+              <!-- Fine-grained color pickers -->
+              <div class="theme-section-label">Fine-tune colors</div>
+              <div class="theme-color-grid">
+                <div class="theme-color-item"><label>Background</label>
+                  <input type="color" ng-model="vm.themeColors['--bg']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--bg']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Surface</label>
+                  <input type="color" ng-model="vm.themeColors['--surface']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--surface']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Panel</label>
+                  <input type="color" ng-model="vm.themeColors['--panel']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--panel']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Text</label>
+                  <input type="color" ng-model="vm.themeColors['--text']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--text']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Muted</label>
+                  <input type="color" ng-model="vm.themeColors['--muted']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--muted']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Accent</label>
+                  <input type="color" ng-model="vm.themeColors['--accent']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--accent']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Accent 2</label>
+                  <input type="color" ng-model="vm.themeColors['--accent-2']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--accent-2']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Success</label>
+                  <input type="color" ng-model="vm.themeColors['--success']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--success']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Warning</label>
+                  <input type="color" ng-model="vm.themeColors['--warning']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--warning']}}</code>
+                </div>
+                <div class="theme-color-item"><label>Error</label>
+                  <input type="color" ng-model="vm.themeColors['--error']" ng-model-options="{updateOn: 'input change'}" ng-change="vm.applyThemeColors(null, vm.themeColors)" />
+                  <code>{{vm.themeColors['--error']}}</code>
+                </div>
+              </div>
+              <div class="theme-reset-row">
+                <button ng-click="vm.resetThemeColors()" class="small ghost">↺ Reset to defaults</button>
+              </div>
             </div>
           </details>
         </div>
+
+        <!-- ===== TAB: Agent ===== -->
+        <div ng-show="vm.settingsTab === 'agent'">
+          <details>
+            <summary class="settings-header">Default LLM Endpoint</summary>
+            <div style="padding:8px 0;">
+              <label for="settings-llama" style="font-size:0.85em;color:var(--muted);">URL</label>
+              <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width:100%;margin-top:2px;" />
+              <div style="margin-top:6px;">
+                <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model Name</label>
+                <input id="settings-llama-model" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" />
+              </div>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">Additional LLM Endpoints</summary>
+            <div style="padding:8px 0;display:flex;flex-direction:column;gap:6px;">
+              <div ng-repeat="ep in vm.llamaEndpoints track by $index"
+                style="border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:6px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+                <input ng-model="ep.name" placeholder="Name (e.g. GPU-2)" style="flex:1 1 90px;min-width:80px;padding:3px 6px;font-size:12px;" />
+                <span ng-if="vm.endpointHealthBadge(ep.url)" class="endpoint-health endpoint-health-{{vm.endpointHealthBadge(ep.url).level}}"
+                  title="{{vm.endpointHealthBadge(ep.url).title}}">{{vm.endpointHealthBadge(ep.url).icon}}</span>
+                <input ng-model="ep.url" placeholder="http://localhost:8080" style="flex:2 1 160px;min-width:120px;padding:3px 6px;font-size:12px;" />
+                <input ng-model="ep.model" placeholder="medgemma:4b" style="flex:1 1 110px;min-width:90px;padding:3px 6px;font-size:12px;" />
+                <button ng-click="vm.removeLlamaEndpoint($index)" class="small ghost" style="padding:2px 8px;" title="Remove endpoint">✕</button>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                <button ng-click="vm.addLlamaEndpoint()" class="small primary">+ Add Endpoint</button>
+                <span style="font-size:11px;color:var(--muted);">Cards can be assigned one of these endpoints. Each running agent gets its own section labeled with its endpoint.</span>
+              </div>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">Context Size Limits</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;gap:6px;padding:8px 0;">
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-maxFileContextChars">Max File Context Chars</label>
+                  <span>{{vm.maxFileContextChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-maxFileContextChars" ng-model="vm.maxFileContextChars" min="4000" max="64000" step="1000" style="width:100%;" />
+                <span class="settings-note">💡 Higher lets the agent read bigger files, but each request costs more tokens.</span>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-maxFullFileTokens">Max Full File Tokens<span class="settings-tip" ng-click="$event.preventDefault()" title="Files larger than this are truncated before the agent sees them — edits may miss code beyond the cut-off.">?</span></label>
+                  <span>{{vm.maxFullFileTokens | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-maxFullFileTokens" ng-model="vm.maxFullFileTokens" min="512" max="16384" step="512" style="width:100%;" />
+                <span class="settings-note warn">⚠ Truncated files can cause wrong or incomplete edits — keep this high enough for your largest files.</span>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-maxContextChars">Max Context Chars<span class="settings-tip" ng-click="$event.preventDefault()" title="Total context budget per request. Too low and the agent forgets earlier steps mid-task.">?</span></label>
+                  <span>{{vm.maxContextChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-maxContextChars" ng-model="vm.maxContextChars" min="4000" max="64000" step="1000" style="width:100%;" />
+                <span class="settings-note warn">⚠ Very low values can make the agent lose track of the task and produce sloppy edits.</span>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-fileBodyTruncation">File Body Truncation Chars</label>
+                  <span>{{vm.fileBodyTruncationChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-fileBodyTruncation" ng-model="vm.fileBodyTruncationChars" min="1000" max="32000" step="500" style="width:100%;" />
+                <span class="settings-note warn">⚠ Small values hide most of a file's body — the agent will edit blind and can break code.</span>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-buildOutputTail">Build Output Tail Chars</label>
+                  <span>{{vm.buildOutputTailChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-buildOutputTail" ng-model="vm.buildOutputTailChars" min="1000" max="32000" step="500" style="width:100%;" />
+                <span class="settings-note warn">⚠ Too short and compiler errors scroll out of view — the agent can't see why the build failed.</span>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-defaultMaxTokens">Default Max Tokens<span class="settings-tip" ng-click="$event.preventDefault()" title="Maximum tokens per LLM response. Too low and the agent is cut off mid-edit.">?</span></label>
+                  <span>{{vm.defaultMaxTokens | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-defaultMaxTokens" ng-model="vm.defaultMaxTokens" min="256" max="16384" step="256" style="width:100%;" />
+                <span class="settings-note warn">⚠ Very low values truncate responses mid-step and lead to broken edits.</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-includeProjectSkeleton" ng-model="vm.includeProjectSkeleton" />
+                <label for="ctx-includeProjectSkeleton">Include Project File Skeleton</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">adds project directory tree to discovery context</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-includeEditKnowledge" ng-model="vm.includeEditKnowledge" />
+                <label for="ctx-includeEditKnowledge">Include Edit Knowledge</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">do/dont/patterns from past edits</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-extendThinking" ng-model="vm.extendThinking" />
+                <label for="ctx-extendThinking">Extending Thinking</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">verbose per-step reasoning; carries thinking across steps</span>
+              </div>
+              <div ng-if="vm.extendThinking">
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-thinkingMaxTokens">Thinking Max Tokens</label>
+                  <span>{{vm.thinkingMaxTokens | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-thinkingMaxTokens" ng-model="vm.thinkingMaxTokens" min="256" max="16384" step="256" style="width:100%;" />
+                <span class="settings-note" ng-class="{warn: vm.thinkingMaxTokens > 4096}">
+                  <span ng-if="vm.thinkingMaxTokens <= 4096">💡 <strong>4096</strong> is the recommended default for overall thinking.</span>
+                  <span ng-if="vm.thinkingMaxTokens > 4096">⚠ More than <strong>4096</strong> tends to produce weaker results with more hallucinations.
+                    <a href="javascript:void(0)" ng-click="vm.thinkingMaxTokens = 4096" style="font-weight:600;text-decoration:underline;margin-left:6px;cursor:pointer;white-space:nowrap;">↺ Reset to 4096</a>
+                  </span>
+                  <br/><span style="font-size:11px;color:var(--text-dim,#888);">Planning/editing thinking uses its own tighter cap that scales <strong>100–700</strong> tokens with task complexity, independent of this slider.</span>
+                </span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-compactThinkingContext" ng-model="vm.compactThinkingContext" />
+                <label for="ctx-compactThinkingContext">Compact Thinking Context</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">summarize carried thinking once it exceeds the budget above</span>
+              </div>
+              <span class="settings-note" ng-if="vm.compactThinkingContext">💡 Compacting summarizes reasoning away — for hard tasks this can remove the trail the agent uses to stay correct.</span>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-summarizeDiffContext" ng-model="vm.summarizeDiffContext" />
+                <label for="ctx-summarizeDiffContext">Summarize Diff Context</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">compact accumulated step diffs into one summary past the threshold</span>
+              </div>
+              <span class="settings-note" ng-if="vm.summarizeDiffContext">💡 Summarized diffs lose exact old/new content — the agent may re-edit blindly after a summary kicks in.</span>
+              <div ng-if="vm.summarizeDiffContext">
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-diffContextSummaryChars">Diff Summary Threshold Chars</label>
+                  <span>{{vm.diffContextSummaryChars | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-diffContextSummaryChars" ng-model="vm.diffContextSummaryChars" min="1000" max="32000" step="500" style="width:100%;" />
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="ctx-llmInfiniteTimeout" ng-model="vm.llmInfiniteTimeout" ng-change="vm.onLlmInfiniteToggle()" />
+                <label for="ctx-llmInfiniteTimeout">Infinite LLM Timeout</label>
+                <span class="settings-help" style="margin-left:auto;font-size:11px;">never time out agent LLM requests (default)</span>
+              </div>
+              <span class="settings-note warn" ng-if="!vm.llmInfiniteTimeout">⚠ A short timeout can kill a long agent run mid-edit, leaving the card stuck in Doing.</span>
+              <div ng-if="!vm.llmInfiniteTimeout">
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-llmTimeoutMinutes">LLM Timeout (minutes, min 5)</label>
+                  <span>{{vm.llmTimeoutMinutes | formatNumber}}</span>
+                </div>
+                <input type="range" id="ctx-llmTimeoutMinutes" ng-model="vm.llmTimeoutMinutes" min="5" max="240" step="5" style="width:100%;" />
+              </div>
+              <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the agent to handle larger files but consume more tokens.</span>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">Agent Tools</summary>
+            <div style="padding:8px 0;">
+              <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+                Uncheck to remove a tool from the agent's available step types.
+              </div>
+              <span class="settings-note warn">⚠ Disabling <strong>edit</strong>, <strong>create</strong>, or <strong>explore</strong> tools makes the agent unable to change or inspect files — most tasks will stall.</span>
+              <div class="form-row" ng-repeat="tool in vm.toolList" style="display:flex;align-items:center;gap:6px;padding:4px 0;">
+                <input type="checkbox" ng-model="tool.enabled" id="tool-{{$index}}" />
+                <label for="tool-{{$index}}" ng-bind="tool.label" style="flex:1;"></label>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- ===== TAB: Panels ===== -->
+        <div ng-show="vm.settingsTab === 'panels'">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px 0;">
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showAI" />
+              <span>🤖 Ask AI</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showTerminal" />
+              <span>💻 Terminal</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showKanban" />
+              <span>📋 Kanban Board</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showCalendar" />
+              <span>📅 Calendar</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showIDE" />
+              <span>📝 IDE</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showNotes" />
+              <span>📒 Notes</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
+              <input type="checkbox" ng-model="vm.showMeeting" />
+              <span>🕷️ Meeting View</span>
+            </label>
+          </div>
+          <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+            <details>
+              <summary class="settings-header">Panel Options</summary>
+              <div style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
+                <label style="display:flex;align-items:center;gap:8px;">
+                  <input type="checkbox" ng-model="vm.useVSCodeInsteadOfIDE" />
+                  Open attachments in VS Code instead
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;">
+                  <input type="checkbox" ng-model="vm.prByDefault" />
+                  PR enabled by default
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;">
+                  <input type="checkbox" ng-model="vm.autoQueue" />
+                  Auto-queue: process next Todo card when one completes
+                </label>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <!-- ===== TAB: Integrations ===== -->
+        <div ng-show="vm.settingsTab === 'integrations'">
+          <details>
+            <summary class="settings-header">Email (IMAP)</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:12px;">
+              <div ng-repeat="acct in vm.emailAccounts track by $index"
+                style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                  <span style="font-size:13px;font-weight:600;">Account {{$index + 1}}</span>
+                  <button ng-click="vm.removeEmailAccount($index)" style="background:none;border:none;color:#ff5252;cursor:pointer;font-size:13px;">✕ Remove</button>
+                </div>
+                <div style="display:flex;gap:8px;margin-bottom:6px;">
+                  <input ng-model="acct.label" placeholder="Label (e.g., Gmail, Work)" style="flex:1;" />
+                </div>
+                <div style="display:flex;gap:8px;margin-bottom:6px;">
+                  <input ng-model="acct.imapServer" placeholder="imap.example.com" style="flex:1;" ng-change="vm.checkEmailServer($index)" />
+                  <input ng-model="acct.imapPort" type="number" placeholder="993" style="width:80px;" />
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                  <input ng-model="acct.username" placeholder="Email username" style="flex:1;" />
+                  <input ng-model="acct.password" type="password" placeholder="Password" style="flex:1;" />
+                </div>
+                <div style="display:flex;align-items:center;gap:12px;">
+                  <label style="font-size:12px;"><input type="checkbox" ng-model="acct.useSsl" /> Use SSL</label>
+                  <button ng-click="vm.testEmailConnection($index)" ng-disabled="acct.testing" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;">Test Connection</button>
+                  <span ng-if="acct.testResult" style="font-size:12px;" ng-class="acct.testResult.success ? 'success-text' : 'error-text'">{{acct.testResult.message}}</span>
+                </div>
+                <div ng-if="acct.showAppPasswordInstructions" class="app-password-instructions" style="margin-top:8px;">
+                  <span class="settings-help">If you have 2FA enabled, you'll need an app password instead of your regular password.</span>
+                  <div class="app-password-steps">
+                    <p ng-if="acct.showAppPasswordInstructions === 'google'">For <strong>Google</strong> accounts:</p>
+                    <p ng-if="acct.showAppPasswordInstructions === 'microsoft'">For <strong>Outlook/Hotmail</strong> accounts:</p>
+                    <ol>
+                      <li ng-if="acct.showAppPasswordInstructions === 'google'">Go to <a href="https://myaccount.google.com/apppasswords" target="_blank">Google App Passwords</a></li>
+                      <li ng-if="acct.showAppPasswordInstructions === 'microsoft'">Go to <a href="https://account.live.com/password/apppasswords" target="_blank">Microsoft App Passwords</a></li>
+                      <li>Generate a new app password</li>
+                      <li>Copy and paste it into the Password field above</li>
+                    </ol>
+                  </div>
+                </div>
+              </div>
+              <button ng-click="vm.addEmailAccount()" style="padding:6px 16px;font-size:13px;background:var(--surface2);border:1px dashed var(--border);border-radius:8px;cursor:pointer;width:100%;">+ Add Email Account</button>
+              <span class="settings-help">Configure one or more IMAP accounts so the agent can read your email.</span>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
+            <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:8px;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
+                <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
+              </div>
+              <label style="font-size:12px;display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" />
+                Enable heartbeat (keep dashboard in sync)
+              </label>
+              <span class="settings-help">
+                When enabled, Weaver will send heartbeats and kanban data to bughosted.com.
+                You can send commands from the dashboard to execute locally.
+                <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
+                <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
+                <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
+                <span ng-if="vm.bughostedTesting" style="color:#ff9800;"> Testing…</span>
+                <span ng-if="vm.bughostedTestResult === 'ok'" style="color:#4caf50;"> Test OK</span>
+                <span ng-if="vm.bughostedTestResult === 'fail'" style="color:#f44336;"> Test failed: {{vm.bughostedTestError}}</span>
+              </span>
+              <div style="display:flex;gap:6px;">
+                <button ng-click="vm.bughostedTestConnection()" ng-disabled="vm.bughostedTesting || !vm.bughostedUsername" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;">Test Connection</button>
+                <button ng-click="vm.bughostedForceReconnect()" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;">↻ Reconnect</button>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- ===== TAB: Security ===== -->
+        <div ng-show="vm.settingsTab === 'security'">
+          <details>
+            <summary class="settings-header">Terminal Approval</summary>
+            <div style="padding:8px 0;">
+              <div style="margin-bottom:8px;">
+                <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode" style="width:100%;">
+                  <option value="approveEach">Approve every command</option>
+                  <option value="approveRoot">Approve command roots</option>
+                  <option value="approveAll">Approve all commands</option>
+                </select>
+                <span class="settings-note danger" ng-if="vm.terminalApprovalMode === 'approveAll'">
+                  ⛔ <strong>Approve all</strong> lets the agent run any command without asking — destructive commands like <code>rm -rf</code>, <code>git push</code>, or <code>DROP TABLE</code> will execute immediately.
+                </span>
+                <span class="settings-note" ng-if="vm.terminalApprovalMode === 'approveRoot'">
+                  💡 Only the exact executables listed in <strong>Approved Roots</strong> run without prompting.
+                </span>
+                <span class="settings-note" ng-if="vm.terminalApprovalMode === 'approveEach'">
+                  💡 Safest mode: every command waits for your approval before running.
+                </span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <div>
+                  <label for="settings-approved-roots" style="font-size:12px;color:var(--muted);">Approved Roots</label>
+                  <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText" placeholder="git, dotnet, rg, npm" style="width:100%;" />
+                </div>
+                <div>
+                  <label for="settings-disallowed-roots" style="font-size:12px;color:var(--muted);">Disallowed Roots</label>
+                  <input id="settings-disallowed-roots" ng-model="vm.disallowedTerminalRootsText" placeholder="git, dotnet, rg, npm" style="width:100%;" />
+                </div>
+                <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- ===== TAB: Files ===== -->
+        <div ng-show="vm.settingsTab === 'files'">
+          <span style="font-size:12px;color:var(--muted);margin-bottom:8px;display:block;">
+            Map keywords to files so the agent knows where to look.
+          </span>
+          <details ng-repeat="project in vm.projects track by project.Name" style="margin-bottom:8px;">
+            <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
+            <div ng-repeat="hint in vm.getProjectHints($index) track by $index" style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
+                <input ng-model="hint.keywords" placeholder="comma-separated keywords" style="flex:1;padding:4px 8px;font-size:12px;" />
+              </div>
+              <div style="margin-left:4px;">
+                <span style="font-size:12px;color:var(--muted);">Files:</span>
+                <div ng-repeat="file in hint.files track by $index" style="display:flex;align-items:center;gap:4px;margin:4px 0;">
+                  <input ng-model="hint.files[$index]" placeholder="file path" style="flex:1;padding:3px 6px;font-size:12px;" />
+                  <button ng-click="vm.removeFileFromHint($parent.$parent.$index, $parent.$index, $index)" title="Remove file" style="padding:2px 6px;font-size:11px;">✕</button>
+                </div>
+                <button ng-click="vm.addFileToHint($parent.$index, $index)" style="padding:2px 8px;font-size:11px;margin-top:2px;">+ File</button>
+              </div>
+              <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+                <button ng-click="vm.removeHint($parent.$index, $index)" style="padding:2px 8px;font-size:11px;color:var(--error);">✕ Remove</button>
+              </div>
+            </div>
+            <button ng-click="vm.addHint($index)" style="padding:4px 10px;font-size:12px;margin-top:4px;">+ Add Keyword Mapping</button>
+          </details>
+          <button class="small primary" ng-click="vm.saveFileHints()" style="margin-top:8px;">Save File Hints</button>
+        </div>
+
       </div>
       <div class="popup-footer">
         <button ng-click="vm.saveSettings()" class="primary">Save</button>
@@ -1201,196 +1646,370 @@
 
   <!-- BENCHMARKS PANEL -->
   <div class="popup-overlay" ng-if="vm.showBenchmarksPanel" ng-click="vm.closeBenchmarksPanel()">
-    <div class="popup-panel" style="max-width:600px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel bench-panel" style="max-width:80vw;max-width:80dvw;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>📊 Benchmarks</strong>
         <button ng-click="vm.closeBenchmarksPanel()">✕</button>
       </div>
       <div class="popup-body">
-        <div style="margin-bottom:16px;">
-          <div ng-if="vm.benchmarkPlans.length > 0">
-            <div ng-repeat="plan in vm.benchmarkPlans"
-              style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:4px;">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <div>
-                  <strong>{{plan.name}}</strong>
-                  <span class="text-sm muted" style="margin-left:8px;">{{plan.description}}</span>
-                  <span class="text-xs muted" style="margin-left:4px;">({{plan.steps.length}} steps)</span>
+
+        <!-- Summary strip -->
+        <div class="bench-summary" ng-init="benchStats = vm.benchmarkStats(); benchTrend = vm.benchmarkTrendData()" ng-if="benchStats">
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.runs}}</span>
+            <span class="bench-stat-label">Runs</span>
+          </div>
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.avgPass}}%</span>
+            <span class="bench-stat-label">Edit success</span>
+          </div>
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.ok}}<small> / {{benchStats.ok + benchStats.fail}}</small></span>
+            <span class="bench-stat-label">Edits ok / total</span>
+          </div>
+          <div class="bench-stat">
+            <span class="bench-stat-value">{{benchStats.points}}</span>
+            <span class="bench-stat-label">Points</span>
+          </div>
+        </div>
+
+        <!-- Score trend chart -->
+        <div class="bench-trend" ng-if="benchTrend">
+          <div class="bench-trend-head">
+            <span class="bench-trend-title">Score trend</span>
+            <span class="bench-trend-meta">
+              <span class="bench-trend-chip">Latest <strong>{{benchTrend.last != null ? benchTrend.last.toFixed(1) + '%' : '—'}}</strong></span>
+              <span class="bench-trend-chip">Best <strong>{{benchTrend.best != null ? benchTrend.best.toFixed(1) + '%' : '—'}}</strong></span>
+            </span>
+          </div>
+          <svg class="bench-trend-svg" ng-attr-viewBox="0 0 {{benchTrend.w}} {{benchTrend.h}}" preserveAspectRatio="none"
+            role="img" aria-label="Benchmark score percentage trend across runs">
+            <polygon class="bench-trend-area" ng-attr-points="{{benchTrend.area}}"></polygon>
+            <polyline class="bench-trend-line" ng-attr-points="{{benchTrend.line}}"></polyline>
+            <circle ng-repeat="pt in benchTrend.pts track by $index" class="bench-trend-dot"
+              ng-attr-cx="{{pt.x}}" ng-attr-cy="{{pt.y}}" r="3"
+              ng-attr-title="Run {{$index + 1}}: {{pt.pct}}%"></circle>
+          </svg>
+        </div>
+
+        <!-- Run a benchmark -->
+        <div class="bench-section">
+          <div class="bench-section-head bench-head-toggle" ng-click="vm.toggleBenchSection('run')"
+            role="button" tabindex="0"
+            ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchSection('run'); $event.preventDefault()"
+            ng-class="{open: vm.benchSectionOpen.run}"
+            title="Click to expand / collapse">
+            <div>
+              <span class="bench-chevron">{{vm.benchSectionOpen.run ? '▾' : '▸'}}</span>
+              <div class="bench-section-title">Run a benchmark
+                <span class="bench-count" ng-if="vm.benchmarkPlans.length > 0">{{vm.benchmarkPlans.length}} plan{{vm.benchmarkPlans.length === 1 ? '' : 's'}}</span>
+              </div>
+              <div class="bench-section-sub">Each run sends a coding task through the agent and scores the edits it makes.</div>
+            </div>
+            <button ng-click="vm.startBenchmarkAll(); $event.stopPropagation()" class="primary small nowrap"
+              ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run All</button>
+          </div>
+
+          <div class="bench-section-body" ng-if="vm.benchSectionOpen.run">
+            <div ng-if="vm.benchmarkRunning" class="bench-running">
+              <span class="bench-spinner"></span>
+              Benchmark <strong>{{vm.benchmarkLevelName(vm.benchmarkLevel)}}</strong> running
+              <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>…
+            </div>
+
+            <div ng-if="vm.benchmarkPlans.length > 0">
+              <div ng-repeat="plan in vm.benchmarkPlans" class="bench-plan-card">
+                <span class="bench-plan-chip">L{{plan.level}}</span>
+                <div class="bench-plan-body">
+                  <div class="bench-plan-name">{{plan.name}}</div>
+                  <div class="bench-plan-desc">{{plan.description}}</div>
                 </div>
-                <button ng-click="vm.startBenchmark(plan.level)" class="primary small"
-                  ng-disabled="vm.benchmarkRunning">▶ Run</button>
+                <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
+                  ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run</button>
               </div>
             </div>
+            <div ng-if="vm.benchmarkPlans.length === 0" class="bench-empty">
+              No benchmark plans available.
+            </div>
           </div>
-          <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark
-            {{vm.benchmarkLevel}} running...</div>
         </div>
-        <div ng-if="vm.routingCalibration" style="margin:8px 0 12px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12px;">
-          <strong>Planner routing calibration</strong>
-          <span style="margin-left:10px;">{{vm.routingCalibration.accuracyPercent.toFixed(1)}}% accuracy</span>
-          <span class="muted" style="margin-left:8px;">{{vm.routingCalibration.correct}}/{{vm.routingCalibration.total}} cases · threshold {{vm.routingCalibration.threshold}} · FP {{vm.routingCalibration.falsePositives}} · FN {{vm.routingCalibration.falseNegatives}}</span>
-        </div>
-        <div ng-if="vm.benchmarkSummary && vm.benchmarkSummary.runCount" class="muted" style="margin:6px 0 10px;font-size:12px;">
-          History: {{vm.benchmarkSummary.runCount}} runs · {{vm.benchmarkSummary.averageScore.toFixed(1)}}% average · {{vm.formatBenchmarkDuration(vm.benchmarkSummary.averageDurationMs)}} average duration
-        </div>
-        <!-- Server Benchmarks (fetched) -->
-        <div ng-if="vm.serverBenchmarks.length > 0" style="margin-bottom:16px;">
-          <strong style="font-size:13px;">Server Benchmarks</strong>
-          <table style="width:100%;border-collapse:collapse;margin-top:4px;">
-            <thead>
-              <tr style="border-bottom:1px solid var(--border);">
-                <th style="text-align:left;padding:4px 8px;">Benchmark</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr ng-repeat="s in vm.serverBenchmarks" style="border-bottom:1px solid var(--border);">
-                <td style="padding:4px 8px;font-size:12px;">
-                  <div style="font-weight: bold;">
-                    <span style="font-size: small">{{s.timestamp ? (s.timestamp | date:'short') : '—'}}</span> - 
-                    {{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}} - 
-                    {{s.stepsCompleted}}/{{s.totalSteps}} - 
-                    {{s.scorePercent != null ? (s.scorePercent.toFixed(1) + '%') : '—'}} - 
-                    {{s.status || '—'}} - 
-                    {{vm.formatBenchmarkDuration(s.durationMs)}}
-                  </div>
-                  <div>
-                    Model: {{(s.modelUsed || '') | limitTo:50}} - 
-                    OS : {{s.os || '—'}}
-                  </div>
-                  <div>
-                    {{(s.cpu || '') | limitTo:40}} - 
-                    {{s.ram || '—'}}GB RAM - 
-                    {{(s.gpu || '') | limitTo:50}}
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+
+        <!-- Final Benchmark Score (benchmark-all) -->
+        <div class="bench-section" ng-if="vm.benchmarkAllResult">
+          <div class="bench-section-title">Final score</div>
+          <div class="bench-final" ng-class="{bad: vm.benchmarkAllResult.failedLevel !== null}">
+            <div class="bench-final-row">
+              <span class="bench-final-icon">{{vm.benchmarkAllResult.failedLevel === null ? '✅' : '⚠️'}}</span>
+              <span>
+                Reached <strong>{{vm.benchmarkAllResult.completedLevels}}</strong> of <strong>{{vm.benchmarkPlans.length}}</strong> benchmarks
+              </span>
+            </div>
+            <div class="bench-final-row" ng-if="vm.benchmarkAllResult.failedLevel !== null">
+              <span class="bench-final-note">Stopped at {{vm.benchmarkLevelName(vm.benchmarkAllResult.failedLevel)}} — error steps detected</span>
+            </div>
+            <div class="bench-final-row" ng-if="vm.benchmarkAllResult.failedLevel === null">
+              <span class="bench-final-note">All benchmarks completed — passed</span>
+            </div>
+            <div class="bench-final-row">
+              <span class="bench-final-note"><strong>{{vm.benchmarkAllResult.totalSuccessful}}</strong> ok / <strong>{{vm.benchmarkAllResult.totalFailed}}</strong> fail — <strong>{{vm.benchmarkAllResult.totalPoints}}</strong> pts</span>
+            </div>
+          </div>
         </div>
 
         <!-- Local Scores -->
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-          <strong style="font-size:13px;">Local Scores</strong>
-          <div style="display:flex;gap:4px;">
-            <button ng-click="vm.fetchBenchmarksFromServer()" class="small" ng-disabled="vm.fetchingBenchmarks"
-              style="font-size:11px;">
-              {{vm.fetchingBenchmarks ? 'Fetching...' : '📥 Fetch from Server'}}
-            </button>
+        <div class="bench-section">
+          <div class="bench-section-head bench-head-toggle" ng-click="vm.toggleBenchSection('local')"
+            role="button" tabindex="0"
+            ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchSection('local'); $event.preventDefault()"
+            ng-class="{open: vm.benchSectionOpen.local}"
+            title="Click to expand / collapse">
+            <div>
+              <span class="bench-chevron">{{vm.benchSectionOpen.local ? '▾' : '▸'}}</span>
+              <div class="bench-section-title">Local scores
+                <span class="bench-count" ng-if="vm.benchmarkScores.length > 0">{{vm.benchmarkScores.length}}</span>
+              </div>
+              <div class="bench-section-sub" ng-if="vm.benchmarkScores.length > 0 && !vm.compareMode">Click a card for details, send, or delete.</div>
+              <div class="bench-section-sub" ng-if="vm.benchmarkScores.length > 0 && vm.compareMode">Pick two cards — the comparison panel shows which edits differed.</div>
+              <div class="bench-section-sub" ng-if="vm.benchmarkScores.length === 0">No local scores yet — run a benchmark above.</div>
+            </div>
+            <div class="bench-section-actions">
+              <button ng-if="!vm.compareMode" ng-click="vm.startCompareMode(); $event.stopPropagation()" class="small nowrap"
+                ng-disabled="vm.benchmarkScores.length < 2"
+                title="Compare two runs side-by-side">⚖ Compare</button>
+              <button ng-if="vm.compareMode" ng-click="vm.exitCompareMode(); $event.stopPropagation()" class="small nowrap"
+                title="Exit compare mode">✕ Exit compare</button>
+              <button ng-click="vm.fetchBenchmarksFromServer(); $event.stopPropagation()" class="small nowrap" ng-disabled="vm.fetchingBenchmarks">
+                {{vm.fetchingBenchmarks ? 'Fetching…' : '📥 Fetch from Server'}}
+              </button>
+            </div>
+          </div>
+
+          <!-- Comparison panel -->
+          <div class="bench-section-body" ng-if="vm.benchSectionOpen.local">
+          <div class="bench-compare" ng-if="vm.compareResult">
+            <div class="bench-compare-cards">
+              <div class="bench-compare-card" ng-class="{selected: vm.compareA === vm.compareResult.a}">
+                <div class="bench-compare-card-head">
+                  <span class="bench-compare-letter">A</span>
+                  <span class="bench-badge {{vm.benchmarkStatusInfo(vm.compareResult.a.status).cls}}">{{vm.benchmarkStatusInfo(vm.compareResult.a.status).label}}</span>
+                  <span class="bench-score-name">{{vm.benchmarkLevelName(vm.compareResult.a.level) || 'BM ' + vm.compareResult.a.level}}</span>
+                </div>
+                <div class="bench-compare-card-body">
+                  <span class="bench-compare-pct">{{vm.benchmarkPct(vm.compareResult.a.scorePercent)}}</span>
+                  <span class="bench-chip ok">{{vm.compareResult.a.successfulEdits || 0}} ok</span>
+                  <span class="bench-chip bad" ng-if="vm.compareResult.a.failedEdits">{{vm.compareResult.a.failedEdits}} fail</span>
+                  <span class="bench-chip neutral">{{vm.compareResult.a.points || 0}} pts</span>
+                  <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(vm.compareResult.a.durationMs)}}</span>
+                </div>
+              </div>
+              <div class="bench-compare-vs">vs</div>
+              <div class="bench-compare-card" ng-class="{selected: vm.compareB === vm.compareResult.b}">
+                <div class="bench-compare-card-head">
+                  <span class="bench-compare-letter">B</span>
+                  <span class="bench-badge {{vm.benchmarkStatusInfo(vm.compareResult.b.status).cls}}">{{vm.benchmarkStatusInfo(vm.compareResult.b.status).label}}</span>
+                  <span class="bench-score-name">{{vm.benchmarkLevelName(vm.compareResult.b.level) || 'BM ' + vm.compareResult.b.level}}</span>
+                </div>
+                <div class="bench-compare-card-body">
+                  <span class="bench-compare-pct">{{vm.benchmarkPct(vm.compareResult.b.scorePercent)}}</span>
+                  <span class="bench-chip ok">{{vm.compareResult.b.successfulEdits || 0}} ok</span>
+                  <span class="bench-chip bad" ng-if="vm.compareResult.b.failedEdits">{{vm.compareResult.b.failedEdits}} fail</span>
+                  <span class="bench-chip neutral">{{vm.compareResult.b.points || 0}} pts</span>
+                  <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(vm.compareResult.b.durationMs)}}</span>
+                </div>
+              </div>
+            </div>
+            <div class="bench-compare-summary" ng-if="vm.compareResult.differs">
+              ⚠ <strong>{{vm.compareResult.differs}}</strong> edit(s) differ between the two runs — highlighted below.
+            </div>
+            <div class="bench-compare-summary ok" ng-if="!vm.compareResult.differs">
+              ✓ No differing edits — both runs agreed on every file.
+            </div>
+            <div class="bench-compare-rows">
+              <div class="bench-compare-row" ng-repeat="r in vm.compareResult.rows track by $index"
+                ng-class="r.state">
+                <span class="bench-compare-path" title="{{r.path}}">{{r.path}}</span>
+                <span class="bench-compare-cell">
+                  <span class="bench-change-status {{vm.benchEditStatusClass(r.a)}}">{{vm.benchEditGlyph(r.a)}}</span>
+                  <span class="bench-compare-cell-label" ng-if="r.a">{{r.a.editAction || r.a.type}}</span>
+                  <span class="bench-compare-cell-label muted" ng-if="!r.a">—</span>
+                </span>
+                <span class="bench-compare-cell">
+                  <span class="bench-change-status {{vm.benchEditStatusClass(r.b)}}">{{vm.benchEditGlyph(r.b)}}</span>
+                  <span class="bench-compare-cell-label" ng-if="r.b">{{r.b.editAction || r.b.type}}</span>
+                  <span class="bench-compare-cell-label muted" ng-if="!r.b">—</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div ng-if="vm.benchmarkScores.length > 0">
+            <div ng-repeat="s in vm.benchmarkScores" class="bench-score-card"
+              ng-class="{open: vm.selectedBenchmarkScore === s, 'compare-a': vm.compareMode && vm.compareA === s, 'compare-b': vm.compareMode && vm.compareB === s}"
+              ng-click="vm.compareMode ? vm.toggleCompareScore(s) : (vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s))">
+              <div class="bench-score-head">
+                <span class="bench-compare-tag" ng-if="vm.compareMode && vm.compareA === s">A</span>
+                <span class="bench-compare-tag tag-b" ng-if="vm.compareMode && vm.compareB === s">B</span>
+                <span class="bench-badge {{vm.benchmarkStatusInfo(s.status).cls}}">{{vm.benchmarkStatusInfo(s.status).label}}</span>
+                <span class="bench-score-name">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</span>
+                <span class="bench-score-date" title="{{s.timestamp | date:'short'}}">{{s.timestamp | date:'short'}}</span>
+                <span class="bench-score-chevron">{{vm.compareMode ? (vm.compareA === s || vm.compareB === s ? '●' : '○') : (vm.selectedBenchmarkScore === s ? '▾' : '▸')}}</span>
+              </div>
+              <div class="bench-score-body">
+                <div class="bench-progress" title="{{vm.benchmarkPct(s.scorePercent)}}">
+                  <div class="bench-progress-fill" ng-style="{width: vm.benchmarkPctNum(s.scorePercent) + '%'}"></div>
+                </div>
+                <span class="bench-score-pct">{{vm.benchmarkPct(s.scorePercent)}}</span>
+              </div>
+              <div class="bench-chips">
+                <span class="bench-chip ok">{{s.successfulEdits || 0}} ok</span>
+                <span class="bench-chip bad" ng-if="s.failedEdits">{{s.failedEdits}} fail</span>
+                <span class="bench-chip neutral">{{s.points || 0}} pts</span>
+                <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(s.durationMs)}}</span>
+                <span class="bench-chip neutral" ng-if="s.modelUsed" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:24}}</span>
+              </div>
+              <div class="bench-score-details" ng-if="vm.selectedBenchmarkScore === s">
+                <div class="bench-detail-grid">
+                  <div><span class="muted">Status</span> {{s.status}}</div>
+                  <div><span class="muted">Duration</span> {{vm.formatBenchmarkDuration(s.durationMs) || '—'}}</div>
+                  <div><span class="muted">Model</span> {{s.modelUsed || '—'}}</div>
+                  <div><span class="muted">Edits</span> {{s.successfulEdits || 0}} ok / {{s.failedEdits || 0}} fail</div>
+                  <div ng-if="s.errorReason"><span class="muted">Error</span> {{s.errorReason}}</div>
+                </div>
+                <div class="bench-score-actions">
+                  <button ng-click="s._showChanges = !s._showChanges; $event.stopPropagation()" class="btn btn-small"
+                    ng-if="s.edits && s.edits.length"
+                    title="Inspect the file edits the agent made in this run">
+                    {{s._showChanges ? 'Hide changes' : 'View changes'}} ({{s.edits.length}})
+                  </button>
+                  <button ng-click="vm.sendBenchmarkToServer(s); $event.stopPropagation()" class="btn btn-small"
+                    ng-disabled="vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]">{{vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id] ? 'Sending…' : 'Send to server'}}</button>
+                  <button ng-click="vm.deleteBenchmarkScore(s); $event.stopPropagation()" class="btn btn-small danger" title="Delete this score">Delete</button>
+                </div>
+                <div class="bench-changes" ng-if="s._showChanges">
+                  <div class="bench-change" ng-repeat="e in s.edits track by $index">
+                    <div class="bench-change-head">
+                      <span class="bench-change-status {{vm.benchEditStatusClass(e)}}">{{vm.benchEditGlyph(e)}}</span>
+                      <span class="bench-change-action" title="{{e.editAction}}">{{e.editAction}}</span>
+                      <span class="bench-change-path" title="{{e.path}}">{{e.path}}</span>
+                      <span class="bench-change-lines" ng-if="e.linesAdded || e.linesRemoved">
+                        <span class="bench-chip ok" ng-if="e.linesAdded">+{{e.linesAdded}}</span>
+                        <span class="bench-chip bad" ng-if="e.linesRemoved">−{{e.linesRemoved}}</span>
+                      </span>
+                    </div>
+                    <div class="bench-change-error" ng-if="e.error">{{e.error}}</div>
+                    <div class="bench-change-diff" ng-if="e.diff && e.diff.length">
+                      <div class="bench-change-row" ng-repeat="l in e.diff track by $index"
+                        ng-class="{'old': l.old && !l.new, 'new': l.new && !l.old, 'mod': l.old && l.new && l.old !== l.new}">
+                        <span class="bench-change-mark">{{l.old && !l.new ? '−' : (l.new && !l.old ? '+' : ' ' )}}</span>
+                        <span class="bench-change-old" ng-if="l.old">{{l.old}}</span>
+                        <span class="bench-change-new" ng-if="l.new">{{l.new}}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
           </div>
         </div>
-        <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
-          No local benchmark scores yet. Run a benchmark above.
-        </div>
-        <table ng-if="vm.benchmarkScores.length > 0" style="width:100%;border-collapse:collapse;">
-          <thead>
-            <tr style="border-bottom:1px solid var(--border);">
-              <th style="text-align:left;padding:4px 8px;">Date</th>
-              <th style="text-align:left;padding:4px 8px;">Benchmark</th>
-              <th style="text-align:left;padding:4px 8px;">Steps</th>
-              <th style="text-align:left;padding:4px 8px;">Score</th>
-              <th style="text-align:left;padding:4px 8px;">Status</th>
-              <th style="text-align:left;padding:4px 8px;">Duration</th>
-              <th style="text-align:left;padding:4px 8px;">Model</th>
-              <th style="width:24px;"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr ng-repeat="s in vm.benchmarkScores" style="border-bottom:1px solid var(--border);cursor:pointer;"
-              ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
-              <td style="padding:4px 8px;font-size:12px;">{{s.timestamp | date:'short'}}</td>
-              <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
-              <td style="padding:4px 8px;">{{s.stepsCompleted}}/{{s.totalSteps}}</td>
-              <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
-              <td style="padding:4px 8px;">{{s.status}}</td>
-              <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>
-              <td style="padding:4px 8px;font-size:11px;" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}
-              </td>
-              <td style="padding:4px 8px;">
-                <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"
-                  style="color:var(--danger);font-size:11px;" title="Delete">✕</button>
-                <button class="btn btn-small" ng-click="vm.sendBenchmarkToServer(s)">Send</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <div ng-if="vm.selectedBenchmarkScore" style="margin:10px 0;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px;">
-          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;">
-            <strong>Evaluation details</strong>
-            <span>Correctness {{vm.selectedBenchmarkScore.correctnessPercent.toFixed(1)}}%</span>
-            <span ng-if="vm.selectedBenchmarkScore.preservationPercent != null">Preservation {{vm.selectedBenchmarkScore.preservationPercent.toFixed(1)}}%</span>
-            <span ng-if="vm.selectedBenchmarkScore.recoveryPercent != null">Recovery {{vm.selectedBenchmarkScore.recoveryPercent.toFixed(1)}}%</span>
-            <span ng-if="vm.selectedBenchmarkScore.efficiencyPercent != null">Efficiency {{vm.selectedBenchmarkScore.efficiencyPercent.toFixed(1)}}%</span>
-            <span ng-if="vm.selectedBenchmarkScore.plannerRoute">Route {{vm.selectedBenchmarkScore.plannerRoute}} ({{vm.selectedBenchmarkScore.plannerGateScore}})</span>
+
+        <!-- Server Benchmarks (fetched) -->
+        <div class="bench-section" ng-if="vm.serverBenchmarks.length > 0">
+          <div class="bench-section-head">
+            <div>
+              <div class="bench-section-title">Server benchmarks</div>
+              <div class="bench-section-sub">Scores shared from other machines. Click a card for system details.</div>
+            </div>
           </div>
-          <div ng-if="vm.selectedBenchmarkScore.actualStrategies.length" class="muted" style="margin-bottom:6px;">Strategies: {{vm.selectedBenchmarkScore.actualStrategies.join(', ')}}</div>
-          <div ng-if="vm.selectedBenchmarkScore.regression" ng-style="{'color': vm.selectedBenchmarkScore.regression.hasRegression ? 'var(--danger)' : 'var(--success)'}" style="margin-bottom:6px;">
-            Baseline Δ {{vm.selectedBenchmarkScore.regression.scoreDelta.toFixed(1)}} points
-            <span ng-if="vm.selectedBenchmarkScore.regression.newlyFailingChecks.length"> · New failures: {{vm.selectedBenchmarkScore.regression.newlyFailingChecks.join(', ')}}</span>
-            <span ng-if="vm.selectedBenchmarkScore.regression.recoveredChecks.length"> · Recovered: {{vm.selectedBenchmarkScore.regression.recoveredChecks.join(', ')}}</span>
-          </div>
-          <div ng-repeat="check in vm.selectedBenchmarkScore.checks" style="padding:3px 0;">
-            <span ng-style="{'color': check.passed ? 'var(--success)' : 'var(--danger)'}">{{check.passed ? '✓' : '✕'}}</span>
-            <span>{{check.name}}</span>
-            <span ng-if="!check.passed && check.failureCode" class="muted">— {{check.failureCode}}: {{check.normalizedFailure}}</span>
+          <div ng-repeat="s in vm.serverBenchmarks" class="bench-score-card server"
+            ng-click="vm.selectedServerBenchmark = (vm.selectedServerBenchmark === s ? null : s)">
+            <div class="bench-score-head">
+              <span class="bench-badge {{vm.benchmarkStatusInfo(s.status).cls}}">{{vm.benchmarkStatusInfo(s.status).label}}</span>
+              <span class="bench-score-name">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</span>
+              <span class="bench-score-date" title="{{s.timestamp | date:'short'}}">{{s.timestamp ? (s.timestamp | date:'short') : '—'}}</span>
+              <span class="bench-score-chevron">{{vm.selectedServerBenchmark === s ? '▾' : '▸'}}</span>
+            </div>
+            <div class="bench-score-body">                <div class="bench-progress" title="{{vm.benchmarkPct(s.scorePercent)}}">
+                  <div class="bench-progress-fill" ng-style="{width: vm.benchmarkPctNum(s.scorePercent) + '%'}"></div>
+                </div>
+                <span class="bench-score-pct">{{vm.benchmarkPct(s.scorePercent)}}</span>
+            </div>
+            <div class="bench-chips">
+              <span class="bench-chip ok">{{s.successfulEdits || 0}} ok</span>
+              <span class="bench-chip bad" ng-if="s.failedEdits">{{s.failedEdits}} fail</span>
+              <span class="bench-chip neutral">{{s.points || 0}} pts</span>
+              <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(s.durationMs)}}</span>
+              <span class="bench-chip neutral" ng-if="s.modelUsed" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:24}}</span>
+            </div>
+            <div class="bench-score-details" ng-if="vm.selectedServerBenchmark === s">
+              <div class="bench-detail-grid">
+                <div><span class="muted">Model</span> {{s.modelUsed || '—'}}</div>
+                <div><span class="muted">OS</span> {{s.os || '—'}}</div>
+                <div><span class="muted">CPU</span> {{s.cpu || '—'}}</div>
+                <div><span class="muted">RAM</span> {{s.ram || '—'}} GB</div>
+                <div><span class="muted">GPU</span> {{s.gpu || '—'}}</div>
+              </div>
+            </div>
           </div>
         </div>
-        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <strong style="font-size:13px;">System Specs</strong>
-            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor" class="small"
-              style="font-size:11px;">{{vm.showSystemInfoEditor ? 'Done' : '✎ Edit'}}</button>
+
+        <!-- System Specs -->
+        <div class="bench-section">
+          <div class="bench-section-head bench-head-toggle" ng-click="vm.toggleBenchSection('specs')"
+            role="button" tabindex="0"
+            ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchSection('specs'); $event.preventDefault()"
+            ng-class="{open: vm.benchSectionOpen.specs}"
+            title="Click to expand / collapse">
+            <div>
+              <span class="bench-chevron">{{vm.benchSectionOpen.specs ? '▾' : '▸'}}</span>
+              <div class="bench-section-title">System specs
+                <span class="bench-count" ng-if="vm.systemSpecCount() > 0">{{vm.systemSpecCount()}}</span>
+              </div>
+              <div class="bench-section-sub">Reported with your scores so results are comparable.</div>
+            </div>
+            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor; $event.stopPropagation()" class="small nowrap"
+              ng-if="!vm.showSystemInfoEditor">✎ Edit</button>
+            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor; $event.stopPropagation()" class="small nowrap"
+              ng-if="vm.showSystemInfoEditor">✔ Done</button>
           </div>
-          <div ng-if="!vm.showSystemInfoEditor" style="font-size:12px;">
-            <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
-              <span class="muted">OS:</span><span>{{vm.systemInfoCustom.os || vm.systemInfoDetected.os || '—'}}</span>
-              <span class="muted">CPU:</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu ||
-                '—'}}</span>
-              <span class="muted">RAM:</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') :
-                (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') :
-                '—')}}</span>
-              <span class="muted">GPU:</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu ||
-                '—'}}</span>
-            </div>
+
+          <div class="bench-section-body" ng-if="vm.benchSectionOpen.specs">
+          <div ng-if="!vm.showSystemInfoEditor" class="bench-spec-grid">
+            <div class="bench-spec-item"><span class="muted">OS</span><span>{{vm.systemInfoCustom.os || vm.systemInfoDetected.os || '—'}}</span></div>
+            <div class="bench-spec-item"><span class="muted">CPU</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '—'}}</span></div>
+            <div class="bench-spec-item"><span class="muted">RAM</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') : (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') : '—')}}</span></div>
+            <div class="bench-spec-item"><span class="muted">GPU</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '—'}}</span></div>
+            <div class="bench-spec-item" ng-if="vm.systemInfoCustom.model"><span class="muted">Model</span><span>{{vm.systemInfoCustom.model}}</span></div>
           </div>
-          <div ng-if="vm.showSystemInfoEditor" style="font-size:12px;">
-            <div style="margin-bottom:6px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">OS</label>
-              <input type="text" ng-model="vm.systemInfoCustom.os" placeholder="{{vm.systemInfoDetected.os}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+
+          <div ng-if="vm.showSystemInfoEditor" class="bench-spec-editor">
+            <div class="form-row"><label class="muted">OS</label>
+              <input type="text" ng-model="vm.systemInfoCustom.os" placeholder="{{vm.systemInfoDetected.os}}" />
             </div>
-            <div style="margin-bottom:6px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">CPU</label>
-              <input type="text" ng-model="vm.systemInfoCustom.cpu" placeholder="{{vm.systemInfoDetected.cpu}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">CPU</label>
+              <input type="text" ng-model="vm.systemInfoCustom.cpu" placeholder="{{vm.systemInfoDetected.cpu}}" />
             </div>
-            <div style="margin-bottom:6px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">RAM (GB)</label>
-              <input type="number" step="0.1" ng-model="vm.systemInfoCustom.ramGb" placeholder="e.g. 32"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">RAM (GB)</label>
+              <input type="number" step="0.1" ng-model="vm.systemInfoCustom.ramGb" placeholder="e.g. 32" />
             </div>
-            <div style="margin-bottom:8px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">GPU</label>
-              <input type="text" ng-model="vm.systemInfoCustom.gpu" placeholder="{{vm.systemInfoDetected.gpu}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">GPU</label>
+              <input type="text" ng-model="vm.systemInfoCustom.gpu" placeholder="{{vm.systemInfoDetected.gpu}}" />
             </div>
-            <div style="margin-bottom:8px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">Model</label>
-              <input type="text" ng-model="vm.systemInfoCustom.model" placeholder="e.g. GPT-4, Claude 3.5 Sonnet"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            <div class="form-row"><label class="muted">Model</label>
+              <input type="text" ng-model="vm.systemInfoCustom.model" placeholder="e.g. GPT-4, Claude 3.5 Sonnet" />
             </div>
-            <div style="margin-bottom:8px;">
-              <label class="muted" style="display:block;margin-bottom:2px;">Benchmark Project Root</label>
-              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot"
-                placeholder="{{vm.defaultBenchmarkRoot}}"
-                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;font-family:monospace;" />
+            <div class="form-row"><label class="muted">Benchmark Project Root</label>
+              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot" placeholder="{{vm.defaultBenchmarkRoot}}" class="bench-mono" />
             </div>
-            <div style="display:flex;gap:6px;">
+            <div class="bench-spec-actions">
               <button ng-click="vm.saveSystemInfo()" class="primary small">Save</button>
               <button ng-click="vm.resetSystemInfo()" class="small">Reset to Detected</button>
+              <span ng-if="vm.systemInfoSaved" class="bench-saved">✓ Saved</span>
             </div>
-            <div ng-if="vm.systemInfoSaved" style="margin-top:6px;color:var(--accent);font-size:11px;">✓ Saved</div>
+          </div>
           </div>
         </div>
+
       </div>
       <div class="popup-footer">
         <button ng-click="vm.closeBenchmarksPanel()">Close</button>
@@ -1431,10 +2050,11 @@
       <div class="popup-body">
         <p style="font-size:12px;color:var(--muted);margin:0 0 12px 0;">
           Select files to include in the context
-          <span ng-if="vm.pendingContextReview && !vm._contextReviewSubmitted" class="context-review-countdown">
-            — waiting for your confirmation
+          <span ng-if="vm.contextReviewCountdown > 0" class="context-review-countdown">
+            — auto-confirming in {{vm.contextReviewCountdown}}s
           </span>
-          <span ng-if="vm._contextReviewSubmitted" class="context-review-countdown">
+          <span ng-if="vm.contextReviewCountdown <= 0 && vm.pendingContextReview && vm._contextReviewSubmitted"
+            class="context-review-countdown">
             — submitting…
           </span>
         </p>
@@ -1450,7 +2070,7 @@
         </div>
       </div>
       <div class="popup-footer">
-        <button class="primary" ng-click="vm.confirmContextReview()">
+        <button class="primary" ng-click="vm.confirmContextReview()" autofocus>
           Confirm
         </button>
       </div>
@@ -1469,7 +2089,7 @@
       </div>
     </div>
   </div>
-
+  <div id="weaver-toast-container"></div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/codemirror.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/clike/clike.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/javascript/javascript.min.js"></script>
@@ -1480,16 +2100,19 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/markdown/markdown.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/yaml/yaml.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/go/go.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/addon/mode/simple.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/rust/rust.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/swift/swift.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/php/php.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/ruby/ruby.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/shell/shell.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/mode/diff/diff.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/addon/edit/closebrackets.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/addon/edit/matchbrackets.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/addon/search/searchcursor.min.js"></script>
   <script
     src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/addon/search/match-highlighter.min.js"></script>
+  <script src="/error-core.js"></script>
   <script src="/app.js"></script>
   <script src="/kanban.js"></script>
   <script src="/calendar.js"></script>
@@ -1500,7 +2123,92 @@
   <script src="/terminal.js"></script>
   <script src="/agent.js"></script>
   <script src="/voice-input.js"></script>
+  <script src="/filetree.js"></script>
   <script src="/ide.js"></script>
+  <script src="/notes.js"></script>
+  <script src="/meeting.js"></script>
+  <script>
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      var swRegistration = null, swResolve = null;
+      window.__weaverSwReady = new Promise(function (r) { swResolve = r; });
+      navigator.serviceWorker.register('/service-worker.js').then(function (reg) {
+        swRegistration = reg;
+        if (swResolve) { swResolve(reg); swResolve = null; }
+        if ('Notification' in window && Notification.permission === 'granted') subscribePush(reg);
+      }).catch(function () { if (swResolve) { swResolve(null); swResolve = null; } });
+      function subscribePush(reg) {
+        reg.pushManager.getSubscription().then(function (sub) {
+          if (sub) return sub;
+          return fetch('/api/push/vapid-public-key').then(function (r) { return r.text(); }).then(function (key) {
+            return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) });
+          });
+        }).then(function (sub) {
+          fetch('/api/push/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub.toJSON()) });
+        }).catch(function () {});
+      }
+      window.__weaverNotify = function (title, body) {
+        window.__weaverSwReady.then(function (reg) {
+          if (reg && reg.active) {
+            reg.active.postMessage({
+              type: 'show-notification',
+              title: title || 'Weaver',
+              body: body || '',
+              icon: '/weavericon.png',
+              data: { url: window.location.origin + '/' }
+            });
+          } else if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification(title || 'Weaver', {
+              body: body || '',
+              icon: '/weavericon.png',
+              silent: false,
+              requireInteraction: true
+            });
+          }
+        });
+      };
+      window.__weaverRequestPermission = function () {
+        if (!('Notification' in window)) return Promise.resolve(false);
+        if (Notification.permission === 'granted') {
+          return window.__weaverSwReady.then(function (reg) {
+            if (reg) subscribePush(reg);
+            return true;
+          });
+        }
+        if (Notification.permission === 'denied') return Promise.resolve(false);
+        return Notification.requestPermission().then(function (perm) {
+          if (perm === 'granted') {
+            return window.__weaverSwReady.then(function (reg) {
+              if (reg) subscribePush(reg);
+              return true;
+            });
+          }
+          return false;
+        });
+      };
+      function urlBase64ToUint8Array(base64String) {
+        var padding = '='.repeat((4 - base64String.length % 4) % 4);
+        var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        var rawData = window.atob(base64);
+        var output = new Uint8Array(rawData.length);
+        for (var i = 0; i < rawData.length; ++i) output[i] = rawData.charCodeAt(i);
+        return output;
+      }
+      var deferredPrompt = null;
+      window.addEventListener('beforeinstallprompt', function (e) {
+        e.preventDefault();
+        deferredPrompt = e;
+      });
+      window.__weaverInstallApp = function () {
+        if (!deferredPrompt) return Promise.resolve(false);
+        deferredPrompt.prompt();
+        return deferredPrompt.userChoice.then(function (result) {
+          deferredPrompt = null;
+          return result.outcome === 'accepted';
+        });
+      };
+    })();
+  </script>
 </body>
 
 </html>

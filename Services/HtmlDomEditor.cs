@@ -114,18 +114,39 @@ public static class HtmlDomEditor
         var m = Regex.Match(line, @"^(\s*)");
         return m.Groups[1].Value;
     }
-    public static string StripLeadingClosingDivs(string html)
+    public static string StripLeadingClosingDivs(string html, string? targetName = null)
     {
         if (string.IsNullOrWhiteSpace(html))
             return html;
-        var lines = html.Split('\n').ToList();
-        while (lines.Count > 0)
+        int targetLeading = 0;
+        if (targetName != null)
         {
-            var trimmed = lines[0].Trim();
+            var targetLines = targetName.Split('\n');
+            foreach (var line in targetLines)
+            {
+                var trimmed = line.Trim();
+                if (trimmed == "</div>" || string.IsNullOrWhiteSpace(trimmed))
+                    targetLeading++;
+                else
+                    break;
+            }
+        }
+        var lines = html.Split('\n').ToList();
+        int toStrip = 0;
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
             if (trimmed == "</div>" || string.IsNullOrWhiteSpace(trimmed))
-                lines.RemoveAt(0);
+                toStrip++;
             else
                 break;
+        }
+        int excess = toStrip - targetLeading;
+        if (excess <= 0)
+            return html;
+        for (int i = 0; i < excess && lines.Count > 0; i++)
+        {
+            lines.RemoveAt(0);
         }
         return string.Join("\n", lines);
     }
@@ -157,6 +178,14 @@ public static class HtmlDomEditor
         var collapsedCandidates = FindAllCollapsed(content, targetName);
         if (collapsedCandidates.Count > 0)
             return PickBestCandidate(content, collapsedCandidates, stepChange, centerLine);
+        // Last resort for HTML: attribute-aware fuzzy element matching. The LLM frequently
+        // emits a targetName whose attribute VALUES drift from the file (e.g. a hallucinated
+        // (closeClicked)=\"$event\" when the file has remove_me('RecipeComponent')). Match on
+        // tag name + attribute KEYS (order-insensitive) with normalized value scoring instead
+        // of rejecting the whole edit with "targetName block not found".
+        var fuzzyCandidates = FindFuzzyElementCandidates(content, targetName);
+        if (fuzzyCandidates.Count > 0)
+            return PickBestCandidate(content, fuzzyCandidates, stepChange, centerLine);
         return (-1, 0);
     }
     private static List<(int index, int length)> FindAllExact(string content, string targetName)
@@ -206,11 +235,116 @@ public static class HtmlDomEditor
         }
         return result;
     }
+    private static List<(int index, int length)> FindFuzzyElementCandidates(string content, string targetName)
+    {
+        var result = new List<(int, int)>();
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(targetName))
+            return result;
+        var tagMatch = Regex.Match(targetName, @"<([a-zA-Z][\w-]*)\b");
+        if (!tagMatch.Success)
+            return result;
+        var tag = tagMatch.Groups[1].Value;
+        // Only parse the FIRST tag of the targetName (attributes of nested tags would pollute the key set).
+        var targetTag = targetName;
+        var gt = FindHtmlTagEnd(targetName, 1);
+        if (gt >= 0)
+            targetTag = targetName.Substring(0, gt + 1);
+        var targetAttrs = ParseHtmlAttributes(targetTag);
+        if (targetAttrs.Count == 0)
+            return result;
+        var tagRegex = new Regex($@"<{Regex.Escape(tag)}\b", RegexOptions.IgnoreCase);
+        var scored = new List<(int index, int length, int score)>();
+        foreach (Match m in tagRegex.Matches(content))
+        {
+            var elemStart = m.Index;
+            var tagEnd = FindHtmlTagEnd(content, elemStart + m.Length);
+            if (tagEnd < 0)
+                continue;
+            var openTag = content.Substring(elemStart, tagEnd - elemStart + 1);
+            var candAttrs = ParseHtmlAttributes(openTag);
+            // Every target attribute KEY must be present in the candidate (order-insensitive).
+            if (targetAttrs.Any(ta => !candAttrs.Any(ca => string.Equals(ca.Key, ta.Key, StringComparison.OrdinalIgnoreCase))))
+                continue;
+            var score = targetAttrs.Count(ta =>
+                candAttrs.Any(ca => string.Equals(ca.Key, ta.Key, StringComparison.OrdinalIgnoreCase) &&
+                                    string.Equals(ca.Value, ta.Value, StringComparison.OrdinalIgnoreCase)));
+            var elemEnd = ExtendHtmlElementEnd(content, tagEnd, tag);
+            scored.Add((elemStart, elemEnd - elemStart, score));
+        }
+        if (scored.Count == 0)
+            return result;
+        var best = scored.Max(s => s.score);
+        // Require at least one attribute VALUE match — otherwise a hallucinated
+        // targetName could silently select the wrong element that shares the keys.
+        if (best < 1)
+            return result;
+        foreach (var (idx, len, s) in scored)
+            if (s >= best)
+                result.Add((idx, len));
+        return result;
+    }
+
+    private static List<(string Key, string Value)> ParseHtmlAttributes(string tagText)
+    {
+        var result = new List<(string, string)>();
+        var attrRegex = new Regex(@"([@#*]?\[[^\]""=]*\]|[@#*]?\([^\)""=]*\)|[@#*]?[\w:.-]+)\s*=\s*(""[^""]*""|'[^']*')", RegexOptions.IgnoreCase);
+        foreach (Match m in attrRegex.Matches(tagText))
+        {
+            var normKey = Regex.Replace(m.Groups[1].Value, @"[\[\]()*#@]", "");
+            var normVal = NormalizeHtmlValue(m.Groups[2].Value);
+            result.Add((normKey, normVal));
+        }
+        return result;
+    }
+
+    private static string NormalizeHtmlValue(string value)
+    {
+        var s = (value ?? "").Trim();
+        if (s.Length >= 2 && ((s[0] == '"' && s[^1] == '"') || (s[0] == '\'' && s[^1] == '\'')))
+            s = s[1..^1];
+        return Regex.Replace(s, @"\s+", " ").Trim();
+    }
+
+    private static int FindHtmlTagEnd(string content, int searchFrom)
+    {
+        var inQuote = '\0';
+        for (var i = searchFrom; i < content.Length; i++)
+        {
+            var c = content[i];
+            if (inQuote != '\0')
+            {
+                if (c == '\\') { i++; continue; }
+                if (c == inQuote) inQuote = '\0';
+                continue;
+            }
+            if (c == '"' || c == '\'') { inQuote = c; continue; }
+            if (c == '>') return i;
+        }
+        return -1;
+    }
+
+    private static int ExtendHtmlElementEnd(string content, int openTagEnd, string tag)
+    {
+        // self-closing: <tag ... />
+        var ci = openTagEnd - 1;
+        while (ci >= 0 && char.IsWhiteSpace(content[ci])) ci--;
+        if (ci >= 0 && content[ci] == '/')
+            return openTagEnd + 1;
+        var lineEnd = content.IndexOf('\n', openTagEnd);
+        if (lineEnd < 0) lineEnd = content.Length;
+        var closePattern = $@"</{Regex.Escape(tag)}\s*>";
+        var slice = content.Substring(openTagEnd + 1, lineEnd - (openTagEnd + 1));
+        var closeMatch = Regex.Match(slice, closePattern, RegexOptions.IgnoreCase);
+        if (closeMatch.Success)
+            return openTagEnd + 1 + closeMatch.Index + closeMatch.Length;
+        return lineEnd;
+    }
+
     private static (int index, int length) PickBestCandidate(
         string content, List<(int index, int length)> candidates, string? stepChange, int centerLine)
     {
         if (candidates.Count == 1) return candidates[0];
-        var keywords = AgentUtilities.ExtractDisambiguationKeywords(stepChange);
+        var keywords = AgentDiscovery.ExtractDisambiguationKeywords(stepChange);
         var hasKeywords = keywords.Count > 0;
         var hasLineHint = centerLine > 0;
         if (!hasKeywords && !hasLineHint)

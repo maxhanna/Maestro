@@ -2,6 +2,76 @@ using TreeSitter;
 namespace Weaver.Services;
 public static class AstCodeEditorService
 {
+    private static readonly HashSet<string> JsLikeLanguages = new(StringComparer.OrdinalIgnoreCase)
+        { "JavaScript", "TypeScript", "TSX" };
+
+    /// <summary>
+    /// After an edit is applied to a .ts/.js file, parse with Tree-sitter and
+    /// insert missing tokens (commas, semicolons) that the parser expected.
+    /// Re-parses in a loop until clean or no more fixable errors.
+    /// </summary>
+    public static string AutoFixSyntaxErrors(string content, string fileExtension)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+        if (!LanguageMap.TryGetValue(fileExtension, out var langName)) return content;
+        if (!JsLikeLanguages.Contains(langName)) return content;
+
+        for (var iter = 0; iter < 10; iter++)
+        {
+            Language language;
+            Parser parser;
+            Tree? tree;
+            try
+            {
+                language = new Language(langName);
+                parser = new Parser(language);
+                tree = parser.Parse(content);
+            }
+            catch
+            {
+                return content;
+            }
+            using (language) using (parser) using (tree)
+            {
+                if (tree == null || !tree.RootNode.HasError) return content;
+
+                var missingNodes = new List<(string Type, int Pos)>();
+                CollectMissingNodes(tree.RootNode, missingNodes);
+                if (missingNodes.Count == 0) return content;
+
+                missingNodes.Sort((a, b) => b.Pos.CompareTo(a.Pos));
+                var changed = false;
+                foreach (var (type, pos) in missingNodes)
+                {
+                    var insert = type switch
+                    {
+                        "," => ",",
+                        ";" => ";",
+                        _ => null
+                    };
+                    if (insert == null) continue;
+                    if (pos >= 0 && pos <= content.Length)
+                    {
+                        content = content.Insert(pos, insert);
+                        changed = true;
+                    }
+                }
+                if (!changed) return content;
+            }
+        }
+        return content;
+    }
+
+    private static void CollectMissingNodes(Node node, List<(string Type, int Pos)> results)
+    {
+        if (node.IsMissing)
+            results.Add((node.Type, node.EndIndex));
+        if (node.Children != null)
+        {
+            foreach (var child in node.Children)
+                CollectMissingNodes(child, results);
+        }
+    }
     // Maps file extension -> TreeSitter grammar name (for new Language(name))
     private static readonly Dictionary<string, string> LanguageMap = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -11,7 +81,7 @@ public static class AstCodeEditorService
         { ".jsx", "JavaScript" },
         { ".mjs", "JavaScript" },
         { ".cjs", "JavaScript" },
-        { ".cs", "c_sharp" },
+        { ".cs", "c-sharp" }, // NB: native lib is tree-sitter-c-sharp.dll — "c_sharp" fails to load
         { ".py", "python" },
         { ".rb", "ruby" },
         { ".go", "go" },
@@ -42,6 +112,7 @@ public static class AstCodeEditorService
     {
         ["TypeScript"] =
         [
+            "(property_definition name: (property_identifier) @name) @target",
             "(method_definition name: (property_identifier) @name) @target",
             "(function_declaration name: (identifier) @name) @target",
             "(method_signature name: (property_identifier) @name) @target",
@@ -54,6 +125,7 @@ public static class AstCodeEditorService
         ],
         ["TSX"] =
         [
+            "(property_definition name: (property_identifier) @name) @target",
             "(method_definition name: (property_identifier) @name) @target",
             "(function_declaration name: (identifier) @name) @target",
             "(method_signature name: (property_identifier) @name) @target",
@@ -72,7 +144,7 @@ public static class AstCodeEditorService
             "(class_declaration name: (identifier) @name) @target",
             "(export_statement declaration: (function_declaration name: (identifier) @name)) @target",
         ],
-        ["c_sharp"] =
+        ["c-sharp"] =
         [
             "(method_declaration name: (identifier) @name) @target",
             "(local_function_statement name: (identifier) @name) @target",
@@ -212,35 +284,40 @@ public static class AstCodeEditorService
             if (tree == null) return results;
             foreach (var pattern in patterns)
             {
-                using var query = new Query(language, pattern);
-                var allCaptures = query.Execute(tree.RootNode).Captures.ToList();
-                var nameByStart = new Dictionary<int, string>();
-                foreach (var c in allCaptures)
+                Query query;
+                try { query = new Query(language, pattern); }
+                catch { continue; }
+                using (query)
                 {
-                    if (c.Name == "name")
-                        nameByStart[c.Node.StartIndex] = c.Node.Text;
-                }
-                foreach (var capture in allCaptures)
-                {
-                    if (capture.Name != "method" && capture.Name != "target" && capture.Name != "func")
-                        continue;
-                    var targetStart = capture.Node.StartIndex;
-                    var targetEnd = capture.Node.EndIndex;
-                    var resolvedName = nameByStart
-                        .Where(kvp => kvp.Key >= targetStart && kvp.Key < targetEnd)
-                        .OrderBy(kvp => kvp.Key)
-                        .Select(kvp => kvp.Value)
-                        .FirstOrDefault();
-                    if (string.IsNullOrWhiteSpace(resolvedName))
-                        continue;
-                    var startIndex = capture.Node.StartIndex;
-                    var endIndex = capture.Node.EndIndex;
-                    var lineStart = fileContent.LastIndexOf('\n', startIndex) + 1;
-                    if (lineStart < 0) lineStart = 0;
-                    var fullOldStr = fileContent[lineStart..endIndex]
-                        .Replace("\r\n", "\n").Replace("\r", "\n");
-                    var startLine = capture.Node.StartPosition.Row + 1;
-                    results.Add((resolvedName, fullOldStr, startLine));
+                    var allCaptures = query.Execute(tree.RootNode).Captures.ToList();
+                    var nameByStart = new Dictionary<int, string>();
+                    foreach (var c in allCaptures)
+                    {
+                        if (c.Name == "name")
+                            nameByStart[c.Node.StartIndex] = c.Node.Text;
+                    }
+                    foreach (var capture in allCaptures)
+                    {
+                        if (capture.Name != "method" && capture.Name != "target" && capture.Name != "func")
+                            continue;
+                        var targetStart = capture.Node.StartIndex;
+                        var targetEnd = capture.Node.EndIndex;
+                        var resolvedName = nameByStart
+                            .Where(kvp => kvp.Key >= targetStart && kvp.Key < targetEnd)
+                            .OrderBy(kvp => kvp.Key)
+                            .Select(kvp => kvp.Value)
+                            .FirstOrDefault();
+                        if (string.IsNullOrWhiteSpace(resolvedName))
+                            continue;
+                        var startIndex = capture.Node.StartIndex;
+                        var endIndex = capture.Node.EndIndex;
+                        var lineStart = fileContent.LastIndexOf('\n', startIndex) + 1;
+                        if (lineStart < 0) lineStart = 0;
+                        var fullOldStr = fileContent[lineStart..endIndex]
+                            .Replace("\r\n", "\n").Replace("\r", "\n");
+                        var startLine = capture.Node.StartPosition.Row + 1;
+                        results.Add((resolvedName, fullOldStr, startLine));
+                    }
                 }
             }
             return results;
@@ -267,38 +344,43 @@ public static class AstCodeEditorService
                 return (null, 0, "Failed to parse file");
             foreach (var pattern in patterns)
             {
-                using var query = new Query(language, pattern);
-                var allCaptures = query.Execute(tree.RootNode).Captures.ToList();
-                // Build a map: name-node start-index → name text for all @name captures
-                var nameByStart = new Dictionary<int, string>();
-                foreach (var c in allCaptures)
+                Query q2;
+                try { q2 = new Query(language, pattern); }
+                catch { continue; }
+                using (q2)
                 {
-                    if (c.Name == "name")
-                        nameByStart[c.Node.StartIndex] = c.Node.Text;
-                }
-                foreach (var capture in allCaptures)
-                {
-                    if (capture.Name != "method" && capture.Name != "target" && capture.Name != "func")
-                        continue;
-                    // Find the @name capture that falls WITHIN this target node's range
-                    // (the name is always a child of the target node in the syntax tree)
-                    var targetStart = capture.Node.StartIndex;
-                    var targetEnd = capture.Node.EndIndex;
-                    var resolvedName = nameByStart
-                        .Where(kvp => kvp.Key >= targetStart && kvp.Key < targetEnd)
-                        .OrderBy(kvp => kvp.Key)
-                        .Select(kvp => kvp.Value)
-                        .FirstOrDefault();
-                    if (resolvedName == null || resolvedName != targetSymbol)
-                        continue;
-                    var startIndex = capture.Node.StartIndex;
-                    var endIndex = capture.Node.EndIndex;
-                    var lineStart = fileContent.LastIndexOf('\n', startIndex) + 1;
-                    if (lineStart < 0) lineStart = 0;
-                    var fullOldStr = fileContent[lineStart..endIndex];
-                    fullOldStr = fullOldStr.Replace("\r\n", "\n").Replace("\r", "\n");
-                    var startLine = capture.Node.StartPosition.Row + 1;
-                    return (fullOldStr, startLine, null);
+                    var allCaptures = q2.Execute(tree.RootNode).Captures.ToList();
+                    // Build a map: name-node start-index → name text for all @name captures
+                    var nameByStart = new Dictionary<int, string>();
+                    foreach (var c in allCaptures)
+                    {
+                        if (c.Name == "name")
+                            nameByStart[c.Node.StartIndex] = c.Node.Text;
+                    }
+                    foreach (var capture in allCaptures)
+                    {
+                        if (capture.Name != "method" && capture.Name != "target" && capture.Name != "func")
+                            continue;
+                        // Find the @name capture that falls WITHIN this target node's range
+                        // (the name is always a child of the target node in the syntax tree)
+                        var targetStart = capture.Node.StartIndex;
+                        var targetEnd = capture.Node.EndIndex;
+                        var resolvedName = nameByStart
+                            .Where(kvp => kvp.Key >= targetStart && kvp.Key < targetEnd)
+                            .OrderBy(kvp => kvp.Key)
+                            .Select(kvp => kvp.Value)
+                            .FirstOrDefault();
+                        if (resolvedName == null || resolvedName != targetSymbol)
+                            continue;
+                        var startIndex = capture.Node.StartIndex;
+                        var endIndex = capture.Node.EndIndex;
+                        var lineStart = fileContent.LastIndexOf('\n', startIndex) + 1;
+                        if (lineStart < 0) lineStart = 0;
+                        var fullOldStr = fileContent[lineStart..endIndex];
+                        fullOldStr = fullOldStr.Replace("\r\n", "\n").Replace("\r", "\n");
+                        var startLine = capture.Node.StartPosition.Row + 1;
+                        return (fullOldStr, startLine, null);
+                    }
                 }
             }
             return (null, 0, $"'{targetSymbol}' not found in {langName} file");

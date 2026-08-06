@@ -61,15 +61,13 @@ namespace Weaver.Services;
 /// </summary>
 public class FileHintsManager
 {
-    private readonly string _basePath;
+    private readonly DatabaseService _db;
     private readonly object _lock = new();
 
-    public FileHintsManager(string basePath)
+    public FileHintsManager(DatabaseService db)
     {
-        _basePath = basePath;
+        _db = db;
     }
-
-    private string HintsFilePath => Path.Combine(_basePath, "data", "filehints.json");
 
     // ════════════════════════════════════════════════════════════════════════
     //  PERSISTENCE  (unchanged from original)
@@ -79,25 +77,14 @@ public class FileHintsManager
     {
         try
         {
-            if (!System.IO.File.Exists(HintsFilePath))
-            {
-                var dir = Path.GetDirectoryName(HintsFilePath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-                var defaultContent = "{\"Projects\": {}}";
-                System.IO.File.WriteAllText(HintsFilePath, defaultContent);
+            var json = _db.GetFileHints();
+            if (string.IsNullOrWhiteSpace(json))
                 return new GlobalHintsStore();
-            }
-            var json = System.IO.File.ReadAllText(HintsFilePath);
             var opts = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
-                // Tolerant deserialization: if AutoLearned or SymbolHints are
-                // missing on an old store written by pre-2.0 code, default them
-                // to empty lists instead of crashing.
             };
             var store = JsonSerializer.Deserialize<GlobalHintsStore>(json, opts) ?? new GlobalHintsStore();
-            // Backfill null collections — older stores may not have these fields.
             foreach (var proj in store.Projects.Values)
             {
                 proj.AutoLearned ??= new List<LearnedAssociation>();
@@ -113,7 +100,7 @@ public class FileHintsManager
     private void SaveAll(GlobalHintsStore store)
     {
         var json = JsonSerializer.Serialize(store, new JsonSerializerOptions { WriteIndented = true });
-        System.IO.File.WriteAllText(HintsFilePath, json);
+        _db.SetFileHints(json);
     }
 
     private ProjectHints EnsureProject(string projectRoot, GlobalHintsStore store)

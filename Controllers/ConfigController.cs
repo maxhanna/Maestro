@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 using Weaver.Services;
@@ -9,8 +10,13 @@ namespace Weaver.Controllers;
 public class ConfigController : ControllerBase
 {
     private readonly ConfigFileService _configFile;
+    private readonly IWebHostEnvironment _env;
 
-    public ConfigController(ConfigFileService configFile) => _configFile = configFile;
+    public ConfigController(ConfigFileService configFile, IWebHostEnvironment env)
+    {
+        _configFile = configFile;
+        _env = env;
+    }
 
     [HttpGet]
     public async Task<IActionResult> Get()
@@ -94,6 +100,32 @@ public class ConfigController : ControllerBase
         catch (Exception ex) { return StatusCode(500, ex.Message); }
     }
 
+    [HttpPost("open-in-vscode")]
+    public IActionResult OpenInVSCode([FromBody] OpenFileInVSCodeRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.FilePath))
+            return BadRequest("FilePath is required");
+
+        try
+        {
+            var fullPath = Path.GetFullPath(request.FilePath);
+            if (!System.IO.File.Exists(fullPath))
+                return NotFound($"File not found: {fullPath}");
+
+            var psi = new ProcessStartInfo("code", $"-g \"{fullPath}\"")
+            {
+                UseShellExecute = true,
+                CreateNoWindow = true
+            };
+            Process.Start(psi);
+            return Ok(new { opened = true, path = fullPath });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, $"Failed to open VS Code: {ex.Message}");
+        }
+    }
+
     [HttpPost("default-project")]
     public async Task<IActionResult> SetDefaultProject([FromBody] SetDefaultProjectRequest request)
     {
@@ -111,4 +143,5 @@ public class ConfigController : ControllerBase
 }
 
 public class SetDefaultProjectRequest { public string ProjectPath { get; set; } = ""; }
+public class OpenFileInVSCodeRequest { public string FilePath { get; set; } = ""; }
 

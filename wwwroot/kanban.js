@@ -14,7 +14,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
   return {
     init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
-
+      vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
       vm.findCardById = function (cardId) {
         if (!cardId || !vm.state) return null;
         try {
@@ -162,7 +162,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           attached: [],
           autoPr: vm.prByDefault !== false,
           selfImproving: false,
-          createTests: false
+          createTests: false,
+          llmEndpointId: ''
         });
         vm.saveCards();
         $timeout(function () {
@@ -340,7 +341,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.toggleCardReady = function (card) {
         try {
           card.ready = !card.ready;
-          if (card.ready && !vm.streamingActive) {
+          if (card.ready && (!vm.streamingActive || !vm.isCardActive(card.id))) {
             vm.startCard(card);
           }
         }
@@ -352,6 +353,48 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.planDoneCount = function (items) {
         if (!items || !items.length) return 0;
         return items.filter(function (i) { return i.done; }).length;
+      };
+
+      // Number of 'recovering' log entries for this card — the count of times the
+      // run healed itself mid-stream (stream drop retry, finish-this continuation).
+      // Persisted runs read card.agentLog; the live run reads the streaming log.
+      vm.recoveredCount = function (card) {
+        try {
+          var log = null;
+          if (card && card.agentLog && card.agentLog.length) {
+            log = card.agentLog;
+          } else if (card && vm.isCardActive && vm.isCardActive(card.id) && vm.agentActivityLog) {
+            log = vm.agentActivityLog;
+          }
+          if (!log) return 0;
+          var n = 0;
+          for (var i = 0; i < log.length; i++) {
+            if (log[i] && log[i].level === 'recovering') n++;
+          }
+          return n;
+        } catch (e) { return 0; }
+      };
+
+      vm.isPlanMarker = function (file) {
+        return file === '_planning' || file === '_executing' || file === '_verifying' || file === '_exploring';
+      };
+
+      vm.planMarkerIcon = function (file) {
+        if (file === '_planning') return '💭';
+        if (file === '_executing') return '⚡';
+        if (file === '_verifying') return '🔍';
+        if (file === '_exploring') return '🔎';
+        return null;
+      };
+
+      vm.planMarkerLabel = function (file, change) {
+        if (!vm.isPlanMarker(file)) return null;
+        if (change) return change;
+        if (file === '_planning') return 'Thinking…';
+        if (file === '_executing') return 'Working…';
+        if (file === '_verifying') return 'Verifying…';
+        if (file === '_exploring') return 'Exploring…';
+        return 'Working…';
       };
 
       vm.togglePlanItem = function (card, index) {
@@ -468,11 +511,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             // Clear previous analysis when starting a fresh run
             delete card.agentAnalysis;
             delete card.agentLog;
+            delete card._meetingReplay; // stale replay — the new run re-records it
             vm.executeAgent(card);
           }
           if (from === 'selfImproving' && to === 'doing' && card.ready) {
             delete card.agentAnalysis;
             delete card.agentLog;
+            delete card._meetingReplay; // stale replay — the new run re-records it
             vm.executeAgent(card);
           }
           vm.saveCards();
@@ -520,6 +565,18 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
 
         vm.saveCards();
+      };
+
+      vm.openInIde = function (filePath) {
+        if (vm.useVSCodeInsteadOfIDE) {
+          var fullPath = (vm.selectedProject || '') + '/' + filePath;
+          $http.post('/api/config/open-in-vscode', { filePath: fullPath }).then(function () {}, function (err) {
+            console.error('Failed to open in VS Code', err);
+          });
+          return;
+        }
+        vm.showIDE = true;
+        if (vm.openFile) vm.openFile(filePath);
       };
 
       vm.editCardText = function (card) {
@@ -570,7 +627,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             createdAt: new Date().toISOString(),
             priority: card.priority || 'medium',
             attached: i === 0 ? angular.copy(card.attached || []) : [],
-            selfImproving: false
+            selfImproving: false,
+            llmEndpointId: card.llmEndpointId || ''
           });
         });
         vm.saveCards();
@@ -640,9 +698,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
         var moved = vm.state.doing.splice(idx, 1)[0];
         if (moved) {
+          // Stamp the completion time so stats like "cards finished this week"
+          // reflect when the card actually finished, not when it was created.
+          moved.finishedAt = new Date().toISOString();
           console.log("Found card in doing, moving to " + targetCol);
           if (targetCol === 'selfImproving') {
-            vm.state[targetCol].unshift(moved);
+            // Round-robin: a completed self-improving card goes to the BACK of the list
+            // so the armed cycle advances 1-by-1 (A → B → C → A …) instead of re-running
+            // the same front card forever.
+            vm.state[targetCol].push(moved);
           } else {
             vm.state[targetCol].push(moved);
           }
@@ -661,6 +725,18 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (!card) return;
         try {
           if (card.ready) {
+            // Self-improving cards only run while NO regular card (todo/doing/done) is
+            // active — even on a physical start. Arm the cycle and leave the card Ready;
+            // processQueuedCards drains it (1-by-1) once regular work clears.
+            if (card.selfImproving && vm.regularAgentActive && vm.regularAgentActive()) {
+              if (vm.selfImprovingAgentActive !== true) {
+                vm.selfImprovingAgentActive = true;
+                if (vm.persistSelfImprovingAgent) vm.persistSelfImprovingAgent();
+              }
+              card.ready = true;
+              vm.saveCards();
+              return;
+            }
             vm.moveCardToDoing(card.id);
             vm.executeAgent(card);
           } else {
@@ -686,11 +762,23 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
       vm.processSelfImprovingQueue = function () {
         if (vm.streamingActive) return;
+        // Self-improving cards only run when the user has armed the cycle AND no regular
+        // card (todo/doing/done) is active.
+        if (!vm.selfImprovingAgentActive) return;
+        if (vm.regularAgentActive && vm.regularAgentActive()) return;
         var readyCards = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
         if (!readyCards.length) return;
-        var next = readyCards[readyCards.length - 1];
+        // Round-robin: completed cards are pushed to the BACK, so pick the front
+        // card to advance 1-by-1 through the list.
+        var next = readyCards[0];
         vm.moveCardToDoing(next.id);
         vm.executeAgent(next);
+      };
+
+      vm.toggleSelfImprovingAgent = function () {
+        vm.selfImprovingAgentActive = !vm.selfImprovingAgentActive;
+        if (vm.persistSelfImprovingAgent) vm.persistSelfImprovingAgent();
+        if (vm.selfImprovingAgentActive && vm.processQueuedCards) vm.processQueuedCards();
       };
 
       vm.countSelfImprovingCards = function () {
@@ -707,11 +795,36 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
       };
 
+      // Persistent workspace: per-column widths survive reloads. Seeded from the
+      // settings localStorage store (stashed by SettingsMixin before this mixin).
+      vm._kanbanColWidths = {};
+      if (vm._savedKanbanColWidths && typeof vm._savedKanbanColWidths === 'object') {
+        vm._kanbanColWidths = vm._savedKanbanColWidths;
+      }
+
       vm.initColumnResizers = function () {
         try {
           var existing = document.querySelectorAll('.col-resizer');
           existing.forEach(function (el) { el.remove(); });
           var cols = Array.prototype.slice.call(document.querySelectorAll('#board .column'));
+          if (!cols.length) {
+            // The board template is ng-included asynchronously — retry briefly
+            // so the resizers attach as soon as the columns exist.
+            if (vm._resizerRetries === undefined) vm._resizerRetries = 0;
+            if (vm._resizerRetries < 25) {
+              vm._resizerRetries++;
+              $timeout(function () { vm.initColumnResizers(); }, 200);
+            }
+            return;
+          }
+          vm._resizerRetries = 0;
+          // Restore persisted widths (keyed by data-col) so the layout comes
+          // back exactly as the user left it.
+          var savedW = vm._kanbanColWidths || {};
+          cols.forEach(function (c) {
+            var key = c.getAttribute('data-col');
+            if (key && savedW[key]) c.style.flex = '0 0 ' + Math.round(savedW[key]) + 'px';
+          });
           for (var i = 0; i < cols.length - 1; i++) {
             (function (leftCol) {
               var resizer = document.createElement('div');
@@ -727,12 +840,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
                 var leftW = leftRect.width;
                 var rightW = rightRect.width;
                 var min = 200;
+                var nl = leftW, nr = rightW;
                 document.body.style.userSelect = 'none';
                 resizer.classList.add('active');
                 function onMove(ev) {
                   var dx = ev.clientX - startX;
-                  var nl = leftW + dx;
-                  var nr = rightW - dx;
+                  nl = leftW + dx;
+                  nr = rightW - dx;
                   var total = leftW + rightW;
                   if (nl < min) { nl = min; nr = total - min; }
                   if (nr < min) { nr = min; nl = total - min; }
@@ -744,16 +858,40 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
                   document.removeEventListener('pointerup', stopDrag);
                   document.body.style.userSelect = '';
                   resizer.classList.remove('active');
+                  // Persist the new widths so the layout survives a reload.
+                  var lk = leftCol.getAttribute('data-col');
+                  var rk = rightCol.getAttribute('data-col');
+                  var saved = vm._kanbanColWidths = vm._kanbanColWidths || {};
+                  if (lk) saved[lk] = Math.round(nl);
+                  if (rk) saved[rk] = Math.round(nr);
+                  if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout();
                 }
                 document.addEventListener('pointermove', onMove);
                 document.addEventListener('pointerup', stopDrag);
               });
               resizer.addEventListener('dblclick', function () {
-                cols.forEach(function (c) { c.style.flex = ''; c.style.width = ''; });
+                cols.forEach(function (c) {
+                  c.style.flex = ''; c.style.width = '';
+                  var key = c.getAttribute('data-col');
+                  if (key && vm._kanbanColWidths) delete vm._kanbanColWidths[key];
+                });
+                if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout();
               });
             })(cols[i]);
           }
         } catch (e) { console.error('resizer error', e); }
+      };
+
+      // Toggle a board column's visibility and persist it, re-attaching resizers
+      // afterwards since ng-if re-renders the column DOM.
+      vm.toggleColumn = function (col) {
+        if (col === 'todo') vm.showTodo = !vm.showTodo;
+        else if (col === 'doing') vm.showDoing = !vm.showDoing;
+        else if (col === 'done') vm.showDone = !vm.showDone;
+        else if (col === 'archived') vm.showArchived = !vm.showArchived;
+        else if (col === 'selfImproving') vm.showSelfImproving = !vm.showSelfImproving;
+        $timeout(function () { vm.initColumnResizers(); }, 0);
+        if (vm.persistWorkspaceLayout) vm.persistWorkspaceLayout();
       };
 
       vm.setupDragDrop = function () {
@@ -916,7 +1054,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         } catch (e) { console.error('dragdrop error', e); }
       };
 
-      $timeout(function () { vm.setupDragDrop(); }, 500);
+      $timeout(function () { vm.setupDragDrop(); vm.initColumnResizers(); }, 500);
+      // The board is ng-if'd on vm.showKanban, so closing it destroys the column
+      // DOM (inline widths + attached resizers). Re-attach and re-apply saved
+      // widths whenever the board re-opens.
+      $scope.$watch(function () { return vm.showKanban; }, function (v) {
+        if (v) $timeout(function () { vm.initColumnResizers(); }, 100);
+      });
     }
   };
 });

@@ -12,7 +12,7 @@ public class EditKnowledgeService
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new(StringComparer.Ordinal);
     private readonly LlmCallDelegate? _llmCaller;
     private readonly Action<string, string>? _logger;
-    private readonly string _weaverDataDir;
+    private readonly DatabaseService _db;
 
     public const int MaxDoEntries = 30;
     public const int MaxDontEntries = 30;
@@ -23,14 +23,31 @@ public class EditKnowledgeService
     public const int MaxArchEndpoints = 40;
     public const int MaxArchMethods = 60;
 
-    public EditKnowledgeService(string weaverDataDir, LlmCallDelegate? llmCaller = null, Action<string, string>? logger = null)
+    public EditKnowledgeService(DatabaseService db, LlmCallDelegate? llmCaller = null, Action<string, string>? logger = null)
     {
-        _weaverDataDir = weaverDataDir;
+        _db = db;
         _llmCaller = llmCaller;
         _logger = logger;
     }
 
-    public string GetEditKnowledgeFilePath(string projectRoot)
+    // Compatibility constructor for isolated tests and legacy callers.
+    public EditKnowledgeService(string dataPath)
+        : this(CreateCompatibilityDatabase())
+    {
+    }
+
+    private static DatabaseService CreateCompatibilityDatabase()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "weaver-edit-knowledge-compat-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        return new DatabaseService(
+            Path.Combine(root, "weaver.db"), root, Path.Combine(root, "weaverconfig.json"));
+    }
+
+    /// <summary>
+    /// Returns a stable project key (safe name) used for DB storage.
+    /// </summary>
+    public string GetProjectKey(string projectRoot)
     {
         var projectName = Path.GetFileName(projectRoot.TrimEnd(
             Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
@@ -43,16 +60,15 @@ public class EditKnowledgeService
                 safeName.Append('_');
         }
         if (safeName.Length == 0) safeName.Append("default");
-        return Path.Combine(_weaverDataDir, $".project_{safeName}_edit_knowledge.json");
+        return safeName.ToString();
     }
 
     public async Task<ProjectEditKnowledge?> LoadAsync(string projectRoot, CancellationToken ct = default)
     {
         try
         {
-            var path = GetEditKnowledgeFilePath(projectRoot);
-            if (!System.IO.File.Exists(path)) return null;
-            var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, ct);
+            var projectName = GetProjectKey(projectRoot);
+            var raw = _db.GetEditKnowledge(projectName);
             if (string.IsNullOrWhiteSpace(raw)) return null;
             return JsonSerializer.Deserialize<ProjectEditKnowledge>(raw, new JsonSerializerOptions
             {
@@ -70,14 +86,15 @@ public class EditKnowledgeService
     {
         try
         {
-            var path = GetEditKnowledgeFilePath(projectRoot);
-            if (System.IO.File.Exists(path)) return;
+            var projectName = GetProjectKey(projectRoot);
+            var existing = _db.GetEditKnowledge(projectName);
+            if (!string.IsNullOrWhiteSpace(existing)) return;
 
-            var projectName = Path.GetFileName(projectRoot.TrimEnd(
+            var projectDisplayName = Path.GetFileName(projectRoot.TrimEnd(
                 Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
             var empty = new ProjectEditKnowledge
             {
-                ProjectName = projectName,
+                ProjectName = projectDisplayName,
                 LastUpdated = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 Version = 1,
                 Do = new List<string>(),
@@ -86,27 +103,17 @@ public class EditKnowledgeService
                 RecentFailures = new List<ProjectEditFailure>()
             };
 
-            var dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-
-            var tmp = path + ".tmp";
             var json = JsonSerializer.Serialize(empty, new JsonSerializerOptions
             {
                 WriteIndented = true,
                 PropertyNamingPolicy = null
             });
-            await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, ct);
-            if (System.IO.File.Exists(path))
-                System.IO.File.Replace(tmp, path, null);
-            else
-                System.IO.File.Move(tmp, path);
-
-            _logger?.Invoke("info", $"Created edit knowledge file for project: {projectName}");
+            _db.SetEditKnowledge(projectName, json);
+            _logger?.Invoke("info", $"Created edit knowledge for project: {projectDisplayName}");
         }
         catch (Exception ex)
         {
-            _logger?.Invoke("warn", $"Failed to create edit knowledge file: {ex.Message}");
+            _logger?.Invoke("warn", $"Failed to create edit knowledge: {ex.Message}");
         }
     }
 
@@ -385,26 +392,24 @@ public class EditKnowledgeService
 
         try
         {
-            var path = GetEditKnowledgeFilePath(projectRoot);
-            var projectName = Path.GetFileName(projectRoot.TrimEnd(
+            var projectName = GetProjectKey(projectRoot);
+            var projectDisplayName = Path.GetFileName(projectRoot.TrimEnd(
                 Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
 
-            var sem = _locks.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
+            var sem = _locks.GetOrAdd(projectName, _ => new SemaphoreSlim(1, 1));
             await sem.WaitAsync(bgCt);
             try
             {
                 ProjectEditKnowledge k;
-                if (System.IO.File.Exists(path))
+                var existingJson = _db.GetEditKnowledge(projectName);
+                if (!string.IsNullOrWhiteSpace(existingJson))
                 {
                     try
                     {
-                        var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, bgCt);
-                        k = (string.IsNullOrWhiteSpace(raw)
-                                ? null
-                                : JsonSerializer.Deserialize<ProjectEditKnowledge>(raw, new JsonSerializerOptions
-                                {
-                                    PropertyNameCaseInsensitive = true
-                                })) ?? new ProjectEditKnowledge();
+                        k = JsonSerializer.Deserialize<ProjectEditKnowledge>(existingJson, new JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true
+                        }) ?? new ProjectEditKnowledge();
                     }
                     catch { k = new ProjectEditKnowledge(); }
                 }
@@ -412,7 +417,7 @@ public class EditKnowledgeService
                 {
                     k = new ProjectEditKnowledge();
                 }
-                if (string.IsNullOrEmpty(k.ProjectName)) k.ProjectName = projectName;
+                if (string.IsNullOrEmpty(k.ProjectName)) k.ProjectName = projectDisplayName;
                 k.Do ??= new List<string>();
                 k.Dont ??= new List<string>();
                 k.Patterns ??= new Dictionary<string, List<string>>(StringComparer.Ordinal);
@@ -484,21 +489,12 @@ public class EditKnowledgeService
 
                 k.LastUpdated = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                var tmp = path + ".tmp";
                 var json = JsonSerializer.Serialize(k, new JsonSerializerOptions
                 {
                     WriteIndented = true,
                     PropertyNamingPolicy = null
                 });
-                await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, bgCt);
-                if (System.IO.File.Exists(path))
-                    System.IO.File.Replace(tmp, path, null);
-                else
-                    System.IO.File.Move(tmp, path);
+                _db.SetEditKnowledge(projectName, json);
             }
             finally
             {
@@ -690,8 +686,8 @@ public class EditKnowledgeService
                 endpoints.Count == 0 && methods.Count == 0)
                 return;
 
-            var path = GetEditKnowledgeFilePath(projectRoot);
-            var sem = _locks.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
+            var projectName = GetProjectKey(projectRoot);
+            var sem = _locks.GetOrAdd(projectName, _ => new SemaphoreSlim(1, 1));
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
@@ -700,14 +696,13 @@ public class EditKnowledgeService
             try
             {
                 ProjectEditKnowledge k;
-                if (System.IO.File.Exists(path))
+                var existingJson = _db.GetEditKnowledge(projectName);
+                if (!string.IsNullOrWhiteSpace(existingJson))
                 {
                     try
                     {
-                        var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, cts.Token);
-                        k = (string.IsNullOrWhiteSpace(raw) ? null :
-                             JsonSerializer.Deserialize<ProjectEditKnowledge>(raw,
-                                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true }))
+                        k = JsonSerializer.Deserialize<ProjectEditKnowledge>(existingJson,
+                                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                             ?? new ProjectEditKnowledge();
                     }
                     catch { k = new ProjectEditKnowledge(); }
@@ -723,21 +718,12 @@ public class EditKnowledgeService
 
                 k.LastUpdated = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                var tmp = path + ".tmp";
                 var json = JsonSerializer.Serialize(k, new JsonSerializerOptions
                 {
                     WriteIndented = true,
                     PropertyNamingPolicy = null
                 });
-                await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, cts.Token);
-                if (System.IO.File.Exists(path))
-                    System.IO.File.Replace(tmp, path, null);
-                else
-                    System.IO.File.Move(tmp, path);
+                _db.SetEditKnowledge(projectName, json);
             }
             finally { sem.Release(); }
         }
