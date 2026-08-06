@@ -1,7 +1,8 @@
 // settings.mixin.js
 angular.module('kanbanApp')
     .factory('SettingsMixin', ['$http', '$window', '$timeout', function ($http, $window, $timeout) {
-        const SETTINGS_KEY = 'weaverconfig.settings';
+        // Versioned so the former opt-out default (auto-queue enabled) cannot silently carry over.
+        const SETTINGS_KEY = 'weaverconfig.settings.v2';
 
         var DEFAULT_THEME = {
             '--bg': '#071025', '--surface': '#0b1220', '--panel': '#071322',
@@ -76,7 +77,7 @@ angular.module('kanbanApp')
                 vm.projects = [];
                 vm.defaultProject = '';
                 vm.settingsDefaultProject = '';
-                vm.autoQueue = true;
+                vm.autoQueue = false;
 
                 // Terminal/Config settings
                 vm.llamaUrl = 'http://localhost:8080';
@@ -124,7 +125,7 @@ angular.module('kanbanApp')
                         var raw = $window.localStorage.getItem(SETTINGS_KEY);
                         if (raw) {
                             var s = JSON.parse(raw);
-                            vm.autoQueue = s.autoQueue !== false;
+                            vm.autoQueue = s.autoQueue === true;
                         }
                     } catch (e) { }
                 }

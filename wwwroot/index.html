@@ -1431,11 +1431,10 @@
       <div class="popup-body">
         <p style="font-size:12px;color:var(--muted);margin:0 0 12px 0;">
           Select files to include in the context
-          <span ng-if="vm.contextReviewCountdown > 0" class="context-review-countdown">
-            — auto-confirming in {{vm.contextReviewCountdown}}s
+          <span ng-if="vm.pendingContextReview && !vm._contextReviewSubmitted" class="context-review-countdown">
+            — waiting for your confirmation
           </span>
-          <span ng-if="vm.contextReviewCountdown <= 0 && vm.pendingContextReview && vm._contextReviewSubmitted"
-            class="context-review-countdown">
+          <span ng-if="vm._contextReviewSubmitted" class="context-review-countdown">
             — submitting…
           </span>
         </p>

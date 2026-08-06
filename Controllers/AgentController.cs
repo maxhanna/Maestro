@@ -10646,7 +10646,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }, ct);
         try
         {
-            var confirmedFiles = await review.Answer.Task.WaitAsync(TimeSpan.FromSeconds(30), ct);
+            // Do not continue automatically. The agent must receive an explicit user decision;
+            // cancellation of the request (closing/stopping the agent) still releases the wait.
+            var confirmedFiles = await review.Answer.Task.WaitAsync(ct);
             var confirmedSet = new HashSet<string>(confirmedFiles, StringComparer.OrdinalIgnoreCase);
             if (confirmedFiles.Count < readFiles.Count)
             {

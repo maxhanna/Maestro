@@ -251,12 +251,8 @@ angular.module('kanbanApp')
                                                                 try {
                                                                     if (parsed && parsed.id && parsed.files) {
                                                                         const ctx = parsed; ctx.files.forEach(function (f) { f.keep = true; });
-                                                                        vm.pendingContextReview = ctx; vm._contextReviewSubmitted = false; vm.contextReviewCountdown = 5;
-                                                                        pushAgentLog(vm, 'phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 5s');
-                                                                        if (vm.contextReviewTimer) $interval.cancel(vm.contextReviewTimer);
-                                                                        if (vm.contextReviewAutoConfirm) $timeout.cancel(vm.contextReviewAutoConfirm);
-                                                                        vm.contextReviewTimer = $interval(function () { vm.contextReviewCountdown--; if (vm.contextReviewCountdown < 0) vm.contextReviewCountdown = 0; }, 1000, 5);
-                                                                        vm.contextReviewAutoConfirm = $timeout(function () { if (!vm._contextReviewSubmitted && vm.pendingContextReview) vm.confirmContextReview(); }, 5000);
+                                                                        vm.pendingContextReview = ctx; vm._contextReviewSubmitted = false; vm.contextReviewCountdown = 0;
+                                                                        pushAgentLog(vm, 'phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered; waiting for confirmation');
                                                                     }
                                                                 } catch (e) { pushAgentLog(vm, 'error', 'Context review error: ' + (e.message || e)); }
                                                                 break;
@@ -375,6 +371,9 @@ angular.module('kanbanApp')
                                                                             card.agentLog = angular.copy(vm.agentActivityLog);
                                                                             vm.saveCards();
                                                                             if (card._benchmark) { recordBenchmarkScore(completionElapsed); return; }
+                                                                            vm.activeCardId = null;
+                                                                            vm.activeCardIds.delete(card.id);
+                                                                            return;
                                                                         } else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
                                                                      $timeout(function () {
@@ -487,9 +486,16 @@ angular.module('kanbanApp')
                     vm.clarificationReply = '';
                 };
 
-                vm.dismissContextReview = function () { if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); vm.contextReviewTimer = null; } vm.pendingContextReview = null; };
+                vm.dismissContextReview = function () {
+                    if (!vm.pendingContextReview || vm._contextReviewSubmitted) return;
+                    vm._contextReviewSubmitted = true;
+                    var reviewId = vm.pendingContextReview.id;
+                    vm.pendingContextReview = null;
+                    $http.post('/api/agent/context-review/confirm', { id: reviewId, files: [] });
+                };
                 vm.confirmContextReview = function () {
-                    if (!vm.pendingContextReview) return;
+                    if (!vm.pendingContextReview || vm._contextReviewSubmitted) return;
+                    vm._contextReviewSubmitted = true;
                     var selected = []; vm.pendingContextReview.files.forEach(function (f) { if (f.keep !== false) selected.push(f.path); });
                     $http.post('/api/agent/context-review/confirm', { id: vm.pendingContextReview.id, files: selected }).then(function () {
                         var card = vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
