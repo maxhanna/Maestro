@@ -77,4 +77,11 @@ public class BenchmarkController : ControllerBase
             return NotFound(new { message = "Score not found" });
         return Ok(new { message = "Score deleted" });
     }
+
+    [HttpDelete("scores")]
+    public IActionResult ClearAllScores()
+    {
+        var count = _benchmark.ClearAllScores();
+        return Ok(new { message = "Cleared " + count + " score(s)", cleared = count });
+    }
 }

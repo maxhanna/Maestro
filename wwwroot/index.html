@@ -1741,6 +1741,7 @@
               <button ng-click="vm.startBenchmarkAll(); $event.stopPropagation()" class="primary small nowrap"
                 ng-disabled="vm.benchmarksRunning()">▶ Run All</button>
             </span>
+            <button ng-if="vm.benchmarkAllActive" ng-click="vm.stopBenchmarkAll(); $event.stopPropagation()" class="small nowrap danger" title="Stop running benchmarks">⏹ Stop Running</button>
           </div>
 
           <div class="bench-section-body" ng-if="vm.benchSectionOpen.run">
@@ -1826,6 +1827,7 @@
               <button ng-click="vm.fetchBenchmarksFromServer(); $event.stopPropagation()" class="small nowrap" ng-disabled="vm.fetchingBenchmarks">
                 {{vm.fetchingBenchmarks ? 'Fetching…' : '📥 Fetch from Server'}}
               </button>
+              <button ng-if="vm.benchmarkScores.length > 0" ng-click="vm.clearAllBenchmarkScores(); $event.stopPropagation()" class="small nowrap danger" title="Delete all local benchmark scores">🗑 Clear all</button>
             </div>
           </div>
 

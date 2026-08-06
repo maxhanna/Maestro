@@ -1261,6 +1261,18 @@ angular.module('kanbanApp')
                         (failed != null ? 'stopped at ' + vm.benchmarkLevelName(failed) + ' due to error steps' : 'all benchmarks passed') +
                         ' (' + vm.benchmarkAllResult.totalPoints + ' pts)');
                 };
+                vm.stopBenchmarkAll = function () {
+                    if (!vm.benchmarkAllActive) return;
+                    if (vm.stopAgent) vm.stopAgent();
+                    var completed = vm.benchmarkAllResults ? vm.benchmarkAllResults.length : 0;
+                    var queued = vm._benchmarkQueue ? vm._benchmarkQueue.length : 0;
+                    vm.benchmarkAllActive = false;
+                    vm._benchmarkQueue = [];
+                    vm.benchmarkAllResult = vm._summarizeBenchmarkAll(vm.benchmarkAllResults);
+                    vm.benchmarkRunning = false; vm.benchmarkLevel = null;
+                    vm._persistBenchmarkRun();
+                    pushAgentLog(vm, 'warn', '⏹ Benchmark All stopped — completed ' + completed + ' benchmark(s), ' + queued + ' remaining.');
+                };
                 vm._runNextBenchmarkFromQueue = function () {
                     if (!vm._benchmarkQueue || !vm._benchmarkQueue.length) { vm._finishBenchmarkAll(); return; }
                     var plan = vm._benchmarkQueue.shift();
@@ -1569,6 +1581,17 @@ angular.module('kanbanApp')
                 vm.saveSystemInfo = function () { $http.post('/api/benchmark/system-info', vm.systemInfoCustom).then(function () { vm.systemInfoSaved = true; $timeout(function () { vm.systemInfoSaved = false; }, 2000); }); };
                 vm.resetSystemInfo = function () { vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: '' }; vm.saveSystemInfo(); };
                 vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); if (vm.compareA === score) vm.compareA = null; if (vm.compareB === score) vm.compareB = null; vm.compareResult = vm.compareData(); }).catch(function () { }); };
+                vm.clearAllBenchmarkScores = function () {
+                    if (!vm.benchmarkScores || !vm.benchmarkScores.length) return;
+                    if (!$window.confirm('Delete all ' + vm.benchmarkScores.length + ' local benchmark score(s)? This cannot be undone.')) return;
+                    $http.delete('/api/benchmark/scores').then(function () {
+                        vm.benchmarkScores = [];
+                        vm.compareA = null;
+                        vm.compareB = null;
+                        vm.compareResult = vm.compareData();
+                        vm.selectedBenchmarkScore = null;
+                    }).catch(function () { });
+                };
             }
         };
     }]);
