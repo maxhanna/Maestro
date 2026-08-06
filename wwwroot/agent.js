@@ -364,8 +364,18 @@ angular.module('kanbanApp')
                                                                      }
                                                                      if (incomplete && card.id === vm.activeCardId) {
                                                                         card._agentIteration = (card._agentIteration || 0) + 1; var MAX_ITERATIONS = 5;
-                                                                        if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(completionElapsed); return; } }
-                                                                        else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
+                                                                        if (card._agentIteration >= MAX_ITERATIONS) {
+                                                                            var maxIterationWarning = 'Max iterations reached — stopping. The agent could not verify task completion after ' + MAX_ITERATIONS + ' attempts.';
+                                                                            pushAgentLog(vm, 'warn', maxIterationWarning);
+                                                                            vm.aiResponse = maxIterationWarning;
+                                                                            if (vm.agentResult) vm.agentResult.warning = maxIterationWarning;
+                                                                            analysis.warning = maxIterationWarning;
+                                                                            analysis.incomplete = true;
+                                                                            card.agentAnalysis = analysis;
+                                                                            card.agentLog = angular.copy(vm.agentActivityLog);
+                                                                            vm.saveCards();
+                                                                            if (card._benchmark) { recordBenchmarkScore(completionElapsed); return; }
+                                                                        } else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
                                                                      $timeout(function () {
                                                                          if (vm.autoQueue) {
@@ -384,7 +394,7 @@ angular.module('kanbanApp')
                                                                         else { card.prStatus = { status: 'error', error: (prResp.data && prResp.data.error) || 'PR creation failed', branch: card.prStatus.branch }; pushAgentLog(vm, 'warn', 'PR creation: ' + card.prStatus.error); }
                                                                         finishCard();
                                                                     }, function (err) { card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch }; pushAgentLog(vm, 'warn', 'PR creation failed: ' + card.prStatus.error); finishCard(); });
-                                                                } else { if (incomplete) pushAgentLog(vm, 'warn', 'Card kept in Doing — no files were modified'); finishCard(); }
+                                                                } else { if (incomplete) { pushAgentLog(vm, 'warn', 'Card kept in Doing — no files were modified'); vm.saveCards(); } finishCard(); }
                                                                 break;
                                                             case 'error':
                                                                 vm.streamingActive = false; 
