@@ -3629,6 +3629,44 @@ public partial class AgentController : ControllerBase
         }
         catch { }
     }
+    private static (string oldString, string newString)? TryBuildSimplePropertyEdit(string content, PlanStep step)
+    {
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(step.TargetSymbol) ||
+            string.IsNullOrWhiteSpace(step.Change)) return null;
+
+        var change = step.Change;
+        var valueMatch = Regex.Match(change,
+            @"\bfrom\s+['\x22`]?([^\s'\x22`]+)['\x22`]?\s+to\s+['\x22`]?([^\s'\x22`,;.]+)",
+            RegexOptions.IgnoreCase);
+        var desired = valueMatch.Success ? valueMatch.Groups[2].Value : null;
+        if (string.IsNullOrWhiteSpace(desired))
+        {
+            valueMatch = Regex.Match(change,
+                $@"\b{Regex.Escape(step.TargetSymbol)}\s*=\s*['\x22`]?([^\s'\x22`,;.]+)",
+                RegexOptions.IgnoreCase);
+            desired = valueMatch.Success ? valueMatch.Groups[1].Value : null;
+        }
+        if (string.IsNullOrWhiteSpace(desired))
+        {
+            valueMatch = Regex.Match(change,
+                @"\b(?:change|update|modify|set)\b.*?\bto\s+['\x22`]?([^\s'\x22`,;.]+)",
+                RegexOptions.IgnoreCase);
+            desired = valueMatch.Success ? valueMatch.Groups[1].Value : null;
+        }
+        if (string.IsNullOrWhiteSpace(desired)) return null;
+
+        var linePattern = new Regex(
+            $@"^(?<before>.*\b{Regex.Escape(step.TargetSymbol)}\b[^=\r\n]*=\s*)(?<value>[^;\r\n]+)(?<after>;.*)$",
+            RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        var match = linePattern.Match(content);
+        if (!match.Success || string.Equals(match.Groups["value"].Value.Trim(), desired.Trim(), StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var oldLine = match.Value;
+        var newLine = match.Groups["before"].Value + desired + match.Groups["after"].Value;
+        return (oldLine, newLine);
+    }
+
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -3839,6 +3877,20 @@ emitSse, ct);
                     await EmitLog(emitSse, "info",
                         $"No target symbol available for {relPath} — resolver will use full file context", ct: ct);
                 }
+            }
+        }
+        if (string.IsNullOrWhiteSpace(planOldStr) && System.IO.File.Exists(fullPath))
+        {
+            var propertyEdit = TryBuildSimplePropertyEdit(
+                await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct), step);
+            if (propertyEdit.HasValue)
+            {
+                planOldStr = propertyEdit.Value.oldString;
+                planNewStr = propertyEdit.Value.newString;
+                step.OldString = planOldStr;
+                step.NewString = planNewStr;
+                await EmitLog(emitSse, "info",
+                    $"Deterministically resolved simple property update for {relPath} using an exact line anchor", ct: ct);
             }
         }
         if (HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(planOldStr))
