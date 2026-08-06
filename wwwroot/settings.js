@@ -193,6 +193,13 @@ angular.module('kanbanApp')
                     });
                 };
 
+                function formatRequestError(err) {
+                    var data = err && err.data;
+                    if (typeof data === 'string' && data) return data;
+                    if (data && typeof data === 'object') return data.message || data.error || data.detail || JSON.stringify(data);
+                    return (err && (err.statusText || err.message)) || 'Unknown error';
+                }
+
                 vm.saveSettings = function (skipCloseSettingsPanel = false) {
                     saveLocalSettings();
                     $http.get('/api/config').then(function (resp) {
@@ -221,7 +228,7 @@ angular.module('kanbanApp')
                         if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
                        // vm.loadConfig(vm.defaultProject);
                         if (!skipCloseSettingsPanel) vm.closeSettingsPanel();
-                    }, function (err) { $window.alert('Failed to save settings: ' + (err.data || err.statusText || err)); });
+                    }, function (err) { $window.alert('Failed to save settings: ' + formatRequestError(err)); });
                 };
 
                 vm.addEmailAccount = function () { vm.emailAccounts.push({ imapServer: '', imapPort: 993, useSsl: true, username: '', password: '', label: '', showAppPasswordInstructions: false, testing: false, testResult: null }); };

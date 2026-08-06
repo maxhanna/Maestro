@@ -62,6 +62,7 @@ public class FrontendConfig
 
 public class ConfigFileService
 {
+    private static readonly SemaphoreSlim ConfigWriteLock = new(1, 1);
     private readonly string _configPath;
     private const string EncryptedPrefix = "DPAPI_B64:";
 
@@ -178,6 +179,19 @@ public class ConfigFileService
 
     public async Task WriteConfigAsync(FrontendConfig cfg)
     {
+        await ConfigWriteLock.WaitAsync();
+        try
+        {
+            await WriteConfigCoreAsync(cfg);
+        }
+        finally
+        {
+            ConfigWriteLock.Release();
+        }
+    }
+
+    private async Task WriteConfigCoreAsync(FrontendConfig cfg)
+    {
         // Encrypt passwords before persisting to disk
         EncryptAccountPasswords(cfg);
         // Sync legacy single-account fields from first email account for backward compat
@@ -204,7 +218,6 @@ public class ConfigFileService
 
         var tmp = _configPath + ".tmp";
         await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8);
-        System.IO.File.Copy(tmp, _configPath, true);
-        System.IO.File.Delete(tmp);
+        System.IO.File.Move(tmp, _configPath, true);
     }
 }
