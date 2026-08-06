@@ -80,6 +80,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       var _minimapDiffMarkers = null;
       var _minimapDiffPath = null;   // file the current markers were computed for
       var _minimapDiffCache = {};    // path → markers (avoid refetching on tab switches)
+      var _editorDiffLines = [];     // {line, kind} currently highlighted in the editor
 
 
       var _contentSyncDebounce = null;
@@ -984,6 +985,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
             'Cmd-F': function () { if (vm && vm.openSearch) vm.openSearch(); }
           }
         });
+        // The DOM was just rebuilt, so any diff line classes are gone — re-apply
+        // the current file's markers now that the editor exists again.
+        _applyEditorDiff(_minimapDiffPath === vm.ide.currentFile ? _minimapDiffMarkers : null);
         vm._editor.on('change', function () {
           if (vm._editorIgnoreChange) return;
           if (!vm.ide.currentTab) return;
@@ -1057,7 +1061,6 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileOpen(path, content);
-          _refreshMinimapDiff(path);
           // Initialize or update CodeMirror
           $timeout(function () {
             if (!vm._editor) {
@@ -1065,6 +1068,10 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
             } else {
               setEditorContent(content, path);
             }
+            // Refresh the diff AFTER the content swap — setValue destroys line
+            // objects (and their addLineClass state), so markers applied first
+            // would be wiped and the editor would show no highlights.
+            _refreshMinimapDiff(path);
           }, 50);
           if (vm.bughostedStatus === 'connected') {
             $timeout(function() { vm.syncEditorState(); }, 50);
@@ -1564,11 +1571,36 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         return markers;
       }
 
+      // Mirrors the minimap's markers onto the editor itself: added lines get a
+      // green tint, modified lines amber, and deletion anchors red, each with a
+      // matching accent bar in the line-number gutter (VS Code-style). Uses the
+      // exact same marker list as the minimap, so the two views never disagree.
+      function _applyEditorDiff(markers) {
+        if (!vm._editor) return;
+        var cm = vm._editor;
+        for (var i = 0; i < _editorDiffLines.length; i++) {
+          var prev = _editorDiffLines[i];
+          cm.removeLineClass(prev.line, 'background', 'ide-diff-line-' + prev.kind);
+          cm.removeLineClass(prev.line, 'gutter', 'ide-diff-gutter-' + prev.kind);
+        }
+        _editorDiffLines = [];
+        if (!markers || !markers.length) return;
+        var lineCount = cm.lineCount();
+        for (var j = 0; j < markers.length; j++) {
+          var m = markers[j];
+          if (m.line < 0 || m.line >= lineCount) continue;
+          cm.addLineClass(m.line, 'background', 'ide-diff-line-' + m.kind);
+          cm.addLineClass(m.line, 'gutter', 'ide-diff-gutter-' + m.kind);
+          _editorDiffLines.push({ line: m.line, kind: m.kind });
+        }
+      }
+
       function _refreshMinimapDiff(path) {
         if (!path || path.indexOf('_git:') === 0) return;
         if (_minimapDiffCache[path]) {
           _minimapDiffMarkers = _minimapDiffCache[path];
           _minimapDiffPath = path;
+          if (vm.ide.currentFile === path) _applyEditorDiff(_minimapDiffMarkers);
           _scheduleMinimapOverlay();
           return;
         }
@@ -1576,12 +1608,16 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         if (_minimapDiffPath !== path) {
           _minimapDiffMarkers = null;
           _minimapDiffPath = path;
+          if (vm.ide.currentFile === path) _applyEditorDiff(null);
         }
         $http.get('/api/editor/git-diff-file', { params: { project: vm.selectedProject, path: path } }).then(function (resp) {
           var data = resp.data || {};
           if (!data.isGitRepo) {
             _minimapDiffCache[path] = null;
-            if (vm.ide.currentFile === path) _minimapDiffMarkers = null;
+            if (vm.ide.currentFile === path) {
+              _minimapDiffMarkers = null;
+              _applyEditorDiff(null);
+            }
             return;
           }
           // Count real lines (CodeMirror semantics — no phantom trailing ''), so
@@ -1596,11 +1632,15 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           if (vm.ide.currentFile === path) {
             _minimapDiffMarkers = markers;
             _minimapDiffPath = path;
+            _applyEditorDiff(markers);
             _scheduleMinimapOverlay();
           }
         }, function () {
           _minimapDiffCache[path] = null;
-          if (vm.ide.currentFile === path) _minimapDiffMarkers = null;
+          if (vm.ide.currentFile === path) {
+            _minimapDiffMarkers = null;
+            _applyEditorDiff(null);
+          }
         });
       }
 

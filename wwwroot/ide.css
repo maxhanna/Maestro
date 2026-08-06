@@ -604,6 +604,34 @@
     min-height: 0;
 }
 
+/* Diff line highlighting inside the editor — mirrors the minimap's markers.
+   Added lines tint green, modified amber, and deletion anchors red, each with
+   a matching accent bar on the line-number gutter (VS Code-style). The classes
+   are added via CodeMirror's addLineClass, so no theme conflicts. */
+.ide-codemirror-container .ide-diff-line-add {
+    background-color: rgba(46, 160, 67, 0.14);
+}
+
+.ide-codemirror-container .ide-diff-line-modify {
+    background-color: rgba(251, 191, 36, 0.14);
+}
+
+.ide-codemirror-container .ide-diff-line-remove {
+    background-color: rgba(248, 113, 113, 0.10);
+}
+
+.ide-codemirror-container .ide-diff-gutter-add {
+    box-shadow: inset 3px 0 0 0 rgba(46, 160, 67, 0.85);
+}
+
+.ide-codemirror-container .ide-diff-gutter-modify {
+    box-shadow: inset 3px 0 0 0 rgba(251, 191, 36, 0.85);
+}
+
+.ide-codemirror-container .ide-diff-gutter-remove {
+    box-shadow: inset 3px 0 0 0 rgba(248, 113, 113, 0.85);
+}
+
 /* Minimap (VS Code-style overview) */
 .ide-minimap {
     position: absolute;
@@ -703,6 +731,104 @@
     border-right: none !important;
     width: auto !important;
     background: none !important;
+}
+
+/* Per-theme caret color: each light theme's caret borrows its own accent hue
+   (darkened where the theme color would be too pale to see) instead of the
+   shared gray above — Eclipse/IDEA get their blue, Neo its number purple, etc.
+   Equal specificity + !important as the shared block, so being later in the
+   file makes these win for border-left-color only. */
+.cm-s-eclipse .CodeMirror-cursor {
+    border-left-color: #1565c0 !important;
+}
+
+.cm-s-idea .CodeMirror-cursor {
+    border-left-color: #1e40af !important;
+}
+
+.cm-s-neo .CodeMirror-cursor {
+    border-left-color: #75438a !important;
+}
+
+.cm-s-yeti .CodeMirror-cursor {
+    border-left-color: #23667f !important;
+}
+
+.cm-s-paraiso-light .CodeMirror-cursor {
+    border-left-color: #5f3f80 !important;
+}
+
+.cm-s-xq-light .CodeMirror-cursor {
+    border-left-color: #5a5cad !important;
+}
+
+/* Light IDE themes: selection + gutter. The same pale backgrounds that wash
+   out the caret also wash out the selection tint (e.g. Yeti's #dcd8d2 on
+   #eceae8 and Paraiso Light's #b9b6b0 on #e7e9db are barely darker than the
+   page) and the line numbers (Neo's #e0e2e5 on white is nearly invisible;
+   Yeti/Paraiso sit at ~1.5–2.6:1). Pin a clearly visible selection and a dark
+   enough line number for every light theme. `!important` keeps these
+   authoritative over the later-loaded CDN stylesheets.
+
+   Two themes (yeti, paraiso-light) also paint the text-level selection via
+   native ::selection rules, so those get overridden too — a .CodeMirror-selected
+   background alone wouldn't win on modern browsers. The gutter border is left
+   alone on purpose: Neo uses border-right width as gutter spacing, so forcing
+   a border would squish its line numbers. */
+.cm-s-eclipse .CodeMirror-selected,
+.cm-s-idea .CodeMirror-selected,
+.cm-s-neo .CodeMirror-selected,
+.cm-s-yeti .CodeMirror-selected,
+.cm-s-paraiso-light .CodeMirror-selected,
+.cm-s-xq-light .CodeMirror-selected {
+    background: rgba(56, 139, 253, 0.25) !important;
+}
+
+.cm-s-eclipse .CodeMirror-focused .CodeMirror-selected,
+.cm-s-idea .CodeMirror-focused .CodeMirror-selected,
+.cm-s-neo .CodeMirror-focused .CodeMirror-selected,
+.cm-s-yeti .CodeMirror-focused .CodeMirror-selected,
+.cm-s-paraiso-light .CodeMirror-focused .CodeMirror-selected,
+.cm-s-xq-light .CodeMirror-focused .CodeMirror-selected {
+    background: rgba(56, 139, 253, 0.45) !important;
+}
+
+/* The native ::selection paints the glyphs on top of the .CodeMirror-selected
+   divs, so it must mirror the divs' focus split too — otherwise an unfocused
+   selection would be two-tone (chars at 0.45, whitespace at 0.25). `:is()`
+   collapses the six-theme lists; the compound `:is(...).CodeMirror-focused`
+   targets the focus class that CodeMirror puts on the same .CodeMirror div. */
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light) .CodeMirror-line::selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light) .CodeMirror-line > span::selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light) .CodeMirror-line > span > span::selection {
+    background: rgba(56, 139, 253, 0.25) !important;
+}
+
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light).CodeMirror-focused .CodeMirror-line::selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light).CodeMirror-focused .CodeMirror-line > span::selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light).CodeMirror-focused .CodeMirror-line > span > span::selection {
+    background: rgba(56, 139, 253, 0.45) !important;
+}
+
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light) .CodeMirror-line::-moz-selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light) .CodeMirror-line > span::-moz-selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light) .CodeMirror-line > span > span::-moz-selection {
+    background: rgba(56, 139, 253, 0.25) !important;
+}
+
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light).CodeMirror-focused .CodeMirror-line::-moz-selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light).CodeMirror-focused .CodeMirror-line > span::-moz-selection,
+:is(.cm-s-eclipse, .cm-s-idea, .cm-s-neo, .cm-s-yeti, .cm-s-paraiso-light, .cm-s-xq-light).CodeMirror-focused .CodeMirror-line > span > span::-moz-selection {
+    background: rgba(56, 139, 253, 0.45) !important;
+}
+
+.cm-s-eclipse .CodeMirror-linenumber,
+.cm-s-idea .CodeMirror-linenumber,
+.cm-s-neo .CodeMirror-linenumber,
+.cm-s-yeti .CodeMirror-linenumber,
+.cm-s-paraiso-light .CodeMirror-linenumber,
+.cm-s-xq-light .CodeMirror-linenumber {
+    color: #5a6472 !important;
 }
 
 .ide-codemirror-container .CodeMirror-selected {
@@ -1062,6 +1188,17 @@
 /* Highlight selection matches (from match-highlighter addon) */
 .cm-selection-match {
     background: rgba(187, 128, 9, 0.15) !important;
+}
+
+/* The match-highlighter's faint amber was tuned for the dark theme — 0.15
+   alpha on white is barely visible, so light themes get a stronger tint. */
+.cm-s-eclipse .cm-selection-match,
+.cm-s-idea .cm-selection-match,
+.cm-s-neo .cm-selection-match,
+.cm-s-yeti .cm-selection-match,
+.cm-s-paraiso-light .cm-selection-match,
+.cm-s-xq-light .cm-selection-match {
+    background: rgba(187, 128, 9, 0.4) !important;
 }
 
 /* Git Diff Viewer */

@@ -366,7 +366,11 @@ public class BughostedController : ControllerBase
                 }
                 fileStream.Close();
 
-                _updateStage = "installing";
+                // NOTE: the stage stays "downloading" while the download is validated
+                // and self-checked below. "installing"/"restarting" are only set AFTER
+                // verification passes — the frontend treats "installing" as "the server
+                // is about to die" and jumps to restart-watching, so setting it earlier
+                // would reload the page while the server is still up.
 
                 // Validate the downloaded EXE before touching the original
                 using (var validateStream = new FileStream(tempExe, FileMode.Open, FileAccess.Read))
@@ -380,6 +384,21 @@ public class BughostedController : ControllerBase
                         return;
                     }
                 }
+
+                // The MZ/size check proves it's an exe, but not that it's the NEW
+                // single-file build with the native libraries bundled INSIDE it.
+                // Run the download's own --self-check (loads SQLite + tree-sitter
+                // from the bundle, exits 0 only when both work) — a stale partial
+                // publish fails here and is rejected instead of shipped to users.
+                _updateStage = "verifying";
+                if (!await VerifyDownloadedExeAsync(tempExe))
+                {
+                    _updateStage = "failed";
+                    try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
+                    return;
+                }
+
+                _updateStage = "installing";
 
                 var currentExe = Environment.ProcessPath!;
                 var scriptPath = Path.Combine(tempDir, "update.cmd");
@@ -897,6 +916,54 @@ start """" ""{currentExe}"" --no-open-browser
     {
         _db.SetLocalVersion(version);
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Runs a freshly downloaded Weaver.exe with its --self-check flag and returns
+    /// true only when it exits 0 AND reports the native libraries loaded. This is
+    /// the reliable "is this the new single-file build?" test: an old partial
+    /// publish (e_sqlite3/tree-sitter sitting beside the exe instead of bundled)
+    /// cannot load the natives and exits 1 — so it's rejected before the running
+    /// copy is ever replaced. (A plain binary scan is not enough: managed metadata
+    /// contains those DLL names even in stale builds.)
+    /// </summary>
+    private static async Task<bool> VerifyDownloadedExeAsync(string exePath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(exePath, "--self-check")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi);
+            if (proc == null) return false;
+
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+
+            // First run of a fresh bundle extracts the natives to %TEMP%/.net/Weaver
+            // — generous timeout for cold machines.
+            if (!proc.WaitForExit(120_000))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                Console.WriteLine($"Update self-check timed out: {exePath}");
+                return false;
+            }
+
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+            Console.WriteLine($"Update self-check: exit={proc.ExitCode} out={stdout.Trim()} err={stderr.Trim()}");
+            return proc.ExitCode == 0
+                && stdout.Contains("self-check OK", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Update self-check threw: {ex.Message}");
+            return false;
+        }
     }
 
     static async Task<string?> GetRemoteVersionAsync()

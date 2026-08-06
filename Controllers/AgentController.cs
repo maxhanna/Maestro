@@ -76,15 +76,15 @@ public partial class AgentController : ControllerBase
         // Wire the per-endpoint stream-health tracker to SQLite so badges reflect
         // reliability across app restarts, not just the current session. The static
         // hooks capture this controller's DatabaseService (same singleton in DI).
-        RegisterEndpointHealthPersistence(
+        EndpointHealthService.RegisterPersistence(
             loader: () =>
             {
-                try { return _db.GetValue("weaver_config", EndpointHealthDbKey); }
+                try { return _db.GetValue("weaver_config", EndpointHealthService.DbKey); }
                 catch { return null; }
             },
             saver: json =>
             {
-                try { _db.SetValue("weaver_config", EndpointHealthDbKey, json); }
+                try { _db.SetValue("weaver_config", EndpointHealthService.DbKey, json); }
                 catch { }
             });
         _editKnowledge = new EditKnowledgeService(
@@ -458,27 +458,23 @@ public partial class AgentController : ControllerBase
     }
 
     // ── Per-endpoint stream health for the endpoint picker ───────────────
-    // Stream reliability counters accumulated by RecordEndpointCall in the LLM
-    // wrappers (transport/stream/truncation failures vs total calls). Rendered as
-    // a badge in the endpoint picker so flaky endpoints are easy to spot and swap.
+    // Stream reliability counters accumulated by EndpointHealthService.RecordCall in
+    // the LLM wrappers (transport/stream/truncation failures vs total calls). Rendered
+    // as a badge in the endpoint picker so flaky endpoints are easy to spot and swap.
     [HttpGet("endpoint-health")]
     public IActionResult GetEndpointHealth()
     {
-        HydrateEndpointHealthFromDisk();
+        EndpointHealthService.HydrateFromDisk();
         // Flush the latest counters to disk so an app crash or normal restart can
         // never lose the session's accumulated evidence (debounced on the hot path;
         // this explicit call guarantees the write happens while the user is looking).
-        PersistEndpointHealth();
+        EndpointHealthService.Persist();
         var now = DateTime.UtcNow;
         // Prune endpoints the user has removed or that went idle: entries whose last
         // activity (success or stream error) is older than the shared 24h window are
         // dropped so the tracker matches what was just persisted (same staleness rule).
-        foreach (var kv in _endpointStreamHealth.ToList())
-        {
-            if (IsEndpointHealthStale(kv.Value, now))
-                _endpointStreamHealth.TryRemove(kv.Key, out _);
-        }
-        var items = _endpointStreamHealth
+        EndpointHealthService.PruneStale();
+        var items = EndpointHealthService.Entries
             .Select(kv => new
             {
                 baseUrl = kv.Key,
@@ -502,6 +498,31 @@ public partial class AgentController : ControllerBase
             .ThenByDescending(x => x.errorRate)
             .ToList();
         return Ok(items);
+    }
+
+    // ── LLM reachability probe for the benchmark panel ────────────────────
+    // The front end disables the Run All / Run benchmark buttons (with a
+    // tooltip explaining why) while the configured LLM endpoint is
+    // unreachable, so a user isn't told "benchmark running" only to have the
+    // run fail a minute later at the connectivity check. This is a lightweight
+    // HTTP probe (no PowerShell TCP check) so the panel opens fast.
+    [HttpGet("llm-reachable")]
+    public async Task<IActionResult> GetLlmReachable()
+    {
+        var baseUrl = await GetLlamaBaseUrl();
+        var reachable = await ProbeLlmReachableAsync(baseUrl);
+        return Ok(new { reachable, url = baseUrl });
+    }
+    private async Task<bool> ProbeLlmReachableAsync(string baseUrl)
+    {
+        try
+        {
+            using var client = _clientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(5);
+            var resp = await client.GetAsync(baseUrl.TrimEnd('/') + "/api/tags");
+            return resp.IsSuccessStatusCode || (int)resp.StatusCode < 500;
+        }
+        catch { return false; }
     }
 
     // ── Improvement suggestions for a completed card ──────────────────────
@@ -533,25 +554,91 @@ public partial class AgentController : ControllerBase
             foreach (var p in piEl.EnumerateArray())
                 if (p.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(p.GetString()))
                     planLog.Add(p.GetString()!);
+        // "More like this" top-up: the card already has suggestions and the user
+        // asked for more. topup=true routes into the topping-up branch; existing
+        // is the front-end's live copy of the current suggestions, used as
+        // context so the LLM EXTENDS the set instead of repeating it.
+        bool topup = false;
+        var existingDescs = new List<string>();
+        if (payload.TryGetProperty("topup", out var topEl)) topup = topEl.ValueKind == JsonValueKind.True;
+        if (payload.TryGetProperty("existing", out var exEl) && exEl.ValueKind == JsonValueKind.Array)
+            foreach (var e in exEl.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty("description", out var dEl)) continue;
+                var d = dEl.GetString();
+                if (!string.IsNullOrWhiteSpace(d)) existingDescs.Add(d.Trim());
+            }
         if (string.IsNullOrWhiteSpace(cardId) || string.IsNullOrWhiteSpace(project))
             return BadRequest(new { error = "cardId and project are required" });
 
         try
         {
-            // Already generated (even 0)? Return the stored suggestions without re-running the LLM.
             var existing = await ReadCardSuggestionsAsync(cardId);
-            if (existing != null)
+            if (topup)
+            {
+                // "More like this" only tops up while the stored set is under the
+                // 3-cap; at the cap there's nothing left to add.
+                if (existing != null && existing.Count >= 3)
+                    return Ok(new { suggestions = existing });
+                // Robustness: if the front-end's existing list is empty but the
+                // board still carries suggestions, re-derive descriptions from
+                // the stored objects so dedupe still has context.
+                if (existingDescs.Count == 0 && existing != null)
+                {
+                    foreach (var ex in existing)
+                    {
+                        try
+                        {
+                            using var d = JsonDocument.Parse(JsonSerializer.Serialize(ex));
+                            if (d.RootElement.TryGetProperty("description", out var dd))
+                            {
+                                var t = dd.GetString();
+                                if (!string.IsNullOrWhiteSpace(t)) existingDescs.Add(t.Trim());
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            // Initial generation: an existing stored set (even an empty one) means
+            // the LLM already ran — return it without re-running.
+            else if (existing != null)
+            {
                 return Ok(new { suggestions = existing });
+            }
 
+            // Only top-ups budget slots from the existing set (defensive: a plain
+            // initial request always asks for the full 0-3 even if it somehow
+            // carried an `existing` array).
+            var slots = topup ? Math.Max(1, 3 - (existing?.Count ?? existingDescs.Count)) : 3;
             var projectRoot = Path.GetFullPath(project);
             var sb = new StringBuilder();
-            sb.AppendLine("A card on the kanban board was just completed successfully.");
-            sb.AppendLine("Generate up to 3 tightly-scoped, on-point follow-up suggestions for THIS card's work.");
-            sb.AppendLine("Ground every suggestion in what the agent actually did, thought, and the real files it touched ");
-            sb.AppendLine("— prefer the single most valuable next increment over generic advice. Do NOT suggest work that ");
-            sb.AppendLine("the card already completed or that is unrelated to its task.");
-            sb.AppendLine("Each suggestion MUST include file attachments (existing project-relative paths) that would serve as ");
-            sb.AppendLine("discovery context for implementing it — pick real files that actually exist in the project.");
+            if (topup)
+            {
+                sb.AppendLine("A kanban card's Suggestions section is being topped up by a \"More like this\" request.");
+                sb.AppendLine($"The card already has {existingDescs.Count} suggestion(s). Generate up to {slots} NEW, DISTINCT follow-up suggestion(s) that the existing set missed — same spirit and grounding, but NOT repeats or paraphrases of what is already listed.");
+                sb.AppendLine("Ground every suggestion in what the agent actually did, thought, and the real files it touched ");
+                sb.AppendLine("— prefer the single most valuable next increment over generic advice. Do NOT suggest work that ");
+                sb.AppendLine("the card already completed or that is unrelated to its task.");
+                sb.AppendLine("Each suggestion MUST include file attachments (existing project-relative paths) that would serve as ");
+                sb.AppendLine("discovery context for implementing it — pick real files that actually exist in the project.");
+                if (existingDescs.Count > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("EXISTING SUGGESTIONS (do not repeat or paraphrase these):");
+                    foreach (var d in existingDescs) sb.AppendLine("  - " + d);
+                }
+            }
+            else
+            {
+                sb.AppendLine("A card on the kanban board was just completed successfully.");
+                sb.AppendLine("Generate up to 3 tightly-scoped, on-point follow-up suggestions for THIS card's work.");
+                sb.AppendLine("Ground every suggestion in what the agent actually did, thought, and the real files it touched ");
+                sb.AppendLine("— prefer the single most valuable next increment over generic advice. Do NOT suggest work that ");
+                sb.AppendLine("the card already completed or that is unrelated to its task.");
+                sb.AppendLine("Each suggestion MUST include file attachments (existing project-relative paths) that would serve as ");
+                sb.AppendLine("discovery context for implementing it — pick real files that actually exist in the project.");
+            }
             sb.AppendLine();
             sb.AppendLine($"CARD TASK:\n{cardText}");
             if (!string.IsNullOrWhiteSpace(thinking)) sb.AppendLine($"\nAGENT THINKING (reasoning that drove the work):\n{thinking}");
@@ -560,7 +647,7 @@ public partial class AgentController : ControllerBase
             if (!string.IsNullOrWhiteSpace(summary)) sb.AppendLine($"\nCOMPLETION SUMMARY:\n{summary}");
             if (filesEdited.Count > 0) sb.AppendLine($"\nFILES CHANGED:\n{string.Join("\n", filesEdited.Select(f => "  - " + f))}");
             sb.AppendLine();
-            sb.AppendLine("Reply ONLY with a JSON array of 0-3 objects, each shaped:");
+            sb.AppendLine($"Reply ONLY with a JSON array of 0-{(topup ? slots : 3)} objects, each shaped:");
             sb.AppendLine(@"[{""description"": ""<suggestion text>"", ""files"": [""rel/path/file.ts"", ""rel/path/other.cs""]}]
 If nothing meaningful remains, reply with an empty array [] — never invent work.");
 
@@ -586,12 +673,18 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                 try
                 {
                     using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    var newDescs = new List<string>();
                     foreach (var el in doc.RootElement.EnumerateArray())
                     {
-                        if (suggestions.Count >= 3) break;
+                        if (suggestions.Count >= slots) break;
                         if (el.ValueKind != JsonValueKind.Object) continue;
                         var desc = el.TryGetProperty("description", out var dEl) ? dEl.GetString() : null;
                         if (string.IsNullOrWhiteSpace(desc)) continue;
+                        desc = desc.Trim();
+                        // Top-ups must EXTEND the set: drop anything that parrots an
+                        // existing suggestion (or another one from this same batch).
+                        if (topup && IsDuplicateSuggestion(desc, existingDescs.Concat(newDescs))) continue;
+                        newDescs.Add(desc);
                         var files = new List<string>();
                         if (el.TryGetProperty("files", out var fEl) && fEl.ValueKind == JsonValueKind.Array)
                             foreach (var fp in fEl.EnumerateArray())
@@ -606,7 +699,7 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                         suggestions.Add(new
                         {
                             id = Guid.NewGuid().ToString("N")[..8],
-                            description = desc.Trim(),
+                            description = desc,
                             files = files,
                             createdAt = DateTime.UtcNow.ToString("o")
                         });
@@ -615,9 +708,36 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                 catch { /* partial or malformed JSON — keep what we have */ }
             }
 
+            // Top-up: keep the existing set first, then append the new (already
+            // deduped) suggestions, never exceeding the 3-suggestion cap.
+            if (topup && existing != null)
+            {
+                var merged = new List<object>(existing);
+                foreach (var s in suggestions)
+                {
+                    if (merged.Count >= 3) break;
+                    merged.Add(s);
+                }
+                suggestions = merged;
+            }
+
             await PersistCardSuggestionsAsync(cardId, suggestions);
-            if (suggestions.Count == 0)
-                Console.WriteLine($"[SUGGEST IMPROVEMENTS] no suggestions for card {cardId} (rawlen={(raw?.Length ?? 0)} err={(string.IsNullOrWhiteSpace(err) ? "none" : err)})");
+            // Persist the context that grounded this generation alongside the
+            // suggestions so a future 'explain this suggestion' tooltip can show
+            // WHY each idea was proposed, even after a reload. Written on every
+            // generation (initial + top-up) since the card context is the same.
+            await PersistCardSuggestionsContextAsync(cardId, new
+            {
+                summary,
+                thinking,
+                steps = stepLog,
+                planItems = planLog,
+                filesEdited,
+                generatedAt = DateTime.UtcNow.ToString("o")
+            });
+            var addedNothing = suggestions.Count == 0 || (topup && existing != null && suggestions.Count == existing.Count);
+            if (addedNothing)
+                Console.WriteLine($"[SUGGEST IMPROVEMENTS] {(topup ? "top-up added nothing new" : "no suggestions")} for card {cardId} (rawlen={(raw?.Length ?? 0)} err={(string.IsNullOrWhiteSpace(err) ? "none" : err)})");
             return Ok(new { suggestions });
         }
         catch (Exception ex)
@@ -654,6 +774,27 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
     }
     private async Task PersistCardSuggestionsAsync(string cardId, List<object> suggestions)
     {
+        await TryUpdateCardAsync(cardId, card => card["_suggestions"] = JsonNode.Parse(JsonSerializer.Serialize(suggestions)));
+    }
+
+    /// <summary>
+    /// Persists the context that grounded suggestion generation (summary, thinking,
+    /// steps, plan items, files edited) onto the card as _suggestionsContext, written
+    /// alongside _suggestions so a future 'explain this suggestion' tooltip can show
+    /// WHY each suggestion was proposed — even after a reload.
+    /// </summary>
+    private async Task PersistCardSuggestionsContextAsync(string cardId, object context)
+    {
+        await TryUpdateCardAsync(cardId, card => card["_suggestionsContext"] = JsonNode.Parse(JsonSerializer.Serialize(context)));
+    }
+
+    /// <summary>
+    /// Shared board write: loads the board, finds the card in any column, applies
+    /// the mutation, and persists. Used by all the _suggestions/_suggestionsContext
+    /// writers so the find-and-save scan lives in exactly one place.
+    /// </summary>
+    private async Task TryUpdateCardAsync(string cardId, Action<JsonObject> mutate)
+    {
         try
         {
             var raw = await _boardData.LoadRawAsync();
@@ -670,7 +811,7 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                 {
                     if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
                         continue;
-                    cardObj["_suggestions"] = JsonNode.Parse(JsonSerializer.Serialize(suggestions));
+                    mutate(cardObj);
                     var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
                     await _boardData.SaveRawAsync(saved);
                     return;
@@ -681,6 +822,47 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
         {
             Console.WriteLine($"[SUGGEST IMPROVEMENTS PERSIST] {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Normalizes a suggestion description for similarity comparison: lowercase,
+    /// non-alphanumerics become spaces, whitespace collapsed. Shared by the
+    /// "More like this" top-up dedupe so "Add error handling" and
+    /// "add error handling." compare equal.
+    /// </summary>
+    internal static string NormalizeSuggestionText(string s)
+    {
+        var sb = new StringBuilder();
+        foreach (var c in (s ?? "").ToLowerInvariant())
+            sb.Append(char.IsLetterOrDigit(c) ? c : ' ');
+        return string.Join(' ', sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    /// <summary>
+    /// True when a new suggestion duplicates one already in the set: an exact
+    /// normalized match, a meaningful containment (one description is embedded
+    /// in the other), or a high token overlap. Used by the "More like this"
+    /// top-up so the LLM extends the card's suggestions instead of repeating them.
+    /// </summary>
+    internal static bool IsDuplicateSuggestion(string desc, IEnumerable<string> known)
+    {
+        var norm = NormalizeSuggestionText(desc);
+        if (string.IsNullOrEmpty(norm)) return true;
+        var knownNorms = known.Select(NormalizeSuggestionText).Where(n => !string.IsNullOrEmpty(n)).ToList();
+        var tokens = norm.Split(' ').ToHashSet();
+        foreach (var k in knownNorms)
+        {
+            if (k == norm) return true;
+            // Containment only counts when the shorter side is a real phrase
+            // (>= 8 chars) — a one-word tag like "add" shouldn't veto everything.
+            var minLen = Math.Min(k.Length, norm.Length);
+            if (minLen >= 8 && (norm.Contains(k) || k.Contains(norm))) return true;
+            var kTokens = k.Split(' ');
+            var overlap = kTokens.Count(t => tokens.Contains(t));
+            var denom = tokens.Count + kTokens.Length - overlap;
+            if (denom > 0 && (double)overlap / denom >= 0.7) return true;
+        }
+        return false;
     }
     private async Task<bool> CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
     {

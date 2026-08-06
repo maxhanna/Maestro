@@ -955,12 +955,14 @@
               <div class="update-stage">
                 <span ng-if="vm.updateProgress.stage === 'starting'" class="update-dot"></span>
                 <span ng-if="vm.updateProgress.stage === 'downloading'" class="update-dot"></span>
+                <span ng-if="vm.updateProgress.stage === 'verifying'" class="update-dot"></span>
                 <span ng-if="vm.updateProgress.stage === 'installing'" class="update-dot"></span>
                 <span ng-if="vm.updateProgress.stage === 'restarting'" class="update-dot"></span>
                 <span ng-if="vm.updateProgress.stage === 'failed'" class="update-dot" style="background:#f87171;"></span>
                 <span class="update-stage-label">
                   <span ng-if="vm.updateProgress.stage === 'starting'">Starting...</span>
                   <span ng-if="vm.updateProgress.stage === 'downloading'">Downloading update</span>
+                  <span ng-if="vm.updateProgress.stage === 'verifying'">Verifying download…</span>
                   <span ng-if="vm.updateProgress.stage === 'installing'">Installing update</span>
                   <span ng-if="vm.updateProgress.stage === 'restarting'">Restarting app</span>
                   <span ng-if="vm.updateProgress.stage === 'failed'">Update failed</span>
@@ -1706,8 +1708,10 @@
               </div>
               <div class="bench-section-sub">Each run sends a coding task through the agent and scores the edits it makes.</div>
             </div>
-            <button ng-click="vm.startBenchmarkAll(); $event.stopPropagation()" class="primary small nowrap"
-              ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run All</button>
+            <span class="bench-btn-wrap" ng-class="{'bench-btn-disabled': vm.benchmarkRunDisabled()}" title="{{vm.benchmarkRunTitle()}}">
+              <button ng-click="vm.startBenchmarkAll(); $event.stopPropagation()" class="primary small nowrap"
+                ng-disabled="vm.benchmarkRunDisabled()">▶ Run All</button>
+            </span>
           </div>
 
           <div class="bench-section-body" ng-if="vm.benchSectionOpen.run">
@@ -1715,6 +1719,9 @@
               <span class="bench-spinner"></span>
               Benchmark <strong>{{vm.benchmarkLevelName(vm.benchmarkLevel)}}</strong> running
               <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>…
+              <button ng-if="vm.benchmarkAllActive && vm.benchmarkInterrupted()"
+                ng-click="vm.resumeBenchmarkAll()" class="primary small nowrap bench-resume-btn"
+                title="The run was interrupted by a page reload — resume the remaining benchmarks from here.">↻ Resume</button>
             </div>
 
             <div ng-if="vm.benchmarkPlans.length > 0">
@@ -1724,8 +1731,10 @@
                   <div class="bench-plan-name">{{plan.name}}</div>
                   <div class="bench-plan-desc">{{plan.description}}</div>
                 </div>
-                <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
-                  ng-disabled="vm.benchmarkRunning || vm.benchmarkAllActive">▶ Run</button>
+                <span class="bench-btn-wrap" ng-class="{'bench-btn-disabled': vm.benchmarkRunDisabled()}" title="{{vm.benchmarkRunTitle()}}">
+                  <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
+                    ng-disabled="vm.benchmarkRunDisabled()">▶ Run</button>
+                </span>
               </div>
             </div>
             <div ng-if="vm.benchmarkPlans.length === 0" class="bench-empty">

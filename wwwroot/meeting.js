@@ -160,7 +160,7 @@ angular.module('kanbanApp')
         vm.gossipSearchActive = -1;   // ordinal of the currently highlighted match
         vm.gossipActiveLine = null;   // the line object that's highlighted (scrolled to)
         vm.gossipCopied = false;      // transient '✓' feedback after copying the chat
-        vm.meetingIdeas = [];         // backend improvement suggestions ({ topic, desc, complete, date })
+        vm.meetingIdeas = [];         // suggestions for the Ideas spider to relay ({ topic, desc, complete, date }) — card _suggestions first, backend feed as fallback
 
         function makeScene() {
           var spiders = ROLES.map(function (r) {
@@ -1368,14 +1368,68 @@ angular.module('kanbanApp')
         ];
         // Fake but fun ranks based on live user stats. Each rank carries a
         // military-style insignia: chevrons (enlisted stripes, pointing up),
-        // stars (officer rank), and a grade color (bronze → silver → gold →
-        // platinum). The header rank chip renders the insignia beside the title.
+        // stars (officer rank), and a metal grade (recruit → bronze → silver →
+        // gold → platinum → diamond → obsidian → cosmic). The header rank chip
+        // renders the insignia beside the title. The ladder spans 56 tiers so
+        // there is always another rung to grind toward — the cosmic tail is
+        // intentionally absurd and unreachable, as all good rank ladders are.
+        // Sorted highest-first; mins must be strictly descending and unique.
         var RANK_TITLES = [
+          { min: 25000, title: 'The Truly Final Commit', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 21000, title: 'It Works on My Machine', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 17500, title: 'The Undocumented Legend', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 14600, title: 'Semicolon of Creation', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 12200, title: 'The Great Refactorer', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 10200, title: 'Cargo Cult God', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 8500, title: 'The Null Reference', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 7080, title: 'Source of All Commits', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 5900, title: 'The Compiler Itself', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 4920, title: 'Final Boss of the IDE', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 4100, title: 'The One Who Deletes No Code', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 3420, title: 'Entity of the Eternal Compile', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 2850, title: 'Infinite Loom Prime', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 2370, title: 'Omnipotent Weaver Deity', chevrons: 5, stars: 5, grade: 'cosmic' },
+          { min: 1970, title: 'Grandmaster of the Infinite Loom', chevrons: 5, stars: 4, grade: 'cosmic' },
+          { min: 1640, title: 'Archwizard of Endless Refactors', chevrons: 5, stars: 4, grade: 'cosmic' },
+          { min: 1360, title: 'Titan of the Ten Thousand Commits', chevrons: 5, stars: 4, grade: 'cosmic' },
+          { min: 1130, title: 'Emperor of Working Trees', chevrons: 5, stars: 3, grade: 'cosmic' },
+          { min: 940, title: 'Overlord of Clean Git History', chevrons: 5, stars: 3, grade: 'cosmic' },
+          { min: 780, title: 'Champion of the Hallowed Monorepo', chevrons: 5, stars: 3, grade: 'obsidian' },
+          { min: 650, title: 'Dreadnought of the Deadline', chevrons: 5, stars: 3, grade: 'obsidian' },
+          { min: 540, title: 'Avatar of the Perfect Build', chevrons: 4, stars: 3, grade: 'obsidian' },
+          { min: 450, title: 'Infallible Prophet of the Build', chevrons: 4, stars: 3, grade: 'obsidian' },
+          { min: 375, title: 'Unstoppable Merge Train Conductor', chevrons: 4, stars: 3, grade: 'obsidian' },
+          { min: 310, title: 'Obsidian-Class Merge Warlord', chevrons: 4, stars: 2, grade: 'obsidian' },
+          { min: 255, title: 'Paladin of the Production Branch', chevrons: 4, stars: 2, grade: 'diamond' },
+          { min: 210, title: 'Legendary Loom Whisperer', chevrons: 4, stars: 2, grade: 'diamond' },
+          { min: 175, title: 'Diamond-Class Syntax Alchemist', chevrons: 4, stars: 2, grade: 'diamond' },
+          { min: 145, title: 'Celestial Refactorer', chevrons: 4, stars: 2, grade: 'diamond' },
+          { min: 120, title: 'Grandmaster of the Golden Loom', chevrons: 4, stars: 2, grade: 'diamond' },
           { min: 100, title: 'Grand Architect of Everything', chevrons: 5, stars: 2, grade: 'platinum' },
+          { min: 95, title: 'Revered Performance Prophet', chevrons: 4, stars: 1, grade: 'platinum' },
+          { min: 83, title: 'Venerable Architecture Warden', chevrons: 4, stars: 1, grade: 'platinum' },
+          { min: 72, title: 'Illustrious Refactor Ranger', chevrons: 4, stars: 1, grade: 'platinum' },
+          { min: 63, title: 'Distinguished Pull Request Sage', chevrons: 3, stars: 2, grade: 'platinum' },
+          { min: 55, title: 'Exalted Merge Maestro', chevrons: 3, stars: 2, grade: 'platinum' },
           { min: 50, title: 'Supreme Code Commander', chevrons: 4, stars: 1, grade: 'gold' },
+          { min: 43, title: 'Ironclad Test Crusader', chevrons: 3, stars: 1, grade: 'gold' },
+          { min: 38, title: 'Honored Bug Exterminator', chevrons: 3, stars: 1, grade: 'gold' },
+          { min: 33, title: 'Venerated Documentation Sage', chevrons: 3, stars: 1, grade: 'gold' },
+          { min: 28, title: 'Noble Protector of Main', chevrons: 3, stars: 1, grade: 'gold' },
           { min: 25, title: 'Certified Power User', chevrons: 3, stars: 1, grade: 'gold' },
+          { min: 22, title: 'Trusted Whitespace Polisher', chevrons: 2, stars: 1, grade: 'silver' },
+          { min: 18, title: 'Decorated Bracket Balancer', chevrons: 2, stars: 1, grade: 'silver' },
+          { min: 15, title: 'Battle-Hardened Syntax Warrior', chevrons: 2, stars: 0, grade: 'silver' },
+          { min: 12, title: 'Seasoned Merge Conflict Negotiator', chevrons: 2, stars: 0, grade: 'silver' },
           { min: 10, title: 'Respected Contributor', chevrons: 2, stars: 0, grade: 'silver' },
+          { min: 8, title: 'Capable Commit Craftsman', chevrons: 1, stars: 0, grade: 'silver' },
+          { min: 7, title: 'Reliable Unit Test Whisperer', chevrons: 1, stars: 0, grade: 'bronze' },
+          { min: 6, title: 'Skilled Keyboard Cavalry', chevrons: 1, stars: 0, grade: 'bronze' },
+          { min: 5, title: 'Promising Stack Overflow Scholar', chevrons: 1, stars: 0, grade: 'bronze' },
+          { min: 4, title: 'Ambitious Tab-Key Virtuoso', chevrons: 1, stars: 0, grade: 'bronze' },
           { min: 3, title: 'Rising Star', chevrons: 1, stars: 0, grade: 'bronze' },
+          { min: 2, title: 'Eager Semicolon Herder', chevrons: 0, stars: 0, grade: 'recruit' },
+          { min: 1, title: 'Curious Curly Brace Apprentice', chevrons: 0, stars: 0, grade: 'recruit' },
           { min: 0, title: 'Legend in Training', chevrons: 0, stars: 0, grade: 'recruit' }
         ];
 
@@ -2675,16 +2729,65 @@ angular.module('kanbanApp')
         // One spider strolls to the cooler and brags about the user's stats
         // while two others gather and react — as impressed by a tab count as
         // by an entire architecture.
-        // Fetches the backend's improvement suggestions for the current project
-        // (the "new tickets" the self-improving pipeline spawns) so the Ideas
-        // spider can relay them during idle gossip. Throttled to once a minute.
+        // The Ideas spider relays suggestions during idle gossip. The PRIMARY
+        // source is the context-aware set: the LLM-generated _suggestions that
+        // get stamped onto completed kanban cards (each one is scoped to that
+        // card's finished work and carries real file attachments). Only when no
+        // card has suggestions yet does it fall back to the generic backend
+        // improvement-data feed (the "new tickets" the self-improving pipeline
+        // spawns). Throttled to once a minute.
         var _ideasFetchedAt = 0;
+        // Gather the context-aware suggestions straight off the board: every
+        // card's _suggestions array, tagged with the card's task text so the
+        // relay can frame them as follow-ups to work that actually finished.
+        function collectCardSuggestions() {
+          var ideas = [];
+          if (!vm.state) return ideas;
+          var cols = [vm.state.done, vm.state.archived, vm.state.selfImproving, vm.state.todo, vm.state.doing];
+          cols.forEach(function (cards) {
+            if (!cards || !cards.length) return;
+            cards.forEach(function (card) {
+              var sugs = card && card._suggestions;
+              if (!Array.isArray(sugs) || !sugs.length) return;
+              var topic = (card.text || 'a completed task').trim();
+              sugs.forEach(function (s) {
+                if (!s || !s.description) return;
+                ideas.push({
+                  topic: topic,
+                  desc: s.description,
+                  complete: false,
+                  date: s.createdAt || '',
+                  card: card,
+                  files: s.files || []
+                });
+              });
+            });
+          });
+          return ideas;
+        }
+        function applyIdeas(ideas) {
+          var fresh = (ideas || []).filter(function (i) { return !i.complete; });
+          fresh.sort(function (x, y) { return (y.date || '').localeCompare(x.date || ''); });
+          vm.meetingIdeas = fresh.slice(0, 6);
+          $scope.$applyAsync();
+        }
         function refreshMeetingIdeas() {
-          var proj = vm.selectedProject;
-          if (!proj) return;
+          // Context-aware source first: the AI's own suggestions, persisted on
+          // the cards. These beat the generic feed — they're LLM-vetted and
+          // scoped to work that actually finished. The scan is in-memory (no
+          // HTTP), so it runs on every gossip and picks up cards as they
+          // complete; no throttle needed.
+          var cardIdeas = collectCardSuggestions();
+          if (cardIdeas.length) { applyIdeas(cardIdeas); return; }
+          // Fall back to the generic backend feed when no card has suggestions
+          // yet (fresh board, or suggestion generation disabled). The throttle
+          // only guards the HTTP fetch, and only consumes when a project is
+          // actually selected.
           var now = Date.now();
           if (now - _ideasFetchedAt < 60000) return;
           _ideasFetchedAt = now;
+          var proj = vm.selectedProject;
+          if (!proj) return;
           $http.get('/api/improvementdata', { params: { project: proj } }).then(function (resp) {
             var data = resp.data;
             if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return; } }
@@ -2702,12 +2805,14 @@ angular.module('kanbanApp')
                 date: last.date || ''
               });
             });
-            ideas.sort(function (x, y) { return (y.date || '').localeCompare(x.date || ''); });
-            vm.meetingIdeas = ideas.slice(0, 6);
-            $scope.$applyAsync();
+            applyIdeas(ideas);
           }).catch(function () { /* silent — office keeps gossiping about other stuff */ });
         }
-        // The Ideas spider cuts in with the freshest backend suggestion.
+        // The Ideas spider cuts in with the freshest suggestion — either from a
+        // completed card's context-aware _suggestions or, failing that, the
+        // backend improvement-data feed. IDEA_LINES frame the generic feed
+        // ("new ticket spawned"); IDEA_CARD_LINES frame card suggestions as
+        // follow-ups to work that already finished.
         var IDEA_LINES = [
           "Fresh from the backend: '{topic}' is now a ticket. I basically invented it.",
           "Hey, the system just spawned an idea — '{topic}'. Filed under: brilliant.",
@@ -2715,11 +2820,24 @@ angular.module('kanbanApp')
           "The backend birthed a ticket about '{topic}'. I've already got notes.",
           "Idea alert from the pipeline: '{topic}'. I saw it coming. I always see it coming."
         ];
+        var IDEA_CARD_LINES = [
+          "That completed task, '{topic}'? The model left follow-ups. I'm already on it.",
+          "Fresh from the cards: '{topic}' just earned improvement suggestions.",
+          "The AI reviewed '{topic}' and stamped suggestions on it. Bold move.",
+          "Suggestions dropped for '{topic}' — scoped to the work we just finished.",
+          "'{topic}' is done, but its suggestion section says otherwise. I collect them."
+        ];
         var IDEA_REACTIONS = [
           "ANOTHER ticket?! From thin air?!",
           "The backend just THINKS of work now?!",
           "Self-spawning tickets?! Terrifying. I love it.",
           "Where does it get these ideas?! ...Oh. From the user's code."
+        ];
+        var IDEA_CARD_REACTIONS = [
+          "Suggestions FROM the model?! On MY cards?!",
+          "It finished the card AND planned the follow-up. Overachiever.",
+          "A suggestion section on the card?! I knew it had more to give.",
+          "The AI peer-reviewed its own work and wants MORE. Ambitious."
         ];
         function startGossip() {
           if (!scene || scene.gossip) return;
@@ -2814,7 +2932,7 @@ angular.module('kanbanApp')
             var idea = freshIdeas[0];
             var topic = (idea.topic || 'a new task').trim();
             if (topic.length > 48) topic = topic.slice(0, 45) + '…';
-            var ideaText = fmtIdea(pick(IDEA_LINES), topic);
+            var ideaText = fmtIdea(pick(idea.card ? IDEA_CARD_LINES : IDEA_LINES), topic);
             // Sprinkle in the actual suggestion description when there is one,
             // so the spider relays the ticket's content, not just its title.
             if (idea.desc) {
@@ -2822,8 +2940,15 @@ angular.module('kanbanApp')
               if (snippet.length > 60) snippet = snippet.slice(0, 57) + '…';
               ideaText = ideaText + ' (' + snippet + ')';
             }
+            // Card suggestions carry the files the follow-up would touch —
+            // surface the first couple so the relay sounds like it actually
+            // read the card.
+            if (idea.card && idea.files && idea.files.length) {
+              var fileList = idea.files.slice(0, 2).join(', ');
+              ideaText = ideaText + ' — touching ' + fileList;
+            }
             lines.push({ spider: ideasSpider, text: ideaText, ttl: 3.6 });
-            lines.push({ spider: listeners[0], text: pick(IDEA_REACTIONS), ttl: 2.2 });
+            lines.push({ spider: listeners[0], text: pick(idea.card ? IDEA_CARD_REACTIONS : IDEA_REACTIONS), ttl: 2.2 });
           }
           // A bystander retells the reviewer's verdict moment from the run that
           // just ended — the grudging admission, the smug 'told you so', or the
@@ -6318,6 +6443,33 @@ angular.module('kanbanApp')
         // (relative to the 12px default), so canvas text grows with the chrome.
         var mf = function (px) { return Math.max(6, Math.round(px * (vm.meetingFontSize || 12) / 12)); };
 
+        // ── Wall-board under-shadow ────────────────────────────────────────
+        // A diffuse dark pool just below a wall-mounted board's bottom edge, so
+        // it reads as sitting slightly proud of the wall instead of painted
+        // flat on it. Drawn BEFORE the board surface, which then covers the
+        // ellipse's top half — only the pool beneath the board remains.
+        function drawBoardShadow(x, y, w, h, strength) {
+          ctx.save();
+          var gh = Math.max(6, h * 0.22); // how far the pool falls
+          var rx = w * 0.55, ry = gh * 0.7; // pool ellipse radii
+          var cy = y + h + gh * 0.15;       // ellipse center, just below the board edge
+          // Gradient must be centered ON the ellipse and sized to its vertical
+          // radius so alpha reaches 0 exactly at the ellipse's boundary — a
+          // larger radius here leaves the whole pool in the dark part of the
+          // gradient and cuts off with a hard arc at the bottom instead of
+          // fading out. (The ellipse's top half sits behind the board, which
+          // is drawn afterwards and covers it.)
+          var g = ctx.createRadialGradient(x + w / 2, cy, 0, x + w / 2, cy, ry);
+          g.addColorStop(0, 'rgba(0,0,0,' + strength + ')');
+          g.addColorStop(0.55, 'rgba(0,0,0,' + (strength * 0.55).toFixed(3) + ')');
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.ellipse(x + w / 2, cy, rx, ry, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
         // ── Mood board ─────────────────────────────────────────────────────
         // A corkboard on the left wall carrying the six domain grump meters
         // as tiny glowing lights. Each light brightens as its spider stews,
@@ -6327,6 +6479,7 @@ angular.module('kanbanApp')
           if (!scene) return;
           var mb = MOOD_RECT;
           var mx = mb.x * W, my = mb.y * H, mw = mb.w * W, mh = mb.h * H;
+          drawBoardShadow(mx, my, mw, mh, 0.4);
           var lit = !!scene.gripeSession;
           var pulse = 0.5 + 0.5 * Math.sin(Date.now() / 260);
           // Frame (the blazing halo only while the session is live)
@@ -6342,13 +6495,45 @@ angular.module('kanbanApp')
           rr(mx + 3, my + 3, mw - 6, mh - 6, 4); ctx.fill();
           ctx.fillStyle = '#b9985f';
           rr(mx + 6, my + 6, mw - 12, mh - 12, 3); ctx.fill();
-          // Title
+          // Title — every spider that crosses 75% grump 'joins' the complaint
+          // and lends its color to the board: the title's letters cycle through
+          // the participants' colors, so the board visibly signs onto the
+          // session as it grows. (The 📌 glyph renders as its native emoji, so
+          // it stays a pin.) One hot spider turns the whole title its color;
+          // each addition brings another color into the mix.
+          var hot = [];
+          GRUMP_ROLES.forEach(function (rk) {
+            var hs = spiderFor(rk);
+            if (hs && hs.grump >= 75) hot.push(hs.color);
+          });
           ctx.font = 'bold ' + mf(8) + 'px sans-serif';
-          ctx.textAlign = 'center';
-          ctx.fillStyle = '#f4e3c1';
-          ctx.fillText('📌 MOOD BOARD', mx + mw / 2, my + mf(11));
-          // The six grump lights, 3×2 — each glowing by how steamed its spider is
+          if (hot.length) {
+            var title = '📌 MOOD BOARD';
+            var chars = Array.from(title); // split by code point so the 📌 emoji stays one unit
+            var tx0 = mx + mw / 2 - ctx.measureText(title).width / 2;
+            var ci = 0;
+            ctx.textAlign = 'left';
+            for (var k = 0; k < chars.length; k++) {
+              // Spaces and emoji (multi-unit code points like the 📌 pin) stay
+              // cream — the pin renders natively anyway, so skipping it keeps
+              // the visible letters starting cleanly on participant 1.
+              ctx.fillStyle = chars[k] === ' ' || chars[k].length > 1
+                ? 'rgba(244,227,193,0.55)'
+                : hot[ci++ % hot.length];
+              ctx.fillText(chars[k], tx0, my + mf(11));
+              tx0 += ctx.measureText(chars[k]).width;
+            }
+          } else {
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#f4e3c1';
+            ctx.fillText('📌 MOOD BOARD', mx + mw / 2, my + mf(11));
+          }
+          // The six grump lights, 3×2 — each glowing by how steamed its spider
+          // is. While the complaint session runs they MARCH instead of pulsing
+          // together: each light's phase is offset by its index, so a slow
+          // 'complain-complain' flare sweeps through them one after another.
           var cols = 3, cellW = (mw - 12) / cols;
+          var marchMs = 2600; // one full left→right march
           GRUMP_ROLES.forEach(function (rk, idx) {
             var s = spiderFor(rk);
             if (!s) return;
@@ -6356,11 +6541,23 @@ angular.module('kanbanApp')
             var level = gr >= 75 ? 1 : gr >= 50 ? 0.55 : gr >= 25 ? 0.25 : 0.08;
             var cx = mx + 6 + (idx % cols) * cellW + cellW / 2;
             var cy = my + mf(17) + Math.floor(idx / cols) * mf(11);
+            // 0..1 per light — a narrow half-sine pulse, staggered by index so
+            // each light flares in turn. The +0.5 anchors light 0's peak at the
+            // cycle start and the −idx/6 offsets each next light by 1/6 of a
+            // cycle, so the sweep marches left→right along the top row then the
+            // bottom row (idx 0→5) instead of zigzagging. Wrapped into [0,1) so
+            // sin stays non-negative and alpha never goes negative.
+            var cascade = 0;
+            if (lit) {
+              var ph = ((Date.now() / marchMs) + 0.5 - idx / 6) % 1;
+              if (ph < 0) ph += 1;
+              cascade = Math.pow(Math.sin(ph * Math.PI), 3);
+            }
             ctx.save();
             ctx.shadowColor = s.color;
-            ctx.shadowBlur = lit ? mf(5) + mf(4) * pulse : mf(2.5) * level + 0.4;
+            ctx.shadowBlur = lit ? mf(5) + mf(9) * cascade : mf(2.5) * level + 0.4;
             ctx.fillStyle = s.color;
-            ctx.globalAlpha = 0.35 + 0.65 * level;
+            ctx.globalAlpha = lit ? 0.3 + 0.7 * cascade : 0.35 + 0.65 * level;
             ctx.beginPath();
             ctx.arc(cx, cy, mf(3.2), 0, Math.PI * 2);
             ctx.fill();
@@ -6725,6 +6922,7 @@ angular.module('kanbanApp')
         function drawBoard(W, H) {
           var b = BOARD_RECT;
           var bx = b.x * W, by = b.y * H, bw = b.w * W, bh = b.h * H;
+          drawBoardShadow(bx, by, bw, bh, 0.38);
           // Frame shadow
           ctx.fillStyle = 'rgba(0,0,0,0.4)';
           rr(bx + 4, by + 4, bw, bh, 8); ctx.fill();

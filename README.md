@@ -172,10 +172,22 @@ This mechanism ensures that the standard edit pipeline is automatically selected
 
 ## Configuration
 
-`weaverconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address
+All settings are persisted in the database (`data/weaver.db`, `weaver_config` table) — there is no `weaverconfig.json` anymore. `llamaUrl` defaults to `http://localhost:8080`; edit it in the app's settings panel if your llama server is on a different address.
 
+## Build & Publish
 
-Publish command : dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+Publish a self-contained, single-file `Weaver.exe` (this is what gets uploaded to Bughosted.com/assets/Weaver.exe):
+
+```bash
+dotnet publish -c Release -r win-x64
+```
+
+Single-file, self-contained, native-library bundling, and appsettings embedding are all configured in `Weaver.csproj` (no extra flags needed — and note `/p:PublishSingleFile=true` breaks in Git Bash because MSYS rewrites `/p:` paths).
+
+**One-command publish + verify** — `./publish.sh` (Git Bash) or `powershell -ExecutionPolicy Bypass -File publish.ps1` (PowerShell) runs the publish, **fails if any native DLL was left beside the exe** (e_sqlite3 / tree-sitter must be bundled inside), **smoke-tests the lone exe from an empty temp folder** (server must stay up and log the welcome banner), and prints the **SHA-256 of `artifacts/Weaver.exe`** ready for upload.
+
+**The published `Weaver.exe` is fully standalone**: it bundles the runtime, the SQLite native library (`e_sqlite3`), the tree-sitter parsers, the web UI, and `appsettings.json`. You can copy just `Weaver.exe` into a fresh folder (even an empty one) and it will run — the bundled files are extracted to `%TEMP%/.net/Weaver/` on first launch. The app creates its `data/weaver.db` next to the exe on first run, so the folder must be writable. Expect the exe to be ~200 MB — everything is inside it; don't enable `PublishTrimmed` to shrink it (TreeSitter/AngleSharp/MailKit are reflection-heavy and trimming would break them).
+
 Testing command : dotnet test   (tests live in tests/UnitTests and compile into the main project)
 
 ![Agentic loop](https://venturebeat.com/_next/image?url=https%3A%2F%2Fimages.ctfassets.net%2Fjdtwqhzvc2n1%2F5gWXRttHvteZMEGgygXVuz%2F3fa3112800b8d8f6e153fa0957a78f22%2Fautonomous_optimization.png%3Fw%3D1000%26q%3D100&w=3840&q=75)

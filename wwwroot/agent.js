@@ -164,6 +164,7 @@ angular.module('kanbanApp')
 
                 // Benchmarks State
                 vm.benchmarkScores = []; vm.serverBenchmarks = []; vm.benchmarkPlans = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.selectedServerBenchmark = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
+                vm.benchmarkAllActive = false; vm.benchmarkAllResults = []; vm.benchmarkAllResult = null; vm._benchmarkQueue = [];
 
                 // Methods
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
@@ -719,15 +720,24 @@ angular.module('kanbanApp')
                 // backend to generate up to 3 LLM suggestions (with file
                 // attachments), then persists them onto the card as a
                 // "Suggestions" section. Suggestions never become new cards.
-                vm.suggestImprovements = function (card, summary, project) {
-                    if (!card || card._suggestions || card._suggestionsRequested) return;
+                vm.suggestImprovements = function (card, summary, project, opts) {
+                    if (!card) return;
+                    var topup = !!(opts && opts.topup);
+                    if (topup) {
+                        // "More like this": tops up only while the card is under the
+                        // 3-suggestion cap, and never while a generation is already
+                        // in flight.
+                        if (!Array.isArray(card._suggestions) || card._suggestions.length >= 3 || card._suggestionsGenerating) return;
+                    } else if (card._suggestions || card._suggestionsRequested) {
+                        return;
+                    }
                     var proj = project || card.filePath || vm.selectedProject;
                     if (!proj) return;
                     card._suggestionsRequested = true;
                     card._suggestionsGenerating = true;
                     card._suggestionsError = null;
                     vm.saveCards();
-                    pushAgentLog(vm, 'info', '💡 Suggesting improvements for completed card…');
+                    pushAgentLog(vm, 'info', topup ? '💡 Topping up suggestions (More like this)…' : '💡 Suggesting improvements for completed card…');
                     // Ground the suggestions in what the agent actually did and
                     // thought: the stored analysis carries the thinking log, the
                     // executed steps, and the plan items.
@@ -744,7 +754,7 @@ angular.module('kanbanApp')
                         .filter(function (p) { return p && p.text; })
                         .slice(0, 25)
                         .map(function (p) { return (p.done ? '✓ ' : '○ ') + p.text; });
-                    $http.post('/api/agent/suggest-improvements', {
+                    var payload = {
                         project: proj,
                         cardId: card.id,
                         cardText: card.text,
@@ -755,14 +765,19 @@ angular.module('kanbanApp')
                         steps: stepLog,
                         planItems: planLog,
                         filesEdited: filesEdited
-                    }).then(function (resp) {
+                    };
+                    // "More like this": hand over the existing set so the backend can
+                    // extend it (deduped, capped at 3) instead of regenerating from
+                    // scratch.
+                    if (topup) { payload.topup = true; payload.existing = card._suggestions; }
+                    $http.post('/api/agent/suggest-improvements', payload).then(function (resp) {
                         var suggestions = (resp.data && resp.data.suggestions) || [];
                         card._suggestionsGenerating = false;
                         card._suggestions = suggestions;
                         vm.saveCards();
                         if (suggestions.length) {
-                            pushAgentLog(vm, 'success', '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card.');
-                            if (vm.showSideToast) vm.showSideToast('💡 ' + suggestions.length + ' improvement suggestion(s) added to the card');
+                            pushAgentLog(vm, 'success', topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card.' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card.');
+                            if (vm.showSideToast) vm.showSideToast(topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card');
                         } else {
                             pushAgentLog(vm, 'info', '💡 No improvement suggestions generated for this card.');
                         }
@@ -773,6 +788,37 @@ angular.module('kanbanApp')
                         vm.saveCards();
                         pushAgentLog(vm, 'warn', '💡 Suggestion generation failed: ' + card._suggestionsError);
                     });
+                };
+
+                // "More like this": tops up the card's Suggestions section toward the
+                // 3-suggestion cap with new, distinct ideas in the same vein, grounded
+                // in the same card context (thinking / steps / files).
+                vm.moreLikeThis = function (card) {
+                    if (!card) return;
+                    vm.suggestImprovements(card, null, card.filePath || vm.selectedProject, { topup: true });
+                };
+
+                // The context that grounded the Suggestions generation — either the
+                // persisted _suggestionsContext (survives reloads) or the live card
+                // analysis from the run that just finished. Powers the "why these
+                // were proposed" explainer on the Suggestions section.
+                vm.suggestionContext = function (card) {
+                    if (!card) return null;
+                    if (card._suggestionsContext) return card._suggestionsContext;
+                    var analysis = card.agentAnalysis || {};
+                    if (!analysis.summary && !analysis.thinking && !analysis.steps) return null;
+                    return {
+                        summary: analysis.summary || '',
+                        thinking: (analysis.thinking || '').slice(0, 6000),
+                        steps: (analysis.steps || []).filter(function (s) { return s && s.change; }).slice(0, 40).map(function (s) { return (s.path ? s.path + ' — ' : '') + s.change; }),
+                        planItems: (analysis.planItems || []).filter(function (p) { return p && p.text; }).slice(0, 25).map(function (p) { return (p.done ? '✓ ' : '○ ') + p.text; }),
+                        filesEdited: (analysis.filesEdited || []).map(function (f) { return f && f.path ? f.path : null; }).filter(function (p) { return !!p; }),
+                        generatedAt: ''
+                    };
+                };
+                vm.toggleSuggestionContext = function (card) {
+                    if (!card) return;
+                    card._showSuggestionContext = !card._showSuggestionContext;
                 };
 
                 vm.askAI = function () {
@@ -944,7 +990,7 @@ angular.module('kanbanApp')
                     });
                 };
 
-                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
+                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; vm.checkLlmReachable(); $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; if (vm._hydrateRestoredBenchmarkQueue) vm._hydrateRestoredBenchmarkQueue(); }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
                 // Collapsible benchmark sections — headers expand/collapse their
                 // bodies, and everything starts collapsed so the panel opens
@@ -953,11 +999,216 @@ angular.module('kanbanApp')
                 vm.toggleBenchSection = function (key) {
                     if (!vm.benchSectionOpen) vm.benchSectionOpen = {};
                     vm.benchSectionOpen[key] = !vm.benchSectionOpen[key];
+                    // Re-probe reachability when the run section is expanded, so a
+                    // model server that came up (or died) while the panel stayed
+                    // open doesn't leave the buttons with stale state.
+                    if (key === 'run' && vm.benchSectionOpen.run && vm.checkLlmReachable) vm.checkLlmReachable();
                 };
                 vm.benchmarkLevelName = function (level) {
                     if (level === undefined || level === null) return '';
                     var p = (vm.benchmarkPlans || []).find(function (x) { return x.level === level; });
                     return p ? p.name : 'Benchmark ' + level;
+                };
+                // True while benchmark runs (or any agent run) are in flight.
+                // Sources the truth from the BOARD (a _benchmark card sitting in
+                // Doing, or a ready benchmark card queued in Todo) rather than
+                // only the in-session JS flags — benchmark cards keep running
+                // server-side across page reloads, so the flags alone would let
+                // the Run All / Run buttons wrongly re-enable mid-run. Mirrors
+                // the startBenchmark/startBenchmarkAll guards exactly (session
+                // flags + streamingActive), then adds the reload-safe board check.
+                vm.benchmarksRunning = function () {
+                    if (vm.benchmarkRunning || vm.streamingActive || vm.benchmarkAllActive) return true;
+                    var doing = (vm.state && vm.state.doing) || [];
+                    var todo = (vm.state && vm.state.todo) || [];
+                    return doing.some(function (c) { return c && c._benchmark; })
+                        || todo.some(function (c) { return c && c._benchmark && c.ready; });
+                };
+                // LLM reachability for the benchmark buttons: null while unknown
+                // (don't disable until we've probed), true/false once checked.
+                vm.llmReachable = null;
+                vm.checkLlmReachable = function () {
+                    $http.get('/api/agent/llm-reachable').then(function (resp) {
+                        vm.llmReachable = !!(resp.data && resp.data.reachable);
+                    }, function () { vm.llmReachable = false; });
+                };
+                // Disable benchmark run buttons while a run is in flight OR the
+                // configured LLM endpoint is unreachable (checked on panel open).
+                vm.benchmarkRunDisabled = function () {
+                    return vm.benchmarksRunning() || vm.llmReachable === false;
+                };
+                vm.benchmarkRunTitle = function () {
+                    if (vm.llmReachable === false) return '⚠ LLM endpoint unreachable — start the model server (or fix the endpoint in Settings) to run benchmarks.';
+                    if (vm.benchmarksRunning()) return 'A benchmark is already running — wait for it to finish.';
+                    return '';
+                };
+                // Persists the run-all batch state (queue + completed results)
+                // onto the board so a page reload can restore accurate progress.
+                // The benchmark cards themselves already live in board data — this
+                // captures the batch wrapper around them (how many levels remain,
+                // which completed with what score) that is otherwise in-memory only.
+                vm._persistBenchmarkRun = function () {
+                    if (!vm.state) return;
+                    var run = {
+                        active: !!vm.benchmarkAllActive,
+                        queue: (vm._benchmarkQueue || []).map(function (p) { return p.level; }),
+                        results: vm.benchmarkAllResults || []
+                    };
+                    // Keep a stable id so a re-opened panel can tell this batch
+                    // apart from an older persisted one.
+                    run.id = vm._benchmarkRunId || (vm._benchmarkRunId = 'br_' + Date.now().toString(36));
+                    vm.state._benchmarkRun = run;
+                    vm.saveCards();
+                };
+                // Called after board data loads (or refreshes) to bring the
+                // benchmark panel state back in line with what is actually on the
+                // board: a _benchmark card in Doing = a benchmark is running, and
+                // a persisted _benchmarkRun restores the run-all queue + results.
+                vm._restoreBenchmarkState = function () {
+                    if (!vm.state) return;
+                    var doing = (vm.state.doing || []).filter(function (c) { return c && c._benchmark; });
+                    var todo = (vm.state.todo || []).filter(function (c) { return c && c._benchmark && c.ready; });
+                    var liveCard = doing[0] || todo[0];
+                    // Single benchmark (no batch): running flag comes from the card.
+                    if (liveCard && !vm.benchmarkAllActive) {
+                        vm.benchmarkRunning = true;
+                        vm.benchmarkLevel = liveCard._benchmarkLevel != null ? liveCard._benchmarkLevel : 1;
+                        if (vm.benchSectionOpen) vm.benchSectionOpen.run = true;
+                    }
+                    var run = vm.state._benchmarkRun;
+                    if (run && run.active && !vm.benchmarkAllActive) {
+                        // A persisted in-progress batch and no live in-memory one
+                        // (page reload). Restore the queue + results so the panel
+                        // shows accurate progress. Guarded on !vm.benchmarkAllActive
+                        // so a mid-session board refresh can't clobber a batch this
+                        // tab is already tracking in memory.
+                        vm.benchmarkAllActive = true;
+                        vm._benchmarkRunId = run.id;
+                        // Auto-expand the run section so the restored progress and
+                        // the Resume control are visible without a manual click.
+                        if (vm.benchSectionOpen) vm.benchSectionOpen.run = true;
+                        vm.benchmarkAllResults = (run.results || []).slice();
+                        // Rebuild the queue from the plans list (already fetched for
+                        // the panel); levels we can't resolve stay as {level} stubs so
+                        // the count and progression remain correct even if plans
+                        // loaded after this restore.
+                        var plans = vm.benchmarkPlans || [];
+                        vm._benchmarkQueue = (run.queue || []).map(function (lv) {
+                            return plans.find(function (p) { return p.level === lv; }) || { level: lv, name: 'Benchmark ' + lv, description: '' };
+                        });
+                    if (vm.benchmarkRunning === false) {
+                        // Batch active but no visible card in Doing/Todo — the
+                        // previous run died with the tab. Surface that the batch
+                        // is incomplete rather than showing idle.
+                        vm.benchmarkRunning = true;
+                        // Prefer the stuck Doing card's level for accurate
+                        // progress; fall back to the next queued level.
+                        var stuckDoing = (vm.state.doing || []).find(function (c) { return c && c._benchmark; });
+                        vm.benchmarkLevel = (stuckDoing && stuckDoing._benchmarkLevel != null)
+                            ? stuckDoing._benchmarkLevel
+                            : (vm._benchmarkQueue.length ? vm._benchmarkQueue[0].level : (vm.benchmarkAllResults.length ? vm.benchmarkAllResults[vm.benchmarkAllResults.length - 1].level : null));
+                    }
+                    } else if (run && !run.active) {
+                        // A finished batch: keep the final summary visible.
+                        vm.benchmarkAllActive = false;
+                        vm.benchmarkAllResults = (run.results || []).slice();
+                        vm.benchmarkAllResult = vm._summarizeBenchmarkAll(vm.benchmarkAllResults);
+                    } else if (!run && !liveCard) {
+                        vm.benchmarkAllActive = false;
+                    }
+                    // A batch flagged active with no benchmark card left on the
+                    // board is stale (the run died with its tab, or the stuck
+                    // card was deleted) — finalize it so the run buttons unlock.
+                    vm._finalizeStaleBenchmarkIfNeeded();
+                };
+                // Ends a run-all batch that is marked active but no longer has any
+                // benchmark card in Todo/Doing (reload mid-run + deleted card, or a
+                // run that died with its tab). Keeps whatever results completed so
+                // the final-score section stays visible.
+                vm._finalizeStaleBenchmarkIfNeeded = function () {
+                    if (!vm.state || !vm.benchmarkAllActive) return;
+                    var anyBenchCard = (vm.state.todo || []).some(function (c) { return c && c._benchmark; })
+                        || (vm.state.doing || []).some(function (c) { return c && c._benchmark; });
+                    if (!anyBenchCard) {
+                        vm.benchmarkAllActive = false;
+                        vm._benchmarkQueue = [];
+                        vm.benchmarkAllResult = vm._summarizeBenchmarkAll(vm.benchmarkAllResults);
+                        vm.benchmarkRunning = false; vm.benchmarkLevel = null;
+                        vm._persistBenchmarkRun();
+                    }
+                };
+                // A batch restored from the board is rebuilt as {level} stubs when
+                // it loads before /api/benchmark/plans has answered. Once the plans
+                // arrive (openBenchmarksPanel), swap the stubs for the real plan
+                // objects so names/descriptions render and Resume can run them.
+                vm._hydrateRestoredBenchmarkQueue = function () {
+                    if (!vm._benchmarkQueue || !vm._benchmarkQueue.length || !vm.benchmarkPlans || !vm.benchmarkPlans.length) return;
+                    vm._benchmarkQueue = vm._benchmarkQueue.map(function (p) {
+                        var real = vm.benchmarkPlans.find(function (x) { return x.level === p.level; });
+                        return real || p;
+                    });
+                };
+                // True when a run-all batch is flagged active but no run in this
+                // tab is driving it — the SSE stream that advances the batch died
+                // with the previous page, so it is stuck and needs a manual resume.
+                vm.benchmarkInterrupted = function () {
+                    if (!vm.benchmarkAllActive) return false;
+                    return !vm.agentRuns.some(function (r) { return r.active; });
+                };
+                // Resumes a run-all batch interrupted by a page reload. The reload
+                // killed the SSE stream that drives the batch, so the benchmark
+                // card that was in Doing is stuck (its run died with the tab and
+                // never recorded a result). Resume removes that dead card, puts
+                // its level back at the front of the queue, and restarts the
+                // remaining batch from this tab.
+                vm.resumeBenchmarkAll = function () {
+                    if (!vm.benchmarkAllActive || !vm.state) return;
+                    // The button is gated by benchmarkInterrupted(), but a stale
+                    // digest or an endpoint that just freed up can start a run
+                    // between render and click — re-running the stuck level then
+                    // would duplicate execution.
+                    if (vm.agentRuns.some(function (r) { return r.active; })) return;
+                    if (!vm.benchmarkPlans || !vm.benchmarkPlans.length) {
+                        // Panel opens before the plans fetch resolves: load the
+                        // plans first so the stuck level resolves to a real plan
+                        // instead of being dropped as an un-runnable stub.
+                        $http.get('/api/benchmark/plans').then(function (resp) {
+                            vm.benchmarkPlans = resp.data || [];
+                            vm._hydrateRestoredBenchmarkQueue();
+                            vm._resumeBenchmarkAllNow();
+                        }).catch(function () { vm._resumeBenchmarkAllNow(); });
+                        return;
+                    }
+                    vm._resumeBenchmarkAllNow();
+                };
+                vm._resumeBenchmarkAllNow = function () {
+                    if (!vm.benchmarkAllActive || !vm.state) return;
+                    var doing = (vm.state.doing || []).filter(function (c) { return c && c._benchmark; });
+                    var todo = (vm.state.todo || []).filter(function (c) { return c && c._benchmark; });
+                    var stuckLevel = doing.length ? (doing[0]._benchmarkLevel != null ? doing[0]._benchmarkLevel : null) : null;
+                    if (doing.length) vm.state.doing = vm.state.doing.filter(function (c) { return !c._benchmark; });
+                    if (todo.length) vm.state.todo = vm.state.todo.filter(function (c) { return !c._benchmark; });
+                    // The stuck level never recorded a result — re-run it first.
+                    if (stuckLevel != null && !vm.benchmarkAllResults.some(function (r) { return r.level === stuckLevel; })) {
+                        var plan = (vm.benchmarkPlans || []).find(function (p) { return p.level === stuckLevel; })
+                            || { level: stuckLevel, name: vm.benchmarkLevelName(stuckLevel), description: '' };
+                        vm._benchmarkQueue.unshift(plan);
+                    }
+                    pushAgentLog(vm, 'info', '▶ Resuming interrupted benchmark run…');
+                    vm._persistBenchmarkRun();
+                    vm._runNextBenchmarkFromQueue();
+                };
+                vm._summarizeBenchmarkAll = function (results) {
+                    var r = results || [];
+                    var failed = r.find(function (x) { return x.failed > 0 || x.status === 'failed' || x.status === 'error'; });
+                    return {
+                        completedLevels: r.length,
+                        failedLevel: failed ? failed.level : null,
+                        levels: r,
+                        totalPoints: r.reduce(function (s, x) { return s + (x.points || 0); }, 0),
+                        totalSuccessful: r.reduce(function (s, x) { return s + (x.successful || 0); }, 0),
+                        totalFailed: r.reduce(function (s, x) { return s + (x.failed || 0); }, 0)
+                    };
                 };
                 vm._runBenchmarkLevel = function (plan) {
                     vm.benchmarkRunning = true; vm.benchmarkLevel = plan.level;
@@ -979,24 +1230,30 @@ angular.module('kanbanApp')
                 vm._finishBenchmarkAll = function () {
                     vm.benchmarkAllActive = false;
                     vm._benchmarkQueue = [];
-                    var results = vm.benchmarkAllResults || [];
-                    var failed = results.find(function (r) { return r.failed > 0 || r.status === 'failed' || r.status === 'error'; });
-                    vm.benchmarkAllResult = {
-                        completedLevels: results.length,
-                        failedLevel: failed ? failed.level : null,
-                        levels: results,
-                        totalPoints: results.reduce(function (s, r) { return s + (r.points || 0); }, 0),
-                        totalSuccessful: results.reduce(function (s, r) { return s + (r.successful || 0); }, 0),
-                        totalFailed: results.reduce(function (s, r) { return s + (r.failed || 0); }, 0)
-                    };
+                    vm.benchmarkAllResult = vm._summarizeBenchmarkAll(vm.benchmarkAllResults);
                     vm.benchmarkRunning = false; vm.benchmarkLevel = null;
+                    // Persist the finished summary so a reload still shows the
+                    // final score instead of losing it.
+                    vm._persistBenchmarkRun();
+                    var failed = vm.benchmarkAllResult.failedLevel;
                     pushAgentLog(vm, 'info', '📊 Benchmark All finished — completed ' + vm.benchmarkAllResult.completedLevels + ' benchmark(s), ' +
-                        (failed ? 'stopped at ' + vm.benchmarkLevelName(failed.level) + ' due to error steps' : 'all benchmarks passed') +
+                        (failed != null ? 'stopped at ' + vm.benchmarkLevelName(failed) + ' due to error steps' : 'all benchmarks passed') +
                         ' (' + vm.benchmarkAllResult.totalPoints + ' pts)');
                 };
                 vm._runNextBenchmarkFromQueue = function () {
                     if (!vm._benchmarkQueue || !vm._benchmarkQueue.length) { vm._finishBenchmarkAll(); return; }
                     var plan = vm._benchmarkQueue.shift();
+                    // A queue entry that never resolved to a real plan (restored
+                    // from the board before /api/benchmark/plans answered) has an
+                    // empty task text — starting it would create a card that
+                    // executeAgent silently skips and the batch would deadlock.
+                    // Skip such levels (logged, no result recorded) rather than
+                    // stalling the whole run.
+                    while (plan && !plan.description) {
+                        pushAgentLog(vm, 'warn', '⏭ Skipping benchmark ' + vm.benchmarkLevelName(plan.level) + ' — plan unavailable (open the panel once plans load, or run it manually).');
+                        if (!vm._benchmarkQueue.length) { vm._finishBenchmarkAll(); return; }
+                        plan = vm._benchmarkQueue.shift();
+                    }
                     vm._runBenchmarkLevel(plan);
                 };
                 vm.startBenchmarkAll = function () {
@@ -1008,12 +1265,18 @@ angular.module('kanbanApp')
                         vm.benchmarkAllResults = [];
                         vm.benchmarkAllResult = null;
                         vm._benchmarkQueue = plans;
+                        // Record the batch on the board before the first card
+                        // starts so a reload mid-batch can restore the queue.
+                        vm._persistBenchmarkRun();
                         vm._runNextBenchmarkFromQueue();
                     }).catch(function () { vm.benchmarkAllActive = false; });
                 };
                 vm._advanceBenchmarkAll = function (level, successful, failed, totalAttempts, status, points, scorePercent) {
                     if (!vm.benchmarkAllActive) return;
                     vm.benchmarkAllResults.push({ level: level, successful: successful, failed: failed, status: status, points: points, scorePercent: scorePercent });
+                    // Keep the board in sync as results land so a mid-batch reload
+                    // sees the correct completed/remaining split.
+                    vm._persistBenchmarkRun();
                     if (failed > 0 || totalAttempts === 0 || status === 'error' || status === 'failed') { vm._finishBenchmarkAll(); }
                     else { vm._runNextBenchmarkFromQueue(); }
                 };

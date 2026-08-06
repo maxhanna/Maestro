@@ -6,6 +6,7 @@
 **/.playwright-mcp/
 data/*
 weaverconfig.json
+artifacts/
 
 .formatter/node_modules/
 .formatter/package-lock.json
@@ -15,3 +16,5 @@ weaverconfig.json
 *.trx
 **/TestResultsCoverage/
 *.cobertura.xml
+publish.sh
+publish.ps1

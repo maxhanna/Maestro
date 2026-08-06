@@ -11,6 +11,20 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
   var _cardsVersion = 0;
   var _saveCardTextTimer = null;
 
+  // Fallback copy path for browsers without navigator.clipboard.
+  function legacyCopyLog(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (e) { }
+  }
+
   return {
     init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
@@ -40,6 +54,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             }
             if (data && (data.todo || data.doing || data.done || data.archived || data.selfImproving)) {
               vm.state = data;
+
+              // Restore benchmark panel state (running flag + run-all queue/results)
+              // from the board so a reload shows accurate progress instead of idle.
+              if (vm._restoreBenchmarkState) vm._restoreBenchmarkState();
 
               if (vm.activeCardId && vm.planItems && vm.planItems.length) {
                 var activeCard = findCardById(vm.activeCardId);
@@ -259,6 +277,30 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
       };
 
+      vm.copyCardLog = function (card, $event) {
+        if ($event) { $event.stopPropagation(); $event.preventDefault(); }
+        var btn = $event && $event.currentTarget;
+        if (!card || !card.agentLog || !card.agentLog.length) return;
+        var lines = card.agentLog.map(function (e) {
+          var line = (e.ts ? e.ts + '  ' : '') + (e.level || 'info') + ': ' + (e.message || '');
+          if (e.detail) {
+            var d = vm.formatLogDetail ? vm.formatLogDetail(e.detail) : JSON.stringify(e.detail);
+            if (d) line += '\n    ' + String(d).split('\n').join('\n    ');
+          }
+          return line;
+        });
+        var text = lines.join('\n');
+        function copied() {
+          if (!btn) return;
+          var old = btn.textContent;
+          btn.textContent = '✓ Copied';
+          setTimeout(function () { btn.textContent = old; }, 1200);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(copied, function () { legacyCopyLog(text); copied(); });
+        } else { legacyCopyLog(text); copied(); }
+      };
+
       vm.openDeleteCardConfirm = function (id, col) {
         vm.confirmDeleteCardId = id;
         var col = col || 'done';
@@ -285,6 +327,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           console.log('Deleted card with id', id);
           vm.saveCards();
         }
+        // Deleting the last benchmark card of a run-all batch finalizes it
+        // (the batch has no live card left), so the run buttons unlock.
+        if (vm._finalizeStaleBenchmarkIfNeeded) vm._finalizeStaleBenchmarkIfNeeded();
         if (vm.deleteCardConfirm.dontShowAgain) {
           try { $window.localStorage.setItem('weaverconfig.deleteCardConfirm', 'false'); } catch (e) { }
         }
@@ -311,6 +356,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           vm.state[col].splice(idx, 1);
           vm.saveCards();
         }
+        // Deleting the last benchmark card of a run-all batch finalizes it
+        // (the batch has no live card left), so the run buttons unlock.
+        if (vm._finalizeStaleBenchmarkIfNeeded) vm._finalizeStaleBenchmarkIfNeeded();
       };
 
       vm.onSelfImprovingToggle = function (card) {

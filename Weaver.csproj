@@ -7,6 +7,13 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- True single-file: package native libraries (e_sqlite3, tree-sitter) and
+         content files are bundled INSIDE Weaver.exe and extracted at runtime,
+         so the exe works when copied alone to a fresh folder. Without this the
+         native DLLs land beside the exe and a lone copy throws DllNotFoundException
+         (Microsoft.Data.Sqlite type initializer). -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <ApplicationIcon>WeaverIcon.ico</ApplicationIcon>
     <!-- Unit tests live in this project (see tests/UnitTests) so `dotnet test`
          works straight from the repo root with no separate test project. The
@@ -26,6 +33,14 @@
 
   <ItemGroup>
     <EmbeddedResource Include="wwwroot\**\*.*" />
+    <!-- appsettings.json is bundled into the single-file exe; Program.cs loads it
+         from this embedded copy when the on-disk file is missing. -->
+    <EmbeddedResource Include="appsettings.json" />
+    <!-- Keep the local data/ folder (dev SQLite DB, VAPID keys) OUT of the publish
+         output and out of the bundle — those are per-install runtime files. -->
+    <Content Remove="data\**" />
+    <None Remove="data\**" />
+    <EmbeddedResource Remove="data\**" />
   </ItemGroup> 
 
   <ItemGroup>

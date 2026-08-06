@@ -36,7 +36,8 @@ public class DatabaseService
 
         InitializeDatabase();
         MigrateFromFilesIfNeeded();
-        CleanupLegacyConfigFile();
+        MigrateLegacyVersionFile();
+        CleanupLegacyFiles();
     }
 
     public SqliteConnection CreateConnection()
@@ -154,20 +155,111 @@ public class DatabaseService
     }
 
     /// <summary>
-    /// Removes the legacy weaverconfig.json once the database holds the config.
-    /// Runs on every startup so the file disappears even for databases that were
-    /// migrated by an earlier version of the app (which left the file behind).
-    /// The file is only deleted when the DB actually contains the config, so a
-    /// not-yet-migrated file is never discarded.
+    /// Migrates the legacy .weaver-version file — which the app used to read
+    /// before versions moved into the database — into the local_version key,
+    /// then deletes the file. Runs on every startup: a database migrated by an
+    /// earlier app version gets its real version back if the file still exists,
+    /// and any leftover file is swept once the DB holds a version. When nothing
+    /// is available it seeds "0", exactly like the old file-based code wrote a
+    /// "0" file for a missing one — so the Discord panel always shows a
+    /// DB-backed value instead of a transient fallback.
     /// </summary>
-    private void CleanupLegacyConfigFile()
+    private void MigrateLegacyVersionFile()
     {
         try
         {
-            if (File.Exists(_configPath) && GetValue("weaver_config", "config") != null)
-                File.Delete(_configPath);
+            // The version file lived in several places over the app's history:
+            // next to the data dir (dev runs), and in %LOCALAPPDATA%\Weaver
+            // (installed builds), under either .weaver-version or .weaver-version.txt.
+            var roots = new[]
+            {
+                _weaverDataDir,
+                Path.GetDirectoryName(_weaverDataDir) ?? "",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Weaver"),
+            };
+            var names = new[] { ".weaver-version", ".weaver-version.txt" };
+
+            var hasVersion = !string.IsNullOrWhiteSpace(GetLocalVersion());
+            foreach (var root in roots)
+            {
+                foreach (var name in names)
+                {
+                    var versionFile = Path.Combine(root, name);
+                    if (!File.Exists(versionFile)) continue;
+                    // Import whenever the DB holds no real version — including the
+                    // seeded "0" placeholder, which only means "unknown" and must
+                    // not swallow a real version that still exists on disk.
+                    if (!hasVersion || GetLocalVersion() == "0")
+                    {
+                        var content = File.ReadAllText(versionFile).Trim();
+                        if (!string.IsNullOrWhiteSpace(content))
+                        {
+                            SetLocalVersion(content);
+                            hasVersion = true;
+                        }
+                    }
+                    // The version now lives in the database — the legacy file must not linger.
+                    File.Delete(versionFile);
+                }
+            }
+
+            if (!hasVersion)
+                SetLocalVersion("0");
+        }
+        catch { /* best-effort migration */ }
+    }
+
+    /// <summary>
+    /// Removes every legacy JSON file once its data has been migrated into the
+    /// database. Runs on every startup so files disappear even for databases
+    /// that were migrated by an earlier version of the app (which left them
+    /// behind). Each file is only deleted when the DB actually holds that data,
+    /// so a not-yet-migrated file is never discarded.
+    /// </summary>
+    private void CleanupLegacyFiles()
+    {
+        CleanupLegacyFile(_configPath, () => GetValue("weaver_config", "config") != null);
+        CleanupLegacyFile(Path.Combine(_weaverDataDir, "board.json"), () => GetBoardData() != null);
+        CleanupLegacyFile(Path.Combine(_weaverDataDir, ".calendardata"), () => GetCalendarData() != null);
+        CleanupLegacyFile(Path.Combine(_weaverDataDir, "filehints.json"), () => GetFileHints() != null);
+        CleanupLegacyFile(Path.Combine(_weaverDataDir, "vapid-keys.json"), () => GetVapidKeys() != null);
+        CleanupLegacyFile(Path.Combine(_weaverDataDir, "benchmark_scores.json"), () => GetValue("benchmark_scores_json") != null);
+        CleanupLegacyFile(Path.Combine(_weaverDataDir, "system_info.json"), () => GetSystemInfo() != null);
+
+        if (!Directory.Exists(_weaverDataDir)) return;
+        foreach (var file in Directory.GetFiles(_weaverDataDir, ".project_*_edit_knowledge.json"))
+        {
+            var projectName = ExtractEditKnowledgeProjectName(file);
+            CleanupLegacyFile(file, () => GetEditKnowledge(projectName) != null);
+        }
+    }
+
+    private void CleanupLegacyFile(string path, Func<bool> hasData)
+    {
+        try
+        {
+            if (!File.Exists(path)) return;
+            // Delete once the DB holds the data, or when the file holds nothing
+            // at all — an empty/whitespace-only file has no data worth keeping,
+            // so it must not linger either.
+            if (hasData() || string.IsNullOrWhiteSpace(File.ReadAllText(path)))
+                File.Delete(path);
         }
         catch { /* best-effort cleanup */ }
+    }
+
+    /// <summary>
+    /// Extracts the project name from a legacy edit-knowledge file name of the
+    /// form ".project_{name}_edit_knowledge.json".
+    /// </summary>
+    private static string ExtractEditKnowledgeProjectName(string filePath)
+    {
+        var name = Path.GetFileNameWithoutExtension(filePath);
+        if (name.StartsWith(".project_"))
+            name = name[".project_".Length..];
+        if (name.EndsWith("_edit_knowledge"))
+            name = name[..^"_edit_knowledge".Length];
+        return name;
     }
 
     private void MigrateBoardData()
@@ -179,6 +271,8 @@ public class DatabaseService
             var json = File.ReadAllText(boardPath);
             if (string.IsNullOrWhiteSpace(json)) return;
             SetBoardData(json);
+            // The board now lives in the database — the legacy JSON file must not linger.
+            File.Delete(boardPath);
         }
         catch { }
     }
@@ -192,6 +286,8 @@ public class DatabaseService
             var json = File.ReadAllText(calPath);
             if (string.IsNullOrWhiteSpace(json)) return;
             SetCalendarData(json);
+            // The calendar now lives in the database — the legacy file must not linger.
+            File.Delete(calPath);
         }
         catch { }
     }
@@ -205,6 +301,8 @@ public class DatabaseService
             var json = File.ReadAllText(hintsPath);
             if (string.IsNullOrWhiteSpace(json)) return;
             SetFileHints(json);
+            // The hints now live in the database — the legacy JSON file must not linger.
+            File.Delete(hintsPath);
         }
         catch { }
     }
@@ -218,6 +316,8 @@ public class DatabaseService
             var json = File.ReadAllText(vapidPath);
             if (string.IsNullOrWhiteSpace(json)) return;
             SetVapidKeys(json);
+            // The keys now live in the database — the legacy JSON file must not linger.
+            File.Delete(vapidPath);
         }
         catch { }
     }
@@ -239,6 +339,8 @@ public class DatabaseService
             ";
             cmd.Parameters.AddWithValue("@data", json);
             cmd.ExecuteNonQuery();
+            // The scores now live in the database — the legacy JSON file must not linger.
+            File.Delete(benchPath);
         }
         catch { }
     }
@@ -252,6 +354,8 @@ public class DatabaseService
             var json = File.ReadAllText(sysInfoPath);
             if (string.IsNullOrWhiteSpace(json)) return;
             SetSystemInfo(json);
+            // The info now lives in the database — the legacy JSON file must not linger.
+            File.Delete(sysInfoPath);
         }
         catch { }
     }
@@ -272,17 +376,12 @@ public class DatabaseService
             {
                 try
                 {
-                    var name = Path.GetFileNameWithoutExtension(file);
-                    // Extract project name from ".project_{name}_edit_knowledge"
-                    var projectName = name;
-                    if (name.StartsWith(".project_"))
-                        projectName = name[".project_".Length..];
-                    if (projectName.EndsWith("_edit_knowledge"))
-                        projectName = projectName[..^"_edit_knowledge".Length];
-
+                    var projectName = ExtractEditKnowledgeProjectName(file);
                     var json = File.ReadAllText(file);
                     if (string.IsNullOrWhiteSpace(json)) continue;
                     SetEditKnowledge(projectName, json);
+                    // The knowledge now lives in the database — the legacy file must not linger.
+                    File.Delete(file);
                 }
                 catch { }
             }

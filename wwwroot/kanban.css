@@ -361,6 +361,84 @@ body.dragging-active .card:hover {
     padding: 6px 10px;
 }
 
+.card .suggest-more {
+    float: right;
+    font-size: 11px;
+    font-weight: 600;
+    color: #a78bfa;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    opacity: 0.85;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.card .suggest-more:hover {
+    opacity: 1;
+    color: #c4b5fd;
+}
+
+.card .suggest-why {
+    float: right;
+    margin-right: 8px;
+    font-size: 11px;
+    color: #a78bfa;
+    cursor: pointer;
+    text-decoration: none;
+    opacity: 0.8;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.card .suggest-why:hover {
+    opacity: 1;
+    color: #c4b5fd;
+}
+
+.card .suggestion-context {
+    border-top: 1px dashed rgba(192, 132, 252, 0.3);
+    padding: 8px 10px;
+    font-size: 12px;
+}
+
+.card .suggestion-context-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #c084fc;
+    margin-bottom: 6px;
+}
+
+.card .suggestion-context-field {
+    margin-bottom: 6px;
+}
+
+.card .suggestion-context-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.card .suggestion-context-text {
+    margin-top: 2px;
+    color: var(--text);
+    line-height: 1.45;
+}
+
+.card .suggestion-context-text.sc-collapsed {
+    max-height: 96px;
+    overflow-y: auto;
+}
+
+.card .suggestion-context-files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+}
+
 .card .suggestion {
     padding: 8px 10px;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
@@ -374,6 +452,13 @@ body.dragging-active .card:hover {
     font-size: 12px;
     line-height: 1.45;
     color: var(--text);
+}
+
+.card .suggestion-empty {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    font-style: italic;
 }
 
 .card .suggestion-files {
@@ -430,6 +515,26 @@ body.dragging-active .card:hover {
 
 .card-section[open] > summary .section-caret {
     transform: rotate(90deg);
+}
+
+.card-section > summary .log-copy-btn {
+    flex-shrink: 0;
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 7px;
+    line-height: 1.4;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--muted);
+    cursor: pointer;
+    transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+
+.card-section > summary .log-copy-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text);
+    border-color: rgba(255, 255, 255, 0.25);
 }
 
 .card-section > summary .section-title {

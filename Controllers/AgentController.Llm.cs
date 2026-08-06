@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -13,208 +11,31 @@ partial class AgentController
     private const int StreamChunkLen = 40;
     private const int StreamRepeatThreshold = 4;
 
-    /// <summary>Per-endpoint stream reliability counters, keyed by normalized base URL.
-    /// Feeds the health badge in the endpoint picker so flaky endpoints (frequent
-    /// mid-stream drops) are visible at a glance.</summary>
-    private sealed class EndpointStreamHealth
-    {
-        public long Calls;
-        public long StreamErrors;
-        public long Recovered;       // recovery retries that landed (finish-this / hint retry succeeded)
-        public long RecoveryFailed;  // recovery retries that still failed
-        public DateTime LastStreamErrorUtc;
-        public DateTime LastSuccessUtc;
-    }
-    private static readonly ConcurrentDictionary<string, EndpointStreamHealth> _endpointStreamHealth =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>Normalizes an endpoint URL to the dictionary key (trim trailing slash).</summary>
-    private static string EndpointHealthKey(string? baseUrl)
-        => string.IsNullOrWhiteSpace(baseUrl) ? "" : baseUrl.Trim().TrimEnd('/');
-
-    /// <summary>
-    /// Records one completed LLM attempt for the endpoint health tracker. A call counts as
-    /// a stream error when it failed with a transport/stream/truncation problem (the same
-    /// predicate that triggers recovery), so the badge reflects reliability, not LLM quality.
-    /// </summary>
-    private const string EndpointHealthDbKey = "endpoint_stream_health";
-    // Debounce between SQLite writes from the hot recording path (10s), and the window
-    // beyond which an idle endpoint's counters are considered stale and dropped everywhere
-    // (persist, hydrate, and the HTTP endpoint share this so what's served == what's saved).
-    private const long EndpointHealthPersistDebounceTicks = TimeSpan.TicksPerSecond * 10;
-    private static readonly TimeSpan EndpointHealthStaleAge = TimeSpan.FromHours(24);
-
-    /// <summary>True when an endpoint's last recorded activity is older than the 24h window.</summary>
-    private static bool IsEndpointHealthStale(EndpointStreamHealth h, DateTime now)
-    {
-        var last = h.LastSuccessUtc > h.LastStreamErrorUtc ? h.LastSuccessUtc : h.LastStreamErrorUtc;
-        return last != default && (now - last) > EndpointHealthStaleAge;
-    }
-    // Persistence hooks — set once by the AgentController constructor so the static tracker
-    // can round-trip through the injected DatabaseService. Tests leave these null and the
-    // tracker stays purely in-memory.
-    private static Func<string?>? _endpointHealthLoader;
-    private static Action<string>? _endpointHealthSaver;
-    private static bool _endpointHealthHydrated;
-    private static long _lastHealthPersistTicks;
-
-    /// <summary>
-    /// Registers the SQLite-backed load/save hooks. No-op if already set. The check-then-act
-    /// is technically racy under concurrent controller construction, but benign: every
-    /// AgentController captures the same DI singleton DatabaseService, so whichever instance
-    /// wins the race installs functionally identical hooks.
-    /// </summary>
-    internal static void RegisterEndpointHealthPersistence(Func<string?>? loader, Action<string>? saver)
-    {
-        if (_endpointHealthLoader == null && _endpointHealthSaver == null)
-        {
-            _endpointHealthLoader = loader;
-            _endpointHealthSaver = saver;
-            _endpointHealthHydrated = false;
-        }
-    }
-
-    /// <summary>
-    /// Restores the tracker from disk on process start. Entries whose last activity is
-    /// older than 24h are dropped so removed endpoints don't resurrect forever — the same
-    /// window the persist path and the HTTP endpoint enforce.
-    /// </summary>
-    internal static void HydrateEndpointHealthFromDisk()
-    {
-        if (_endpointHealthHydrated || _endpointHealthLoader == null) return;
-        _endpointHealthHydrated = true;
-        try
-        {
-            var json = _endpointHealthLoader();
-            if (string.IsNullOrWhiteSpace(json)) return;
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array) return;
-            var now = DateTime.UtcNow;
-            foreach (var el in doc.RootElement.EnumerateArray())
-            {
-                if (el.ValueKind != JsonValueKind.Object) continue;
-                var key = el.TryGetProperty("baseUrl", out var urlEl) ? urlEl.GetString() : null;
-                if (string.IsNullOrWhiteSpace(key)) continue;
-                var h = _endpointStreamHealth.GetOrAdd(key, _ => new EndpointStreamHealth());
-                if (el.TryGetProperty("calls", out var cEl) && cEl.TryGetInt64(out var calls)) h.Calls = calls;
-                if (el.TryGetProperty("streamErrors", out var eEl) && eEl.TryGetInt64(out var errors)) h.StreamErrors = errors;
-                if (el.TryGetProperty("recovered", out var recEl) && recEl.TryGetInt64(out var rec)) h.Recovered = rec;
-                if (el.TryGetProperty("recoveryFailed", out var rfEl) && rfEl.TryGetInt64(out var rf)) h.RecoveryFailed = rf;
-                // RoundtripKind keeps the UTC kind of the persisted "o" strings, so the
-                // 24h-trim comparison against DateTime.UtcNow isn't skewed by the local
-                // timezone offset (plain TryParse would convert Z timestamps to Local).
-                if (el.TryGetProperty("lastStreamErrorUtc", out var lseEl) &&
-                    DateTime.TryParse(lseEl.GetString(), CultureInfo.InvariantCulture,
-                        DateTimeStyles.RoundtripKind, out var lse)) h.LastStreamErrorUtc = lse;
-                if (el.TryGetProperty("lastSuccessUtc", out var lsuEl) &&
-                    DateTime.TryParse(lsuEl.GetString(), CultureInfo.InvariantCulture,
-                        DateTimeStyles.RoundtripKind, out var lsu)) h.LastSuccessUtc = lsu;
-                if (IsEndpointHealthStale(h, now))
-                    _endpointStreamHealth.TryRemove(key, out _);
-            }
-        }
-        catch { /* corrupt or unreadable persisted blob — start fresh */ }
-    }
-
-    /// <summary>
-    /// Serializes the tracker to the registered saver. Prunes entries whose last activity
-    /// is older than 24h so removed endpoints don't linger on disk forever. Synchronous so
-    /// it can be called from the HTTP endpoint; the recording path uses the debounced wrapper.
-    /// </summary>
-    internal static void PersistEndpointHealth()
-    {
-        var saver = _endpointHealthSaver;
-        if (saver == null) return;
-        try
-        {
-            var now = DateTime.UtcNow;
-            var items = new List<object>();
-            // NOTE: blob field names (…Utc) differ from the HTTP response (…At) on purpose —
-            // this is the internal persistence format; the endpoint builds its own contract.
-            foreach (var kv in _endpointStreamHealth)
-            {
-                if (IsEndpointHealthStale(kv.Value, now)) continue; // trim stale entries
-                items.Add(new
-                {
-                    baseUrl = kv.Key,
-                    calls = kv.Value.Calls,
-                    streamErrors = kv.Value.StreamErrors,
-                    recovered = kv.Value.Recovered,
-                    recoveryFailed = kv.Value.RecoveryFailed,
-                    lastStreamErrorUtc = kv.Value.LastStreamErrorUtc == default
-                        ? null : kv.Value.LastStreamErrorUtc.ToString("o"),
-                    lastSuccessUtc = kv.Value.LastSuccessUtc == default
-                        ? null : kv.Value.LastSuccessUtc.ToString("o")
-                });
-            }
-            saver(JsonSerializer.Serialize(items));
-        }
-        catch { /* persistence is best-effort */ }
-    }
-
-    /// <summary>
-    /// Debounced persist for the hot recording path — at most one SQLite write every 10s,
-    /// executed synchronously. The debounce keeps the write frequency trivial (one small
-    /// JSON blob per 10s per process), and a synchronous write removes any async race where
-    /// a stale background flush could overwrite newer counters.
-    /// </summary>
-    private static void MaybePersistEndpointHealth()
-    {
-        if (_endpointHealthSaver == null) return;
-        var now = DateTime.UtcNow.Ticks;
-        var last = Interlocked.Read(ref _lastHealthPersistTicks);
-        if (now - last < EndpointHealthPersistDebounceTicks) return;
-        if (Interlocked.CompareExchange(ref _lastHealthPersistTicks, now, last) != last) return;
-        PersistEndpointHealth();
-    }
-
     /// <summary>
     /// Records the OUTCOME of a recovery retry (finish-this continuation, hint retry, or
     /// non-streaming transport retry) for the endpoint health tracker, and emits a 📊 metric
     /// log entry so users can see in the agent log whether their endpoints' recovery feature
-    /// is actually working. Called once per retry after it completes.
+    /// is actually working. Called once per retry after it completes. The counter mutation
+    /// lives in EndpointHealthService; this wrapper adds the SSE/log surface.
     /// </summary>
     private async Task RecordRecoveryOutcomeAsync(string? baseUrl, bool recovered, string retryKind,
         bool emitSse = false, CancellationToken ct = default)
     {
-        var key = EndpointHealthKey(baseUrl);
-        if (key.Length > 0)
+        var counts = EndpointHealthService.RecordRecoveryOutcome(baseUrl, recovered);
+        // The service increments a counter BEFORE returning, so the sum is always >= 1 for
+        // a real endpoint and only 0 when the baseUrl normalized to empty — i.e. this is a
+        // proxy for "the endpoint was tracked" (equivalent to the old key.Length > 0 check).
+        if (counts.Recovered + counts.RecoveryFailed > 0)
         {
-            var h = _endpointStreamHealth.GetOrAdd(key, _ => new EndpointStreamHealth());
-            if (recovered) Interlocked.Increment(ref h.Recovered);
-            else Interlocked.Increment(ref h.RecoveryFailed);
-            MaybePersistEndpointHealth();
             await EmitLog(emitSse, "metric",
                 $"📊 Recovery ({retryKind}): {(recovered ? "recovered ✓" : "still failed ✗")} — " +
-                $"{h.Recovered} recovered / {h.RecoveryFailed} failed retries on this endpoint", ct: ct);
+                $"{counts.Recovered} recovered / {counts.RecoveryFailed} failed retries on this endpoint", ct: ct);
         }
         else
         {
             await EmitLog(emitSse, "metric",
                 $"📊 Recovery ({retryKind}): {(recovered ? "recovered ✓" : "still failed ✗")}", ct: ct);
         }
-    }
-
-    private static void RecordEndpointCall(string? baseUrl, string? partial, string? error)
-    {
-        HydrateEndpointHealthFromDisk();
-        var key = EndpointHealthKey(baseUrl);
-        if (key.Length == 0) return;
-        var h = _endpointStreamHealth.GetOrAdd(key, _ => new EndpointStreamHealth());
-        Interlocked.Increment(ref h.Calls);
-        if (string.IsNullOrWhiteSpace(error))
-        {
-            h.LastSuccessUtc = DateTime.UtcNow;
-        }
-        else if (TransientFailureDetector.IsTransientTransportFailure(error) || TransientFailureDetector.IsRecoverableStreamFailure(partial, error))
-        {
-            // A recovered call counts as a stream error on the FIRST attempt plus a success
-            // on the retry — intentional: the badge measures connection drops, not task
-            // outcomes, so a drop that was healed still shows up as a reliability blip.
-            Interlocked.Increment(ref h.StreamErrors);
-            h.LastStreamErrorUtc = DateTime.UtcNow;
-        }
-        MaybePersistEndpointHealth();
     }
 
     /// <summary>
@@ -340,7 +161,7 @@ partial class AgentController
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var first = await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens);
-        RecordEndpointCall(baseUrl, first.raw, first.error);
+        EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
         // Non-streaming calls can't reuse partial output, but a one-shot retry still
         // recovers a transient transport blip (network drop, connection reset, premature
         // close, timeout) — the prompt is intact and the second attempt often lands.
@@ -352,7 +173,7 @@ partial class AgentController
             using var retryTimeoutCts = new CancellationTokenSource(timeout);
             using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
             first = await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, retryLinkedCts.Token, maxTokens);
-            RecordEndpointCall(baseUrl, first.raw, first.error);
+            EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
             await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), "non-streaming retry", ct: ct);
         }
         return first;
@@ -374,7 +195,7 @@ partial class AgentController
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens, emitSse);
-        RecordEndpointCall(baseUrl, first.raw, first.error);
+        EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
         // A stream read error / truncated response can kill an otherwise-good response mid-run
         // (e.g. the planner had already produced the correct edit before the connection dropped).
         // Two distinct recoveries, chosen by WHY it failed:
@@ -415,7 +236,7 @@ partial class AgentController
                 };
                 first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, hintMessages, retryLinkedCts.Token, maxTokens, emitSse: false);
             }
-            RecordEndpointCall(baseUrl, first.raw, first.error);
+            EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
             await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), retryKind, emitSse, ct);
         }
         return first;
@@ -780,7 +601,7 @@ partial class AgentController
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, linkedCts.Token, maxTokens);
-        RecordEndpointCall(baseUrl, first.raw, first.error);
+        EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
         // Same recovery as CallLlmRawStreaming: a dropped connection or max-token cut must
         // not discard a good partial response — retry once with the partial as a hint.
         // Editor:DisableLLMRetries skips this — the partial + error return as-is.
@@ -798,7 +619,7 @@ partial class AgentController
             using var retryTimeoutCts = new CancellationTokenSource(timeout);
             using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
             first = await CallLlmRawTextOnce(systemPrompt, AppendPartialContinuationHint(userMessage, first.raw), emitSse: false, retryLinkedCts.Token, maxTokens);
-            RecordEndpointCall(baseUrl, first.raw, first.error);
+            EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
             await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), "prose retry", emitSse, ct);
         }
         return first;

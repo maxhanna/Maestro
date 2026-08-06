@@ -1078,6 +1078,8 @@ header h1 {
 	left: 0;
 	width: 100%;
 	height: 100%;
+	/* Above the floating-panel z band (1000–1199) so dialogs always stack on top */
+	z-index: 2000;
 	background: rgba(0, 0, 0, 0.7);
 	backdrop-filter: blur(6px);
 	-webkit-backdrop-filter: blur(6px);
@@ -2028,12 +2030,14 @@ header h1 span.brand-badge {
 	font-size: 12px;
 }
 
-/* Grade colors — the insignia metal the rank is stamped from. */
-.rank-grade-platinum { color: #e5e4e2; }
-.rank-grade-gold { color: #ffd700; }
-.rank-grade-silver { color: #c0c0c0; }
-.rank-grade-bronze { color: #cd7f32; }
-.rank-grade-recruit { color: rgba(255, 255, 255, 0.35); }
+/* Grade colors — the insignia metal the rank is stamped from. */    .rank-grade-platinum { color: #e5e4e2; }
+    .rank-grade-gold { color: #ffd700; }
+    .rank-grade-silver { color: #c0c0c0; }
+    .rank-grade-bronze { color: #cd7f32; }
+    .rank-grade-recruit { color: rgba(255, 255, 255, 0.35); }
+    .rank-grade-diamond { color: #7dd3fc; }
+    .rank-grade-obsidian { color: #c4b5fd; }
+    .rank-grade-cosmic { color: #f0abfc; }
 
 .user-stats-popup {
 	position: absolute;
@@ -2127,11 +2131,13 @@ header h1 span.brand-badge {
 	box-shadow: 0 0 8px rgba(6, 182, 212, 0.45);
 }
 
-/* Fill previews the NEXT tier's metal. */
-.rank-progress-fill.rank-grade-platinum { background: linear-gradient(90deg, #e5e4e2, #ffffff); }
-.rank-progress-fill.rank-grade-gold { background: linear-gradient(90deg, #b8860b, #ffd700); }
-.rank-progress-fill.rank-grade-silver { background: linear-gradient(90deg, #9ca3af, #e5e7eb); }
-.rank-progress-fill.rank-grade-bronze { background: linear-gradient(90deg, #9a5b24, #e0954c); }
+/* Fill previews the NEXT tier's metal. */    .rank-progress-fill.rank-grade-platinum { background: linear-gradient(90deg, #e5e4e2, #ffffff); }
+    .rank-progress-fill.rank-grade-gold { background: linear-gradient(90deg, #b8860b, #ffd700); }
+    .rank-progress-fill.rank-grade-silver { background: linear-gradient(90deg, #9ca3af, #e5e7eb); }
+    .rank-progress-fill.rank-grade-bronze { background: linear-gradient(90deg, #9a5b24, #e0954c); }
+    .rank-progress-fill.rank-grade-diamond { background: linear-gradient(90deg, #38bdf8, #7dd3fc); }
+    .rank-progress-fill.rank-grade-obsidian { background: linear-gradient(90deg, #8b5cf6, #c4b5fd); }
+    .rank-progress-fill.rank-grade-cosmic { background: linear-gradient(90deg, #d946ef, #f0abfc); }
 
 .rank-progress-max {
 	align-items: center;
@@ -4671,6 +4677,13 @@ h3 .small.ghost:hover {
   gap: 12px;
   margin-bottom: 10px;
 }
+/* Run All / Run button wrapper: carries the tooltip so it still shows when
+   the inner button is ng-disabled (disabled buttons don't fire mouse events). */
+.bench-btn-wrap {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.bench-btn-disabled { cursor: not-allowed; }
 /* Clickable collapsible section headers (Benchmarks panel) */
 .bench-head-toggle {
   cursor: pointer;
@@ -4722,6 +4735,10 @@ h3 .small.ghost:hover {
   border: 1px solid rgba(6,182,212,0.3);
   border-radius: 8px;
   margin-bottom: 10px;
+}
+.bench-running .bench-resume-btn {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 .bench-spinner {
   width: 14px; height: 14px;
