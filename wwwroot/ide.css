@@ -687,6 +687,24 @@
     border-left: 2px solid #06b6d4;
 }
 
+/* Light IDE themes: the CDN theme stylesheets load after this file and several
+   of them paint the caret in a color that vanishes on their pale background
+   (e.g. Yeti's #d1c9c0 caret on #eceae8, Neo's faint translucent block). Pin a
+   clearly visible caret for every light theme — in the editor and in the
+   settings theme previews. `!important` keeps it authoritative over the
+   later-loaded CDN CSS. */
+.cm-s-eclipse .CodeMirror-cursor,
+.cm-s-idea .CodeMirror-cursor,
+.cm-s-neo .CodeMirror-cursor,
+.cm-s-yeti .CodeMirror-cursor,
+.cm-s-paraiso-light .CodeMirror-cursor,
+.cm-s-xq-light .CodeMirror-cursor {
+    border-left: 2px solid #333 !important;
+    border-right: none !important;
+    width: auto !important;
+    background: none !important;
+}
+
 .ide-codemirror-container .CodeMirror-selected {
     background: rgba(56, 139, 253, 0.25);
 }
@@ -806,10 +824,10 @@
     color: #79c0ff;
 }
 
-/* Floating IDE container */
+/* Floating IDE container — z-index is dynamic (vm.panelZ.ide via ng-style);
+   the panels share a 1000–1199 band so the last-clicked one sits on top. */
 .ide-floating-panel {
     position: fixed;
-    z-index: 1100;
     display: flex;
     flex-direction: column;
     min-width: 300px;
@@ -1479,7 +1497,7 @@
 /* ── Notes Floating Panel ── */
 .notes-floating-panel {
     position: fixed;
-    z-index: 1000;
+    /* z-index is dynamic (vm.panelZ.notes via ng-style) — see .ide-floating-panel */
     min-width: 300px;
     min-height: 200px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);

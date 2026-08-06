@@ -103,7 +103,7 @@ public static class EditStrategyResolver
             return new EditPlanDecision(EditStrategy.AnchoredEdit, null, null, null,
                 $"{ext} — anchored text edit (no AST)");
 
-        var (_, supportsFormatC, _) = AgentUtilities.GetLanguageProfile(ext);
+        var (_, supportsFormatC, _) = AgentMethodInventory.GetLanguageProfile(ext);
 
         // ── Property/field addition → never FORMAT C class-replace ───────────
         if (intent.Kind == EditIntentKind.AddProperty)

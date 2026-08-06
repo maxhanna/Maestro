@@ -5,7 +5,7 @@ namespace Weaver.UnitTests;
 
 /// <summary>
 /// Regression tests for the oldString/newString apply-path re-indentation
-/// (AgentUtilities.ReindentReplacementSnippet).
+/// (AgentEditHeuristics.ReindentReplacementSnippet).
 ///
 /// BUG (fixed): the apply path used content sniffing (IsHtmlLikeContent) to pick
 /// between the HTML tag-depth indenter and the brace-depth indenter. TypeScript
@@ -93,7 +93,7 @@ public class SnippetReindentTests
         var oldEnd = Array.IndexOf(GlobeFile, "  }") + 1; // closing brace of ngOnInit
         var oldLines = GlobeFile.Skip(oldStart).Take(oldEnd - oldStart).ToList();
 
-        var result = AgentUtilities.ReindentReplacementSnippet(
+        var result = AgentEditHeuristics.ReindentReplacementSnippet(
             newLines.ToList(), oldLines,
             GlobeFile.ToList(), oldStart,
             isHtmlDomFile: false);
@@ -147,7 +147,7 @@ public class SnippetReindentTests
         var oldLines = GlobeFile.Skip(oldStart).Take(oldEnd - oldStart).ToList();
 
         var fileLines = GlobeFile.ToList();
-        var reindented = AgentUtilities.ReindentReplacementSnippet(
+        var reindented = AgentEditHeuristics.ReindentReplacementSnippet(
             newLines.ToList(), oldLines, fileLines, oldStart, isHtmlDomFile: false);
 
         var prefix = fileLines.Take(oldStart).ToList();
@@ -197,7 +197,7 @@ public class SnippetReindentTests
             "</div>"
         };
 
-        var result = AgentUtilities.ReindentReplacementSnippet(
+        var result = AgentEditHeuristics.ReindentReplacementSnippet(
             newLines.ToList(), new List<string> { "<div class=\"content\">" },
             fileLines.ToList(), 2, isHtmlDomFile: true);
 
@@ -231,7 +231,7 @@ public class SnippetReindentTests
             "  }",
             "}"
         };
-        var result = AgentUtilities.ReindentReplacementSnippet(
+        var result = AgentEditHeuristics.ReindentReplacementSnippet(
             newLines.ToList(),
             new List<string> { "  existingMethod(): void {", "    this.bar();", "  }" },
             fileLines.ToList(), 1, isHtmlDomFile: false);

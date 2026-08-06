@@ -416,6 +416,33 @@ angular.module('kanbanApp', [])
       vm.showSelfImproving = false;
       vm.isSearchResult = false;
 
+      // === Floating-panel z-order ===
+      // IDE / Notes / Meeting stack in a shared band (1000–1199) below the
+      // dropdown/modal layer (options-menu 1200, popups 1300+). The last panel
+      // the user clicked — or opened — sits on top, so the meeting view no
+      // longer permanently hovers over the IDE.
+      vm.panelZ = { notes: 1001, ide: 1010, meeting: 1020 };
+      vm._panelZNext = 1030;
+      vm.bringPanelToFront = function (key) {
+        if (!Object.prototype.hasOwnProperty.call(vm.panelZ, key)) return;
+        // Band is nearly full — rebase while preserving the current order.
+        if (vm._panelZNext >= 1195) {
+          var order = Object.keys(vm.panelZ).sort(function (a, b) { return vm.panelZ[a] - vm.panelZ[b]; });
+          for (var i = 0; i < order.length; i++) vm.panelZ[order[i]] = 1000 + i;
+          vm._panelZNext = 1000 + order.length;
+        }
+        vm.panelZ[key] = vm._panelZNext++;
+      };
+
+      // The panel toggles are plain ng-model checkboxes — bring a panel to the
+      // front the moment it's opened.
+      var _panelFlag = { ide: 'showIDE', notes: 'showNotes', meeting: 'showMeeting' };
+      Object.keys(_panelFlag).forEach(function (key) {
+        $scope.$watch(function () { return vm[_panelFlag[key]]; }, function (nv) {
+          if (nv) vm.bringPanelToFront(key);
+        });
+      });
+
       // === Global UI Methods ===
       vm.playSound = function () {
         var audio = new Audio('/wwwroot/zen.mp3');

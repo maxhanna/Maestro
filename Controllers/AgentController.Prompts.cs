@@ -4,6 +4,14 @@ using System.Text.RegularExpressions;
 using Weaver.Services;
 namespace Weaver.Controllers;
 
+/// <summary>Which FORMAT C example block a prompt site should render.</summary>
+internal enum FormatCVariant
+{
+    Insert,     // ADD a new method — insertAfter:true against an existing anchor method
+    Replace,    // REPLACE an entire existing method/class in place — no insertAfter
+    ClassFill   // fill an existing class body with new property/field declarations
+}
+
 partial class AgentController
 {
     private static string BuildEditSystemPrompt(string editFormat)
@@ -13,17 +21,7 @@ partial class AgentController
         {
             "format_c_insert" =>
                 "You MUST use FORMAT C to add a new method/function (insertAfter with an existing method as anchor):\n" +
-                "{\n" +
-                "  \"targetType\": \"method\",\n" +
-                "  \"targetName\": \"ExistingMethodName\",\n" +
-                "  \"insertAfter\": true,\n" +
-                "  \"newCode\": [\"    async myNewMethod(param: string): Promise<Result> {\", \"        // body\", \"    }\"]\n" +
-                "}\n" +
-                "  - targetType MUST be \"method\".\n" +
-                "  - targetName MUST be an EXISTING method name in the file (copy it VERBATIM from the file content).\n" +
-                "  - insertAfter MUST be true.\n" +
-                "  - newCode is the COMPLETE new method including signature and body. Can be a string or array of lines.\n" +
-                "  - Do NOT use any other format. Do NOT return alreadyDone. Do NOT use fullFile.\n\n",
+                BuildFormatCExamples(FormatCVariant.Insert) + "\n",
             "delete" =>
                 "You are DELETING code. Use this format:\n" +
                 "{\n" +
@@ -35,16 +33,10 @@ partial class AgentController
                 "  - NEVER include surrounding container lines — delete ONLY what's asked.\n\n",
             "format_c_class_fill" =>
                 "You MUST use FORMAT C to fill an EXISTING class body with new property/field declarations:\n" +
-                "{\n" +
-                "  \"targetType\": \"class\",\n" +
-                "  \"targetName\": \"ExistingClassName\",\n" +
-                "  \"newCode\": [\"    public string? Token { get; set; }\", \"    public string? Date { get; set; }\"]\n" +
-                "}\n" +
-                "  - targetType MUST be \"class\".\n" +
-                "  - targetName MUST be the EXISTING class name copied VERBATIM from the file (e.g. the class already shown as empty `{ }` in the file content below).\n" +
-                "  - newCode MUST contain ONLY the new property/field lines to insert inside the class body — one per line.\n" +
-                "  - Do NOT repeat the class declaration or braces in newCode. Do NOT set insertAfter.\n" +
-                "  - Do NOT use oldString/newString.\n\n",
+                BuildFormatCExamples(FormatCVariant.ClassFill) + "\n",
+            "format_c_replace" =>
+                "You MUST use FORMAT C to REPLACE an entire EXISTING method/function (or class) with a new implementation:\n" +
+                BuildFormatCExamples(FormatCVariant.Replace) + "\n",
             _ =>
                 "Use oldString/newString targeted edit format:\n" +
                 "{\n" +
@@ -79,6 +71,58 @@ partial class AgentController
              "15. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form. Only add comments if the change description explicitly asks for them.\n";
         return intro + formatSection + commonRules;
     }
+
+    // ── FORMAT C canonical examples — the SINGLE source of truth ─────────────
+    // Every prompt site that teaches the LLM the FORMAT C JSON shape (system
+    // prompts in BuildEditSystemPrompt, resolver user prompts in ResolveEditForStep,
+    // and escalation directives in EscalationStateMachine) renders these. Change the
+    // wording/examples here and every site stays consistent. Kept internal (not
+    // private) so the separate EscalationStateMachine class can reference it.
+
+    internal static string BuildFormatCExamples(FormatCVariant variant) => variant switch
+    {
+        // NOTE: each variant intentionally ends WITHOUT a trailing newline. Callers that
+        // append to a StringBuilder (AppendLine) get exactly one newline; the string-concat
+        // callers in BuildEditSystemPrompt add the blank-line separator themselves.
+        FormatCVariant.Insert =>
+            "{\n" +
+            "  \"targetType\": \"method\",\n" +
+            "  \"targetName\": \"ExistingMethodName\",\n" +
+            "  \"insertAfter\": true,\n" +
+            "  \"newCode\": [\"    async myNewMethod(param: string): Promise<Result> {\", \"        const result = await fetchData(param);\", \"        return result;\", \"    }\"]\n" +
+            "}\n" +
+            "  - targetType MUST be \"method\".\n" +
+            "  - targetName MUST be an EXISTING method name in the file (copy it VERBATIM from the file content).\n" +
+            "  - insertAfter MUST be true.\n" +
+            "  - newCode is the COMPLETE new method including signature and body. Can be a string or array of lines.\n" +
+            "  - Do NOT use any other format. Do NOT return alreadyDone. Do NOT use fullFile.",
+        FormatCVariant.Replace =>
+            "{\n" +
+            "  \"targetType\": \"method\",\n" +
+            "  \"targetName\": \"ExistingMethodName\",\n" +
+            "  \"newCode\": [\"    async existingMethod(param: string): Promise<Result> {\", \"        const result = await fetchData(param);\", \"        return result;\", \"    }\"]\n" +
+            "}\n" +
+            "  - targetType MUST be \"method\" (or \"class\" for a whole-class replacement).\n" +
+            "  - targetName MUST be the name of the EXISTING method/class being replaced (copy it VERBATIM from the file content).\n" +
+            "  - Do NOT set insertAfter — this REPLACES the existing method in place (insertAfter:true would ADD a new method instead).\n" +
+            "  - newCode is the COMPLETE replacement method/class including signature and body. Can be a string or array of lines.\n" +
+            "  - PRESERVE the existing signature (attributes, return type, name, parameters) unless the change explicitly requires changing it.\n" +
+            "  - Do NOT duplicate the old method in newCode — newCode holds ONLY the new version.\n" +
+            "  - Do NOT use oldString/newString and do NOT use fullFile for this.",
+        FormatCVariant.ClassFill =>
+            "{\n" +
+            "  \"targetType\": \"class\",\n" +
+            "  \"targetName\": \"ExistingClassName\",\n" +
+            "  \"newCode\": [\"    public string? Token { get; set; }\", \"    public string? Date { get; set; }\"]\n" +
+            "}\n" +
+            "  - targetType MUST be \"class\".\n" +
+            "  - targetName MUST be the EXISTING class name copied VERBATIM from the file (e.g. the class already shown as empty `{ }` in the file content below).\n" +
+            "  - newCode MUST contain ONLY the new property/field lines to insert inside the class body — one per line.\n" +
+            "  - Do NOT repeat the class declaration or braces in newCode. Do NOT set insertAfter.\n" +
+            "  - Do NOT use oldString/newString.",
+        _ => ""
+    };
+
     private static string BuildFullFileSystemPrompt()
     {
         return
@@ -345,6 +389,10 @@ partial class AgentController
         sb.Append("    \"targetSymbol\": \"getTimedGreetingMessage\",\n");
         sb.Append("    \"oldString\": \"EXACT text to replace — KEEP THIS SHORT (1-3 lines MAX). See RULE 17 below.\",\n");
         sb.Append("    \"newString\": \"replacement content (for _create_file and edit steps)\",\n");
+        sb.Append("    \"targetType\": \"method\",  // OPTIONAL — FORMAT C/D: set when this step ADDS or REPLACES a WHOLE method (see RULE 18)\n");
+        sb.Append("    \"targetName\": \"ExistingOrTargetMethodName\",  // OPTIONAL — method to insert after (ADD) or the method being replaced (REPLACE)\n");
+        sb.Append("    \"insertAfter\": true,  // OPTIONAL — true = ADD a new method after targetName; omit = REPLACE the target method\n");
+        sb.Append("    \"newCode\": [\"...COMPLETE new method (signature + body)...\"],  // OPTIONAL — full new method for FORMAT C/D\n");
         sb.Append("    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n");
         sb.Append("  },\n");
         sb.Append("  \"justification\": \"why this step must happen NOW relative to steps already committed ");
@@ -430,8 +478,16 @@ partial class AgentController
             sb.Append("   include that line UNCHANGED followed by your new lines. Example:\n");
             sb.Append("     oldString: \"  await this.loadRecipes();\"\n");
             sb.Append("     newString: \"  await this.loadRecipes();\\n  this.registerEscapeHandler();\"\n");
-            sb.Append("   When adding a new method, find the last method in the file and use its closing `}` as the anchor to insert after.\n");
+            sb.Append("   When ADDING a NEW method or REPLACING an ENTIRE method, use the FORMAT C/D fields instead (see RULE 18) — NEVER dump a whole method body into newString.\n");
             sb.Append("   Never include more than 3 lines in oldString. If the target has no single unique line, add an identifying comment first.\n");
+            // NOTE: the FORMAT C field semantics shown here are the compact step-schema form
+            // for the PLANNER. The canonical full JSON examples + rules for the RESOLVER live in
+            // BuildFormatCExamples(FormatCVariant.Insert|Replace) — keep wording consistent.
+            sb.Append("18. WHOLE-METHOD EDITS MUST USE FORMAT C/D (CRITICAL): To ADD a brand-new method/function or REPLACE an ENTIRE existing method, emit the FORMAT C fields — targetType, targetName, newCode (plus insertAfter:true for ADD) — INSTEAD of oldString/newString:\n");
+            sb.Append("    • ADD a new method:  {\"targetType\": \"method\", \"targetName\": \"ExistingMethodToInsertAfter\", \"insertAfter\": true, \"newCode\": [\"...COMPLETE new method (signature + body)...\"]}\n");
+            sb.Append("    • REPLACE a method:  {\"targetType\": \"method\", \"targetName\": \"MethodBeingReplaced\", \"newCode\": [\"...COMPLETE new method (signature + body)...\"]}   (no insertAfter)\n");
+            sb.Append("    newCode holds ONLY the new method — never duplicate the old one. The system locates the old method itself (via targetName) and replaces it, or inserts after the anchor for ADD. This roughly halves the output size for whole-method edits, so the response fits and is never truncated mid-method.\n");
+            sb.Append("    Use oldString/newString (1-3 lines) ONLY for small targeted changes inside a method. NEVER put a whole method body in newString.\n");
         }
         else
         {
@@ -860,7 +916,7 @@ partial class AgentController
         }
         try
         {
-            var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
+            var cleaned = AgentJsonUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
             if (!doc.RootElement.TryGetProperty("requirements", out var arr) || arr.ValueKind != JsonValueKind.Array)
                 return "";
@@ -1047,13 +1103,14 @@ partial class AgentController
     internal static string BuildEditSystemPrompt(EditStrategy strategy) => strategy switch
     {
         EditStrategy.InsertMethod => BuildEditSystemPrompt("format_c_insert"),
+        EditStrategy.ReplaceMethod => BuildEditSystemPrompt("format_c_replace"),
         EditStrategy.FillClassBody => BuildEditSystemPrompt("format_c_class_fill"),
         EditStrategy.DeleteLines => BuildEditSystemPrompt("delete"),
         EditStrategy.CreateFile or EditStrategy.FullFileRewrite
                                    => BuildFullFileSystemPrompt(),
         EditStrategy.HtmlInsertAfter or EditStrategy.HtmlInsertBefore or EditStrategy.HtmlReplace
                                    => BuildEditSystemPrompt("old_new"), // FORMAT D is driven by user prompt, not system prompt
-        _ => BuildEditSystemPrompt("old_new"),  // AnchoredEdit + ReplaceMethod
+        _ => BuildEditSystemPrompt("old_new"),  // AnchoredEdit only (ReplaceMethod now uses format_c_replace)
     };
 }
 public enum EscalationLevel
@@ -1121,11 +1178,16 @@ public static class EscalationStateMachine
                 else if (strategy == EditStrategy.InsertMethod)
                 {
                     sb.AppendLine("  STRATEGY: FORMAT_C_INSERTION.");
-                    sb.AppendLine("  • You MUST use FORMAT C with insertAfter:true.");
-                    sb.AppendLine("  • Set targetType=\"method\", targetName to an EXISTING method name");
-                    sb.AppendLine("    (e.g. the LAST method in the class), insertAfter=true, and newCode");
-                    sb.AppendLine("    to the COMPLETE new method including [HttpPost] attribute, signature, and body.");
-                    sb.AppendLine("  • Do NOT use fullFile and do NOT return alreadyDone — both will be rejected.");
+                    sb.AppendLine("  • You MUST use FORMAT C with insertAfter:true — targetType, targetName (existing anchor method), insertAfter:true, newCode.");
+                    sb.AppendLine("  • newCode is the COMPLETE new method including [HttpPost] attribute, signature, and body.");
+                    sb.AppendLine(AgentController.BuildFormatCExamples(FormatCVariant.Insert));
+                }
+                else if (strategy == EditStrategy.ReplaceMethod)
+                {
+                    sb.AppendLine("  STRATEGY: FORMAT_C_REPLACE.");
+                    sb.AppendLine("  • You MUST use FORMAT C REPLACE (NO insertAfter) — targetType, targetName (existing method/class being replaced), newCode.");
+                    sb.AppendLine("  • newCode is the COMPLETE replacement method/class (signature + body), preserving the existing signature.");
+                    sb.AppendLine(AgentController.BuildFormatCExamples(FormatCVariant.Replace));
                 }
                 else
                 {

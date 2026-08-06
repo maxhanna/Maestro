@@ -344,7 +344,7 @@ public static class HtmlDomEditor
         string content, List<(int index, int length)> candidates, string? stepChange, int centerLine)
     {
         if (candidates.Count == 1) return candidates[0];
-        var keywords = AgentUtilities.ExtractDisambiguationKeywords(stepChange);
+        var keywords = AgentDiscovery.ExtractDisambiguationKeywords(stepChange);
         var hasKeywords = keywords.Count > 0;
         var hasLineHint = centerLine > 0;
         if (!hasKeywords && !hasLineHint)

@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using Xunit;
 using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -10,7 +11,8 @@ namespace Weaver.UnitTests;
 /// post-execution verifier's 'issues' array into CONFIRMED (actionable, drives repair
 /// steps) and SPECULATIVE (hypothetical risks, logged but never repaired) buckets.
 /// Invoked via reflection because the method is private static, mirroring the pattern
-/// used by FormatDPayloadCorpusTests.InvokeHasConcreteEdit.
+/// used by FormatDPayloadCorpusTests.InvokeHasConcreteEdit. The triage rules live in
+/// Services/VerifierIssueTriage.cs and are called directly.
 /// </summary>
 public class PostExecuteVerifyTests
 {
@@ -146,13 +148,7 @@ public class PostExecuteVerifyTests
 
     private static (bool keep, string reason) InvokeTriageVerifierIssue(
         string issue, Dictionary<string, string> filesByPath)
-    {
-        var method = typeof(AgentController).GetMethod(
-            "TriageVerifierIssue", BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new InvalidOperationException("TriageVerifierIssue not found");
-        var result = (ValueTuple<bool, string>)(method.Invoke(null, new object?[] { issue, filesByPath })!);
-        return (result.Item1, result.Item2);
-    }
+        => VerifierIssueTriage.TriageVerifierIssue(issue, filesByPath);
 
     [Fact]
     public void Triage_PhantomClaim_SymbolPresent_Drops()
@@ -495,14 +491,7 @@ public class PostExecuteVerifyTests
 
     private static (bool isPhantom, string? phantom, List<string> remaining) InvokeTrySkipPhantomIssue(
         List<object> allSteps, List<string>? issues)
-    {
-        var method = typeof(AgentController).GetMethod(
-            "TrySkipPhantomIssue", BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new InvalidOperationException("TrySkipPhantomIssue not found");
-        var result = (ValueTuple<bool, string?, List<string>>)(
-            method.Invoke(null, new object?[] { allSteps, issues })!);
-        return (result.Item1, result.Item2, result.Item3);
-    }
+        => VerifierIssueTriage.TrySkipPhantomIssue(allSteps, issues);
 
     private static List<object> StepsWithLast(string? status, string? reason)
     {

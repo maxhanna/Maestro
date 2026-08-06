@@ -36,6 +36,7 @@ public class DatabaseService
 
         InitializeDatabase();
         MigrateFromFilesIfNeeded();
+        CleanupLegacyConfigFile();
     }
 
     public SqliteConnection CreateConnection()
@@ -146,8 +147,27 @@ public class DatabaseService
             var json = File.ReadAllText(_configPath);
             if (string.IsNullOrWhiteSpace(json)) return;
             SetValue("weaver_config", "config", json);
+            // The config now lives in the database — the legacy JSON file must not linger.
+            File.Delete(_configPath);
         }
         catch { /* migration is best-effort */ }
+    }
+
+    /// <summary>
+    /// Removes the legacy weaverconfig.json once the database holds the config.
+    /// Runs on every startup so the file disappears even for databases that were
+    /// migrated by an earlier version of the app (which left the file behind).
+    /// The file is only deleted when the DB actually contains the config, so a
+    /// not-yet-migrated file is never discarded.
+    /// </summary>
+    private void CleanupLegacyConfigFile()
+    {
+        try
+        {
+            if (File.Exists(_configPath) && GetValue("weaver_config", "config") != null)
+                File.Delete(_configPath);
+        }
+        catch { /* best-effort cleanup */ }
     }
 
     private void MigrateBoardData()
@@ -268,6 +288,18 @@ public class DatabaseService
             }
         }
         catch { }
+    }
+
+    // ─── Local version (update tracking) ────────────────────────────────────
+
+    public string? GetLocalVersion()
+    {
+        return GetValue("weaver_config", "local_version");
+    }
+
+    public void SetLocalVersion(string version)
+    {
+        SetValue("weaver_config", "local_version", version);
     }
 
     // ─── Generic key/value access (weaver_config) ───────────────────────────

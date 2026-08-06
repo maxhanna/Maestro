@@ -23,12 +23,12 @@ public class ExtractMemberInventoryTests
         return (string)method!.Invoke(null, new object?[] { content })!;
     }
 
-    private static (AgentUtilities.PreEditVerdict verdict, string reason) InvokePreEditValidation(string fileContent, PlanStep step)
+    private static (AgentEditHeuristics.PreEditVerdict verdict, string reason) InvokePreEditValidation(string fileContent, PlanStep step)
     {
         var method = typeof(AgentController).GetMethod(
             "PreEditValidation", BindingFlags.NonPublic | BindingFlags.Static);
         Assert.NotNull(method);
-        return (ValueTuple<AgentUtilities.PreEditVerdict, string>)(method!.Invoke(null, new object?[] { fileContent, step })!);
+        return (ValueTuple<AgentEditHeuristics.PreEditVerdict, string>)(method!.Invoke(null, new object?[] { fileContent, step })!);
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public class ExtractMemberInventoryTests
             NewString = ""
         };
         var (verdict, reason) = InvokePreEditValidation(content, step);
-        Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, verdict);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.AlreadyDone, verdict);
         Assert.Contains("already absent from file", reason);
     }
 

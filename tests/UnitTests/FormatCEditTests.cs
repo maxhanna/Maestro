@@ -122,8 +122,8 @@ public class FormatCEditTests : IDisposable
         var prefix = sourceText[..lineEnd];
         Assert.EndsWith("\r", prefix);
 
-        var normFile = AgentUtilities.NormalizeLineEndings(sourceText);
-        var normOldRaw = AgentUtilities.NormalizeLineEndings(prefix);
+        var normFile = AgentTextUtilities.NormalizeLineEndings(sourceText);
+        var normOldRaw = AgentTextUtilities.NormalizeLineEndings(prefix);
         Assert.Equal(-1, normFile.IndexOf(normOldRaw, StringComparison.Ordinal));
 
         var normOldFixed = normOldRaw.TrimEnd('\r');
@@ -147,20 +147,20 @@ public class FormatCEditTests : IDisposable
         var prefix = prefixWithCr[..^1];
 
         // The fix: TryReplaceSafe trims the trailing '\r' from the old string
-        // (AgentUtilities.cs:3524) so the fallback prefix replaces successfully
+        // (formerly AgentUtilities.cs) so the fallback prefix replaces successfully
         // on CRLF files instead of failing with "oldString not found verbatim".
-        var (rFixed, newContent, error, _) = AgentUtilities.TryReplaceSafe(
+        var (rFixed, newContent, error, _) = AgentEditHeuristics.TryReplaceSafe(
             sourceText, prefixWithCr, prefixWithCr + "\n\n// new method", 0, null);
         Assert.True(rFixed, $"CR-terminated prefix must be accepted after the fix ({ext}): {error}");
         Assert.Contains("// new method", newContent);
 
         // A genuinely wrong anchor must still be rejected (no false positives).
-        var (rWrong, _, errorWrong, _) = AgentUtilities.TryReplaceSafe(
+        var (rWrong, _, errorWrong, _) = AgentEditHeuristics.TryReplaceSafe(
             sourceText, "function doesNotExistAnywhere(", "// nope", 0, null);
         Assert.False(rWrong, "non-matching anchor must be rejected");
         Assert.NotNull(errorWrong);
 
-        var (replaced, newContent2, error2, _) = AgentUtilities.TryReplaceSafe(
+        var (replaced, newContent2, error2, _) = AgentEditHeuristics.TryReplaceSafe(
             sourceText, prefix, prefix + "\n\n// new method", 0, null);
         Assert.True(replaced, $"fixed prefix must replace on {ext} (crlf={crlf}): {error2}");
         Assert.Contains("// new method", newContent2);
@@ -179,7 +179,7 @@ public class FormatCEditTests : IDisposable
     public void FormatC_EndToEnd_ResolveAndApply_Succeeds(string ext, bool crlf)
     {
         var sourceText = WriteFile(ext, crlf);
-        var normFile = AgentUtilities.NormalizeLineEndings(sourceText);
+        var normFile = AgentTextUtilities.NormalizeLineEndings(sourceText);
 
         // -- resolve (AST path, fixed): block + normalized search text --
         var (block, _, _) = AstCodeEditorService.FindFunctionSource(sourceText, "toggleRecipeDetails", ext);
@@ -201,13 +201,13 @@ public class FormatCEditTests : IDisposable
         }
 
         // -- apply --
-        var normOld = AgentUtilities.NormalizeLineEndings(oldStr).TrimEnd('\r');
+        var normOld = AgentTextUtilities.NormalizeLineEndings(oldStr).TrimEnd('\r');
         var applyIdx = normFile.IndexOf(normOld, StringComparison.Ordinal);
         Assert.True(applyIdx >= 0,
             $"FORMAT C oldString must be found in {ext} (crlf={crlf}) — got {applyIdx}");
 
         var newCode = "\n\n  openPopupMenu(): void {\n    this.isPopupPanelOpen = true;\n  }";
-        var (replaced, _, error, _) = AgentUtilities.TryReplaceSafe(
+        var (replaced, _, error, _) = AgentEditHeuristics.TryReplaceSafe(
             sourceText, oldStr, oldStr + newCode, 0, "Add implementation of openPopupMenu()");
         Assert.True(replaced, $"TryReplaceSafe must replace on {ext} (crlf={crlf}): {error}");
     }

@@ -27,10 +27,10 @@ public class TsJsIndentationTests
         // AutoFixOperatorSpacing is applied to newStr for .ts/.tsx/.js/.jsx files
         // before the block matcher runs in the real apply path.
         var normNew = ext is ".ts" or ".tsx" or ".js" or ".jsx"
-            ? AgentUtilities.AutoFixOperatorSpacing(string.Join("\n", newBlock))
+            ? AgentCodeFormatting.AutoFixOperatorSpacing(string.Join("\n", newBlock))
             : string.Join("\n", newBlock);
         var newLinesArr = normNew.Split('\n').ToList();
-        var reindented = AgentUtilities.ReindentReplacementSnippet(
+        var reindented = AgentEditHeuristics.ReindentReplacementSnippet(
             newLinesArr, oldLinesArr, fileLinesArr, matchIdx, isHtmlDomFile: false);
         fileLinesArr.RemoveRange(matchIdx, oldLinesArr.Count);
         fileLinesArr.InsertRange(matchIdx, reindented);

@@ -8,7 +8,7 @@ namespace Weaver.UnitTests;
 /// FORMAT C full-chain tests on .cs files WHOSE METHOD BODIES CONTAIN SQL — the agent's
 /// exact .cs edit path: Classify → ClassifyIntent → EditStrategyResolver.Decide (Roslyn)
 /// → TryReplaceSafe → THEN the .cs-only SQL whitespace pass (AgentController ~4874,
-/// AgentUtilities.AutoFixSqlWhitespace on newContent + newStr) plus the post-write
+/// AgentCodeFormatting.AutoFixSqlWhitespace on newContent + newStr) plus the post-write
 /// verbatim-escape cleanup (PostEditCSharpFixup ~5078). The point of these tests: when an
 /// agent edit carries SQL inside a C# verbatim string, the SQL must be PROPERLY FORMATTED
 /// too (SELECT* → SELECT *, LIMIT5 → LIMIT 5, FROM( → FROM (…) — not just the C# around it.
@@ -65,9 +65,9 @@ public class FormatCSqlEditTests
         var code = $"cmd.CommandText = @\"{malformed}\";";
         var fixedCode = $"cmd.CommandText = @\"{expected}\";";
 
-        Assert.Equal(fixedCode, AgentUtilities.AutoFixSqlWhitespace(code));
+        Assert.Equal(fixedCode, AgentCodeFormatting.AutoFixSqlWhitespace(code));
         // Idempotent: a second pass must be a byte-identical no-op.
-        Assert.Equal(fixedCode, AgentUtilities.AutoFixSqlWhitespace(fixedCode));
+        Assert.Equal(fixedCode, AgentCodeFormatting.AutoFixSqlWhitespace(fixedCode));
     }
 
     [Theory]
@@ -78,7 +78,7 @@ public class FormatCSqlEditTests
     {
         var code = $"cmd.CommandText = @\"{sql}\";";
 
-        Assert.Equal(code, AgentUtilities.AutoFixSqlWhitespace(code));
+        Assert.Equal(code, AgentCodeFormatting.AutoFixSqlWhitespace(code));
     }
 
     [Fact]
@@ -86,7 +86,7 @@ public class FormatCSqlEditTests
     {
         var code = "var greeting = \"hello world\";\nvar path = @\"C:\\temp\\file.txt\";";
 
-        Assert.Equal(code, AgentUtilities.AutoFixSqlWhitespace(code));
+        Assert.Equal(code, AgentCodeFormatting.AutoFixSqlWhitespace(code));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -99,7 +99,7 @@ public class FormatCSqlEditTests
         // A verbatim string holding SQL with literal \r\n escape text (the LLM's common
         // hallucination) must get real line breaks after the post-write fixup.
         var code = "    var sql = @\"SELECT * FROM users\\r\\nWHERE id = 1\";";
-        var fixedContent = AgentUtilities.PostEditCSharpFixup(code);
+        var fixedContent = AgentTextUtilities.PostEditCSharpFixup(code);
 
         Assert.Contains("SELECT * FROM users\r\nWHERE id = 1", fixedContent);
     }
@@ -109,7 +109,7 @@ public class FormatCSqlEditTests
     {
         var code = "    var msg = @\"line1\\r\\nline2\";";
 
-        Assert.Equal(code, AgentUtilities.PostEditCSharpFixup(code));
+        Assert.Equal(code, AgentTextUtilities.PostEditCSharpFixup(code));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -148,7 +148,7 @@ public class FormatCSqlEditTests
         var newStr = insert ? oldStr + "\n" + indented : indented;
 
         // 5. Apply — pure substitution (no fuzzy/dedupe drift).
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(content, oldStr, newStr);
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(content, oldStr, newStr);
         Assert.True(replaced, $"TryReplaceSafe failed on .cs doc: {matchError}");
         Assert.Equal(content.Replace(oldStr, newStr), applied);
 
@@ -156,16 +156,16 @@ public class FormatCSqlEditTests
         //    changed, the agent re-derives newStr from the fixed content too (~4874).
         //    `applied` stays the PRE-pass pure substitution (what TryReplaceSafe wrote);
         //    `final` is the POST-pass content the agent actually keeps.
-        var final = AgentUtilities.AutoFixSqlWhitespace(applied);
+        var final = AgentCodeFormatting.AutoFixSqlWhitespace(applied);
         if (final != applied)
         {
-            var fixedNewStr = AgentUtilities.AutoFixSqlWhitespace(newStr);
+            var fixedNewStr = AgentCodeFormatting.AutoFixSqlWhitespace(newStr);
             Assert.NotEqual(newStr, fixedNewStr);
         }
 
         // Transitive lock: the post-pass file must be EXACTLY the SQL-normalized pure
         // substitution — no drift anywhere beyond the keyword-spacing fix itself.
-        Assert.Equal(AgentUtilities.AutoFixSqlWhitespace(content.Replace(oldStr, newStr)), final);
+        Assert.Equal(AgentCodeFormatting.AutoFixSqlWhitespace(content.Replace(oldStr, newStr)), final);
 
         return (strategy, decision, oldStr, applied, final);
     }
@@ -192,7 +192,7 @@ public class FormatCSqlEditTests
         Assert.DoesNotContain("SELECT* FROM users LIMIT5", final);
 
         // Fully normalized: another pass is a no-op.
-        Assert.Equal(final, AgentUtilities.AutoFixSqlWhitespace(final));
+        Assert.Equal(final, AgentCodeFormatting.AutoFixSqlWhitespace(final));
     }
 
     [Fact]
@@ -215,7 +215,7 @@ public class FormatCSqlEditTests
         Assert.Contains(MemberBlockSql("Alpha", "INSERT INTO logs VALUES (1, 'x')"), final);
         Assert.DoesNotContain("VALUES(1, 'x')", final);
 
-        Assert.Equal(final, AgentUtilities.AutoFixSqlWhitespace(final));
+        Assert.Equal(final, AgentCodeFormatting.AutoFixSqlWhitespace(final));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -256,7 +256,7 @@ public class FormatCSqlEditTests
 
             // ── SQL pass ALWAYS engaged (every doc's new code is malformed) ──
             Assert.NotEqual(applied, final);
-            Assert.Equal(final, AgentUtilities.AutoFixSqlWhitespace(final)); // idempotent
+            Assert.Equal(final, AgentCodeFormatting.AutoFixSqlWhitespace(final)); // idempotent
 
             // ── C# structure: class header + every method signature present ──
             Assert.Contains("class Sample", final);

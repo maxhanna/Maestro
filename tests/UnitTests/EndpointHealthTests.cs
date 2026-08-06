@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
@@ -136,5 +137,246 @@ public class EndpointHealthTests
         ResetHealth();
         RecordEndpointCall("", "partial", "The read operation failed.");
         Assert.Empty(HealthDict());
+    }
+
+    // ── Persistence (SQLite round-trip) ────────────────────────────────────
+    // The static tracker persists through loader/saver hooks registered by the
+    // controller constructor. These tests swap in in-memory fakes to lock the
+    // serialize → hydrate contract and the 24h trim window.
+
+    private static string? _persistBlob; // fake SQLite blob the fakes read/write
+
+    private static void RegisterPersistenceFakes()
+    {
+        _persistBlob = null;
+        var register = typeof(AgentController).GetMethod(
+            "RegisterEndpointHealthPersistence", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(register);
+        register!.Invoke(null, new object?[]
+        {
+            (Func<string?>)(() => _persistBlob),
+            (Action<string>)(json => _persistBlob = json)
+        });
+    }
+
+    private static void InvokePersist()
+    {
+        var m = typeof(AgentController).GetMethod(
+            "PersistEndpointHealth", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(m);
+        m!.Invoke(null, null);
+    }
+
+    private static void InvokeHydrate()
+    {
+        var m = typeof(AgentController).GetMethod(
+            "HydrateEndpointHealthFromDisk", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(m);
+        m!.Invoke(null, null);
+    }
+
+    private static void ResetPersistenceState()
+    {
+        var loaderField = typeof(AgentController).GetField(
+            "_endpointHealthLoader", BindingFlags.NonPublic | BindingFlags.Static);
+        var saverField = typeof(AgentController).GetField(
+            "_endpointHealthSaver", BindingFlags.NonPublic | BindingFlags.Static);
+        var hydratedField = typeof(AgentController).GetField(
+            "_endpointHealthHydrated", BindingFlags.NonPublic | BindingFlags.Static);
+        var lastPersistField = typeof(AgentController).GetField(
+            "_lastHealthPersistTicks", BindingFlags.NonPublic | BindingFlags.Static);
+        loaderField!.SetValue(null, null);
+        saverField!.SetValue(null, null);
+        hydratedField!.SetValue(null, false);
+        lastPersistField!.SetValue(null, 0L);
+    }
+
+    [Fact]
+    public void Persist_WritesCountersToBlob()
+    {
+        ResetHealth();
+        ResetPersistenceState();
+        RegisterPersistenceFakes();
+        try
+        {
+            RecordEndpointCall("http://persist:1", "partial", "The read operation failed.");
+            RecordEndpointCall("http://persist:1", "full", null);
+            InvokePersist();
+            Assert.False(string.IsNullOrWhiteSpace(_persistBlob));
+            using var doc = JsonDocument.Parse(_persistBlob!);
+            var el = doc.RootElement.EnumerateArray().First(e => e.GetProperty("baseUrl").GetString() == "http://persist:1");
+            Assert.Equal(2L, el.GetProperty("calls").GetInt64());
+            Assert.Equal(1L, el.GetProperty("streamErrors").GetInt64());
+            Assert.NotNull(el.GetProperty("lastSuccessUtc").GetString());
+            Assert.NotNull(el.GetProperty("lastStreamErrorUtc").GetString());
+        }
+        finally { ResetPersistenceState(); ResetHealth(); }
+    }
+
+    // Recovered/recoveryFailed counters (the recovery-effectiveness metrics surfaced in
+    // the agent log and badge tooltip) must survive the same persist → hydrate round-trip.
+    private static void RecordRecoveryOutcome(string? baseUrl, bool recovered)
+    {
+        var key = EndpointHealthKey(baseUrl);
+        if (key.Length == 0) return;
+        var dict = HealthDict();
+        if (!dict.Contains(key)) dict.Add(key, Activator.CreateInstance(HealthDictField().FieldType.GetGenericArguments()[1])!);
+        var h = dict[key]!;
+        var f = h.GetType().GetField(recovered ? "Recovered" : "RecoveryFailed", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(f);
+        f!.SetValue(h, (long)f.GetValue(h)! + 1);
+    }
+
+    private static long HealthField(object h, string name)
+    {
+        var f = h.GetType().GetField(name, BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(f);
+        return (long)f!.GetValue(h)!;
+    }
+
+    [Fact]
+    public void RecoveryCounters_PersistAndHydrate()
+    {
+        ResetHealth();
+        ResetPersistenceState();
+        RegisterPersistenceFakes();
+        try
+        {
+            RecordEndpointCall("http://recover:1", "partial", "The read operation failed.");
+            RecordRecoveryOutcome("http://recover:1", recovered: true);
+            RecordRecoveryOutcome("http://recover:1", recovered: false);
+            RecordRecoveryOutcome("http://recover:1", recovered: true);
+            InvokePersist();
+            Assert.False(string.IsNullOrWhiteSpace(_persistBlob));
+            using (var doc = JsonDocument.Parse(_persistBlob!))
+            {
+                var el = doc.RootElement.EnumerateArray().First(e => e.GetProperty("baseUrl").GetString() == "http://recover:1");
+                Assert.Equal(2L, el.GetProperty("recovered").GetInt64());
+                Assert.Equal(1L, el.GetProperty("recoveryFailed").GetInt64());
+            }
+
+            // Simulate app restart: wipe the in-memory dict + hydration flag, then load.
+            ResetHealth();
+            var hydratedField = typeof(AgentController).GetField(
+                "_endpointHealthHydrated", BindingFlags.NonPublic | BindingFlags.Static);
+            hydratedField!.SetValue(null, false);
+            InvokeHydrate();
+
+            Assert.Equal(1, HealthDict().Count);
+            var h = HealthDict()["http://recover:1"];
+            Assert.Equal(2L, HealthField(h, "Recovered"));
+            Assert.Equal(1L, HealthField(h, "RecoveryFailed"));
+        }
+        finally { ResetPersistenceState(); ResetHealth(); }
+    }
+
+    [Fact]
+    public void Hydrate_ToleratesBlobWithoutRecoveryFields()
+    {
+        // Old blobs written before the recovered/recoveryFailed fields existed must still
+        // hydrate (fields default to 0) instead of throwing.
+        ResetHealth();
+        ResetPersistenceState();
+        RegisterPersistenceFakes();
+        try
+        {
+            _persistBlob = "[{\"baseUrl\":\"http://legacy:1\",\"calls\":5,\"streamErrors\":2," +
+                           "\"lastStreamErrorUtc\":\"" + DateTime.UtcNow.AddMinutes(-10).ToString("o") +
+                           "\",\"lastSuccessUtc\":\"" + DateTime.UtcNow.AddMinutes(-2).ToString("o") + "\"}]";
+            InvokeHydrate(); // must not throw
+            Assert.Equal(1, HealthDict().Count);
+            var h = HealthDict()["http://legacy:1"];
+            Assert.Equal(0L, HealthField(h, "Recovered"));
+            Assert.Equal(0L, HealthField(h, "RecoveryFailed"));
+        }
+        finally { ResetPersistenceState(); ResetHealth(); }
+    }
+
+    [Fact]
+    public void Hydrate_RestoresCountersAcrossSessions()
+    {
+        ResetHealth();
+        ResetPersistenceState();
+        RegisterPersistenceFakes();
+        try
+        {
+            RecordEndpointCall("http://roundtrip:1", "partial", "Connection reset by peer.");
+            RecordEndpointCall("http://roundtrip:1", "fine", null);
+            RecordEndpointCall("http://roundtrip:1", "ok", null);
+            InvokePersist();
+            var blob = _persistBlob; // capture what a fresh process would read
+
+            // Simulate app restart: wipe the in-memory dict + hydration flag, then load.
+            ResetHealth();
+            var hydratedField = typeof(AgentController).GetField(
+                "_endpointHealthHydrated", BindingFlags.NonPublic | BindingFlags.Static);
+            hydratedField!.SetValue(null, false);
+            InvokeHydrate();
+
+            Assert.Equal(1, HealthDict().Count);
+            var h = HealthDict()["http://roundtrip:1"];
+            Assert.Equal(3L, HealthCalls(h));
+            Assert.Equal(1L, HealthStreamErrors(h));
+            // Success timestamps survived the round-trip too.
+            var successField = h.GetType().GetField("LastSuccessUtc", BindingFlags.Instance | BindingFlags.Public);
+            Assert.NotNull(successField);
+            var ts = (DateTime)successField!.GetValue(h)!;
+            Assert.True((DateTime.UtcNow - ts).TotalMinutes < 5);
+            Assert.True(blob!.Contains("http://roundtrip:1"));
+        }
+        finally { ResetPersistenceState(); ResetHealth(); }
+    }
+
+    [Fact]
+    public void Persist_TrimsEntriesIdleOver24h()
+    {
+        ResetHealth();
+        ResetPersistenceState();
+        RegisterPersistenceFakes();
+        try
+        {
+            RecordEndpointCall("http://fresh:1", "ok", null);
+            // Backdate the entry's last activity so it falls outside the 24h window.
+            var h = HealthDict()["http://fresh:1"];
+            var successField = h.GetType().GetField("LastSuccessUtc", BindingFlags.Instance | BindingFlags.Public);
+            successField!.SetValue(h, DateTime.UtcNow.AddHours(-30));
+            InvokePersist();
+            using var doc = JsonDocument.Parse(_persistBlob!);
+            Assert.Empty(doc.RootElement.EnumerateArray());
+        }
+        finally { ResetPersistenceState(); ResetHealth(); }
+    }
+
+    [Fact]
+    public void Hydrate_SkipsStaleEntriesOver24h()
+    {
+        ResetHealth();
+        ResetPersistenceState();
+        RegisterPersistenceFakes();
+        try
+        {
+            // A blob containing only a stale entry (last activity 2 days ago).
+            _persistBlob = "[{\"baseUrl\":\"http://ancient:1\",\"calls\":9,\"streamErrors\":4," +
+                           "\"lastStreamErrorUtc\":\"" + DateTime.UtcNow.AddDays(-2).ToString("o") +
+                           "\",\"lastSuccessUtc\":\"" + DateTime.UtcNow.AddDays(-3).ToString("o") + "\"}]";
+            InvokeHydrate();
+            Assert.Empty(HealthDict());
+        }
+        finally { ResetPersistenceState(); ResetHealth(); }
+    }
+
+    [Fact]
+    public void Hydrate_ToleratesCorruptBlob()
+    {
+        ResetHealth();
+        ResetPersistenceState();
+        RegisterPersistenceFakes();
+        try
+        {
+            _persistBlob = "{ this is not valid json [";
+            InvokeHydrate(); // must not throw
+            Assert.Empty(HealthDict());
+        }
+        finally { ResetPersistenceState(); ResetHealth(); }
     }
 }

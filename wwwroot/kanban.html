@@ -38,6 +38,8 @@
           data-card-id="{{card.id}}">
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
+            <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
           </div>
 
@@ -281,6 +283,8 @@
           ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
+            <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
             <span class="card-tag tag-ready" ng-if="vm.isCardActive(card.id)" style="margin-left:auto;">▶ ACTIVE</span>
           </div>
@@ -616,6 +620,8 @@
           ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
+            <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
           </div>
 
@@ -703,23 +709,18 @@
             </span>
           </div>
 
-          <!-- Improvement suggestions (generated when the card finished) -->
+          <!-- Suggestions (generated when the card finished; cap of 3) -->
           <div class="suggest-generating" ng-if="card._suggestionsGenerating">
             <span class="suggest-spinner"></span> 💡 Suggesting improvements…
           </div>
           <div class="suggest-error" ng-if="card._suggestionsError">💡 {{card._suggestionsError}}</div>
           <div class="card-section card-section-suggestions" ng-if="card._suggestions && card._suggestions.length">
-            <div class="section-suggest-title">💡 Improvement suggestions ({{card._suggestions.length}})</div>
+            <div class="section-suggest-title">💡 Suggestions ({{card._suggestions.length}})</div>
             <div class="section-body">
-              <div class="suggestion" ng-repeat="s in card._suggestions track by s.id" ng-class="{'suggestion-added': s.added}">
+              <div class="suggestion" ng-repeat="s in card._suggestions track by s.id">
                 <div class="suggestion-desc">{{s.description}}</div>
                 <div class="suggestion-files" ng-if="s.files && s.files.length">
                   <span class="file-edit-chip" ng-repeat="f in s.files" title="{{f}}">{{f}}</span>
-                </div>
-                <div class="suggestion-actions">
-                  <button class="small" ng-if="!s.added" ng-click="vm.addSuggestionAsCard(card, s); $event.stopPropagation();"
-                    title="Create a new To Do card from this suggestion, pre-attached to its files">＋ Add as card</button>
-                  <span class="suggestion-added-tag" ng-if="s.added">✓ Added to To Do</span>
                 </div>
               </div>
             </div>
@@ -846,6 +847,8 @@
           ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
+            <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
           </div>
 
@@ -922,6 +925,8 @@
           ng-click="vm.selectCard(card)" data-card-id="{{card.id}}">
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
+            <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
           </div>
           <div class="card-text card-text-readonly">{{card.text}}</div>

@@ -1,27 +1,17 @@
-using System.Reflection;
 using Xunit;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
 /// <summary>
-/// Locks in the BM25 auto-read ranking behavior (Controllers/AgentController.cs):
+/// Locks in the BM25 auto-read ranking behavior (Services/Bm25Scorer.cs):
 /// per-token attribution that sums exactly to the total score, filename/path bonus
 /// attribution, top-5 hit trimming, stopword filtering, the empty-query fallback
-/// (including the 2-char regex rescue), and the FormatBm25Hits log format that
-/// sibling files rely on for plain-path rendering. Both methods are private
-/// static, so they are exercised through reflection — if either is ever renamed,
-/// these tests fail loudly instead of silently skipping.
+/// (including the 2-char regex rescue), and the FormatHits log format that
+/// sibling files rely on for plain-path rendering.
 /// </summary>
 public class Bm25ScoringTests : IDisposable
 {
-    private static readonly MethodInfo ScoreMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("ScoreProjectFilesWithBm25", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("ScoreProjectFilesWithBm25 static method not found.");
-
-    private static readonly MethodInfo FormatHitsMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("FormatBm25Hits", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("FormatBm25Hits static method not found.");
-
     private readonly string _tempRoot;
 
     public Bm25ScoringTests()
@@ -44,11 +34,10 @@ public class Bm25ScoringTests : IDisposable
 
     /// <summary>Runs the scorer against the named files (created via <see cref="Write"/>) in the temp root.</summary>
     private List<(string file, double score, List<(string token, double contribution)> tokenHits)> Score(string prompt, params string[] files)
-        => (List<(string file, double score, List<(string token, double contribution)> tokenHits)>)ScoreMethod.Invoke(null,
-            new object?[] { prompt, _tempRoot, files.ToList(), CancellationToken.None })!;
+        => Bm25Scorer.ScoreProjectFiles(prompt, _tempRoot, files.ToList(), CancellationToken.None);
 
     private string FormatHits(string file, double score, List<(string token, double contribution)>? hits)
-        => (string)FormatHitsMethod.Invoke(null, new object?[] { file, score, hits })!;
+        => Bm25Scorer.FormatHits(file, score, hits);
 
     /// <summary>Repeats a token phrase until it carries at least the min-token threshold (20).</summary>
     private static string RepeatTokens(string phrase, int repetitions)
@@ -180,7 +169,7 @@ public class Bm25ScoringTests : IDisposable
     [Fact]
     public void GeneratedFileName_IsSkipped()
     {
-        Write("package.json", RepeatTokens("notepad user", 20)); // in _bm25GeneratedNames
+        Write("package.json", RepeatTokens("notepad user", 20)); // in Bm25Scorer.GeneratedNames
         Write("real.ts", RepeatTokens("notepad user", 20));
 
         var result = Score("notepad user", "package.json", "real.ts");

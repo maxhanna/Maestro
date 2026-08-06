@@ -99,7 +99,7 @@ public class FormatCCorpusTests
         var newStr = insert ? oldStr + "\n" + indented : indented;
 
         // 5. Apply — must be the pure substitution (no fuzzy/dedupe drift).
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(content, oldStr, newStr);
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(content, oldStr, newStr);
         Assert.True(replaced, $"TryReplaceSafe failed on {ext} doc: {matchError}");
         Assert.Equal(content.Replace(oldStr, newStr), applied);
 
@@ -254,7 +254,7 @@ public class FormatCCorpusTests
             // the AlreadyDone assertion below is what actually stops the re-run (the
             // guard is load-bearing, not a vacuous pass).
             var (naiveReplaced, naiveApplied, _, _) =
-                AgentUtilities.TryReplaceSafe(applied, oldStr, newStr);
+                AgentEditHeuristics.TryReplaceSafe(applied, oldStr, newStr);
             Assert.True(naiveReplaced, "anchor must still be present for a naive re-apply");
             Assert.Equal(2, CountOccurrences(naiveApplied, newCode));
 
@@ -278,13 +278,13 @@ public class FormatCCorpusTests
             };
             var (beforeVerdict, beforeReason) = InvokePreEditValidation(content, step);
             var (afterVerdict, afterReason) = InvokePreEditValidation(applied, step);
-            Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, afterVerdict);
+            Assert.Equal(AgentEditHeuristics.PreEditVerdict.AlreadyDone, afterVerdict);
             Assert.Contains("already", afterReason, StringComparison.OrdinalIgnoreCase);
             if (ext != ".js")
             {
                 // .cs/.ts — the clean path: generic "code already present in file" check,
                 // and Proceed on the pristine file (the insert is genuinely absent there).
-                Assert.True(beforeVerdict == AgentUtilities.PreEditVerdict.Proceed,
+                Assert.True(beforeVerdict == AgentEditHeuristics.PreEditVerdict.Proceed,
                     $"doc {i} ({ext}): expected Proceed on original content, got {beforeVerdict}: {beforeReason}");
                 Assert.Contains("code already present", afterReason, StringComparison.OrdinalIgnoreCase);
             }
@@ -334,18 +334,18 @@ public class FormatCCorpusTests
             NewString = survivor
         };
         var (verdict, reason) = InvokePreEditValidation(file, step);
-        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, verdict);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.Proceed, verdict);
 
         // 2. Once the removal HAS been applied (file holds only the survivor), the same
         //    step must be AlreadyDone — the full oldString is gone, nothing left to remove.
         var (doneVerdict, _) = InvokePreEditValidation(survivor, step);
-        Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, doneVerdict);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.AlreadyDone, doneVerdict);
 
         // 3. Whitespace-collapsed survivor (drifted indentation between oldString and the
         //    actual file bytes): still Proceed on the pristine file.
         var drifted = survivor.Replace("  ", " ") + "\n" + target;
         var (driftVerdict, _) = InvokePreEditValidation(drifted, step);
-        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, driftVerdict);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.Proceed, driftVerdict);
 
         // 4. NEGATIVE CONTROL — the generic insert guard is NOT disabled: a genuine
         //    insertion whose newString is present in the file still trips AlreadyDone.
@@ -357,7 +357,7 @@ public class FormatCCorpusTests
             NewString = "<div class=\"app\">\n<div class=\"loading-banner\">Loading…</div>"
         };
         var (insertVerdict, insertReason) = InvokePreEditValidation(insertStep.NewString, insertStep);
-        Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, insertVerdict);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.AlreadyDone, insertVerdict);
         Assert.Contains("already present", insertReason, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -418,7 +418,7 @@ public class FormatCCorpusTests
 
             // ── PRISTINE (edit pending) → MUST be Proceed ──
             var (v1, r1) = InvokePreEditValidation(content, step);
-            Assert.True(v1 == AgentUtilities.PreEditVerdict.Proceed,
+            Assert.True(v1 == AgentEditHeuristics.PreEditVerdict.Proceed,
                 $"doc {i} ({ext} shape {shape}): pending edit must Proceed, got {v1}: {r1}");
 
             // ── APPLIED (pure substitution) → MUST be AlreadyDone (no double-apply) ──
@@ -428,7 +428,7 @@ public class FormatCCorpusTests
             var applied = content.Replace(step.OldString, step.NewString);
             Assert.NotEqual(content, applied); // substitution actually changed the file
             var (v2, r2) = InvokePreEditValidation(applied, step);
-            Assert.True(v2 == AgentUtilities.PreEditVerdict.AlreadyDone,
+            Assert.True(v2 == AgentEditHeuristics.PreEditVerdict.AlreadyDone,
                 $"doc {i} ({ext} shape {shape}): applied edit must AlreadyDone, got {v2}: {r2}");
 
             // ── WHITESPACE-DRIFTED oldString on PRISTINE → still Proceed (tolerant) ──
@@ -437,7 +437,7 @@ public class FormatCCorpusTests
             if (!string.IsNullOrEmpty(step.NewString))
                 wsStep.NewString = IndentLines(step.NewString, "  ");
             var (v3, r3) = InvokePreEditValidation(content, wsStep);
-            Assert.True(v3 == AgentUtilities.PreEditVerdict.Proceed,
+            Assert.True(v3 == AgentEditHeuristics.PreEditVerdict.Proceed,
                 $"doc {i} ({ext} shape {shape}): whitespace drift must not false-skip, got {v3}: {r3}");
 
             // ── QUOTE-DRIFTED oldString (HTML only) → still Proceed ──
@@ -448,7 +448,7 @@ public class FormatCCorpusTests
                 if (!string.IsNullOrEmpty(step.NewString))
                     qStep.NewString = step.NewString.Replace("\"", "'");
                 var (v4, r4) = InvokePreEditValidation(content, qStep);
-                Assert.True(v4 == AgentUtilities.PreEditVerdict.Proceed,
+                Assert.True(v4 == AgentEditHeuristics.PreEditVerdict.Proceed,
                     $"doc {i} ({ext} shape {shape}): quote drift must not false-skip, got {v4}: {r4}");
             }
 
@@ -456,7 +456,7 @@ public class FormatCCorpusTests
             // AlreadyDone on applied — the guard is not a blanket skip (that contrast is
             // v1 vs v2 above). Re-running the APPLIED file a second time stays stable.
             var (v5, _) = InvokePreEditValidation(applied, step);
-            Assert.True(v5 == AgentUtilities.PreEditVerdict.AlreadyDone,
+            Assert.True(v5 == AgentEditHeuristics.PreEditVerdict.AlreadyDone,
                 $"doc {i}: applied re-run must stay AlreadyDone (stable, no double-apply), got {v5}");
 
             checkedDocs++;
@@ -575,7 +575,7 @@ public class FormatCCorpusTests
             var applied1 = InvokeIsRemovalAlreadyApplied(content, step);
             if (shape is 1 or 3)
             {
-                Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, verdict);
+                Assert.Equal(AgentEditHeuristics.PreEditVerdict.Proceed, verdict);
                 Assert.False(applied1, $"doc {i} ({ext} shape {shape}): pending removal must not be 'already applied'");
             }
 
@@ -588,19 +588,19 @@ public class FormatCCorpusTests
             var applied2 = InvokeIsRemovalAlreadyApplied(appliedContent, step);
             if (shape is 1 or 3)
             {
-                Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, verdict2);
+                Assert.Equal(AgentEditHeuristics.PreEditVerdict.AlreadyDone, verdict2);
                 Assert.True(applied2, $"doc {i} ({ext} shape {shape}): applied removal must be 'already applied'");
             }
             else if (shape == 2)
             {
                 // Replace applied: the executor guard sees the new block present (AlreadyDone)
                 // and the helper sees the OLD target block gone (already applied) — agreement.
-                Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, verdict2);
+                Assert.Equal(AgentEditHeuristics.PreEditVerdict.AlreadyDone, verdict2);
                 Assert.True(applied2, $"doc {i} ({ext} shape 2): applied replace must be 'already applied'");
             }
             else
             {
-                Assert.True(verdict2 == AgentUtilities.PreEditVerdict.AlreadyDone,
+                Assert.True(verdict2 == AgentEditHeuristics.PreEditVerdict.AlreadyDone,
                     $"doc {i} ({ext} shape 0): applied insert must be AlreadyDone (double-apply guard), got {verdict2}");
             }
 
@@ -665,12 +665,12 @@ public class FormatCCorpusTests
 
         // Pending: both paths agree the removal still needs to happen.
         var (v1, r1) = InvokePreEditValidation(file, step);
-        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, v1);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.Proceed, v1);
         Assert.False(InvokeIsRemovalAlreadyApplied(file, step));
 
         // Applied (survivor only): both paths agree the removal is done.
         var (v2, r2) = InvokePreEditValidation(survivor, step);
-        Assert.Equal(AgentUtilities.PreEditVerdict.AlreadyDone, v2);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.AlreadyDone, v2);
         Assert.True(InvokeIsRemovalAlreadyApplied(survivor, step));
     }
 
@@ -698,7 +698,7 @@ public class FormatCCorpusTests
         Assert.False(InvokeIsRemovalAlreadyApplied(driftedFile, step),
             "short drifted target is still present — must NOT be declared already done");
         var (verdict, _) = InvokePreEditValidation(driftedFile, step);
-        Assert.Equal(AgentUtilities.PreEditVerdict.Proceed, verdict);
+        Assert.Equal(AgentEditHeuristics.PreEditVerdict.Proceed, verdict);
 
         // Documented tradeoff (conservative direction): a SHORT target that can't be
         // confirmed absent — including one genuinely gone — is never declared already-done.
@@ -766,7 +766,7 @@ public class FormatCCorpusTests
     /// same pattern LlmCssCleanerPipelineTests uses to exercise
     /// <c>FormatAcceptedEditRegionAsync</c>. The method touches no instance/DI state.
     /// </summary>
-    private static (AgentUtilities.PreEditVerdict verdict, string reason) InvokePreEditValidation(
+    private static (AgentEditHeuristics.PreEditVerdict verdict, string reason) InvokePreEditValidation(
         string fileContent, PlanStep step)
     {
         var method = typeof(AgentController).GetMethod(
@@ -775,6 +775,6 @@ public class FormatCCorpusTests
             ?? throw new InvalidOperationException("PreEditValidation not found");
         var result = method.Invoke(null, new object[] { fileContent, step })
             ?? throw new InvalidOperationException("PreEditValidation returned null");
-        return ((AgentUtilities.PreEditVerdict, string))result;
+        return ((AgentEditHeuristics.PreEditVerdict, string))result;
     }
 }

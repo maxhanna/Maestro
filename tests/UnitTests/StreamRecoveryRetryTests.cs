@@ -2,6 +2,7 @@ using System.Reflection;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -9,21 +10,17 @@ namespace Weaver.UnitTests;
 /// Locks the one-shot stream-recovery logic that keeps a good partial LLM response from
 /// being discarded when a network read error or max-token truncation kills the stream
 /// (e.g. the correct refactor streamed just before "Stream read error: network error").
-/// IsRecoverableStreamFailure must only fire for genuine transport/truncation failures
-/// with substantive partial output — never for semantic failures (JSON parse, hallucination,
-/// repetition, empty) which belong to the existing retry/rejection paths, and never for
-/// plain timeouts (usually futile to re-run). AppendPartialContinuationHint must frame the
-/// partial as a continuation task and cap pathological partials while keeping the tail.
+/// IsRecoverableStreamFailure (Services/TransientFailureDetector.cs) must only fire for
+/// genuine transport/truncation failures with substantive partial output — never for
+/// semantic failures (JSON parse, hallucination, repetition, empty) which belong to the
+/// existing retry/rejection paths, and never for plain timeouts (usually futile to re-run).
+/// AppendPartialContinuationHint must frame the partial as a continuation task and cap
+/// pathological partials while keeping the tail.
 /// </summary>
 public class StreamRecoveryRetryTests
 {
     private static bool IsRecoverableStreamFailure(string? partial, string? error)
-    {
-        var method = typeof(AgentController).GetMethod(
-            "IsRecoverableStreamFailure", BindingFlags.NonPublic | BindingFlags.Static);
-        Assert.NotNull(method);
-        return (bool)method!.Invoke(null, new object?[] { partial, error })!;
-    }
+        => TransientFailureDetector.IsRecoverableStreamFailure(partial, error);
 
     private static string AppendPartialContinuationHint(string userMessage, string partial)
     {
@@ -34,12 +31,7 @@ public class StreamRecoveryRetryTests
     }
 
     private static bool IsTransientTransportFailure(string? error)
-    {
-        var method = typeof(AgentController).GetMethod(
-            "IsTransientTransportFailure", BindingFlags.NonPublic | BindingFlags.Static);
-        Assert.NotNull(method);
-        return (bool)method!.Invoke(null, new object?[] { error })!;
-    }
+        => TransientFailureDetector.IsTransientTransportFailure(error);
 
     private const string GoodPartial =
         "{\"planComplete\": false, \"thinking\": \"The task requires unifying getEventIcon and getEventDescription\", " +
@@ -175,6 +167,125 @@ public class StreamRecoveryRetryTests
         Assert.Contains(new string('x', 4000), hint);
         // The head must survive too.
         Assert.StartsWith("task\n\n### YOUR PREVIOUS RESPONSE", hint);
+    }
+
+    // ── "Finish this" continuation (max-token truncation of an oversized edit) ──
+
+    private static bool IsMaxTokenTruncation(string? error)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "IsMaxTokenTruncation", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        return (bool)method!.Invoke(null, new object?[] { error })!;
+    }
+
+    private static bool LooksLikeCompleteJson(string text)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "LooksLikeCompleteJson", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        return (bool)method!.Invoke(null, new object?[] { text })!;
+    }
+
+    private static string BuildFinishThisPrompt(string userMessage, string partial)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "BuildFinishThisPrompt", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        return (string)method!.Invoke(null, new object?[] { userMessage, partial })!;
+    }
+
+    private static string StitchContinuation(string accumulated, string chunk, int overlapChars = 80)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "StitchContinuation", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        return (string)method!.Invoke(null, new object?[] { accumulated, chunk, overlapChars })!;
+    }
+
+    [Fact]
+    public void MaxTokenTruncation_IsDistinctFromTransport()
+    {
+        Assert.True(IsMaxTokenTruncation("Response truncated at max_tokens — partial kept for recovery hint."));
+        Assert.False(IsMaxTokenTruncation("The read operation failed."));
+        Assert.False(IsMaxTokenTruncation("Connection reset by peer."));
+        Assert.False(IsMaxTokenTruncation(null));
+        Assert.False(IsMaxTokenTruncation(""));
+    }
+
+    [Fact]
+    public void CompleteJson_IsRecognized()
+    {
+        Assert.True(LooksLikeCompleteJson("{\"a\": 1}"));
+        Assert.True(LooksLikeCompleteJson("```json\n{\"a\": 1}\n```"));
+        Assert.True(LooksLikeCompleteJson("prefix\n{\"a\": {\"b\": 2}}\nsuffix"));
+    }
+
+    [Fact]
+    public void IncompleteJson_IsNotRecognized()
+    {
+        Assert.False(LooksLikeCompleteJson("{\"a\": 1"));                 // unclosed brace
+        Assert.False(LooksLikeCompleteJson("{\"a\": \"unterminated"));    // mid-string
+        Assert.False(LooksLikeCompleteJson(""));
+        Assert.False(LooksLikeCompleteJson("not json"));
+        Assert.False(LooksLikeCompleteJson("[]"));
+        Assert.True(LooksLikeCompleteJson("{}"));                          // empty object still parses as complete
+    }
+
+    [Fact]
+    public void FinishPrompt_AsksForOnlyTheTail_AndPreservesPartial()
+    {
+        var partial = "{\"step\": {\"newString\": \"private getEventData(eventType: string) {";
+        var prompt = BuildFinishThisPrompt("### TASK ###\nrefactor", partial);
+        Assert.Contains("FINISH THIS OUTPUT", prompt);
+        Assert.Contains("ONLY the REMAINING characters", prompt);
+        Assert.Contains("APPENDED verbatim", prompt);
+        Assert.Contains("do NOT restart", prompt);
+        Assert.Contains(partial, prompt);
+        Assert.Contains("### TASK ###\nrefactor", prompt);
+        Assert.DoesNotContain("COMPLETE response to the original request", prompt); // that's the transport hint's framing
+    }
+
+    [Fact]
+    public void FinishPrompt_KeepsTheContinuationAnchorTail()
+    {
+        var partial = new string('x', 1000) + "END_MARKER";
+        var prompt = BuildFinishThisPrompt("task", partial);
+        // The exact continuation point must be in the prompt even if the partial is huge.
+        Assert.Contains("END_MARKER", prompt);
+        Assert.True(prompt.Length < 14000, "finish-this prompt must stay bounded");
+    }
+
+    [Fact]
+    public void Stitch_AppendsWithoutOverlap_WhenChunkRepeatsTail()
+    {
+        var accumulated = "{\"newString\": \"private getEventData(eventType: string) {";
+        var chunk = "private getEventData(eventType: string) { const icon = 1; }";
+        var stitched = StitchContinuation(accumulated, chunk);
+        // The repeated prefix (the accumulated tail) must be trimmed, so the method body is not duplicated.
+        Assert.Contains("string) { const icon = 1; }", stitched);
+        Assert.Equal(1, CountOccurrences(stitched, "private getEventData"));
+        Assert.StartsWith(accumulated, stitched);
+    }
+
+    [Fact]
+    public void Stitch_AppendsWholeChunk_WhenNoOverlap()
+    {
+        var accumulated = "{\"a\": 1";
+        var stitched = StitchContinuation(accumulated, ", \"b\": 2}");
+        Assert.Equal("{\"a\": 1, \"b\": 2}", stitched);
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var idx = 0;
+        while ((idx = haystack.IndexOf(needle, idx, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += needle.Length;
+        }
+        return count;
     }
 
 }

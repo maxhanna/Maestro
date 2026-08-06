@@ -4,7 +4,7 @@ using Weaver.Services;
 namespace Weaver.UnitTests;
 
 /// <summary>
-/// Seeded-fuzz corpus for <c>AgentUtilities.ReindentReplacementSnippet</c> — the
+/// Seeded-fuzz corpus for <c>AgentEditHeuristics.ReindentReplacementSnippet</c> — the
 /// brace-depth re-indenter the oldString/newString apply path uses for .ts/.js edits.
 ///
 /// BUG (fixed, locked here): the apply path used to choose the HTML tag-depth
@@ -154,7 +154,7 @@ public class ReindentSnippetFuzzCorpusTests
     /// the anchor line's own indent (the class-member base) + depth * indent size.
     /// Blank lines carry none.</summary>
     private static readonly string BaseIndent =
-        AgentUtilities.GetLeadingWhitespace(FileLines[MatchIdx]);
+        AgentTextUtilities.GetLeadingWhitespace(FileLines[MatchIdx]);
 
     private static string ExpectedIndent(int depth) =>
         depth < 0 ? "" : BaseIndent + new string(' ', depth * IndentSize);
@@ -187,7 +187,7 @@ public class ReindentSnippetFuzzCorpusTests
     /// <summary>The production path under test: ReindentReplacementSnippet with the
     /// code-file gate (isHtmlDomFile:false) — exactly what the .ts/.js apply path calls.</summary>
     private static List<string> RunReindent(List<string> newLines) =>
-        AgentUtilities.ReindentReplacementSnippet(
+        AgentEditHeuristics.ReindentReplacementSnippet(
             newLines, OldBlock, FileLines.ToList(), MatchIdx, isHtmlDomFile: false);
 
     [Fact]
@@ -222,7 +222,7 @@ public class ReindentSnippetFuzzCorpusTests
                     continue;
                 }
                 var expected = ExpectedIndent(depths[i]);
-                var actual = AgentUtilities.GetLeadingWhitespace(reindented[i]);
+                var actual = AgentTextUtilities.GetLeadingWhitespace(reindented[i]);
                 Assert.True(string.Equals(expected, actual, StringComparison.Ordinal),
                     $"Doc #{docIdx} line {i}: expected indent '{expected}' (depth {depths[i]}) but got '{actual}'.\n" +
                     $"generated: {flat[i]}\nreindented: {reindented[i]}");
@@ -232,7 +232,7 @@ public class ReindentSnippetFuzzCorpusTests
             Assert.True(maxDepth >= 2,
                 $"Doc #{docIdx}: corpus invariant broken — spec never nests deeper than level 1");
             var deepestLine = reindented[depths.IndexOf(maxDepth)];
-            Assert.True(AgentUtilities.GetLeadingWhitespace(deepestLine).Length >
+            Assert.True(AgentTextUtilities.GetLeadingWhitespace(deepestLine).Length >
                         ExpectedIndent(1).Length,
                 $"Doc #{docIdx}: nesting collapsed to a single level — deepest line '{deepestLine}'");
 

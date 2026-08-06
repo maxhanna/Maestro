@@ -28,7 +28,7 @@ public static class EditIntentClassifier
 
         try
         {
-            var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
+            var cleaned = AgentJsonUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
             var root = doc.RootElement;
 

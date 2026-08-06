@@ -216,20 +216,26 @@ button.small.ghost:hover {
 	transform: translateY(-1px);
 }
 
+/* Options button — the loud legacy gradient is retired; it's now a quiet
+   pill in the same chip family as the logo and rank chip, with the same
+   whisper-cyan hover. */
 button.options-btn {
-	background: var(--brand-gradient);
-	border: none;
-	color: #012;
-	font-weight: 700;
-	padding: 8px 12px;
-	border-radius: 8px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	color: var(--text);
+	font-weight: 600;
+	padding: 7px 12px;
+	border-radius: 999px;
 	transition: all 0.2s ease;
-	box-shadow: var(--brand-shadow);
+	box-shadow: none;
 	font-size: 13px;
 }
 
 button.options-btn:hover {
-	box-shadow: var(--brand-glow), 0 0 20px rgba(6, 182, 212, 0.4);
+	background: rgba(6, 182, 212, 0.06);
+	border-color: rgba(6, 182, 212, 0.35);
+	color: var(--brand-secondary);
+	box-shadow: 0 0 14px rgba(6, 182, 212, 0.18);
 	transform: translateY(-1px);
 }
 
@@ -1736,6 +1742,58 @@ h1 .brand-e:hover::before {
 	filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.35)) drop-shadow(0 0 8px rgba(6, 182, 212, 0.45));
 }
 
+/* Idle life for the logo — a whisper, not a disco. The dashed web rings
+   spin on a long loop while the legs gently breathe in/out around the
+   spider's center. Every ring and leg is concentric on (12,12), so each
+   element pivots on the viewBox center — visually the same as spinning
+   the whole web as a group, but with no markup restructuring. Hovering
+   pauses the idle loop (the icon already scales up + glows softly), and
+   reduced-motion users get a still logo. */
+.brand-logo-enhanced .brand-leg {
+	transform-box: view-box;
+	transform-origin: center;
+	animation: brandLegBreathe 3.6s ease-in-out infinite;
+}
+
+.brand-logo-enhanced .brand-ring {
+	transform-box: view-box;
+	transform-origin: center;
+	animation: brandWebSpin 40s linear infinite;
+}
+
+.brand-logo-enhanced:hover .brand-leg,
+.brand-logo-enhanced:hover .brand-ring {
+	animation-play-state: paused;
+}
+
+@keyframes brandLegBreathe {
+	0%,
+	100% {
+		transform: scale(1);
+		opacity: 1;
+	}
+	50% {
+		transform: scale(0.9);
+		opacity: 0.85;
+	}
+}
+
+@keyframes brandWebSpin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.brand-logo-enhanced .brand-leg,
+	.brand-logo-enhanced .brand-ring {
+		animation: none;
+	}
+}
+
 .brand-text {
 	font-size: 14px;
 	font-weight: 700;
@@ -1895,17 +1953,25 @@ header h1 span.brand-badge {
 	position: relative; /* anchor the rank → user-stats popup */
 }
 
-/* Rank chip next to the Project picker — click opens the user-stats popup. */
-.rank-trigger {
+/* Rank chip next to the Project picker — click opens the user-stats popup.
+   Same pill grammar as the logo chip: height matched via padding, quiet at
+   rest, whisper-cyan hover instead of the loud glow. */
+.header-stat.rank-trigger {
 	cursor: pointer;
 	border: 1px solid rgba(6, 182, 212, 0.35);
 	background: rgba(6, 182, 212, 0.08);
+	padding: 7px 12px;
 }
 
-.rank-trigger.active {
+.header-stat.rank-trigger:hover {
+	color: var(--brand-secondary);
+	box-shadow: 0 0 14px rgba(6, 182, 212, 0.18);
+}
+
+.header-stat.rank-trigger.active {
 	color: var(--brand-secondary);
 	border-color: var(--brand-secondary);
-	box-shadow: var(--brand-glow);
+	box-shadow: 0 0 14px rgba(6, 182, 212, 0.25);
 }
 
 /* ── Military-style rank insignia ────────────────────────────────────────
@@ -1974,6 +2040,7 @@ header h1 span.brand-badge {
 	top: 44px;
 	left: 0;
 	min-width: 220px;
+	max-width: calc(100vw - 24px); /* never poke past the viewport on narrow windows */
 	background: var(--panel);
 	border: 1px solid rgba(255, 255, 255, 0.1);
 	border-radius: 10px;
@@ -1988,6 +2055,9 @@ header h1 span.brand-badge {
 
 .user-stats-popup .header-stat {
 	width: fit-content;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .user-stats-popup-title {
@@ -2119,6 +2189,24 @@ header h1 span.brand-badge {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* Project selector — pill-shaped and glassy like the rest of the cluster
+   (the generic select rule's 32px right padding is kept for the arrow). */
+#project-select {
+	border-radius: 999px;
+	background-color: rgba(255, 255, 255, 0.04);
+	border-color: rgba(255, 255, 255, 0.08);
+	padding: 7px 32px 7px 12px;
+}
+
+/* 'Project:' label — tiny caps, matching the header's uppercase language. */
+.project-picker > label[for="project-select"] {
+	text-transform: uppercase;
+	font-size: 11px;
+	letter-spacing: 0.5px;
+	margin: 0;
+	opacity: 0.7;
 }
 
 .project-options {
@@ -4028,6 +4116,114 @@ h3 .small.ghost:hover {
 	}
 }
 
+/* ── Top-left header cluster on narrow windows ──────────────────────────
+   The logo pill and project picker degrade in stages instead of colliding:
+   first the project description caps and the logo nudges down, then the
+   descriptive bits drop and the chips compress, then the logo sheds its
+   wordmark down to the spider icon alone. The header itself wraps into two
+   rows at 900px (rule above), so each stage keeps its row from overflowing. */
+@media (max-width: 1100px) {
+	.project-desc {
+		max-width: 140px;
+	}
+
+	.brand-logo-container {
+		padding: 6px 12px;
+	}
+
+	.brand-logo-enhanced .brand-icon {
+		width: 18px;
+		height: 18px;
+	}
+}
+
+@media (max-width: 860px) {
+	header {
+		padding: 8px 12px;
+	}
+
+	.project-picker {
+		gap: 6px;
+	}
+
+	.project-desc {
+		display: none;
+	}
+
+	.project-picker > label[for="project-select"] {
+		display: none;
+	}
+
+	#project-select {
+		max-width: 130px;
+		padding: 6px 28px 6px 10px;
+	}
+
+	.brand-logo-container {
+		padding: 5px 10px;
+	}
+
+	.brand-logo-enhanced .brand-icon {
+		width: 16px;
+		height: 16px;
+	}
+
+	.brand-text {
+		font-size: 13px;
+	}
+
+	.header-stat.rank-trigger {
+		padding: 6px 10px;
+	}
+
+	button.options-btn {
+		padding: 6px 10px;
+		font-size: 12px;
+	}
+}
+
+@media (max-width: 560px) {
+	.brand-logo-container {
+		padding: 4px 8px;
+	}
+
+	.brand-logo-enhanced .brand-icon {
+		width: 14px;
+		height: 14px;
+	}
+
+	.brand-text {
+		display: none; /* the spider icon alone still carries the brand */
+	}
+
+	.header-stat.rank-trigger {
+		padding: 5px 8px;
+	}
+
+	#project-select {
+		max-width: 100px;
+	}
+
+	button.options-btn {
+		padding: 5px 8px;
+	}
+}
+
+@media (max-width: 480px) {
+	.header-stat.rank-trigger {
+		padding: 4px 6px;
+	}
+
+	#project-select {
+		max-width: 88px;
+		padding: 5px 26px 5px 8px;
+	}
+
+	button.options-btn {
+		padding: 4px 6px;
+	}
+}
+
 .activeCardTextReview {
 	white-space: break-spaces;
 	margin: 8px 0 0 0;
@@ -4882,7 +5078,8 @@ h3 .small.ghost:hover {
 /* ── Meeting View floating panel ──────────────────────────────────────────── */
 .meeting-floating-panel {
   position: fixed;
-  z-index: 1200; /* above notes (1000) and IDE (1100) so it hovers over everything */
+  /* z-index is dynamic (vm.panelZ.meeting via ng-style) — the panels share a
+     1000–1199 band below modals (1200+) so the last-clicked one sits on top. */
   min-width: 360px;
   min-height: 260px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
@@ -4899,6 +5096,91 @@ h3 .small.ghost:hover {
   flex-direction: column;
   height: 100%;
   width: 100%;
+}
+
+/* Kanban flow dropdown — anchored to the header, hangs over the canvas.
+   The wrapper stops mousedown so the header drag never hijacks the menu. */
+.meeting-flow-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.meeting-flow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1300;
+  min-width: 235px;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  background: rgba(13, 21, 38, 0.97);
+  border: var(--border, 1px solid rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+}
+
+.meeting-flow-head {
+  font-size: calc(var(--meeting-font, 12px) - 1px);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+  padding: 2px 6px 4px;
+}
+
+.meeting-flow-now,
+.meeting-flow-next {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 3px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.meeting-flow-label {
+  font-size: calc(var(--meeting-font, 12px) - 3px);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.meeting-flow-text {
+  font-size: calc(var(--meeting-font, 12px) - 1px);
+  color: var(--text, #e6edf5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meeting-flow-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text, #e6edf5);
+  font-size: calc(var(--meeting-font, 12px) - 1px);
+  text-align: left;
+  padding: 5px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.meeting-flow-item:hover:not(:disabled) {
+  background: rgba(125, 211, 252, 0.12);
+  border-color: rgba(125, 211, 252, 0.4);
+}
+
+.meeting-flow-item:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .meeting-body {
@@ -5300,7 +5582,91 @@ h3 .small.ghost:hover {
   gap: 8px;
 }
 
+/* Office chat search — a compact filter row under the header: matching
+   lines light up cyan, everything else dims, and ↑/↓ jump between hits. */
+.meeting-gossip-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 12px 4px;
+}
+
+.meeting-gossip-search-icon {
+  font-size: calc(var(--meeting-font, 12px) - 3px);
+  opacity: 0.7;
+}
+
+.meeting-gossip-search-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: var(--text, #e6eef6);
+  font-size: calc(var(--meeting-font, 12px) - 1px);
+  padding: 3px 10px;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.meeting-gossip-search-input:focus {
+  border-color: rgba(6, 182, 212, 0.5);
+}
+
+.meeting-gossip-search-input::placeholder {
+  color: var(--muted, #9fb3c8);
+  opacity: 0.8;
+}
+
+.meeting-gossip-search-count {
+  font-size: calc(var(--meeting-font, 12px) - 3px);
+  color: var(--muted, #9fb3c8);
+  white-space: nowrap;
+}
+
+.meeting-gossip-search-nav,
+.meeting-gossip-search-clear {
+  background: none;
+  border: none;
+  color: var(--muted, #9fb3c8);
+  font-size: calc(var(--meeting-font, 12px) - 2px);
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+.meeting-gossip-search-nav:hover:not(:disabled),
+.meeting-gossip-search-clear:hover {
+  color: var(--text, #e6eef6);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.meeting-gossip-search-nav:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.meeting-gossip-search-clear:hover {
+  color: #e06c75;
+}
+
+/* Search hit highlighting on feed lines. */
+.meeting-gossip-line.gossip-dim {
+  opacity: 0.35;
+}
+
+.meeting-gossip-line.gossip-match {
+  background: rgba(6, 182, 212, 0.1);
+}
+
+.meeting-gossip-line.gossip-match-active {
+  background: rgba(6, 182, 212, 0.22);
+  box-shadow: inset 2px 0 0 rgba(6, 182, 212, 0.85);
+}
+
 .meeting-gossip-log-clear,
+.meeting-gossip-log-copy,
 .meeting-gossip-log-expand {
   background: none;
   border: none;
@@ -5317,6 +5683,15 @@ h3 .small.ghost:hover {
 
 .meeting-gossip-log-expand:hover {
   color: #61afef;
+}
+
+.meeting-gossip-log-copy:hover {
+  color: #61afef;
+}
+
+/* The transient '✓ copied' feedback state. */
+.meeting-gossip-log-copy.gossip-copied {
+  color: #98c379;
 }
 
 .meeting-gossip-count {
@@ -5423,6 +5798,80 @@ h3 .small.ghost:hover {
   white-space: nowrap;
 }
 
+/* Office-mood pill — the six domain grumps as one compact dot strip. */
+.meeting-mood {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.meeting-mood-icon {
+  font-size: calc(var(--meeting-font, 12px) + 1px);
+  line-height: 1;
+}
+
+.meeting-mood-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: 0.22;
+  transition: opacity 0.5s ease, box-shadow 0.5s ease, transform 0.35s ease;
+}
+
+.meeting-mood-dot.meeting-mood-lit {
+  opacity: 1;
+  transform: scale(1.2);
+}
+
+/* Kanban-flow chip — what the office is currently working on: the active
+   card's title with a ▶ (live run) / ⏹ (stopped or between runs) marker.
+   The ▶ pulses while a run streams so the bar visibly shows the office at
+   work; the chip disappears entirely once no card is current. */
+.meeting-flow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-width: 200px;
+  overflow: hidden;
+}
+
+.meeting-flow-chip-ind {
+  font-size: calc(var(--meeting-font, 12px) + 1px);
+  line-height: 1;
+  color: var(--muted, #8b8b9e);
+}
+
+.meeting-flow-chip-ind.meeting-flow-live {
+  color: #98c379;
+  animation: meeting-flow-pulse 1.8s ease-in-out infinite;
+  text-shadow: 0 0 6px rgba(152, 195, 121, 0.6);
+}
+
+.meeting-flow-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #d4d4d8;
+  font-weight: 500;
+}
+
+@keyframes meeting-flow-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .meeting-meter-emoji {
   font-size: 11px;
   line-height: 1;
@@ -5472,6 +5921,7 @@ h3 .small.ghost:hover {
 }
 
 .meeting-feud-leader {
+  display: inline-block;
   width: 16px;
   font-size: calc(var(--meeting-font, 12px) + 2px);
   line-height: 1;
@@ -5483,6 +5933,17 @@ h3 .small.ghost:hover {
 .meeting-feud-leader-rage { text-shadow: 0 0 9px rgba(255, 59, 48, 0.9); }
 .meeting-feud-leader-smug { text-shadow: 0 0 9px rgba(245, 190, 60, 0.9); }
 .meeting-feud-leader-tie  { text-shadow: 0 0 6px rgba(255, 255, 255, 0.35); }
+
+/* Leader-change pop: the chip bounces when the feud's winner flips. */
+.meeting-feud-leader.meeting-feud-pop {
+  animation: meeting-feud-pop 0.45s ease;
+}
+@keyframes meeting-feud-pop {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.45); }
+  70%  { transform: scale(0.92); }
+  100% { transform: scale(1); }
+}
 
 .meeting-feud-track {
   display: flex;
@@ -5499,7 +5960,10 @@ h3 .small.ghost:hover {
 .meeting-feud-smug {
   box-sizing: border-box;
   height: 100%;
-  transition: width 0.4s ease;
+  /* The seam overshoots when it moves — a 'back out' curve that swings a
+     little past the new ratio before settling, so a shift of power reads
+     as a physical tug-of-war snap instead of a linear slide. */
+  transition: width 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .meeting-feud-rage {
@@ -5515,6 +5979,61 @@ h3 .small.ghost:hover {
 
 .meeting-feud-smug {
   background: linear-gradient(90deg, #ffd98f, #f5be3c);
+}
+
+/* Work feud — the Planner-vs-Explorer 'who did more work' gauge. Hidden
+   until their feud lines fire in the Office Chat; once revealed, blue
+   (Planner planned steps) pulls from the left, teal (Explorer explored
+   steps) from the right, and the seam rides at planner/(planner+explorer). */
+/* Rivalry feud gauges — one dual-color 'who did more work' bar per rivalry
+   (Planner-vs-Explorer work, Commander-vs-Reviewer command/review). Same
+   grammar as the feud gauge: a leader chip whose glow color comes via
+   ng-style, a pop on every leader flip, and a track whose seam rides at
+   A/(A+B) with the overshoot tug-of-war ease. */
+.meeting-riv {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0; /* up to two rivalry gauges can sit in the bar — never let them squeeze */
+}
+
+.meeting-riv-leader {
+  display: inline-block;
+  width: 16px;
+  font-size: calc(var(--meeting-font, 12px) + 2px);
+  line-height: 1;
+  text-align: center;
+  border-radius: 50%;
+  transition: text-shadow 0.3s ease;
+}
+
+/* Leader-change pop — same bounce as the rage/smug feud chip. */
+.meeting-riv-leader.meeting-riv-pop {
+  animation: meeting-feud-pop 0.45s ease;
+}
+
+.meeting-riv-track {
+  display: flex;
+  align-items: stretch;
+  width: 92px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.35);
+}
+
+.meeting-riv-side {
+  box-sizing: border-box;
+  height: 100%;
+  /* Same overshoot tug-of-war snap as the feud gauge. */
+  transition: width 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* The seam divider is only drawn while the seam actually exists (ratio
+   strictly between 0 and 100), so a fully-dominated bar has no stray line. */
+.meeting-riv-side.meeting-riv-seam {
+  border-right: 1px solid rgba(255, 255, 255, 0.55);
 }
 
 

@@ -1,8 +1,4 @@
-using System.Reflection;
-using System.Runtime.CompilerServices;
 using Xunit;
-using Weaver;
-using Weaver.Controllers;
 using Weaver.Services;
 
 namespace Weaver.UnitTests;
@@ -279,7 +275,7 @@ public class LlmCssCleanerPipelineTests : IDisposable
     // The fuzz tests above pin the cleaner alone. These go further: a random generated
     // CSS file is pushed through the ENTIRE chain the agent executes for a CSS edit —
     // EditClassifier.Classify → ClassifyIntent → EditStrategyResolver.Decide →
-    // AgentUtilities.TryReplaceSafe (the oldString/newString applier) →
+    // AgentEditHeuristics.TryReplaceSafe (the oldString/newString applier) →
     // LlmCssCleaner.Clean → FixCssStructure — and the final file must equal the pure
     // substitution. A regression ANYWHERE in the chain (classifier quirk, resolver
     // misdecision, fuzzy apply, cleaner regex) fails the build — not just a cleaner one.
@@ -309,7 +305,7 @@ public class LlmCssCleanerPipelineTests : IDisposable
         // 3. Apply — exactly the oldString/newString path. PickUniqueRuleAnchor guarantees
         //    a unique anchor, so this MUST succeed as a single-match replace and the applied
         //    content MUST equal the pure substitution (catches fuzzy/dedupe drift).
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(original, oldString, newString);
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(original, oldString, newString);
         Assert.True(replaced, $"TryReplaceSafe failed on corpus doc: {matchError}");
         Assert.Equal(original.Replace(oldString, newString), applied);
 
@@ -553,32 +549,20 @@ public class LlmCssCleanerPipelineTests : IDisposable
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  REGION-WINDOW FORMATTER — AgentController.FormatAcceptedEditRegionAsync
+    //  REGION-WINDOW FORMATTER — Services/CssRegionFormatter.FormatAcceptedEditRegionAsync
     // ═══════════════════════════════════════════════════════════════════════════
     // The agent does NOT clean the whole file after a CSS oldString/newString edit —
     // it locates the applied region, widens it to a ±4-line window, formats ONLY that
-    // window (prettier + LlmCssCleaner.Clean), and splices it back. That private method
-    // is exercised here via reflection (GetUninitializedObject skips the DI ctor; the
-    // method touches no instance state), so the window logic — not just whole-file
-    // Clean — is covered. The squish-fix assertion is prettier-independent: even if the
-    // external formatter were a no-op, Clean() inside the method still repairs
-    // `width:40px`, so the window-replacement path always executes on this fixture.
+    // window (prettier + LlmCssCleaner.Clean), and splices it back. The window logic —
+    // not just whole-file Clean — is covered directly against the service. The
+    // squish-fix assertion is prettier-independent: even if the external formatter were
+    // a no-op, Clean() inside the method still repairs `width:40px`, so the
+    // window-replacement path always executes on this fixture.
 
-    private static async Task<string> InvokeFormatAcceptedEditRegionAsync(
+    private static Task<string> InvokeFormatAcceptedEditRegionAsync(
         string filePath, string content, string? oldString, string? newString)
-    {
-        // RuntimeHelpers.GetUninitializedObject skips the DI constructor (the method
-        // touches no instance state); FormatterServices is obsolete, hence the modern API.
-        var controller = RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
-        var method = typeof(AgentController).GetMethod(
-            "FormatAcceptedEditRegionAsync",
-            BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("FormatAcceptedEditRegionAsync not found");
-        var invokeResult = method.Invoke(controller,
-            new object?[] { filePath, content, oldString, newString, CancellationToken.None });
-        var task = (Task<string>)(invokeResult ?? throw new InvalidOperationException("Invoke returned null"));
-        return await task;
-    }
+        => CssRegionFormatter.FormatAcceptedEditRegionAsync(
+            filePath, content, oldString, newString, CancellationToken.None);
 
     [Fact]
     public async Task FormatAcceptedEditRegion_NonCssExtension_ReturnsContentUnchanged()

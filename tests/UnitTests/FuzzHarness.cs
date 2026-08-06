@@ -107,11 +107,11 @@ internal static class FuzzHarness
         // 1. Overlap rejection — every edit must target a unique, non-overlapping area.
         for (var oi = 0; oi < edits.Count; oi++)
         {
-            var normO = AgentUtilities.NormalizeLineEndings(edits[oi].OldString ?? "").Trim();
+            var normO = AgentTextUtilities.NormalizeLineEndings(edits[oi].OldString ?? "").Trim();
             if (string.IsNullOrWhiteSpace(normO)) continue;
             for (var oj = oi + 1; oj < edits.Count; oj++)
             {
-                var normJ = AgentUtilities.NormalizeLineEndings(edits[oj].OldString ?? "").Trim();
+                var normJ = AgentTextUtilities.NormalizeLineEndings(edits[oj].OldString ?? "").Trim();
                 if (string.IsNullOrWhiteSpace(normJ)) continue;
                 if (normO.Contains(normJ) || normJ.Contains(normO))
                 {
@@ -126,9 +126,9 @@ internal static class FuzzHarness
         foreach (var edit in edits)
         {
             if (string.IsNullOrWhiteSpace(edit.OldString)) continue;
-            var normOld = AgentUtilities.NormalizeLineEndings(edit.OldString);
-            var normNew = AgentUtilities.NormalizeLineEndings(edit.NewString);
-            var (hasReplaced, nc, err, _) = AgentUtilities.TryReplaceSafe(
+            var normOld = AgentTextUtilities.NormalizeLineEndings(edit.OldString);
+            var normNew = AgentTextUtilities.NormalizeLineEndings(edit.NewString);
+            var (hasReplaced, nc, err, _) = AgentEditHeuristics.TryReplaceSafe(
                 batchContent, normOld, normNew,
                 edit.LineNumber > 0 ? edit.LineNumber : 0, change);
             if (!hasReplaced)
@@ -158,9 +158,9 @@ internal static class FuzzHarness
     /// </summary>
     public static string ApplyCreateFileMirror(string fullFile, string relPath)
     {
-        var body = AgentUtilities.StripFullFileFence(fullFile);
-        body = AgentUtilities.AutoFixPythonStatements(body, relPath);
-        body = AgentUtilities.CleanVerbatimStringEscapes(body);
+        var body = AgentTextUtilities.StripFullFileFence(fullFile);
+        body = AgentCodeFormatting.AutoFixPythonStatements(body, relPath);
+        body = AgentTextUtilities.CleanVerbatimStringEscapes(body);
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         if (ext is ".css" or ".scss" or ".less")
             body = LlmCssCleaner.Clean(body);

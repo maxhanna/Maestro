@@ -11,6 +11,24 @@
         <button class="ide-panel-btn" ng-click="vm.increaseMeetingFont()" title="Increase font size">+</button>
       </span>
       <button class="ide-panel-btn" ng-click="vm.resetMeeting()" title="Reset the office">↺</button>
+      <span class="meeting-flow-wrap" ng-mousedown="$event.stopPropagation()" title="Kanban flow controls">
+        <button class="ide-panel-btn meeting-flow-toggle" ng-click="vm.toggleMeetingFlowMenu($event)" title="Kanban flow — stop the current card, clear &amp; restart, or start the next one">🎛</button>
+        <div class="meeting-flow-menu" ng-show="vm.meetingFlowOpen" ng-mousedown="$event.stopPropagation()">
+          <div class="meeting-flow-head">🎛 Kanban Flow</div>
+          <div class="meeting-flow-now" ng-if="vm.activeCardText">
+            <span class="meeting-flow-label">Current</span>
+            <span class="meeting-flow-text">{{vm.activeCardText | limitTo:60}}</span>
+          </div>
+          <button type="button" class="meeting-flow-item" ng-click="vm.meetingFlowStopCard()" ng-disabled="!vm.streamingActive" title="Halt the running agent — the card stays in Doing with its analysis">⏹ Stop current card</button>
+          <button type="button" class="meeting-flow-item" ng-click="vm.meetingFlowRestartCard()" ng-disabled="!vm.meetingFlowCurrentCard()" title="Wipe the card's plan and re-run it from scratch">♻ Clear plan &amp; restart</button>
+          <div class="meeting-flow-next" ng-if="vm.meetingFlowNextCard()">
+            <span class="meeting-flow-label">Next ready</span>
+            <span class="meeting-flow-text">{{vm.meetingFlowNextCard().text | limitTo:60}}</span>
+          </div>
+          <button type="button" class="meeting-flow-item" ng-click="vm.meetingFlowStartNext(false)" ng-disabled="!vm.meetingFlowNextCard()" title="Start the first Ready card in To Do, keeping its existing plan">▶ Next card — keep plan</button>
+          <button type="button" class="meeting-flow-item" ng-click="vm.meetingFlowStartNext(true)" ng-disabled="!vm.meetingFlowNextCard()" title="Start the first Ready card in To Do with a wiped plan">▶ Next card — fresh plan</button>
+        </div>
+      </span>
       <button class="ide-panel-btn" ng-click="vm.closeMeeting()" title="Close Meeting View">✕</button>
     </div>
   </div>
@@ -41,7 +59,7 @@
     <div class="meeting-status-bar">
       <span class="meeting-speaker">{{vm.meetingSpeaker}}</span>        <span class="meeting-meters" ng-if="vm.meetingEditorRage > 0 || vm.meetingVerifierSmug > 0">
           <span class="meeting-feud" title="Feud gauge — the Editor and Verifier argue over every rejected edit. {{vm.meetingFeudLeader === 'rage' ? 'The Editor is winning the argument.' : vm.meetingFeudLeader === 'smug' ? 'The Verifier is winning the argument.' : 'Dead heat — neither is backing down.'}}">
-            <span class="meeting-feud-leader meeting-feud-leader-{{vm.meetingFeudLeader}}">{{vm.meetingFeudLeader === 'rage' ? '😤' : vm.meetingFeudLeader === 'smug' ? '😏' : '⚖️'}}</span>
+            <span class="meeting-feud-leader meeting-feud-leader-{{vm.meetingFeudLeader}}" ng-class="{ 'meeting-feud-pop': vm.meetingFeudPop }">{{vm.meetingFeudLeader === 'rage' ? '😤' : vm.meetingFeudLeader === 'smug' ? '😏' : '⚖️'}}</span>
             <span class="meeting-feud-track">
               <span class="meeting-feud-rage" ng-style="{width: (vm.meetingFeudRatio || 50) + '%'}" ng-class="{'meeting-feud-seamless': (vm.meetingFeudRatio || 50) <= 0 || (vm.meetingFeudRatio || 50) >= 100}"></span>
               <span class="meeting-feud-smug" ng-style="{width: (100 - (vm.meetingFeudRatio || 50)) + '%'}"></span>
@@ -60,6 +78,26 @@
           <span class="meeting-meter-pct">{{vm.meetingVerifierSmug}}%</span>
         </span>
       </span>
+      <span class="meeting-flow-chip" ng-if="vm.activeCardId" title="{{vm.streamingActive ? 'The office is working on' : 'Current card — run not streaming right now'}}: {{vm.activeCardText || '…'}}">
+        <span class="meeting-flow-chip-ind" ng-class="{ 'meeting-flow-live': vm.streamingActive }">{{vm.streamingActive ? '▶' : '⏹'}}</span>
+        <span class="meeting-flow-chip-text">{{vm.activeCardText || '…'}}</span>
+      </span>
+      <span class="meeting-mood" ng-if="vm.meetingMoodActive" title="Office mood — the six domain spiders' grumps. Each dot lights up in its role's color once it crosses 50%.">
+        <span class="meeting-mood-icon">🌡</span>
+        <span class="meeting-mood-dot" ng-repeat="m in vm.meetingMood track by $index"
+          ng-class="{ 'meeting-mood-lit': m.on }"
+          ng-style="{ background: m.color, boxShadow: m.on ? '0 0 7px ' + m.color : 'none' }"
+          title="{{m.icon}} {{m.name}} — {{m.pct}}% grump"></span>
+      </span>
+      <span class="meeting-riv" ng-repeat="riv in vm.meetingRivs track by riv.key" ng-if="riv.on"
+        title="{{riv.title}} {{riv.leader === 'a' ? riv.leadTitleA : riv.leader === 'b' ? riv.leadTitleB : 'Dead even.'}}">
+        <span class="meeting-riv-leader" ng-class="{ 'meeting-riv-pop': riv.pop }"
+          ng-style="{ textShadow: riv.leader === 'a' ? '0 0 9px ' + riv.colorA : riv.leader === 'b' ? '0 0 9px ' + riv.colorB : '0 0 6px rgba(255,255,255,0.35)' }">{{riv.leader === 'a' ? riv.iconA : riv.leader === 'b' ? riv.iconB : '⚖️'}}</span>
+        <span class="meeting-riv-track">
+          <span class="meeting-riv-side" ng-class="{ 'meeting-riv-seam': riv.ratio > 0 && riv.ratio < 100 }" ng-style="{width: riv.ratio + '%', background: riv.gradA}"></span>
+          <span class="meeting-riv-side" ng-style="{width: (100 - riv.ratio) + '%', background: riv.gradB}"></span>
+        </span>
+      </span>
       <span class="meeting-hint">The spiders animate the live agent run — planning, editing, verifying.</span>
     </div>
     <div class="meeting-ticker" ng-show="vm.meetingTicker.length">
@@ -76,13 +114,30 @@
       <div class="meeting-gossip-log-head">
         <span class="meeting-gossip-log-title">💬 OFFICE CHAT <span class="meeting-gossip-count" ng-if="vm.gossipLog.length">· {{vm.gossipLog.length}}</span></span>
         <div class="meeting-gossip-log-actions">
+          <button class="meeting-gossip-log-copy" ng-click="vm.copyGossipLog(); $event.stopPropagation()"
+            ng-class="{'gossip-copied': vm.gossipCopied}"
+            title="{{vm.gossipCopied ? 'Copied!' : 'Copy the chat transcript'}}">{{vm.gossipCopied ? '✓' : '📋'}}</button>
           <button class="meeting-gossip-log-expand" ng-click="vm.toggleGossipExpanded(); $event.stopPropagation()"
             title="{{vm.gossipExpanded ? 'Collapse chat' : 'Expand the chat to read the full conversation'}}">{{vm.gossipExpanded ? '⤵' : '⤴'}}</button>
           <button class="meeting-gossip-log-clear" ng-click="vm.clearGossipLog(); $event.stopPropagation()" title="Clear the chat log">✕</button>
         </div>
       </div>
+      <div class="meeting-gossip-search">
+        <span class="meeting-gossip-search-icon">🔎</span>
+        <input type="text" class="meeting-gossip-search-input" ng-model="vm.gossipSearch"
+          ng-change="vm.gossipSearchChanged()" ng-keydown="vm.gossipSearchKey($event)"
+          placeholder="Find a quip…" spellcheck="false" autocomplete="off" />
+        <span class="meeting-gossip-search-count" ng-if="vm.gossipSearch">{{vm.gossipSearchHits() ? (vm.gossipSearchActive + 1) + '/' + vm.gossipSearchHits() : 'no matches'}}</span>
+        <button class="meeting-gossip-search-nav" ng-if="vm.gossipSearch && vm.gossipSearchHits()"
+          ng-click="vm.gossipPrevMatch(); $event.stopPropagation()" title="Previous match (Shift+Enter)" ng-disabled="!vm.gossipSearchHits()">↑</button>
+        <button class="meeting-gossip-search-nav" ng-if="vm.gossipSearch && vm.gossipSearchHits()"
+          ng-click="vm.gossipNextMatch(); $event.stopPropagation()" title="Next match (Enter)" ng-disabled="!vm.gossipSearchHits()">↓</button>
+        <button class="meeting-gossip-search-clear" ng-if="vm.gossipSearch" ng-click="vm.gossipClearSearch(); $event.stopPropagation()"
+          title="Clear search (Esc)">✕</button>
+      </div>
       <div class="meeting-gossip-log-feed" id="meetingGossipFeed">
-        <div class="meeting-gossip-line" ng-repeat="g in vm.gossipLog track by $index">
+        <div class="meeting-gossip-line" ng-repeat="g in vm.gossipLog track by $index"
+          ng-class="vm.gossipSearch ? {'gossip-dim': !vm.gossipIsMatch(g), 'gossip-match': vm.gossipIsMatch(g), 'gossip-match-active': vm.gossipIsActive(g)} : {}">
           <span class="meeting-gossip-time">{{vm.gossipTimeLabel(g.t)}}</span>
           <span class="meeting-gossip-who">{{g.who}}:</span>
           <span class="meeting-gossip-text">{{g.text}}</span>

@@ -251,7 +251,7 @@ public class FormatDPayloadCorpusTests
 
         Assert.False(alreadyDone);
         Assert.Equal(targetName, oldStr);
-        var (replaced, applied, err, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr, 0, "add a card");
+        var (replaced, applied, err, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr, 0, "add a card");
         Assert.True(replaced, $"TryReplaceSafe failed: {err}");
         Assert.Equal(html.Replace(oldStr, newStr), applied); // pure insertion
         // Inserted block byte-present once, siblings byte-identical.
@@ -275,7 +275,7 @@ public class FormatDPayloadCorpusTests
 
         Assert.False(alreadyDone);
         Assert.Equal(targetName, oldStr);
-        var (replaced, applied, err, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr, 0, "replace a card");
+        var (replaced, applied, err, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr, 0, "replace a card");
         Assert.True(replaced, $"TryReplaceSafe failed: {err}");
         Assert.Equal(html.Replace(oldStr, newStr), applied); // pure replacement
         // Target gone, new block present once, siblings byte-identical.
@@ -302,7 +302,7 @@ public class FormatDPayloadCorpusTests
         Assert.Equal(targetName, oldStr);
         // Pure prefix: raw newCode + "\n" + anchor.
         Assert.Equal(newCode + "\n" + targetName, newStr);
-        var (replaced, applied, err, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr, 0, "add a card");
+        var (replaced, applied, err, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr, 0, "add a card");
         Assert.True(replaced, $"TryReplaceSafe failed: {err}");
         Assert.Equal(html.Replace(oldStr, newStr), applied);
         // The raw over-indented block is present unchanged (no realign for insertBefore).
@@ -327,7 +327,7 @@ public class FormatDPayloadCorpusTests
         // anchor + "\n" + the CLEAN card (no doubled closer anywhere).
         Assert.Equal(targetName + "\n" + CardBlock(docIdx, 66), newStr);
         Assert.Equal(targetName, oldStr);
-        var (replaced, applied, err, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr, 0, "add a card");
+        var (replaced, applied, err, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr, 0, "add a card");
         Assert.True(replaced, $"TryReplaceSafe failed: {err}");
         Assert.Equal(html.Replace(oldStr, newStr), applied);
         Assert.Equal(1, CountOccurrences(applied, CardBlock(docIdx, 66)));
@@ -419,7 +419,7 @@ public class FormatDPayloadCorpusTests
 
             Assert.False(alreadyDone, $"doc #{i}: newCode must not already be present");
             Assert.Equal(1, CountOccurrences(html, oldStr)); // unique anchor
-            var (replaced, applied, err, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr, 0, change);
+            var (replaced, applied, err, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr, 0, change);
             Assert.True(replaced, $"doc #{i}: TryReplaceSafe failed: {err}");
 
             // 3. Pure insertion — applied equals the single-anchor substitution.
@@ -540,7 +540,7 @@ public class FormatDPayloadCorpusTests
 
             // Apply — the insert lands as the PURE substitution (realign bumps the
             // under-indented newCode to the anchor's 4-space base when nested).
-            var (replaced, applied, err, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr, 0, change);
+            var (replaced, applied, err, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr, 0, change);
             Assert.True(replaced, $"doc #{i}: TryReplaceSafe failed: {err}");
             Assert.Equal(html.Replace(oldStr, newStr), applied);
 
@@ -685,7 +685,7 @@ public class FormatDPayloadCorpusTests
             Assert.Equal(cleanTarget, oldStr);
             Assert.Equal(1, CountOccurrences(html, oldStr)); // unique anchor
 
-            var (replaced, applied, err, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr, 0, change);
+            var (replaced, applied, err, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr, 0, change);
             Assert.True(replaced, $"doc #{i}: TryReplaceSafe failed: {err}");
 
             // 4. Pure insertion — applied equals the single-anchor substitution.
@@ -769,7 +769,7 @@ public class FormatDPayloadCorpusTests
         var anchor = step.TargetSymbol!;
         var (matchedBlock, _, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(html, anchor, step.Change);
         if (matchedBlock == null) throw new Xunit.Sdk.XunitException($"anchor did not resolve: {htmlErr}");
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(
             html, matchedBlock, "", step.LineNumber, step.Change);
         return (replaced, applied, matchError, matchedBlock);
     }
@@ -999,7 +999,7 @@ public class FormatDPayloadCorpusTests
 
         // 2. The compose-branch deletion decision: replace intent + empty newCode → (block, "").
         //    Applying it must remove EXACTLY the target span — siblings survive byte-identical.
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matchedBlock, "", 0, change);
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(html, matchedBlock, "", 0, change);
         Assert.True(replaced, $"deletion must apply: {matchError}");
         // The todo card's badge line was deleted; the sibling card's identical badge
         // survives — so exactly ONE full priority-badge span remains.
@@ -1040,7 +1040,7 @@ public class FormatDPayloadCorpusTests
         var (matchedBlock, _, err) = HtmlDomEditor.ResolveHtmlAnchor(html, driftedTarget, "remove the priority badge");
         Assert.NotNull(matchedBlock);
         Assert.Null(err);
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matchedBlock!, "", 0, "remove the priority badge");
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(html, matchedBlock!, "", 0, "remove the priority badge");
         Assert.True(replaced, $"deletion must apply: {matchError}");
         // Exactly ONE priority badge span survives (the second card's) after the drifted
         // anchor deleted only the first — count whole spans, not the substring (3x/span).
@@ -1111,7 +1111,7 @@ public class FormatDPayloadCorpusTests
             if (oldStr == null)
                 return (false, source, astErr, null);
 
-            var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(
+            var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(
                 source, oldStr, "", targetLine, change);
             return (replaced, applied, matchError, oldStr);
         }
@@ -1427,7 +1427,7 @@ public class FormatDPayloadCorpusTests
             var (matched, _, err) = HtmlDomEditor.ResolveHtmlAnchor(html, fullBlock, "Remove the priority badge");
             Assert.NotNull(matched);
             Assert.Null(err);
-            var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matched!, survivor, 0, "Remove the priority badge");
+            var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(html, matched!, survivor, 0, "Remove the priority badge");
             Assert.True(replaced, $"doc #{i}: survivor replace must apply: {matchError}");
             Assert.Contains("BENCH", applied, StringComparison.Ordinal);
             Assert.Contains("FLAGGED", applied, StringComparison.Ordinal);
@@ -1479,7 +1479,7 @@ public class FormatDPayloadCorpusTests
         var (matched, _, err) = HtmlDomEditor.ResolveHtmlAnchor(html, fullBlock, "Remove the priority badge");
         Assert.NotNull(matched);
         Assert.Null(err);
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matched!, driftedSurvivor, 0, "Remove the priority badge");
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(html, matched!, driftedSurvivor, 0, "Remove the priority badge");
         Assert.True(replaced, $"drifted survivor replace must apply: {matchError}");
         Assert.Contains("BENCH", applied, StringComparison.Ordinal);
         Assert.DoesNotContain("card.priority", applied);

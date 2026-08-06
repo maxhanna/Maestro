@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -19,6 +20,8 @@ partial class AgentController
     {
         public long Calls;
         public long StreamErrors;
+        public long Recovered;       // recovery retries that landed (finish-this / hint retry succeeded)
+        public long RecoveryFailed;  // recovery retries that still failed
         public DateTime LastStreamErrorUtc;
         public DateTime LastSuccessUtc;
     }
@@ -34,8 +37,167 @@ partial class AgentController
     /// a stream error when it failed with a transport/stream/truncation problem (the same
     /// predicate that triggers recovery), so the badge reflects reliability, not LLM quality.
     /// </summary>
+    private const string EndpointHealthDbKey = "endpoint_stream_health";
+    // Debounce between SQLite writes from the hot recording path (10s), and the window
+    // beyond which an idle endpoint's counters are considered stale and dropped everywhere
+    // (persist, hydrate, and the HTTP endpoint share this so what's served == what's saved).
+    private const long EndpointHealthPersistDebounceTicks = TimeSpan.TicksPerSecond * 10;
+    private static readonly TimeSpan EndpointHealthStaleAge = TimeSpan.FromHours(24);
+
+    /// <summary>True when an endpoint's last recorded activity is older than the 24h window.</summary>
+    private static bool IsEndpointHealthStale(EndpointStreamHealth h, DateTime now)
+    {
+        var last = h.LastSuccessUtc > h.LastStreamErrorUtc ? h.LastSuccessUtc : h.LastStreamErrorUtc;
+        return last != default && (now - last) > EndpointHealthStaleAge;
+    }
+    // Persistence hooks — set once by the AgentController constructor so the static tracker
+    // can round-trip through the injected DatabaseService. Tests leave these null and the
+    // tracker stays purely in-memory.
+    private static Func<string?>? _endpointHealthLoader;
+    private static Action<string>? _endpointHealthSaver;
+    private static bool _endpointHealthHydrated;
+    private static long _lastHealthPersistTicks;
+
+    /// <summary>
+    /// Registers the SQLite-backed load/save hooks. No-op if already set. The check-then-act
+    /// is technically racy under concurrent controller construction, but benign: every
+    /// AgentController captures the same DI singleton DatabaseService, so whichever instance
+    /// wins the race installs functionally identical hooks.
+    /// </summary>
+    internal static void RegisterEndpointHealthPersistence(Func<string?>? loader, Action<string>? saver)
+    {
+        if (_endpointHealthLoader == null && _endpointHealthSaver == null)
+        {
+            _endpointHealthLoader = loader;
+            _endpointHealthSaver = saver;
+            _endpointHealthHydrated = false;
+        }
+    }
+
+    /// <summary>
+    /// Restores the tracker from disk on process start. Entries whose last activity is
+    /// older than 24h are dropped so removed endpoints don't resurrect forever — the same
+    /// window the persist path and the HTTP endpoint enforce.
+    /// </summary>
+    internal static void HydrateEndpointHealthFromDisk()
+    {
+        if (_endpointHealthHydrated || _endpointHealthLoader == null) return;
+        _endpointHealthHydrated = true;
+        try
+        {
+            var json = _endpointHealthLoader();
+            if (string.IsNullOrWhiteSpace(json)) return;
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return;
+            var now = DateTime.UtcNow;
+            foreach (var el in doc.RootElement.EnumerateArray())
+            {
+                if (el.ValueKind != JsonValueKind.Object) continue;
+                var key = el.TryGetProperty("baseUrl", out var urlEl) ? urlEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                var h = _endpointStreamHealth.GetOrAdd(key, _ => new EndpointStreamHealth());
+                if (el.TryGetProperty("calls", out var cEl) && cEl.TryGetInt64(out var calls)) h.Calls = calls;
+                if (el.TryGetProperty("streamErrors", out var eEl) && eEl.TryGetInt64(out var errors)) h.StreamErrors = errors;
+                if (el.TryGetProperty("recovered", out var recEl) && recEl.TryGetInt64(out var rec)) h.Recovered = rec;
+                if (el.TryGetProperty("recoveryFailed", out var rfEl) && rfEl.TryGetInt64(out var rf)) h.RecoveryFailed = rf;
+                // RoundtripKind keeps the UTC kind of the persisted "o" strings, so the
+                // 24h-trim comparison against DateTime.UtcNow isn't skewed by the local
+                // timezone offset (plain TryParse would convert Z timestamps to Local).
+                if (el.TryGetProperty("lastStreamErrorUtc", out var lseEl) &&
+                    DateTime.TryParse(lseEl.GetString(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out var lse)) h.LastStreamErrorUtc = lse;
+                if (el.TryGetProperty("lastSuccessUtc", out var lsuEl) &&
+                    DateTime.TryParse(lsuEl.GetString(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out var lsu)) h.LastSuccessUtc = lsu;
+                if (IsEndpointHealthStale(h, now))
+                    _endpointStreamHealth.TryRemove(key, out _);
+            }
+        }
+        catch { /* corrupt or unreadable persisted blob — start fresh */ }
+    }
+
+    /// <summary>
+    /// Serializes the tracker to the registered saver. Prunes entries whose last activity
+    /// is older than 24h so removed endpoints don't linger on disk forever. Synchronous so
+    /// it can be called from the HTTP endpoint; the recording path uses the debounced wrapper.
+    /// </summary>
+    internal static void PersistEndpointHealth()
+    {
+        var saver = _endpointHealthSaver;
+        if (saver == null) return;
+        try
+        {
+            var now = DateTime.UtcNow;
+            var items = new List<object>();
+            // NOTE: blob field names (…Utc) differ from the HTTP response (…At) on purpose —
+            // this is the internal persistence format; the endpoint builds its own contract.
+            foreach (var kv in _endpointStreamHealth)
+            {
+                if (IsEndpointHealthStale(kv.Value, now)) continue; // trim stale entries
+                items.Add(new
+                {
+                    baseUrl = kv.Key,
+                    calls = kv.Value.Calls,
+                    streamErrors = kv.Value.StreamErrors,
+                    recovered = kv.Value.Recovered,
+                    recoveryFailed = kv.Value.RecoveryFailed,
+                    lastStreamErrorUtc = kv.Value.LastStreamErrorUtc == default
+                        ? null : kv.Value.LastStreamErrorUtc.ToString("o"),
+                    lastSuccessUtc = kv.Value.LastSuccessUtc == default
+                        ? null : kv.Value.LastSuccessUtc.ToString("o")
+                });
+            }
+            saver(JsonSerializer.Serialize(items));
+        }
+        catch { /* persistence is best-effort */ }
+    }
+
+    /// <summary>
+    /// Debounced persist for the hot recording path — at most one SQLite write every 10s,
+    /// executed synchronously. The debounce keeps the write frequency trivial (one small
+    /// JSON blob per 10s per process), and a synchronous write removes any async race where
+    /// a stale background flush could overwrite newer counters.
+    /// </summary>
+    private static void MaybePersistEndpointHealth()
+    {
+        if (_endpointHealthSaver == null) return;
+        var now = DateTime.UtcNow.Ticks;
+        var last = Interlocked.Read(ref _lastHealthPersistTicks);
+        if (now - last < EndpointHealthPersistDebounceTicks) return;
+        if (Interlocked.CompareExchange(ref _lastHealthPersistTicks, now, last) != last) return;
+        PersistEndpointHealth();
+    }
+
+    /// <summary>
+    /// Records the OUTCOME of a recovery retry (finish-this continuation, hint retry, or
+    /// non-streaming transport retry) for the endpoint health tracker, and emits a 📊 metric
+    /// log entry so users can see in the agent log whether their endpoints' recovery feature
+    /// is actually working. Called once per retry after it completes.
+    /// </summary>
+    private async Task RecordRecoveryOutcomeAsync(string? baseUrl, bool recovered, string retryKind,
+        bool emitSse = false, CancellationToken ct = default)
+    {
+        var key = EndpointHealthKey(baseUrl);
+        if (key.Length > 0)
+        {
+            var h = _endpointStreamHealth.GetOrAdd(key, _ => new EndpointStreamHealth());
+            if (recovered) Interlocked.Increment(ref h.Recovered);
+            else Interlocked.Increment(ref h.RecoveryFailed);
+            MaybePersistEndpointHealth();
+            await EmitLog(emitSse, "metric",
+                $"📊 Recovery ({retryKind}): {(recovered ? "recovered ✓" : "still failed ✗")} — " +
+                $"{h.Recovered} recovered / {h.RecoveryFailed} failed retries on this endpoint", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "metric",
+                $"📊 Recovery ({retryKind}): {(recovered ? "recovered ✓" : "still failed ✗")}", ct: ct);
+        }
+    }
+
     private static void RecordEndpointCall(string? baseUrl, string? partial, string? error)
     {
+        HydrateEndpointHealthFromDisk();
         var key = EndpointHealthKey(baseUrl);
         if (key.Length == 0) return;
         var h = _endpointStreamHealth.GetOrAdd(key, _ => new EndpointStreamHealth());
@@ -44,7 +206,7 @@ partial class AgentController
         {
             h.LastSuccessUtc = DateTime.UtcNow;
         }
-        else if (IsTransientTransportFailure(error) || IsRecoverableStreamFailure(partial, error))
+        else if (TransientFailureDetector.IsTransientTransportFailure(error) || TransientFailureDetector.IsRecoverableStreamFailure(partial, error))
         {
             // A recovered call counts as a stream error on the FIRST attempt plus a success
             // on the retry — intentional: the badge measures connection drops, not task
@@ -52,6 +214,23 @@ partial class AgentController
             Interlocked.Increment(ref h.StreamErrors);
             h.LastStreamErrorUtc = DateTime.UtcNow;
         }
+        MaybePersistEndpointHealth();
+    }
+
+    /// <summary>
+    /// Editor:DisableLLMRetries — when true, ALL recovery retries are skipped: the
+    /// non-streaming transport retry, the streaming hint retry, the prose retry, the
+    /// finish-this continuation loop, AND the terminal/build transient-blip retry
+    /// (RunTerminalCommandWithRetryAsync gates on this same flag). Failed calls/commands
+    /// return their partial/error immediately instead. For users whose flaky endpoints
+    /// make the retry delay worse than the failure itself (a 300ms pause + full re-stream
+    /// per call adds up fast).
+    /// </summary>
+    private bool LlmRetriesDisabled() => LlmRetriesDisabled(_config);
+    internal static bool LlmRetriesDisabled(IConfiguration? config)
+    {
+        try { return config?.GetValue<bool>("Editor:DisableLLMRetries") ?? false; }
+        catch { return false; }
     }
 
     private string? _runBaseUrl;
@@ -165,14 +344,16 @@ partial class AgentController
         // Non-streaming calls can't reuse partial output, but a one-shot retry still
         // recovers a transient transport blip (network drop, connection reset, premature
         // close, timeout) — the prompt is intact and the second attempt often lands.
-        // A tiny delay lets a momentary blip clear before re-issuing.
-        if (IsTransientTransportFailure(first.error))
+        // A tiny delay lets a momentary blip clear before re-issuing. Skipped entirely
+        // when Editor:DisableLLMRetries is set (retry delay hurts more than it helps).
+        if (!LlmRetriesDisabled() && TransientFailureDetector.IsTransientTransportFailure(first.error))
         {
             try { await Task.Delay(300, ct); } catch { return first; }
             using var retryTimeoutCts = new CancellationTokenSource(timeout);
             using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
             first = await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, retryLinkedCts.Token, maxTokens);
             RecordEndpointCall(baseUrl, first.raw, first.error);
+            await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), "non-streaming retry", ct: ct);
         }
         return first;
     }
@@ -196,22 +377,46 @@ partial class AgentController
         RecordEndpointCall(baseUrl, first.raw, first.error);
         // A stream read error / truncated response can kill an otherwise-good response mid-run
         // (e.g. the planner had already produced the correct edit before the connection dropped).
-        // Retry the SAME call ONCE, feeding the already-received partial back as a continuation
-        // hint so the work already done is completed instead of discarded.
-        if (IsRecoverableStreamFailure(first.raw, first.error))
+        // Two distinct recoveries, chosen by WHY it failed:
+        //   1. Max-token truncation → the requested content (e.g. a whole method in newString) is
+        //      bigger than one response's token budget. Re-asking for the FULL response would just
+        //      truncate again at the same point, so we run a "finish this" continuation loop that
+        //      asks the model to output ONLY the missing tail and appends it until the JSON parses.
+        //   2. Transport/stream drop → one retry with the partial as a continuation hint.
+        // Editor:DisableLLMRetries skips ALL of this — the partial + error return as-is.
+        if (TransientFailureDetector.IsRecoverableStreamFailure(first.raw, first.error) && LlmRetriesDisabled())
         {
-            await EmitLog(emitSse, "recovering",
-                string.Format(StreamRecoveryRetryMessage, first.raw.Length),
+            await EmitLog(emitSse, "warn",
+                "⚠ LLM retries disabled (Editor:DisableLLMRetries) — failed call returned without recovery.",
                 detail: RecoveryDetail(first.raw), ct: ct);
-            using var retryTimeoutCts = new CancellationTokenSource(timeout);
-            using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
-            var hintMessages = new object[]
+        }
+        else if (TransientFailureDetector.IsRecoverableStreamFailure(first.raw, first.error))
+        {
+            string retryKind;
+            if (IsMaxTokenTruncation(first.error))
             {
-                new { role = "system", content = systemPrompt },
-                new { role = "user",   content = AppendPartialContinuationHint(userMessage, first.raw) }
-            };
-            first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, hintMessages, retryLinkedCts.Token, maxTokens, emitSse: false);
+                retryKind = "finish-this";
+                first = await FinishThisTruncatedJsonAsync(
+                    client, baseUrl, model, systemPrompt, userMessage, first.raw,
+                    linkedCts.Token, maxTokens, emitSse);
+            }
+            else
+            {
+                retryKind = "stream retry";
+                await EmitLog(emitSse, "recovering",
+                    string.Format(StreamRecoveryRetryMessage, first.raw.Length),
+                    detail: RecoveryDetail(first.raw), ct: ct);
+                using var retryTimeoutCts = new CancellationTokenSource(timeout);
+                using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
+                var hintMessages = new object[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user",   content = AppendPartialContinuationHint(userMessage, first.raw) }
+                };
+                first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, hintMessages, retryLinkedCts.Token, maxTokens, emitSse: false);
+            }
             RecordEndpointCall(baseUrl, first.raw, first.error);
+            await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), retryKind, emitSse, ct);
         }
         return first;
     }
@@ -349,7 +554,7 @@ partial class AgentController
             if (topLevelOpens > 1)
             {
                 // Model emitted multiple JSON objects — extract only the first
-                raw = AgentUtilities.ExtractFirstJsonObject(raw);
+                raw = AgentJsonUtilities.ExtractFirstJsonObject(raw);
             }
             var parsed2 = ParseAgentResponse(raw);
             // Only treat a max-token cut as unrecoverable when the JSON failed to parse — a
@@ -370,7 +575,7 @@ partial class AgentController
         if (!isAddition) return null;
         if (!string.IsNullOrWhiteSpace(newStr))
         {
-            var m = AgentUtilities.MethodDeclRegex.Match(newStr);
+            var m = AgentMethodInventory.MethodDeclRegex.Match(newStr);
             if (m.Success) return m.Groups[1].Value;
             var tsMatch = Regex.Match(newStr,
                 @"\b(?:private|public|protected)?\s*(?:async\s+)?([A-Za-z_]\w*)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{");
@@ -456,7 +661,7 @@ partial class AgentController
         {
             var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, userPrompt, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 500);
             if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-            var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
+            var cleaned = AgentJsonUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
             var rootCause = doc.RootElement.TryGetProperty("rootCause", out var rc) ? rc.GetString() : "Failed to parse root cause.";
             var affected = new List<string>();
@@ -578,7 +783,14 @@ partial class AgentController
         RecordEndpointCall(baseUrl, first.raw, first.error);
         // Same recovery as CallLlmRawStreaming: a dropped connection or max-token cut must
         // not discard a good partial response — retry once with the partial as a hint.
-        if (IsRecoverableStreamFailure(first.raw, first.error))
+        // Editor:DisableLLMRetries skips this — the partial + error return as-is.
+        if (TransientFailureDetector.IsRecoverableStreamFailure(first.raw, first.error) && LlmRetriesDisabled())
+        {
+            await EmitLog(emitSse, "warn",
+                "⚠ LLM retries disabled (Editor:DisableLLMRetries) — failed call returned without recovery.",
+                detail: RecoveryDetail(first.raw), ct: ct);
+        }
+        else if (!LlmRetriesDisabled() && TransientFailureDetector.IsRecoverableStreamFailure(first.raw, first.error))
         {
             await EmitLog(emitSse, "recovering",
                 string.Format(StreamRecoveryRetryMessage, first.raw.Length),
@@ -587,6 +799,7 @@ partial class AgentController
             using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
             first = await CallLlmRawTextOnce(systemPrompt, AppendPartialContinuationHint(userMessage, first.raw), emitSse: false, retryLinkedCts.Token, maxTokens);
             RecordEndpointCall(baseUrl, first.raw, first.error);
+            await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), "prose retry", emitSse, ct);
         }
         return first;
     }
@@ -696,58 +909,6 @@ partial class AgentController
     /// Pure semantic failures (JSON parse, hallucination, repetition loops, empty) are NOT
     /// recoverable by re-running and must flow through their existing retry/rejection paths.
     /// </summary>
-    private static bool IsRecoverableStreamFailure(string? partial, string? error)
-    {
-        if (string.IsNullOrWhiteSpace(partial) || partial.Length < 40) return false;
-        if (string.IsNullOrWhiteSpace(error)) return false;
-        if (error.Contains("JSON parse", StringComparison.OrdinalIgnoreCase) ||
-            error.Contains("hallucination", StringComparison.OrdinalIgnoreCase) ||
-            error.Contains("Repetition loop", StringComparison.OrdinalIgnoreCase) ||
-            error.Contains("Empty LLM response", StringComparison.OrdinalIgnoreCase))
-            return false;
-        return error.Contains("read", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("stream", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("network", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("connection", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("reset", StringComparison.OrdinalIgnoreCase) ||
-               // HttpIOException for a server closing the body early: "The response ended prematurely."
-               error.Contains("prematurely", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("truncated at max_tokens", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// True when a NON-STREAMING LLM call failed with a transient transport problem worth
-    /// one silent retry: network/read/connection/reset/premature-close/timeout. There is no
-    /// partial output to preserve (the whole response is discarded on exception), but the
-    /// prompt is intact, so a second attempt often succeeds after a transient blip. Semantic
-    /// failures (JSON parse, hallucination, repetition, empty, HTTP status) are excluded —
-    /// they are deterministic and retrying would just burn time.
-    /// NOTE: timeouts ARE retried here (unlike the streaming path, which excludes them) —
-    /// the non-streaming call lost the ENTIRE response, so one fresh-budget attempt is a
-    /// genuine hedge; a streaming partial is junk and the server is likely still generating.
-    /// </summary>
-    private static bool IsTransientTransportFailure(string? error)
-    {
-        if (string.IsNullOrWhiteSpace(error)) return false;
-        if (error.StartsWith("HTTP ", StringComparison.OrdinalIgnoreCase) ||
-            error.Contains("JSON parse", StringComparison.OrdinalIgnoreCase) ||
-            error.Contains("hallucination", StringComparison.OrdinalIgnoreCase) ||
-            error.Contains("Repetition loop", StringComparison.OrdinalIgnoreCase) ||
-            error.Contains("Empty LLM response", StringComparison.OrdinalIgnoreCase))
-            return false;
-        return error.Contains("read", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("stream", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("network", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("connection", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("reset", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("prematurely", StringComparison.OrdinalIgnoreCase) ||
-               error.Contains("timed out", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// Capped preview of the partial response, attached to the 'recovering' log entry so the
-    /// user can inspect exactly what work was preserved before the retry completed it.
-    /// </summary>
     private static string? RecoveryDetail(string? partial)
         => string.IsNullOrWhiteSpace(partial)
             ? null
@@ -774,6 +935,146 @@ partial class AgentController
                "truncated JSON (close braces/brackets, complete field values) and return the FULL valid response.\n" +
                "\nPARTIAL RESPONSE (already produced — continue from this point):\n```\n" +
                cap + "\n```\n";
+    }
+
+    /// <summary>
+    /// True when a streaming failure was caused by hitting the max_tokens output cap — the
+    /// requested edit is bigger than one response can hold, NOT a network blip. This is the
+    /// case that needs the "finish this" continuation loop (re-asking for the full response
+    /// would just truncate again at the same point).
+    /// </summary>
+    private static bool IsMaxTokenTruncation(string? error)
+        => !string.IsNullOrWhiteSpace(error) &&
+           error.Contains("truncated at max_tokens", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when the accumulated response text is now a structurally complete JSON object.</summary>
+    private static bool LooksLikeCompleteJson(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var t = text.Trim();
+        if (t.StartsWith("```"))
+        {
+            var m = Regex.Match(t, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) t = m.Groups[1].Value.Trim();
+        }
+        var start = t.IndexOf('{');
+        var end = t.LastIndexOf('}');
+        if (start < 0 || end <= start) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(t[start..(end + 1)]);
+            return doc.RootElement.ValueKind == JsonValueKind.Object;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Builds the prompt for a "finish this" continuation pass. Unlike the transport-retry
+    /// hint (which asks for the FULL response), this asks the model to output ONLY the missing
+    /// tail that continues the partial EXACTLY where it stopped, so the appended result grows
+    /// the response instead of regenerating it (which would truncate again at the same size).
+    /// The ORIGINAL user message is kept in full at the front so the model still has the task
+    /// context (file, change required) it needs to finish the edit correctly. The last ~160
+    /// chars of the partial are given as an explicit continuation anchor so the model can see
+    /// the exact character it must follow.
+    /// </summary>
+    private static string BuildFinishThisPrompt(string userMessage, string partial)
+    {
+        // The tail is what matters (the exact continuation point); the head just gives context.
+        var cap = partial;
+        if (partial.Length > 12000)
+            cap = partial[..8000] + "\n…(partial truncated, middle omitted)…\n" + partial[^4000..];
+        var anchor = partial.Length > 160 ? partial[^160..] : partial;
+        return userMessage + "\n\n" +
+               "### FINISH THIS OUTPUT ###\n" +
+               "Your previous response was cut off because it exceeded the token limit. The partial below is " +
+               "GOOD WORK and must be preserved — do NOT restart, do NOT repeat it, do NOT summarize it.\n" +
+               "Output ONLY the REMAINING characters that continue the partial from the exact point it stopped, " +
+               "so that when the original partial is followed by your output, the result is the COMPLETE valid " +
+               "JSON response to the ORIGINAL request above. Continue mid-string exactly as the model was writing " +
+               "it (e.g. finish the truncated method body, then close any open quotes/braces/brackets).\n" +
+               "Your output will be APPENDED verbatim to the partial — it must start with the very next character.\n" +
+               "Do NOT emit any preamble, explanation, markdown fences, or JSON keys/objects that the partial " +
+               "already contains. Output ONLY the continuation text.\n\n" +
+               "### EXACT CONTINUATION POINT (the partial ends right after this) ###\n" +
+               "```\n" + anchor + "\n```\n" +
+               "### PARTIAL OUTPUT (already produced — continue after its last character) ###\n" +
+               "```\n" + cap + "\n```";
+    }
+
+    /// <summary>
+    /// Stitches a continuation chunk onto the partial, defensively trimming any leading overlap
+    /// that repeats the continuation-point tail (models sometimes re-emit the anchor). Finds
+    /// the LONGEST suffix of the accumulated text (20..160 chars) that the chunk starts with
+    /// and strips it, so a model that re-emitted part of the method declaration doesn't create
+    /// a duplicated block.
+    /// </summary>
+    private static string StitchContinuation(string accumulated, string chunk, int maxOverlapChars = 160)
+    {
+        var c = (chunk ?? "").TrimStart();
+        if (string.IsNullOrWhiteSpace(c)) return accumulated;
+        var maxOverlap = Math.Min(maxOverlapChars, Math.Min(accumulated.Length, c.Length));
+        for (var len = maxOverlap; len >= 20; len--)
+        {
+            var tail = accumulated[^len..];
+            if (c.StartsWith(tail, StringComparison.Ordinal))
+            {
+                c = c[len..];
+                break;
+            }
+        }
+        return accumulated + c;
+    }
+
+    /// <summary>
+    /// "Finish this" continuation loop: when a response is truncated by max_tokens (the edit is
+    /// bigger than one response), run up to 5 passes that each ask the model to output ONLY the
+    /// missing tail, stitch it onto the partial, and stop as soon as the accumulated text parses
+    /// as complete JSON. This lets a step proposal carrying a whole method survive a budget that
+    /// is smaller than the final payload. Passes are bounded so a stuck model can't loop forever.
+    /// </summary>
+    private async Task<(string raw, AgentResponse? parsed, string? error)> FinishThisTruncatedJsonAsync(
+        HttpClient client, string baseUrl, string model, string systemPrompt, string userMessage,
+        string partial, CancellationToken ct, int? maxTokens = null, bool emitSse = false)
+    {
+        const int maxPasses = 5;
+        var accumulated = partial;
+        // If the partial already parses as complete JSON (e.g. the object finished and only
+        // trailing prose got cut), don't burn a continuation pass — hand it back as-is.
+        if (LooksLikeCompleteJson(accumulated))
+            return (accumulated, null, null);
+        for (var pass = 0; pass < maxPasses; pass++)
+        {
+            var finishMessages = new object[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user",   content = BuildFinishThisPrompt(userMessage, accumulated) }
+            };
+            var cont = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model,
+                finishMessages, ct, maxTokens, emitSse: false);
+            if (string.IsNullOrWhiteSpace(cont.raw))
+            {
+                await EmitLog(emitSse, "recovering",
+                    $"✂️ Finish-this pass {pass + 1} returned empty ({cont.error}) — stopping", ct: ct);
+                break;
+            }
+            var before = accumulated.Length;
+            accumulated = StitchContinuation(accumulated, cont.raw);
+            await EmitLog(emitSse, "recovering",
+                $"✂️ Edit exceeded token budget — finish-this pass {pass + 1} appended {accumulated.Length - before} chars (total {accumulated.Length})", ct: ct);
+            if (LooksLikeCompleteJson(accumulated))
+            {
+                // The finished text parses — but leave the caller to decide semantics; the raw
+                // is returned whole with a null error so the step proposal flow proceeds normally.
+                await EmitLog(emitSse, "recovering",
+                    $"✂️ Finished truncated response after {pass + 1} continuation pass(es)", ct: ct);
+                return (accumulated, null, null);
+            }
+            // If a pass added almost nothing, the model is stuck — don't burn more passes.
+            if (accumulated.Length - before < 20) break;
+        }
+        return (accumulated, null,
+            $"Response truncated at max_tokens — {maxPasses} finish-this passes could not complete it (final {accumulated.Length} chars)");
     }
 
     private static string ExtractLlmContent(string respText)

@@ -799,7 +799,7 @@ public class HtmlDomEditorTests
             Assert.False(alreadyDone, $"doc #{i}: new block unexpectedly already present");
             Assert.Equal(targetName, oldStr); // exact full-block anchor, no fuzzy drift
 
-            var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr);
+            var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr);
             Assert.True(replaced, $"doc #{i}: TryReplaceSafe failed: {matchError}");
             Assert.Equal(html.Replace(oldStr, newStr), applied); // byte-exact pure substitution
 
@@ -857,7 +857,7 @@ public class HtmlDomEditorTests
             var (oldStr, newStr, _) = ComposeFormatD(html, indentedAnchor, newCode, changeDesc, expectedStrategy);
             Assert.Equal(indentedAnchor, oldStr);
 
-            var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, oldStr, newStr);
+            var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(html, oldStr, newStr);
             Assert.True(replaced, $"doc #{i}: TryReplaceSafe failed: {matchError}");
             Assert.Equal(html.Replace(oldStr, newStr), applied); // byte-exact pure substitution
 
@@ -885,7 +885,7 @@ public class HtmlDomEditorTests
     // random valid HTML through the ENTIRE deterministic edit chain the agent executes
     // for a FORMAT D step — EditClassifier.Classify → ClassifyIntent →
     // EditStrategyResolver.Decide → HtmlDomEditor.ResolveHtmlAnchor → FORMAT D
-    // composition → AgentUtilities.TryReplaceSafe. HTML has NO post-edit cleaning
+    // composition → AgentEditHeuristics.TryReplaceSafe. HTML has NO post-edit cleaning
     // (LlmCssCleaner.Clean/FixCssStructure are gated on .css/.scss/.less, AgentController
     // ~4995), so the final file must equal the PURE SUBSTITUTION byte-for-byte — a
     // regression anywhere in the chain fails the build, not just a cleaner one.
@@ -921,7 +921,7 @@ public class HtmlDomEditorTests
         Assert.Equal(targetName, oldStr); // exact full-block anchor, no fuzzy drift
 
         // 4. Apply — the applier must produce the pure substitution (no fuzzy/dedupe drift).
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(original, oldStr, newStr);
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(original, oldStr, newStr);
         Assert.True(replaced, $"TryReplaceSafe failed on corpus doc: {matchError}");
         var expected = original.Replace(oldStr, newStr);
         Assert.Equal(expected, applied);
@@ -968,7 +968,7 @@ public class HtmlDomEditorTests
         Assert.Equal(targetName, matchedBlock); // exact full-block anchor, no fuzzy drift
 
         // 4. Apply the deletion — pure substitution with empty newString.
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(original, matchedBlock, "");
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(original, matchedBlock, "");
         Assert.True(replaced, $"TryReplaceSafe failed on deletion doc: {matchError}");
         var expected = original.Replace(matchedBlock, "");
         Assert.Equal(expected, applied);
@@ -1027,7 +1027,7 @@ public class HtmlDomEditorTests
 
         var (matchedBlock, _, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(html, targetName, changeDesc);
         if (matchedBlock == null) throw new Xunit.Sdk.XunitException($"anchor did not resolve: {htmlErr}");
-        var (replaced, applied, matchError, _) = AgentUtilities.TryReplaceSafe(html, matchedBlock, "", targetLine, changeDesc);
+        var (replaced, applied, matchError, _) = AgentEditHeuristics.TryReplaceSafe(html, matchedBlock, "", targetLine, changeDesc);
         return (replaced, applied, matchError, matchedBlock);
     }
 

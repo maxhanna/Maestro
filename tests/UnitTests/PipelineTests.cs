@@ -13,7 +13,7 @@ public class PipelineTests
         var prompt = "ping 8.8.8.8";
 
         // Act
-        var (type, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
+        var (type, cmdScore, editScore) = AgentPlanParsing.ClassifyTask(prompt);
 
         // Assert
         Assert.Equal(PipelineType.CommandExecution, type);
@@ -27,7 +27,7 @@ public class PipelineTests
         var prompt = "add a new button to the navbar that alerts 'hello'";
 
         // Act
-        var (type, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
+        var (type, cmdScore, editScore) = AgentPlanParsing.ClassifyTask(prompt);
 
         // Assert
         Assert.Equal(PipelineType.CodeEdit, type);
@@ -42,7 +42,7 @@ public class PipelineTests
         var desc = "fix something";
 
         // Act
-        var result = AgentUtilities.ExtractRelevantExcerpt(content, desc, null);
+        var result = AgentDiscovery.ExtractRelevantExcerpt(content, desc, null);
 
         // Assert
         // Small files aren't skeletonized the same way if they fit, but let's check it contains the core
@@ -66,7 +66,7 @@ public class PipelineTests
         };
 
         // Act
-        var result = AgentUtilities.GetSkeletonForRange(lines, 0, lines.Length);
+        var result = AgentSkeleton.GetSkeletonForRange(lines, 0, lines.Length);
 
         // Assert
         Assert.Contains("public class MyClass", result);
@@ -89,7 +89,7 @@ public class PipelineTests
         };
 
         // Act
-        var result = AgentUtilities.GetSkeletonForRange(lines, 0, lines.Length);
+        var result = AgentSkeleton.GetSkeletonForRange(lines, 0, lines.Length);
 
         // Assert
         Assert.Contains("User", result);
@@ -105,7 +105,7 @@ public class PipelineTests
         var desc = "something unrelated";
 
         // Act
-        var result = AgentUtilities.ExtractRelevantExcerpt(content, desc, null);
+        var result = AgentDiscovery.ExtractRelevantExcerpt(content, desc, null);
 
         // Assert
         Assert.Contains("public class Test", result);
@@ -122,7 +122,7 @@ public class PipelineTests
     public void ClassifyTask_VariousPrompts_CorrectPipeline(string prompt, PipelineType expected)
     {
         // Act
-        var (type, _, _) = AgentUtilities.ClassifyTask(prompt);
+        var (type, _, _) = AgentPlanParsing.ClassifyTask(prompt);
 
         // Assert
         Assert.Equal(expected, type);
@@ -135,7 +135,7 @@ public class PipelineTests
         var prompt = "Please add a new button to the user dashboard";
 
         // Act
-        var keywords = AgentUtilities.ExtractMeaningfulKeywords(prompt.ToLowerInvariant());
+        var keywords = AgentDiscovery.ExtractMeaningfulKeywords(prompt.ToLowerInvariant());
 
         // Assert
         Assert.DoesNotContain("add", keywords);
@@ -163,7 +163,7 @@ public class PipelineTests
         };
 
         // Act
-        var result = AgentUtilities.GetSkeletonForRange(lines, 0, lines.Length);
+        var result = AgentSkeleton.GetSkeletonForRange(lines, 0, lines.Length);
 
         // Assert
         Assert.Contains("MyController", result);
@@ -184,7 +184,7 @@ public class PipelineTests
         var content = string.Join("\n", lines);
 
         // Act
-        var result = AgentUtilities.ExtractRelevantExcerpt(content, "fix the SecretFunction", null);
+        var result = AgentDiscovery.ExtractRelevantExcerpt(content, "fix the SecretFunction", null);
 
         // Assert
         Assert.Contains("SecretFunction", result);
@@ -210,7 +210,7 @@ public class PipelineTests
         var planOld = "    public void Target() {\n        // Anchor is here";
 
         // Act
-        var result = AgentUtilities.ExtractRelevantExcerpt(content, "fix target", planOld);
+        var result = AgentDiscovery.ExtractRelevantExcerpt(content, "fix target", planOld);
 
         // Assert
         Assert.Contains("Target", result);
@@ -223,7 +223,7 @@ public class PipelineTests
     public void TryRepairTruncatedPlanJson_ClosesBrackets()
     {
         var truncated = "{\"plan\": [{\"file\": \"test.cs\", \"change\": \"add method\"";
-        var result = AgentUtilities.TryRepairTruncatedPlanJson(truncated);
+        var result = AgentPlanParsing.TryRepairTruncatedPlanJson(truncated);
         Assert.NotNull(result);
         Assert.Contains("}]}", result);
     }
@@ -238,7 +238,7 @@ public class PipelineTests
         """;
 
         // Act
-        var result = AgentUtilities.ParseStepExplorationResponse(raw);
+        var result = AgentPlanParsing.ParseStepExplorationResponse(raw);
 
         // Assert
         Assert.True(result.Ready);
@@ -254,7 +254,7 @@ public class PipelineTests
         var task = "Add additional time-based greetings to handle early morning hours before 5AM";
 
         // Act
-        var result = AgentUtilities.ExtractTargetSymbolFromChange(task);
+        var result = AgentMethodInventory.ExtractTargetSymbolFromChange(task);
 
         // Assert
         Assert.NotEqual("handle", result);
@@ -293,7 +293,7 @@ public class PipelineTests
         """;
 
         // Act
-        var result = AgentUtilities.ExtractMethodBodiesByKeywords(content, "Add more funny greeting messages to getTimedGreetingMessage");
+        var result = AgentMethodInventory.ExtractMethodBodiesByKeywords(content, "Add more funny greeting messages to getTimedGreetingMessage");
 
         // Assert
         Assert.Contains("getTimedGreetingMessage", result);
@@ -305,7 +305,7 @@ public class PipelineTests
     public void EstimateTokens_ReturnsApproximateCount()
     {
         var text = "Hello world"; // 11 chars
-        var result = AgentUtilities.EstimateTokens(text);
+        var result = AgentTokenMetrics.EstimateTokens(text);
         Assert.Equal(2, result); // 11 / 4 = 2.75 -> 2
     }
 
@@ -316,7 +316,7 @@ public class PipelineTests
     [InlineData("Explore app-title-bar.component.ts file", false)]
     public void LooksLikeShellCommand_RejectsPlanningProse(string command, bool expected)
     {
-        Assert.Equal(expected, AgentUtilities.LooksLikeShellCommand(command));
+        Assert.Equal(expected, AgentProjectUtilities.LooksLikeShellCommand(command));
     }
 
     [Fact]
@@ -366,7 +366,7 @@ public class PipelineTests
     [InlineData("rename current.cs → renamed.cs", "current.cs", "renamed.cs")]
     public void ExtractTargetPath_HandlesArrowsAndTo(string desc, string current, string expected)
     {
-        var result = AgentUtilities.ExtractTargetPath(desc, current, "/");
+        var result = AgentDiscovery.ExtractTargetPath(desc, current, "/");
         Assert.Equal(expected, result);
     }
 
@@ -374,7 +374,7 @@ public class PipelineTests
     public void TryDetectSimpleIntent_Delete_IdentifiesTarget()
     {
         // Act
-        var plan = AgentUtilities.TryDetectSimpleIntent("delete the file src/temp.log");
+        var plan = AgentPlanParsing.TryDetectSimpleIntent("delete the file src/temp.log");
 
         // Assert
         Assert.NotNull(plan);
@@ -397,7 +397,7 @@ public class PipelineTests
         };
 
         // Act
-        var result = AgentUtilities.GetSkeletonForRange(lines, 0, lines.Length);
+        var result = AgentSkeleton.GetSkeletonForRange(lines, 0, lines.Length);
 
         // Assert
         Assert.Contains("def global_func() { ... }", result);
@@ -421,7 +421,7 @@ public class PipelineTests
         };
 
         // Act
-        var result = AgentUtilities.GetSkeletonForRange(lines, 0, lines.Length);
+        var result = AgentSkeleton.GetSkeletonForRange(lines, 0, lines.Length);
 
         // Assert
         Assert.Contains("func", result);
@@ -455,7 +455,7 @@ class Dto {}
 class Dto { int id; }
 <<<STEP END>>>
 ";
-        var plan = AgentUtilities.ParseDelimitedPlan(raw);
+        var plan = AgentPlanParsing.ParseDelimitedPlan(raw);
         Assert.NotNull(plan);
         Assert.Equal(2, plan.Plan.Count);
         Assert.Equal("api.cs", plan.Plan[0].File);
@@ -469,7 +469,7 @@ class Dto { int id; }
         // Prompt with both command keywords (fetch, data) and edit keywords (update, component)
         var prompt = "fetch the latest weather data and update the WeatherComponent with the new values";
         
-        var (type, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
+        var (type, cmdScore, editScore) = AgentPlanParsing.ClassifyTask(prompt);
         
         // Should favor CodeEdit because of 'component' and 'update' which are strong edit signals
         Assert.Equal(PipelineType.CodeEdit, type);

@@ -586,22 +586,45 @@ angular.module('kanbanApp')
                 // Returns { level, icon, title } for an endpoint URL, or null when there's
                 // not enough data yet. Bad (🔴): >=40% stream-error rate or >=5 errors with
                 // no recent success. Warn (🟡): >=15% rate or any errors while calls are few.
+                // The tooltip also reports recovery effectiveness (retries that landed vs
+                // still failed) so users can judge whether the self-healing is working.
+                //
+                // NOTE: the badge object is memoized by content. Templates bind this
+                // function directly (ng-if, interpolations), and Angular dirty-checks the
+                // RESULT by reference — returning a fresh object every digest made the
+                // loop never settle ($rootScope:infdig). Same content → same reference.
+                vm._endpointBadgeCache = {};
                 vm.endpointHealthBadge = function (url) {
                     var h = vm.endpointHealthFor(url);
                     if (!h || !h.calls || h.calls < 3) return null;
                     var rate = h.errorRate || 0;
+                    // Only mention recovery stats once there's actual retry activity — a fresh
+                    // endpoint with zero retries shouldn't clutter every tooltip with '0/0'.
+                    var rec = (h.recovered || 0) + (h.recoveryFailed || 0) > 0
+                        ? ' · ♻ ' + (h.recovered || 0) + ' recovered / ' + (h.recoveryFailed || 0) + ' failed retries'
+                        : '';
+                    var badge;
                     if (rate >= 40 || (h.streamErrors >= 5 && !h.lastSuccessAt)) {
-                        return { level: 'bad', icon: '🔴', title: 'Frequently drops streams: ' + h.streamErrors + '/' + h.calls + ' calls failed mid-stream (' + rate + '%)' };
+                        badge = { level: 'bad', icon: '🔴', title: 'Frequently drops streams: ' + h.streamErrors + '/' + h.calls + ' calls failed mid-stream (' + rate + '%)' + rec };
                     }
                     // No successful call in the last hour while errors keep coming → treat
                     // as bad, not just warn, so a sick endpoint is easy to spot.
-                    if (rate >= 15 || h.streamErrors >= 2) {
+                    else if (rate >= 15 || h.streamErrors >= 2) {
                         if (h.stale) {
-                            return { level: 'bad', icon: '🔴', title: 'Unhealthy: no successful call in 1h+ and ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' };
+                            badge = { level: 'bad', icon: '🔴', title: 'Unhealthy: no successful call in 1h+ and ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' + rec };
+                        } else {
+                            badge = { level: 'warn', icon: '🟡', title: 'Some stream drops: ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' + rec };
                         }
-                        return { level: 'warn', icon: '🟡', title: 'Some stream drops: ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' };
+                    } else {
+                        badge = { level: 'ok', icon: '🟢', title: 'Healthy: ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' + rec };
                     }
-                    return { level: 'ok', icon: '🟢', title: 'Healthy: ' + h.streamErrors + '/' + h.calls + ' calls failed (' + rate + '%)' };
+                    var key = badge.level + '|' + badge.icon + '|' + badge.title;
+                    if (vm._endpointBadgeCache[key]) return vm._endpointBadgeCache[key];
+                    // Bounded cache — distinct titles (counts drift as data updates), so
+                    // cap it and rebuild rather than leaking references forever.
+                    if (Object.keys(vm._endpointBadgeCache).length > 64) vm._endpointBadgeCache = {};
+                    vm._endpointBadgeCache[key] = badge;
+                    return badge;
                 };
                 vm.endpointBadgeText = function (url) {
                     var b = vm.endpointHealthBadge(url);

@@ -30,7 +30,7 @@ public static class EditClassifier
             return ClassifyHtml(step.Change ?? "");
 
         var change = (step.Change ?? "").ToLowerInvariant().Replace('_', ' ');
-        var (_, supportsFormatC, _) = AgentUtilities.GetLanguageProfile(ext);
+        var (_, supportsFormatC, _) = AgentMethodInventory.GetLanguageProfile(ext);
 
         if (IsDeletion(change))           return EditStrategy.DeleteLines;
         if (IsClassPropertyFill(change))

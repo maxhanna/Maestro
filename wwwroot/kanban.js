@@ -176,29 +176,6 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }, 0);
       };
 
-      // Creates a brand-new To Do card from a finished card's improvement
-      // suggestion, pre-attaching the suggestion's file paths as discovery
-      // context so the orchestrator can hand them straight to the agent.
-      vm.addSuggestionAsCard = function (card, suggestion) {
-        if (!suggestion || suggestion.added) return;
-        var newCard = {
-          id: uid(),
-          text: suggestion.description,
-          filePath: (card && card.filePath) || vm.selectedProject,
-          createdAt: new Date().toISOString(),
-          priority: 'medium',
-          attached: (suggestion.files || []).slice(),
-          autoPr: vm.prByDefault !== false,
-          selfImproving: false,
-          createTests: false,
-          llmEndpointId: (card && card.llmEndpointId) || ''
-        };
-        vm.state.todo.push(newCard);
-        suggestion.added = true;
-        vm.saveCards();
-        if (vm.showSideToast) vm.showSideToast('💡 Suggestion added to To Do');
-      };
-
       vm.clearDoneCards = function () {
         if (!$window.confirm('Delete all done tasks?')) return;
         vm.state.done = [];
@@ -376,6 +353,26 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.planDoneCount = function (items) {
         if (!items || !items.length) return 0;
         return items.filter(function (i) { return i.done; }).length;
+      };
+
+      // Number of 'recovering' log entries for this card — the count of times the
+      // run healed itself mid-stream (stream drop retry, finish-this continuation).
+      // Persisted runs read card.agentLog; the live run reads the streaming log.
+      vm.recoveredCount = function (card) {
+        try {
+          var log = null;
+          if (card && card.agentLog && card.agentLog.length) {
+            log = card.agentLog;
+          } else if (card && vm.isCardActive && vm.isCardActive(card.id) && vm.agentActivityLog) {
+            log = vm.agentActivityLog;
+          }
+          if (!log) return 0;
+          var n = 0;
+          for (var i = 0; i < log.length; i++) {
+            if (log[i] && log[i].level === 'recovering') n++;
+          }
+          return n;
+        } catch (e) { return 0; }
       };
 
       vm.isPlanMarker = function (file) {

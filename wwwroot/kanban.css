@@ -284,6 +284,20 @@ body.dragging-active .card:hover {
     animation: tag-queued-pulse 1.6s ease-in-out infinite;
 }
 
+/* Self-healing badge — counts 'recovering' log entries (stream drops, token-cap
+   finish-this continuations) so users can spot runs that repaired themselves
+   without opening the log. Matches the amber recovering log-entry color. */
+.card .card-tag.tag-recovering {
+    background: rgba(251, 191, 36, 0.18);
+    color: #fbbf24;
+    font-weight: 700;
+    border: 1px solid rgba(251, 191, 36, 0.35);
+}
+.card .card-meta .card-tag.tag-recovering {
+    margin-right: auto;
+    margin-left: 6px;
+}
+
 @keyframes tag-queued-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.55; }
@@ -367,23 +381,6 @@ body.dragging-active .card:hover {
     flex-wrap: wrap;
     gap: 4px;
     margin-top: 6px;
-}
-
-.card .suggestion-actions {
-    margin-top: 6px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.card .suggestion-added-tag {
-    font-size: 11px;
-    font-weight: 600;
-    color: #4ade80;
-}
-
-.card .suggestion.suggestion-added .suggestion-desc {
-    opacity: 0.6;
 }
 
 .card .card-tag.tag-self-improving {

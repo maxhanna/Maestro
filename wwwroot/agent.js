@@ -318,7 +318,7 @@ angular.module('kanbanApp')
                                                                     vm.complexityTokenCap = parsed.tokenCap;
                                                                     vm.complexityMaxTokens = parsed.maxTokens;
                                                                     vm.complexityAtomicSteps = parsed.atomicSteps;
-                                                                    pushAgentLog(vm, 'info', '🧠 Complexity: ' + parsed.score + '/100 (' + parsed.label + ') — thinking capped at ' + parsed.tokenCap + ' tokens (max ' + parsed.maxTokens + ')' + (parsed.atomicSteps ? ', ~' + parsed.atomicSteps + ' atomic step(s) estimated' : ''));
+                                                                    pushAgentLog(vm, 'info', '🧠 Complexity: ' + parsed.score + '/100 (' + parsed.label + ') — planning/editing thinking capped at ' + parsed.tokenCap + ' tokens (overall thinking max ' + parsed.maxTokens + ')' + (parsed.atomicSteps ? ', ~' + parsed.atomicSteps + ' atomic step(s) estimated' : ''));
                                                                 }
                                                                 break;
                                                             case 'phase':
@@ -716,8 +716,9 @@ angular.module('kanbanApp')
                 // ── Improvement suggestions for completed cards ─────────────
                 // Called when a card finishes successfully (moved to Done). Sets a
                 // pulsing "Suggesting improvements…" flag on the card, asks the
-                // backend to generate 0-3 LLM suggestions (with file attachments),
-                // then persists them onto the card and notifies the user.
+                // backend to generate up to 3 LLM suggestions (with file
+                // attachments), then persists them onto the card as a
+                // "Suggestions" section. Suggestions never become new cards.
                 vm.suggestImprovements = function (card, summary, project) {
                     if (!card || card._suggestions || card._suggestionsRequested) return;
                     var proj = project || card.filePath || vm.selectedProject;
@@ -727,12 +728,32 @@ angular.module('kanbanApp')
                     card._suggestionsError = null;
                     vm.saveCards();
                     pushAgentLog(vm, 'info', '💡 Suggesting improvements for completed card…');
-                    var filesEdited = (vm.streamingFilesEdited || []).map(function (f) { return f && f.path ? f.path : null; }).filter(function (p) { return !!p; });
+                    // Ground the suggestions in what the agent actually did and
+                    // thought: the stored analysis carries the thinking log, the
+                    // executed steps, and the plan items.
+                    var analysis = card.agentAnalysis || {};
+                    var filesEdited = ((analysis.filesEdited && analysis.filesEdited.length)
+                        ? analysis.filesEdited
+                        : (vm.streamingFilesEdited || []))
+                        .map(function (f) { return f && f.path ? f.path : null; }).filter(function (p) { return !!p; });
+                    var stepLog = (analysis.steps || [])
+                        .filter(function (s) { return s && s.change; })
+                        .slice(0, 40)
+                        .map(function (s) { return (s.path ? s.path + ' — ' : '') + s.change; });
+                    var planLog = (analysis.planItems || [])
+                        .filter(function (p) { return p && p.text; })
+                        .slice(0, 25)
+                        .map(function (p) { return (p.done ? '✓ ' : '○ ') + p.text; });
                     $http.post('/api/agent/suggest-improvements', {
                         project: proj,
                         cardId: card.id,
                         cardText: card.text,
-                        summary: summary || (card.agentAnalysis && card.agentAnalysis.summary) || '',
+                        summary: summary || analysis.summary || '',
+                        // Thinking logs can run 5-20k chars; cap what we send so the
+                        // suggestion prompt stays within the endpoint's input budget.
+                        thinking: (analysis.thinking || '').slice(0, 6000),
+                        steps: stepLog,
+                        planItems: planLog,
                         filesEdited: filesEdited
                     }).then(function (resp) {
                         var suggestions = (resp.data && resp.data.suggestions) || [];

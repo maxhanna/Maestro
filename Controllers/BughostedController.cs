@@ -19,19 +19,21 @@ public class BughostedController : ControllerBase
     private readonly IConfiguration _config;
     private readonly IWebHostEnvironment _env;
     private readonly IHostApplicationLifetime _hostLifetime;
+    private readonly DatabaseService _db;
     private const string DefaultBugHostedUrl = "https://bughosted.com";
     private static readonly Dictionary<string, BughostedSession> _sessions = new();
     private static string _updateStage = "idle";
     private static long _updateBytesDownloaded;
     private static long _updateTotalBytes;
 
-    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config, IWebHostEnvironment env, IHostApplicationLifetime hostLifetime)
+    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config, IWebHostEnvironment env, IHostApplicationLifetime hostLifetime, DatabaseService db)
     {
         _configFile = configFile;
         _clientFactory = clientFactory;
         _config = config;
         _env = env;
         _hostLifetime = hostLifetime;
+        _db = db;
     }
 
     // ─── Filesystem proxy (for BugHosted IDE remote file access) ─────────────
@@ -883,32 +885,18 @@ start """" ""{currentExe}"" --no-open-browser
             default:
                 return JsonSerializer.Serialize(new { error = $"Unknown request type: {type}" });
         }
+    } 
+    async Task<string> GetLocalVersionAsync()
+    { 
+        var dbVersion = _db.GetLocalVersion();
+        if (!string.IsNullOrWhiteSpace(dbVersion)) return dbVersion; 
+        return "0";
     }
 
-    static string GetVersionFilePath()
+    Task SetLocalVersionAsync(string version)
     {
-        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Weaver");
-        Directory.CreateDirectory(dir);
-        return Path.Combine(dir, ".weaver-version");
-    }
-
-    static async Task<string> GetLocalVersionAsync()
-    {
-        var versionFile = GetVersionFilePath();
-
-        if (!System.IO.File.Exists(versionFile))
-        {
-            await System.IO.File.WriteAllTextAsync(versionFile, "0");
-            return "0";
-        }
-
-        return (await System.IO.File.ReadAllTextAsync(versionFile)).Trim();
-    }
-
-    static async Task SetLocalVersionAsync(string version)
-    {
-        var versionFile = GetVersionFilePath();
-        await System.IO.File.WriteAllTextAsync(versionFile, version);
+        _db.SetLocalVersion(version);
+        return Task.CompletedTask;
     }
 
     static async Task<string?> GetRemoteVersionAsync()

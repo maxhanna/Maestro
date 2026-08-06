@@ -8,7 +8,7 @@ namespace Weaver.UnitTests;
 /// Corpus for the DeleteLines / removal strategy. Generates random files with
 /// duplicate-similar blocks, then runs the COMPLETE deterministic chain the agent
 /// executes for a deletion step: EditClassifier.Classify → ClassifyIntent →
-/// EditStrategyResolver.Decide → AgentUtilities.TryReplaceSafe (oldStr → empty newStr,
+/// EditStrategyResolver.Decide → AgentEditHeuristics.TryReplaceSafe (oldStr → empty newStr,
 /// with step.LineNumber and step.Change — exactly the call at AgentController:4529).
 ///
 /// The claim locked here is the anti-over-match guarantee: a deletion removes ONLY
@@ -82,7 +82,7 @@ public class DeleteCorpusTests
         Assert.Equal(EditIntentKind.DeleteContent, intent.Kind);
         var decision = EditStrategyResolver.Decide(relPath, true, content, change, intent);
         Assert.Equal(EditStrategy.DeleteLines, decision.Strategy);
-        var (replaced, newContent, matchError, _) = AgentUtilities.TryReplaceSafe(content, oldStr, "", targetLine, change);
+        var (replaced, newContent, matchError, _) = AgentEditHeuristics.TryReplaceSafe(content, oldStr, "", targetLine, change);
         return (replaced, newContent, matchError);
     }
 
