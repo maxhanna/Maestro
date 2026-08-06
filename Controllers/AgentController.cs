@@ -12837,7 +12837,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                               t?.ToString() is "plan_step" or "command" or "edit" or "create");
                 var planAlreadyDone = existingPlan != null && completedIndices != null && completedIndices.Count >= existingPlan.Plan.Count;
                 complete = anyStepsAttempted || planAlreadyDone;
-                editsApplied = true;
+                // Do not claim edits were applied merely because a benchmark pipeline ran.
+                // This value drives client retry behavior and must reflect actual artifacts.
+                editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
             }
             await SendSse(Response, "done", new
             {

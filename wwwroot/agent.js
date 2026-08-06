@@ -297,6 +297,7 @@ angular.module('kanbanApp')
 
                                                                 vm.agentResult = { summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited, steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
+                                                                var completionElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                                                                 vm._agentStartTime = null;
                                                                 vm.agentTimer = null; 
 
@@ -310,6 +311,15 @@ angular.module('kanbanApp')
                                                                     var allDone = vm.planItems.every(function (pi) { return pi.done; });
                                                                     if (!allDone) { incomplete = true; pushAgentLog(vm, 'warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing'); }
                                                                     else incomplete = false;
+                                                                }
+
+                                                                // A benchmark with no successful edit cannot make progress by replaying the
+                                                                // same deterministic model response. Score the artifact once instead of
+                                                                // surfacing a misleading client-side max-iterations error.
+                                                                if (card._benchmark && incomplete && parsed && parsed.editsApplied === false) {
+                                                                    pushAgentLog(vm, 'warn', 'Benchmark produced no edits; evaluating the artifact without retrying.');
+                                                                    recordBenchmarkScore(completionElapsed);
+                                                                    return;
                                                                 }
 
                                                                 function recordBenchmarkScore(durationMs) {
@@ -329,7 +339,6 @@ angular.module('kanbanApp')
                                                                 }
 
                                                                 function finishCard() {
-                                                                    var completionElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                                                                     vm._agentStartTime = null;
                                                                     vm.agentTimer = null;
                                                                     if (card._benchmark && !incomplete) { recordBenchmarkScore(completionElapsed); return; }
