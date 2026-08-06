@@ -93,7 +93,9 @@ angular.module('kanbanApp')
 
                 vm.executeAgent = function (card, isAutoRestart) {
                     if (!card || vm.streamingActive || !card.text) return;
-                    var proj = card.filePath || vm.selectedProject; if (!proj) return $window.alert('No project assigned');
+                    var proj = card.filePath || vm.selectedProject;
+                    if (!proj && !card._benchmark) return $window.alert('No project assigned');
+                    proj = proj || '';
                     try {
                         if (!isAutoRestart) card._agentIteration = 0;
                         delete card.agentAnalysis; delete card.agentLog;
@@ -314,20 +316,27 @@ angular.module('kanbanApp')
                                                                     else incomplete = false;
                                                                 }
 
-                                                                function recordBenchmarkScore() {
+                                                                function recordBenchmarkScore(durationMs) {
                                                                     if (!card._benchmark) return;
                                                                     vm.benchmarkRunning = false; vm.benchmarkLevel = null;
-                                                                    var bmElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
+                                                                    var bmElapsed = durationMs == null ? 0 : durationMs;
                                                                     var actualStrategies = (finalSteps || []).map(function (s) { return s.editStrategy; }).filter(Boolean);
-                                                                    $http.post('/api/benchmark/evaluate', { level: card._benchmarkLevel || 1, runId: card._benchmarkRunId || '', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: bmElapsed, actualStrategies: actualStrategies }).then(function (resp) { if (resp.data) vm.benchmarkScores.unshift(resp.data); });
-                                                                    var bIdx = vm.state.todo.indexOf(card); if (bIdx < 0) bIdx = vm.state.doing.indexOf(card); if (bIdx < 0) bIdx = vm.state.done.indexOf(card);
-                                                                    if (bIdx >= 0) { var col = vm.state.todo.indexOf(card) >= 0 ? 'todo' : vm.state.doing.indexOf(card) >= 0 ? 'doing' : 'done'; vm.state[col].splice(bIdx, 1); vm.saveCards(); }
+                                                                    $http.post('/api/benchmark/evaluate', { level: card._benchmarkLevel || 1, runId: card._benchmarkRunId || '', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: bmElapsed, actualStrategies: actualStrategies }).then(function (resp) {
+                                                                        if (resp.data) vm.benchmarkScores.unshift(resp.data);
+                                                                        var columns = [vm.state.todo, vm.state.doing, vm.state.done];
+                                                                        columns.forEach(function (column) { var index = column.indexOf(card); if (index >= 0) column.splice(index, 1); });
+                                                                        vm.saveCards();
+                                                                    }, function (err) {
+                                                                        vm.benchmarkRunning = false;
+                                                                        pushAgentLog(vm, 'error', 'Benchmark evaluation failed', err.data || err.statusText || 'Unknown error');
+                                                                    });
                                                                 }
 
                                                                 function finishCard() {
+                                                                    var completionElapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                                                                     vm._agentStartTime = null;
                                                                     vm.agentTimer = null;
-                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
+                                                                    if (card._benchmark && !incomplete) { recordBenchmarkScore(completionElapsed); return; }
                                                                      if (!incomplete) {
                                                                          pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                          vm.moveCardToDone(card);
@@ -355,7 +364,7 @@ angular.module('kanbanApp')
                                                                      }
                                                                      if (incomplete && card.id === vm.activeCardId) {
                                                                         card._agentIteration = (card._agentIteration || 0) + 1; var MAX_ITERATIONS = 5;
-                                                                        if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(); return; } }
+                                                                        if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(completionElapsed); return; } }
                                                                         else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
                                                                      $timeout(function () {

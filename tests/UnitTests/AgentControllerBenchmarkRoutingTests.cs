@@ -41,6 +41,49 @@ public sealed class AgentControllerBenchmarkRoutingTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareAgentApplyEvaluate_CompletesBenchmarkWorkflow()
+    {
+        Directory.CreateDirectory(_root);
+        var environment = new FakeEnvironment(_root);
+        var benchmarkService = new BenchmarkService(Path.Combine(_root, "data"));
+        var prepared = await benchmarkService.PrepareAsync(1, benchmarkService.SandboxRoot);
+        var configFile = new ConfigFileService(environment);
+        using var terminal = new TerminalService(configFile);
+        var runner = new RecordingBenchmarkTerminalRunner();
+        var agent = new AgentController(
+            null!, new ConfigurationBuilder().Build(), environment, terminal, new FileHintsManager(_root), configFile,
+            new EmailService(configFile), new BoardDataService(Path.Combine(_root, "board.json"), null!), runner)
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
+
+        var applied = await agent.ApplyEdits(new ApplyEditsRequest
+        {
+            IsBenchmark = true,
+            BenchmarkRunId = prepared.RunId,
+            Edits = [new EditAction
+            {
+                Path = "benchmark_test_1/test.md",
+                NewString = "Hello world\nThe capital of France is Paris"
+            }]
+        });
+        Assert.IsType<OkObjectResult>(applied);
+
+        var benchmark = new BenchmarkController(environment);
+        var evaluated = await benchmark.Evaluate(new BenchmarkEvaluationRequest
+        {
+            Level = 1,
+            RunId = prepared.RunId,
+            ModelUsed = "workflow-test"
+        }, CancellationToken.None);
+        var score = Assert.IsType<BenchmarkScore>(Assert.IsType<OkObjectResult>(evaluated).Value);
+
+        Assert.Equal(100, score.ScorePercent);
+        Assert.Equal("workflow-test", score.ModelUsed);
+        Assert.Single(Assert.IsType<List<BenchmarkScore>>(Assert.IsType<OkObjectResult>(benchmark.GetScores()).Value));
+    }
+
+    [Fact]
     public async Task BenchmarkApply_UsesSandboxRunnerForSubmittedCommands()
     {
         Directory.CreateDirectory(_root);
