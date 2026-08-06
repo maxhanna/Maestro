@@ -328,6 +328,7 @@ public class BenchmarkService
                 case BenchmarkCheckType.FileContains:
                 case BenchmarkCheckType.FileNotContains:
                 case BenchmarkCheckType.FileOccurrenceCount:
+                case BenchmarkCheckType.FileEquals:
                     if (!File.Exists(path))
                     {
                         result.Message = $"Missing file: {check.Path}";
@@ -343,6 +344,15 @@ public class BenchmarkService
                         result.Passed = count == check.ExpectedCount;
                         result.Message = result.Passed ? $"Found exactly {count} occurrence(s)."
                             : $"Expected {check.ExpectedCount} occurrence(s) in {check.Path}, found {count}.";
+                        break;
+                    }
+                    if (check.Type == BenchmarkCheckType.FileEquals)
+                    {
+                        static string Normalize(string value) => value.Replace("\r\n", "\n").TrimEnd('\n');
+                        result.Passed = string.Equals(Normalize(content), Normalize(check.Value ?? ""),
+                            check.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+                        result.Message = result.Passed ? "Exact content assertion passed."
+                            : $"Exact content assertion failed for {check.Path}.";
                         break;
                     }
                     var contains = content.Contains(check.Value ?? "", check.IgnoreCase
@@ -707,7 +717,8 @@ public class BenchmarkService
                     Check.Dir("Benchmark directory exists", "benchmark_test_1"),
                     Check.File("Markdown file exists", "benchmark_test_1/test.md"),
                     Check.Contains("Contains greeting", "benchmark_test_1/test.md", "Hello world"),
-                    Check.Contains("Contains Paris fact", "benchmark_test_1/test.md", "The capital of France is Paris")
+                    Check.Contains("Contains Paris fact", "benchmark_test_1/test.md", "The capital of France is Paris"),
+                    Check.Exact("Exact markdown content", "benchmark_test_1/test.md", "Hello world\nThe capital of France is Paris", 2)
                 ]
             },
             new BenchmarkPlanDefinition
@@ -975,7 +986,7 @@ public sealed record BenchmarkRunInfo(string RunId, int Level, DateTime CreatedU
 
 public sealed class BenchmarkRunAlreadyEvaluatedException(string message) : InvalidOperationException(message);
 
-public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, CommandSucceeds, HttpResponse }
+public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, CommandSucceeds, HttpResponse, FileEquals }
 
 public class BenchmarkAcceptanceCheck
 {
@@ -1000,6 +1011,7 @@ public static class Check
     public static BenchmarkAcceptanceCheck File(string name, string path, double weight = 1) => new() { Name = name, Type = BenchmarkCheckType.FileExists, Path = path, Weight = weight };
     public static BenchmarkAcceptanceCheck Contains(string name, string path, string value, double weight = 1) => new() { Name = name, Type = BenchmarkCheckType.FileContains, Path = path, Value = value, Weight = weight };
     public static BenchmarkAcceptanceCheck Contains(string name, string path, string value, double weight, string category) => new() { Name = name, Type = BenchmarkCheckType.FileContains, Path = path, Value = value, Weight = weight, Category = category };
+    public static BenchmarkAcceptanceCheck Exact(string name, string path, string value, double weight = 1, string category = "correctness") => new() { Name = name, Type = BenchmarkCheckType.FileEquals, Path = path, Value = value, Weight = weight, Category = category };
     public static BenchmarkAcceptanceCheck NotContains(string name, string path, string value, double weight = 1, string category = "correctness") => new() { Name = name, Type = BenchmarkCheckType.FileNotContains, Path = path, Value = value, Weight = weight, Category = category };
     public static BenchmarkAcceptanceCheck Occurs(string name, string path, string value, int count, double weight = 1, string category = "correctness") => new() { Name = name, Type = BenchmarkCheckType.FileOccurrenceCount, Path = path, Value = value, ExpectedCount = count, Weight = weight, Category = category };
     public static BenchmarkAcceptanceCheck Command(string name, string path, string command, int timeoutSeconds = 30, double weight = 1) => new() { Name = name, Type = BenchmarkCheckType.CommandSucceeds, Path = path, Command = command, TimeoutSeconds = timeoutSeconds, Weight = weight };

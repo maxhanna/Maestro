@@ -22,7 +22,7 @@ public sealed class BenchmarkServiceTests : IDisposable
         Assert.Equal("completed", result.Status);
         Assert.Equal(100, result.ScorePercent);
         Assert.Equal(100, result.CorrectnessPercent);
-        Assert.Equal(4, result.StepsCompleted);
+        Assert.Equal(5, result.StepsCompleted);
         Assert.False(string.IsNullOrWhiteSpace(result.PlannerRoute));
         Assert.NotNull(result.PlannerGateScore);
         Assert.All(result.Checks, check => Assert.True(check.Passed, check.Message));
@@ -39,13 +39,13 @@ public sealed class BenchmarkServiceTests : IDisposable
         var result = await service.EvaluateAsync(1, prepared.RunRoot, "test-model", 50);
 
         Assert.Equal("partial", result.Status);
-        Assert.Equal(85, result.ScorePercent);
+        Assert.Equal(50, result.ScorePercent);
         Assert.Contains(result.Checks, check => check.Name == "Contains Paris fact" && !check.Passed);
+        Assert.Contains(result.Checks, check => check.Name == "Exact markdown content" && !check.Passed);
         Assert.Contains("Contains Paris fact", result.ErrorReason);
-        var failed = Assert.Single(result.Checks, check => !check.Passed);
-        Assert.Equal("EDIT_APPLICATION_FAILED", failed.FailureCode);
-        Assert.Equal(nameof(FailureCategory.EditApplication), failed.FailureCategory);
-        Assert.Equal(1, result.FailureCounts[nameof(FailureCategory.EditApplication)]);
+        Assert.Contains("Exact markdown content", result.ErrorReason);
+        Assert.Equal(2, result.Checks.Count(check => !check.Passed));
+        Assert.Equal(2, result.FailureCounts[nameof(FailureCategory.EditApplication)]);
     }
 
     [Fact]
