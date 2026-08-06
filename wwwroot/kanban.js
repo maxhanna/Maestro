@@ -330,6 +330,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         // Deleting the last benchmark card of a run-all batch finalizes it
         // (the batch has no live card left), so the run buttons unlock.
         if (vm._finalizeStaleBenchmarkIfNeeded) vm._finalizeStaleBenchmarkIfNeeded();
+        // Also clear a latched single-benchmark "running" flag when the deleted
+        // card was its only evidence (e.g. a stuck single-benchmark run).
+        if (vm.reconcileBenchmarkRunning) vm.reconcileBenchmarkRunning();
         if (vm.deleteCardConfirm.dontShowAgain) {
           try { $window.localStorage.setItem('weaverconfig.deleteCardConfirm', 'false'); } catch (e) { }
         }
@@ -359,6 +362,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         // Deleting the last benchmark card of a run-all batch finalizes it
         // (the batch has no live card left), so the run buttons unlock.
         if (vm._finalizeStaleBenchmarkIfNeeded) vm._finalizeStaleBenchmarkIfNeeded();
+        // Also clear a latched single-benchmark "running" flag when the deleted
+        // card was its only evidence (e.g. a stuck single-benchmark run).
+        if (vm.reconcileBenchmarkRunning) vm.reconcileBenchmarkRunning();
       };
 
       vm.onSelfImprovingToggle = function (card) {

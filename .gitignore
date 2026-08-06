@@ -5,16 +5,12 @@
 **/.freebuff/
 **/.playwright-mcp/
 data/*
-weaverconfig.json
+publish.ps1
 artifacts/
-
-.formatter/node_modules/
-.formatter/package-lock.json
 
 # Test output artifacts
 **/TestResults/
 *.trx
 **/TestResultsCoverage/
 *.cobertura.xml
-publish.sh
-publish.ps1
+

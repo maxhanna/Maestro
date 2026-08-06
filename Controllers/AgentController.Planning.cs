@@ -2233,6 +2233,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         await EmitLog(emitSse, assessFailed ? "warn" : "success",
                             $"✓ Plan complete after step {planSoFar.Count} — {completeReason}", ct: ct);
                         thinkingLog.AppendLine($"\n[Plan complete — {completeReason}]");
+                        // Whole-task verified complete → clear any pending unmet-requirement state
+                        // so a later restart does not re-plan work that is genuinely finished.
+                        if (!string.IsNullOrWhiteSpace(cardId))
+                            await PersistCardVerifyStateAsync(cardId, null, null, emitSse, ct);
                         if (emitSse)
                             await SendSse(Response, "plan", new
                             {
@@ -2249,6 +2253,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                     await EmitLog(emitSse, "metric",
                         $"🔍 Between-steps verification: task NOT complete yet — {assessReason}", ct: ct);
+                    // Persist the unmet assessment onto the card so a crash/stop/restart re-plans
+                    // the remaining requirement instead of trusting the all-done plan marks.
+                    if (!string.IsNullOrWhiteSpace(cardId))
+                        await PersistCardVerifyStateAsync(cardId, assessReason, null, emitSse, ct);
                 }
             }
         }
@@ -2513,6 +2521,101 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!string.IsNullOrWhiteSpace(cardId))
             await PersistMetaPlanToCardAsync(cardId, result, emitSse, ct);
         return result;
+    }
+    /// <summary>
+    /// Persists the "verification still has work to do" state onto a card as _verifyPending
+    /// ({reason, issues[], updatedAt}). Calling with a null/empty reason and no issues REMOVES
+    /// the property (task verified complete). The resume path reads this so a restart re-plans
+    /// the unmet requirements instead of declaring the plan complete just because every
+    /// persisted plan step is already marked done.
+    /// </summary>
+    private async Task PersistCardVerifyStateAsync(string? cardId, string? reason, List<string>? issues, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId))
+            return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    var hasContent = !string.IsNullOrWhiteSpace(reason) || (issues != null && issues.Count > 0);
+                    if (hasContent)
+                    {
+                        cardObj["_verifyPending"] = new JsonObject
+                        {
+                            ["reason"] = reason ?? "",
+                            ["issues"] = new JsonArray((issues ?? new List<string>()).Select(i => JsonValue.Create(i)).ToArray()),
+                            ["updatedAt"] = DateTime.UtcNow.ToString("o")
+                        };
+                    }
+                    else
+                    {
+                        cardObj.Remove("_verifyPending");
+                    }
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                        await SendSse(Response, "refresh", new { target = "boarddata", reason = "verify-state-updated", cardId }, ct);
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to persist card verify state", new { cardId, error = ex.Message });
+        }
+    }
+
+    /// <summary>Reads the card's _verifyPending blob (unmet requirements from the last
+    /// verification). Returns (reason, issues) — both empty when absent.</summary>
+    private async Task<(string? reason, List<string> issues)> LoadCardVerifyStateAsync(string? cardId)
+    {
+        if (string.IsNullOrWhiteSpace(cardId))
+            return (null, new List<string>());
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return (null, new List<string>());
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return (null, new List<string>());
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    if (cardObj["_verifyPending"] is not JsonObject vp)
+                        return (null, new List<string>());
+                    var reason = vp["reason"]?.GetValue<string>() ?? "";
+                    var issues = new List<string>();
+                    if (vp["issues"] is JsonArray arr)
+                        foreach (var i in arr)
+                            if (i?.GetValue<string>() is string s && !string.IsNullOrWhiteSpace(s))
+                                issues.Add(s);
+                    return (string.IsNullOrWhiteSpace(reason) ? null : reason, issues);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to load card verify state", new { cardId, error = ex.Message });
+        }
+        return (null, new List<string>());
     }
     private async Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isBenchmark)> LoadPlanFromBoardDataAsync(string? cardId)
     {

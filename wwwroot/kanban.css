@@ -298,6 +298,20 @@ body.dragging-active .card:hover {
     margin-left: 6px;
 }
 
+/* Run-interrupted badge — the card's agent run is no longer live in this tab
+   (page reload, dropped stream, missing done event). Amber like recovering,
+   but a solid border so it reads as a terminal state, never as running. */
+.card .card-tag.tag-interrupted {
+    background: rgba(251, 191, 36, 0.16);
+    color: #fbbf24;
+    font-weight: 700;
+    border: 1px solid rgba(251, 191, 36, 0.45);
+}
+.card .card-meta .card-tag.tag-interrupted {
+    margin-right: auto;
+    margin-left: 6px;
+}
+
 @keyframes tag-queued-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.55; }

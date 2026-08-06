@@ -187,7 +187,7 @@
     <div class="project-picker">
       <button type="button" class="header-stat header-stat-rank rank-trigger" ng-if="vm.showKanban"
         ng-click="vm.toggleUserStats()" ng-blur="vm.closeUserStatsOnBlur($event)"
-        ng-class="{active: vm.showUserStats}"
+        ng-class="{active: vm.showUserStats, 'rank-shine': vm.rankShine}"
         title="Rank — points from cards, benchmarks, projects & archived">
         <span class="rank-insignia rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
           <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
@@ -195,7 +195,7 @@
         </span>
         {{vm.userRankTitle(vm.userStats())}} ▾</button>
       <div class="user-stats-popup" ng-if="vm.showUserStats" ng-blur="vm.closeUserStatsOnBlur($event)" tabindex="0"
-        ng-init="rp = vm.userRankProgress(vm.userStats())">
+        ng-init="rp = vm.userRankProgress(vm.userStats()); rl = vm.userRankLadder(vm.userStats())">
         <div class="user-stats-popup-title">
           <span class="rank-insignia rank-insignia-lg rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
             <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
@@ -213,14 +213,40 @@
           </div>
         </div>
         <div class="rank-progress rank-progress-max" ng-if="!rp.next">🏆 Top rank reached — you're at the pinnacle</div>
+        <div class="rank-ladder" ng-if="rp.next">
+          <div class="rank-ladder-head">⬡ Rank ladder — {{rl.score | number:0}} pts · {{rl.above}} rung{{rl.above === 1 ? '' : 's'}} above you</div>
+          <div class="rank-ladder-row {{rlRow.isCurrent ? 'rank-ladder-row--current' : 'rank-grade-' + rlRow.grade}}"
+            ng-repeat="rlRow in rl.rungs track by rlRow.min"
+            ng-click="vm.toggleRung(rlRow)"
+            ng-class="{'rank-ladder-row--open': vm.isRungExpanded(rlRow)}"
+            title="{{rlRow.title}} — {{rlRow.min | number:0}} pts · click for the lore">
+            <span class="rank-ladder-insignia rank-grade-{{rlRow.grade}}" aria-hidden="true">
+              <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(rlRow.chevrons) track by $index" class="rank-chevron"></i></span>
+              <span class="rank-stars"><i ng-repeat="s in vm.chevronArray(rlRow.stars) track by $index" class="rank-star">★</i></span>
+            </span>
+            <span class="rank-ladder-main">
+              <span class="rank-ladder-title">{{rlRow.title}}</span>
+              <span class="rank-ladder-tick" ng-if="!rlRow.isCurrent"
+                title="{{rlRow.tickPct | number:0}}% of the way to {{rlRow.title}}">
+                <span class="rank-ladder-tick-fill" ng-style="{width: rlRow.tickPct + '%'}"></span>
+              </span>
+              <span class="rank-ladder-desc" ng-if="vm.isRungExpanded(rlRow)">{{rlRow.blurb}}</span>
+            </span>
+            <span class="rank-ladder-meta">
+              <span class="rank-ladder-you" ng-if="rlRow.isCurrent">◀ you</span>
+              <span class="rank-ladder-pts" ng-if="!rlRow.isCurrent"
+                title="{{rlRow.stepPts | number:0}} pts → {{rlRow.title}} (from {{rlRow.floorTitle}})">{{rlRow.stepPts | number:0}} pts</span>
+            </span>
+            <span class="rank-ladder-chevron" aria-hidden="true">{{vm.isRungExpanded(rlRow) ? '▾' : '▸'}}</span>
+          </div>
+        </div>
         <span class="header-stat" title="Cards done — {{vm.userStats().done}} across {{vm.userStats().archived}} archived">✅
           {{vm.userStats().done}} done</span>
         <span class="header-stat" title="Finished this week">📅 {{vm.userStats().doneThisWeek}} this week</span>
         <span class="header-stat" title="Daily streak">🔥 {{vm.userStats().streak}} day streak</span>
         <span class="header-stat" title="Best benchmark score">📊 {{vm.userStats().bestScore}}% best score</span>
         <span class="header-stat" title="Total archived cards">🗄 {{vm.userStats().archived}} archived</span>
-      </div>
-      <label class="text-sm muted" for="project-select">Project:</label>
+      </div> 
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
         ng-change="vm.changeProject()"></select>
       <div class="project-desc" ng-if="vm.selectedProject && vm.getSelectedProjectDescription()">—
@@ -561,8 +587,8 @@
                           <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                           <code style="font-size:0.9em;opacity:0.8;">{{d.split('/').pop()}}</code>
                         </span>
-                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;">Apply</button>
-                        <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);font-size:0.9em;">✓</span>
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;">Apply</button>
+                        <span ng-if="vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);font-size:0.9em;">✓</span>
                         <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
                         <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
                         <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
@@ -586,8 +612,8 @@
                             <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                             <code>{{d.split('/').pop()}}</code>
                           </span>
-                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;">Apply</button>
-                          <span ng-if="item._diffApplied || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);">✓</span>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;">Apply</button>
+                          <span ng-if="vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
                           <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
                           <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
@@ -723,11 +749,11 @@
                           <span ng-if="!(s._previews && s._previews[d] && s._previews[d].loading)">{{(s._previews && s._previews[d] && s._previews[d].show) ? '▼' : '▶'}}</span>
                           <code class="diff-path">{{d.split('/').pop()}}</code>
                         </span>
-                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, s)" ng-disabled="s._applyingDiff || s._diffApplied || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)">
+                        <button class="diff-apply-btn" ng-click="vm.applyDiff(d, s)" ng-disabled="s._applyingDiff || vm.diffIsApplied(s, d) || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!vm.diffIsApplied(s, d) && !(s._previews && s._previews[d] && s._previews[d].deleted)">
                           <span ng-if="!s._applyingDiff">Apply</span>
                           <span ng-if="s._applyingDiff">Applying...</span>
                         </button>
-                        <span class="diff-applied" ng-if="s._diffApplied || (s._previews && s._previews[d] && s._previews[d].deleted)">✓</span>
+                        <span class="diff-applied" ng-if="vm.diffIsApplied(s, d) || (s._previews && s._previews[d] && s._previews[d].deleted)">✓</span>
                         <button ng-click="vm.deleteDiff(d, s, $event)" ng-disabled="s._applyingDiff || (s._previews && s._previews[d] && s._previews[d].deleting)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:0.64em;padding:0 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
                         <button ng-click="vm.openDiffInIde(d, s, $event)" ng-if="!s._diffApplied && !(s._previews && s._previews[d] && s._previews[d].deleted)" style="font-size:0.64em;padding:0 4px;color:#61afef;" title="Open diff in IDE">📄</button>
                         <span ng-if="s._previews && s._previews[d] && s._previews[d].deleting" style="color:#e06c75;font-size:0.64em;">deleting…</span>
@@ -1708,9 +1734,9 @@
               </div>
               <div class="bench-section-sub">Each run sends a coding task through the agent and scores the edits it makes.</div>
             </div>
-            <span class="bench-btn-wrap" ng-class="{'bench-btn-disabled': vm.benchmarkRunDisabled()}" title="{{vm.benchmarkRunTitle()}}">
+            <span class="bench-btn-wrap" ng-class="{'bench-btn-disabled': vm.benchmarksRunning()}" title="{{vm.benchmarkRunTitle()}}">
               <button ng-click="vm.startBenchmarkAll(); $event.stopPropagation()" class="primary small nowrap"
-                ng-disabled="vm.benchmarkRunDisabled()">▶ Run All</button>
+                ng-disabled="vm.benchmarksRunning()">▶ Run All</button>
             </span>
           </div>
 
@@ -1719,9 +1745,16 @@
               <span class="bench-spinner"></span>
               Benchmark <strong>{{vm.benchmarkLevelName(vm.benchmarkLevel)}}</strong> running
               <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>…
-              <button ng-if="vm.benchmarkAllActive && vm.benchmarkInterrupted()"
-                ng-click="vm.resumeBenchmarkAll()" class="primary small nowrap bench-resume-btn"
-                title="The run was interrupted by a page reload — resume the remaining benchmarks from here.">↻ Resume</button>
+            </div>
+
+            <div ng-if="!vm.benchmarkRunning && vm.benchmarkInterrupted() != null" class="bench-running bench-interrupted">
+              <span class="bench-interrupted-icon">⚠</span>
+              Benchmark <strong>{{vm.benchmarkInterruptedName()}}</strong> interrupted — its run is no longer live
+              <span ng-if="vm.benchmarkAllActive">({{vm.benchmarkAllResults.length}} of {{vm.benchmarkPlans.length}})</span>
+              <span class="bench-interrupted-hint">Resume it or delete the stuck card.</span>
+              <button ng-if="vm.benchmarkAllActive" ng-click="vm.resumeBenchmarkAll()"
+                class="primary small nowrap bench-resume-btn"
+                title="The run was interrupted by a page reload or dropped stream — resume the remaining benchmarks from here.">↻ Resume</button>
             </div>
 
             <div ng-if="vm.benchmarkPlans.length > 0">
@@ -1731,9 +1764,9 @@
                   <div class="bench-plan-name">{{plan.name}}</div>
                   <div class="bench-plan-desc">{{plan.description}}</div>
                 </div>
-                <span class="bench-btn-wrap" ng-class="{'bench-btn-disabled': vm.benchmarkRunDisabled()}" title="{{vm.benchmarkRunTitle()}}">
+                <span class="bench-btn-wrap" ng-class="{'bench-btn-disabled': vm.benchmarksRunning()}" title="{{vm.benchmarkRunTitle()}}">
                   <button ng-click="vm.startBenchmark(plan.level)" class="primary small nowrap"
-                    ng-disabled="vm.benchmarkRunDisabled()">▶ Run</button>
+                    ng-disabled="vm.benchmarksRunning()">▶ Run</button>
                 </span>
               </div>
             </div>
