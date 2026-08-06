@@ -6043,10 +6043,11 @@ angular.module('kanbanApp')
             }
           }
           if (s.speech && s.speechTtl > 0) {
-            drawSpeechBubble(W, H, px, cy - bodyH, s.speech);
+            drawSpeechBubble(W, H, px, cy - bodyH, s);
           }
         }
-        function drawSpeechBubble(W, H, px, py, text) {
+        function drawSpeechBubble(W, H, px, py, s) {
+          var text = s.speech;
           ctx.font = mf(10) + 'px sans-serif';
           var maxW = Math.min(W * 0.32, 220);
           var words = text.split(' ');
@@ -6057,11 +6058,26 @@ angular.module('kanbanApp')
             else cur = test;
           }
           if (cur) lines.push(cur);
-          if (lines.length > 3) { lines = lines.slice(0, 3); lines[2] += '…'; }
-          var bh = lines.length * 13 + 10;
-          var bw = maxW + 12;
+          var maxLines = 3, lineHeight = 13, pad = 6;
+          var visibleLines = Math.min(lines.length, maxLines);
+          var bh = visibleLines * lineHeight + pad * 2;
+          var bw = maxW + pad * 2;
           var bx = Math.max(4, Math.min(W - bw - 4, px - bw / 2));
           var by = Math.max(2, py - bh - 6);
+          // Scroll state: reset whenever the speech text changes so the scroll
+          // restarts from the top for each new thing a spider says.
+          if (s._speechText !== text) { s._speechText = text; s._speechStart = Date.now(); }
+          var totalH = lines.length * lineHeight + pad * 2;
+          var scrollable = Math.max(0, totalH - bh);
+          var scroll = 0;
+          if (scrollable > 0) {
+            var leg = Math.min(6, Math.max(2, lines.length * 0.45));
+            var elapsed = (Date.now() - (s._speechStart || Date.now())) / 1000;
+            var phase = (elapsed % (2 * leg)) / (2 * leg);
+            var tri = phase < 0.5 ? phase * 2 : (1 - (phase - 0.5) * 2);
+            var ease = tri * tri * (3 - 2 * tri);
+            scroll = scrollable * ease;
+          }
           ctx.fillStyle = 'rgba(15,20,35,0.92)';
           rr(bx, by, bw, bh, 6); ctx.fill();
           ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1; ctx.stroke();
@@ -6074,9 +6090,14 @@ angular.module('kanbanApp')
           ctx.fill();
           ctx.fillStyle = '#e8eef6';
           ctx.textBaseline = 'top';
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(bx, by, bw, bh);
+          ctx.clip();
           for (var j = 0; j < lines.length; j++) {
-            ctx.fillText(lines[j], bx + 6, by + 5 + j * 13);
+            ctx.fillText(lines[j], bx + pad, by + pad + j * lineHeight - scroll);
           }
+          ctx.restore();
           ctx.textBaseline = 'alphabetic';
         }
         var _stepStatusCache = {};

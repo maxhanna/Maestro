@@ -116,17 +116,18 @@
                           <code>{{d.split('/').pop()}}</code>
                         </span>
                         <span class="diff-tools">
-                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)"
-                            ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                            ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item, card)"
+                            ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
                           <span class="diff-applied"
-                            ng-if="vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleted)">✓</span>
+                            ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                             title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                            ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#e06c75;" title="Delete this diff file">🗑</button>
                           <button ng-click="vm.openDiffInIde(d, item, $event)"
-                            ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
                           <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>
@@ -365,16 +366,17 @@
                           <code>{{d.split('/').pop()}}</code>
                         </span>
                         <span class="diff-tools">
-                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)"
-                            ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                            ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
-                          <span class="diff-applied" ng-if="vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleted)">✓</span>
+                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item, card)"
+                            ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleting)"
+                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
+                          <span class="diff-applied" ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                             title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                            ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#e06c75;" title="Delete this diff file">🗑</button>
                           <button ng-click="vm.openDiffInIde(d, item, $event)"
-                            ng-if="!item._diffApplied && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
                           <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>

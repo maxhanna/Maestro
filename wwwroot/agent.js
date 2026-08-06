@@ -416,15 +416,26 @@ angular.module('kanbanApp')
                                                             case 'refresh':
                                                                 if (parsed && parsed.target === 'boarddata' && vm.refreshBoardData) vm.refreshBoardData(parsed);
                                                                 break;
-                                                            case 'step':
-                                                                if (parsed) {
-                                                                    upsertStreamingStep(vm, parsed, $scope, $timeout);
-                                                                    reconcilePlanItems(vm, $scope, $timeout);
-                                                                    if (parsed.diffs && parsed.diffs.length && parsed.planItemIndex !== undefined && vm.planItems) {
-                                                                        var pi = vm.planItems.find(function (x) { return x.index === parsed.planItemIndex; });
-                                                                        if (pi && (!pi.diffs || pi.diffs.length !== parsed.diffs.length)) { pi.diffs = parsed.diffs; pi._diffStepStatus = parsed.status; }
-                                                                    }
-                                                                    if (parsed.message === 'Cancelled by user' && parsed.planItemIndex !== undefined && vm.planItems) {
+                                                             case 'step':
+                                                                 if (parsed) {
+                                                                     upsertStreamingStep(vm, parsed, $scope, $timeout);
+                                                                     reconcilePlanItems(vm, $scope, $timeout);
+                                                                     if (parsed.diffs && parsed.diffs.length && parsed.planItemIndex !== undefined && vm.planItems) {
+                                                                         var pi = vm.planItems.find(function (x) { return x.index === parsed.planItemIndex; });
+                                                                         if (pi && (!pi.diffs || pi.diffs.length !== parsed.diffs.length)) { pi.diffs = parsed.diffs; pi._diffStepStatus = parsed.status; }
+                                                                     }
+                                                                     // When the agent finishes a step that produced diffs, those diffs
+                                                                     // are applied by the agent during the run — record them so the
+                                                                     // Apply button stays hidden across reloads (and other tabs).
+                                                                     if (parsed.status === 'done' && parsed.diffs && parsed.diffs.length) {
+                                                                         var appliedCard = vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
+                                                                         if (appliedCard) {
+                                                                             if (!appliedCard._appliedDiffs) appliedCard._appliedDiffs = {};
+                                                                             parsed.diffs.forEach(function (d) { appliedCard._appliedDiffs[d] = true; });
+                                                                             if (vm.saveCards) vm.saveCards();
+                                                                         }
+                                                                     }
+                                                                     if (parsed.message === 'Cancelled by user' && parsed.planItemIndex !== undefined && vm.planItems) {
                                                                         var cancelledItem = vm.planItems.find(function (pi) { return pi.index === parsed.planItemIndex; });
                                                                         if (cancelledItem) cancelledItem.cancelled = true;
                                                                     }
@@ -830,17 +841,42 @@ angular.module('kanbanApp')
                     if (vm.questionTimeout) { $timeout.cancel(vm.questionTimeout); vm.questionTimeout = null; }
                     $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () { vm.showQuestionModal = false; vm.pendingQuestion = null; });
                 };
-                vm.diffIsApplied = function (holder, diffPath) {
+                // Resolve the card that owns a diff. Callers pass it when they have
+                // it in scope (per-card columns); otherwise fall back to the active
+                // card so the streaming panel can still persist applied state.
+                vm._diffResolveCard = function (card) {
+                    if (card) return card;
+                    return vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
+                };
+                vm.diffIsApplied = function (holder, diffPath, card) {
                     if (!holder) return false;
                     if (holder._diffApplied) return true;
                     var status = holder.status || holder._diffStepStatus || '';
                     if (status === 'done') return true;
                     if (holder.done === true && status === '') return true;
+                    // Real per-diff applied flag persisted in board data — survives
+                    // reload and is consistent across tabs (source of truth is the
+                    // backend git apply response, recorded in card._appliedDiffs).
+                    var c = vm._diffResolveCard(card);
+                    if (c && c._appliedDiffs && diffPath && c._appliedDiffs[diffPath]) return true;
                     return false;
                 };
-                vm.applyDiff = function (diffPath, step) {
+                // True when the diff is applied but NOT via an explicit user Apply
+                // click in this session — i.e. the agent applied it during the run.
+                // Drives the "already applied" tooltip on the ✓ marker.
+                vm.diffAppliedByAgent = function (holder, diffPath, card) {
+                    if (!holder || !diffPath) return false;
+                    if (holder._diffApplied) return false;
+                    var status = holder.status || holder._diffStepStatus || '';
+                    var looksApplied = (status === 'done') || (holder.done === true && status === '');
+                    if (looksApplied) return true;
+                    var c = vm._diffResolveCard(card);
+                    if (c && c._appliedDiffs && c._appliedDiffs[diffPath]) return true;
+                    return false;
+                };
+                vm.applyDiff = function (diffPath, step, card) {
                     if (!diffPath || !vm.selectedProject) return;
-                    if (vm.diffIsApplied(step, diffPath)) return;
+                    if (vm.diffIsApplied(step, diffPath, card)) return;
                     var wasRunning = vm.streamingActive;
                     var savedCardId = vm.activeCardId;
                     var savedPrompt = vm.activeCardText;
@@ -854,7 +890,16 @@ angular.module('kanbanApp')
                             step._diffApplied = true;
                             step.status = 'done';
                             step._diffPath = diffPath;
-                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '✓ Diff applied: ' + diffPath + ' — halting agent' });
+                            // Persist the applied diff path in board data so Apply stays
+                            // correct across reloads and consistent across tabs.
+                            var appliedPath = (resp.data && resp.data.diffPath) || diffPath;
+                            var c = vm._diffResolveCard(card);
+                            if (c && appliedPath) {
+                                if (!c._appliedDiffs) c._appliedDiffs = {};
+                                c._appliedDiffs[appliedPath] = true;
+                                if (vm.saveCards) vm.saveCards();
+                            }
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '✓ Diff applied: ' + appliedPath + ' — halting agent' });
                             if (wasRunning && savedCardId && savedPrompt) {
                                 vm.activeCardId = savedCardId;
                                 if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '↻ Restarting agent to continue plan…' });

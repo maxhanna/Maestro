@@ -212,8 +212,8 @@ public partial class AgentController : ControllerBase
             var error = await proc.StandardError.ReadToEndAsync();
             proc.WaitForExit(10000);
             if (proc.ExitCode != 0)
-                return Ok(new { success = false, error = $"git apply failed: {error}", output });
-            return Ok(new { success = true, output });
+                return Ok(new { success = false, error = $"git apply failed: {error}", output, diffPath = req.DiffPath });
+            return Ok(new { success = true, output, diffPath = req.DiffPath });
         }
         catch (Exception ex)
         {
