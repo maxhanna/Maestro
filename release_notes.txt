@@ -1,0 +1,12 @@
+Version 13
+• Enhanced thinking mode, togglable and adjustable via the context settings menu. Advanced thinking context size will be controlled dynamically by task complexity (up to a maximum of what users selected in the settings panel).
+• Tool context is now further trimmed via LLM to save precious tokens. Users can choose which tools are available via the settings panel as well.
+• New "Notes" panel for writing notes per project.
+• New "Benchmark All" button to run all benchmarks until a step errors out. Improved overall benchmark UI/UX.
+• Enhanced anti-hallucination monitoring by detecting continuous sets of words without any punctuation or paragraphs.
+• All data now saves to a database under the /data folder. This has 1 main disadvantage: users can no longer see their data easily via config files, however the tradeoff is a dramatic increase in performance.
+• EB25 file ranking for context control. Currently the LLM was fed a skeleton of the project and asked to pick which files it think might be relevant to the task. Now BM25 is used in conjunction with the LLM to validate which files should be added to context. This "context discovery" phase has now been moved to a tool call.
+• Introducing the new Meeting room. In the meeting room, we have our agent represented by different types of spiders, each with their own personality. There is a lot of interaction and humor which gets interesting. For example the complexity spider gets pissed off if the agent plans way more steps then he anticipates at the start... And he storms off at the end of the meeting if the planner did not listen.
+• Test cases for all major coding languages for all services. Example: oldstring/newstring, HTMLFormatter, tree-sitter, prettier formatter, etc...
+• Diff file tracking
+• All settings/configurations/board data is now saved to a local database and old configurations users might have are automatically migrated.
