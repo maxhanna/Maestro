@@ -13506,7 +13506,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             .Select(g => g.Last())
             .ToList();
         if (editSteps.Count == 0) return (true, "No edit steps — command-only task");
-        var failed = editSteps.Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "skipped")).ToList();
+        // Edits can be reported as done, created, modified, or skipped depending on
+        // which pipeline produced them. Treat all successful edit statuses consistently
+        // with the plan/replan completion logic below.
+        var failed = editSteps.Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "created" or "modified" or "skipped")).ToList();
         if (failed.Count > 0)
         {
             var failedPaths = string.Join(", ", failed.Select(f => f.GetValueOrDefault("path")?.ToString() ?? "?").Distinct());
