@@ -1110,6 +1110,71 @@ partial class AgentController
         return (false, "");
     }
 
+    /// <summary>
+    /// Builds a bounded, fresh-on-disk listing of the project root: top-level directories and
+    /// files, plus the contents of any directory created during the run (from create results).
+    /// The verifier prompt needs this because the discovery context is captured at run start and
+    /// does not reflect directories/files created while executing.
+    /// </summary>
+    private static string BuildCurrentStructureListing(string projectRoot, IEnumerable<object> allResults)
+    {
+        var sb = new StringBuilder();
+        var noise = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "node_modules", ".git", "bin", "obj", "dist", ".vs", ".vscode", ".idea",
+            "packages", "coverage", "__pycache__", ".next", ".nuget", ".gitignore"
+        };
+        try
+        {
+            var topDirs = Directory.GetDirectories(projectRoot)
+                .Select(Path.GetFileName)
+                .Where(n => n != null && !noise.Contains(n))
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            foreach (var d in topDirs) sb.AppendLine(d + "/");
+            var topFiles = Directory.GetFiles(projectRoot)
+                .Select(Path.GetFileName)
+                .Where(n => n != null && !n.StartsWith('.'))
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            foreach (var f in topFiles) sb.AppendLine(f);
+            // Contents of directories created during this run (extensionless create-result paths
+            // are directories; file results carry a sub-path or extension).
+            var createdDirs = new List<string>();
+            foreach (var r in allResults.OfType<Dictionary<string, object?>>())
+            {
+                if (r.GetValueOrDefault("type")?.ToString() == "create" &&
+                    r.GetValueOrDefault("status")?.ToString() is "done" or "created" &&
+                    r.GetValueOrDefault("path") is string p && !string.IsNullOrWhiteSpace(p))
+                {
+                    var rel = p.Replace('\\', '/').Trim('/');
+                    if (rel.Length > 0 && !rel.Contains('/') && !Path.HasExtension(rel))
+                        createdDirs.Add(rel);
+                }
+            }
+            var createdDirList = createdDirs.Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToList();
+            if (createdDirs.Count > createdDirList.Count)
+                sb.AppendLine("… (further created directories not shown)");
+            foreach (var dir in createdDirList)
+            {
+                var full = Path.GetFullPath(Path.Combine(projectRoot, dir.Replace('/', Path.DirectorySeparatorChar)));
+                if (!Directory.Exists(full)) continue;
+                sb.AppendLine();
+                sb.AppendLine($"[contents of {dir}/]");
+                var children = Directory.EnumerateFileSystemEntries(full).Take(40).ToList();
+                foreach (var child in children)
+                {
+                    var name = Path.GetFileName(child);
+                    sb.AppendLine("  " + (Directory.Exists(child) ? name + "/" : name));
+                }
+                if (Directory.EnumerateFileSystemEntries(full).Skip(40).Any())
+                    sb.AppendLine("  … (more entries not shown)");
+            }
+        }
+        catch { }
+        return sb.ToString();
+    }
+
     /// <summary>Loads the current on-disk contents of all files touched by the run plus files
     /// referenced by the prompt, for verifier-issue triage.</summary>
     private static Dictionary<string, string> LoadFilesForTriage(
@@ -1144,7 +1209,9 @@ partial class AgentController
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
-            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+            // Include created files too — a _create_file result carries type "create" and its
+            // content must be shown in CURRENT STATE for the verifier to judge it.
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() is "edit" or "create" &&
                         r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
             .Select(r => r.GetValueOrDefault("path")?.ToString())
             .Where(p => !string.IsNullOrWhiteSpace(p))
@@ -1187,34 +1254,23 @@ partial class AgentController
         }
         var editResults = allResults
             .OfType<Dictionary<string, object?>>()
-            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() is "edit" or "create" &&
                         r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" &&
                         r.TryGetValue("path", out var p) && p?.ToString() != null)
             .GroupBy(r => r["path"]!.ToString()!)
             .ToList();
         if (editResults.Count > 0)
         {
-            sb.AppendLine("### CHANGES MADE (old → new snippets per file) ###");
-            foreach (var fileGroup in editResults)
-            {
-                sb.AppendLine($"\n--- {fileGroup.Key} ---");
-                foreach (var result in fileGroup)
-                {
-                    var oldStr = result.GetValueOrDefault("oldStringPreview")?.ToString();
-                    var newStr = result.GetValueOrDefault("newStringPreview")?.ToString();
-                    if (!string.IsNullOrWhiteSpace(oldStr) || !string.IsNullOrWhiteSpace(newStr))
-                    {
-                        sb.AppendLine("OLD:");
-                        sb.AppendLine("```");
-                        sb.AppendLine(string.IsNullOrWhiteSpace(oldStr) ? "(empty)" : TruncateForLlm(oldStr, 800));
-                        sb.AppendLine("```");
-                        sb.AppendLine("NEW:");
-                        sb.AppendLine("```");
-                        sb.AppendLine(string.IsNullOrWhiteSpace(newStr) ? "(empty)" : TruncateForLlm(newStr, 800));
-                        sb.AppendLine("```");
-                    }
-                }
-            }
+            sb.AppendLine("### FILES CHANGED ###");
+            sb.AppendLine(string.Join(", ", editResults.Select(g => g.Key)));
+            sb.AppendLine();
+            sb.AppendLine("Pre-edit OLD/NEW snippets are intentionally NOT shown: they are historical and go stale the moment a " +
+                          "repair pass edits the file (a verifier re-issued the same defect after the fix landed because it " +
+                          "trusted the pre-edit snippet). ");
+            sb.AppendLine("The CURRENT STATE OF MODIFIED FILES section below is read fresh from disk AFTER all edits and is the " +
+                          "ONLY authoritative view of the code.");
+            sb.AppendLine("Never conclude a defect exists because of text from an earlier stage of the run — judge correctness " +
+                          "EXCLUSIVELY against CURRENT STATE.");
             sb.AppendLine();
         }
         if (!string.IsNullOrWhiteSpace(discoveryContext))
@@ -1223,7 +1279,7 @@ partial class AgentController
             sb.AppendLine(TruncateForLlm(discoveryContext, 6000));
             sb.AppendLine();
         }
-        sb.AppendLine("### CURRENT STATE OF MODIFIED FILES ###");
+        sb.AppendLine("### CURRENT STATE OF MODIFIED FILES (AUTHORITATIVE — read from disk after ALL edits) ###");
         var typeFilesToInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var relPath in modifiedPaths)
         {
@@ -1232,6 +1288,14 @@ partial class AgentController
             if (System.IO.File.Exists(fullPath))
             {
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                // Cap per-file bodies so a run that creates several large files (new server.py /
+                // .cs / .html bodies) can't balloon the verifier prompt. Small files pass through
+                // untouched; the marker keeps the truncation explicit so the verifier knows the
+                // tail is omitted rather than concluding the file ends there.
+                const int MaxFileBodyChars = 12000;
+                if (content.Length > MaxFileBodyChars)
+                    content = content[..MaxFileBodyChars] +
+                        $"\n… [TRUNCATED — file is {content.Length} chars, showing first {MaxFileBodyChars}]";
                 sb.AppendLine($"\n### {relPath}");
                 sb.AppendLine("```");
                 sb.AppendLine(content);
@@ -1263,6 +1327,13 @@ partial class AgentController
                 }
             }
         }
+        // A fresh, bounded listing of the project root read at VERIFY time — the discovery
+        // context above was captured at run start and goes stale the moment a step creates a
+        // directory or file. The verifier must never conclude "folder X does not exist" from a
+        // pre-run listing (see the benchmark_test_7 case).
+        sb.AppendLine();
+        sb.AppendLine("### CURRENT PROJECT STRUCTURE (fresh disk listing at verify time) ###");
+        sb.AppendLine(BuildCurrentStructureListing(projectRoot, allResults));
         // Include unmodified files referenced in the task so the verifier can check cross-file references
         var taskReferencedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (Match m in Regex.Matches(originalPrompt, @"[\w/]+\.(html|css|ts|tsx|js|jsx|scss|less)", RegexOptions.IgnoreCase))
@@ -1328,6 +1399,7 @@ partial class AgentController
         sb.AppendLine("{ \"complete\": true|false, \"reason\": \"short explanation\", \"issues\": [{\"type\": \"CONFIRMED\" | \"SPECULATIVE\", \"text\": \"issue description\"}] }");
         sb.AppendLine("Set complete=true only if the task is fully implemented AND the code would compile.");
         sb.AppendLine("Set complete=false if anything is missing, broken, or would cause compilation errors.");
+        sb.AppendLine("Judge the modified files against their CURRENT STATE content (the authoritative post-edit text); any historical/edit-history text is NOT the current code — ignore it. Other sections are context for cross-file references.");
         sb.AppendLine("Classify EVERY item in the 'issues' array as exactly one of:");
         sb.AppendLine("  - CONFIRMED: the requirement is objectively unmet right now — the code is physically missing/incorrect,");
         sb.AppendLine("    or there is a reproducible defect you can point to in the actual file content above (a missing symbol,");

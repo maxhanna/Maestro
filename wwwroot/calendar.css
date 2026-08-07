@@ -204,6 +204,45 @@
   max-width: 420px;
 }
 
+/* Popup panel hosting the calendar view */
+.calendar-popup-panel {
+  width: min(94vw, 1100px);
+  height: min(88vh, 760px);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.calendar-popup-panel .calendar-view {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+}
+
+.cron-helpers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cron-helper {
+  font-size: 11px;
+  padding: 3px 10px;
+  background: rgba(6, 182, 212, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.cron-helper:hover {
+  background: rgba(6, 182, 212, 0.25);
+  border-color: var(--accent);
+}
+
 .cal-edit-panel .form-row {
   margin-bottom: 12px;
   display: flex;

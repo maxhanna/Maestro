@@ -63,6 +63,7 @@
               <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
                 title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
               <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+              <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
               <label class="pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create a branch then PR on completion">
                 <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
               </label>
@@ -297,6 +298,7 @@
             <!-- Status chips -->
             <div class="card-tags">
               <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+              <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
               <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
                 title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
               <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
@@ -710,6 +712,7 @@
           <!-- Status chips -->
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+            <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
             <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
@@ -729,8 +732,19 @@
             </div>
             <div class="section-body">
               <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length">No suggestions yet — try <b>More like this</b> above to have the model dig deeper.</div>
-              <div class="suggestion" ng-repeat="s in card._suggestions track by s.id">
+              <div class="suggestion" ng-repeat="s in card._suggestions track by s.id"
+                ng-class="{queued: s._queued}"
+                ng-click="vm.suggestionToCard(card, s); $event.stopPropagation()"
+                role="button" tabindex="0"
+                ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.suggestionToCard(card, s); $event.preventDefault()"
+                title="{{s._queued ? 'Already queued as a To Do card' : 'Click to queue this as a new To Do card'}}">
                 <div class="suggestion-desc">{{s.description}}</div>
+                <div class="suggestion-conn" ng-if="s.connection" role="button" tabindex="0"
+                  ng-click="vm.jumpToConnectionCard(s.connection); $event.stopPropagation()"
+                  ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.jumpToConnectionCard(s.connection); $event.preventDefault(); $event.stopPropagation()"
+                  title="Builds on other work — click to jump to the card this suggestion is connected to.">🔗 {{s.connection}}</div>
+                <div class="suggestion-action" ng-if="!s._queued">＋ Add to To Do</div>
+                <div class="suggestion-action queued" ng-if="s._queued">✓ Queued</div>
                 <div class="suggestion-files" ng-if="s.files && s.files.length">
                   <span class="file-edit-chip" ng-repeat="f in s.files" title="{{f}}">{{f}}</span>
                 </div>

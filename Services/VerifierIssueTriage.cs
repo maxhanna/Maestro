@@ -30,6 +30,15 @@ public static class VerifierIssueTriage
         @"[a-z][a-zA-Z0-9]{2,}|[A-Z][a-zA-Z0-9]*|_[a-z][a-zA-Z0-9_]*",
         RegexOptions.IgnoreCase);
 
+    /// <summary>Matches "X should be Y" / "X must be Y" rename claims where the verifier asserts a
+    /// symbol was supposed to be named something else (e.g. "'do_get' should be 'do_GET'").
+    /// Captures group 1 = the symbol the verifier claims is wrong, group 2 = the corrected name.</summary>
+    public static readonly Regex ShouldBeRenameRegex = new(
+        // The leading quote/backtick is REQUIRED so prose issues like "the panel should be visible"
+        // never match — only quoted symbol renames the verifier actually emits ("'do_get' should be 'do_GET'").
+        @"[`'""]\b([A-Za-z_$][\w$]*)(?:\([^)]*\))?[`'""]?\s+(?:should|must|ought to)\s+be\s+(?:the\s+)?[`'""]?([A-Za-z_$][\w$]*)",
+        RegexOptions.IgnoreCase);
+
     /// <summary>
     /// Implements the repair-loop skip-phantom rule: when the most recent executed step was
     /// skipped with reason 'already done', the verifier issue that drove it was a phantom — it
@@ -81,6 +90,29 @@ public static class VerifierIssueTriage
                         Regex.IsMatch(content, @"\b" + Regex.Escape(symbol) + @"\b")))
                 {
                     return (false, $"phantom: symbol '{symbol}' IS present in the file despite the claim");
+                }
+            }
+        }
+
+        // 1a) ALREADY-RESOLVED RENAME: the verifier says "X should be Y" (e.g. 'do_get should be
+        //     do_GET'). When X is no longer present anywhere AND Y now exists in the file, the
+        //     claimed rename has already been applied — the issue was re-issued because the
+        //     verifier read stale/historical text, not because the code is wrong. Drop it so the
+        //     repair loop does not burn a pass re-fixing an already-fixed defect.
+        if (filesByPath.Count > 0)
+        {
+            var rename = ShouldBeRenameRegex.Match(issue);
+            if (rename.Success)
+            {
+                var wrong = rename.Groups[1].Value;
+                var right = rename.Groups[2].Value;
+                var wrongStillPresent = filesByPath.Values.Any(content =>
+                    Regex.IsMatch(content, @"\b" + Regex.Escape(wrong) + @"\b"));
+                var rightNowPresent = filesByPath.Values.Any(content =>
+                    Regex.IsMatch(content, @"\b" + Regex.Escape(right) + @"\b", RegexOptions.IgnoreCase));
+                if (!wrongStillPresent && rightNowPresent)
+                {
+                    return (false, $"already resolved: verifier claims '{wrong} should be {right}' but '{wrong}' is no longer present and '{right}' exists in the file");
                 }
             }
         }

@@ -46,7 +46,9 @@ public sealed record EditPlanDecision(
     string? TargetType,       // "method","class","property" etc
     string? TargetName,       // resolved symbol name
     string? ResolvedOldStr,   // server-resolved via AST — LLM never needs to author this
-    string Reason);
+    string Reason,
+    string? ResolvedNewStr = null,   // deterministic synthesis — new code generated without the LLM
+    List<EditPair>? ResolvedEdits = null);  // multi-match batch — one anchored edit per occurrence
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  EDIT STRATEGY RESOLVER  — deterministic state machine
@@ -94,6 +96,15 @@ public static class EditStrategyResolver
             return new EditPlanDecision(EditStrategy.DeleteLines, null, null, null,
                 "Deletion — oldString/newString with empty newString");
 
+        // ── Deterministic content generation — fully-resolved old/new, no LLM ─
+        // Catches literal swaps ("retryCount from 3 to 5") and class-member
+        // additions ("add a string Email property") with both strings resolved
+        // server-side; the apply pipeline then needs zero LLM round-trips.
+        var det = DeterministicEditGenerator.TryGenerate(relPath, fileExists, fileContent, changeDescription);
+        if (det != null)
+            return new EditPlanDecision(det.Strategy, det.TargetType, det.TargetName, det.OldStr,
+                det.Reason, det.NewStr, det.Edits);
+
         // ── Whitespace-significant / non-AST languages → always anchored ────
         if (ext is ".css" or ".scss" or ".sass" or ".less"
                 or ".json" or ".jsonc"
@@ -106,9 +117,18 @@ public static class EditStrategyResolver
         var (_, supportsFormatC, _) = AgentMethodInventory.GetLanguageProfile(ext);
 
         // ── Property/field addition → never FORMAT C class-replace ───────────
+        // First try deterministic generation (declines when the class body can't be
+        // anchored or the description isn't parseable), else fall back to the LLM
+        // FillClassBody anchored append.
         if (intent.Kind == EditIntentKind.AddProperty)
+        {
+            var prop = DeterministicEditGenerator.TryGenerate(relPath, fileExists, fileContent, changeDescription);
+            if (prop != null)
+                return new EditPlanDecision(prop.Strategy, prop.TargetType, prop.TargetName, prop.OldStr,
+                    prop.Reason, prop.NewStr, prop.Edits);
             return new EditPlanDecision(EditStrategy.FillClassBody, "class", intent.Symbol, null,
                 "Adding property/field — anchored append, not full-class replace");
+        }
 
         // ── Symbol-level edits — try AST resolution ──────────────────────────
         if (supportsFormatC

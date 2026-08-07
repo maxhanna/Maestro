@@ -43,6 +43,42 @@ partial class AgentController
     {
         var relPath = step.File.Replace('\\', '/').TrimStart('/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+        // DIRECTORY-TARGET GUARD: a replanner (repair loop) can re-emit "create directory X" as a
+        // NORMAL edit step whose File is the directory path itself (not a _create_directory marker).
+        // The edit pipeline would then treat the folder as a file target: exploration + LLM produce
+        // full-file content, and ApplyFullFile writes it to the directory path → UnauthorizedAccess-
+        // Exception on Windows (killed a benchmark run). If the change description names a concrete
+        // file, redirect the write INTO the directory; otherwise the directory already exists, so the
+        // step's intent (create the directory) is satisfied → mark it done without touching disk.
+        if (Directory.Exists(fullPath) && !System.IO.File.Exists(fullPath))
+        {
+            var redirected = AgentDiscovery.ResolveDirectoryTargetForStep(relPath, step.Change);
+            if (!string.IsNullOrWhiteSpace(redirected))
+            {
+                await EmitLog(emitSse, "info",
+                    $"Step targets existing directory '{relPath}' but change names a file — redirecting write to {redirected}", ct: ct);
+                relPath = redirected;
+                fullPath = Path.GetFullPath(Path.Combine(projectRoot, redirected.Replace('/', Path.DirectorySeparatorChar)));
+            }
+            else
+            {
+                await EmitLog(emitSse, "info",
+                    $"✓ Already done: {relPath} — target is an existing directory; nothing to write", ct: ct);
+                var skip = new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex,
+                    ["type"] = "edit",
+                    ["status"] = "skipped",
+                    ["path"] = relPath,
+                    ["reason"] = "target is an existing directory — already created",
+                    ["planItemIndex"] = planItemIndex
+                };
+                if (emitSse) await SendSse(Response, "step", skip, ct);
+                allResults.Add(skip);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                return stepIndex + 1;
+            }
+        }
         bool stepNeedsExtraStep = false;
         string? stepExtraStepReason = null;
         string? stepExtraStepFile = relPath;
@@ -75,6 +111,9 @@ partial class AgentController
             await PrepareEditContextAsync(step, projectRoot, emitSse, ct, prompt, plan, planItemIndex,
                 cardId, attachedFiles, skipLlmPreResolution, relPath, fullPath);
         step = preparedStep;
+        // Fully deterministic edits (old+new synthesized server-side) need no causal
+        // reasoning and no multi-round LLM verification — they are correct by construction.
+        var isDeterministicEdit = decidedEditStrategy?.ResolvedNewStr != null;
         await PersistStepStatusAsync(cardId, planItemIndex, "applying", emitSse, ct);
         var history = new List<(string old, string @new, string error)>();
         var planOldStr = step.OldString;
@@ -95,7 +134,7 @@ partial class AgentController
         string? causalContext = null;
         (planOldStr, causalContext) = await ResolveAstOldStringAndCausalAsync(
             step, planOldStr, explorationTargetSymbol, relPath, fullPath, fileExt,
-            prompt, projectRoot, skipLlmPreResolution, emitSse, ct);
+            prompt, projectRoot, skipLlmPreResolution || isDeterministicEdit, emitSse, ct);
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
             if (attempt > 0 && !string.IsNullOrWhiteSpace(preEditContent))
@@ -367,26 +406,54 @@ partial class AgentController
             }
             if (step.Edits is { Count: > 0 } && !replaced)
             {
-                // Reject overlapping edits within the same batch — each edit must target a different area
+                // Reject overlapping edits within the same batch — each edit must target a different
+                // area. POSITION-AWARE: identical anchors at DIFFERENT lines are fine (each edit
+                // carries its own LineNumber hint, which TryReplaceSafe uses to disambiguate); only
+                // edits that actually match at overlapping positions in the file are rejected.
                 var allApplied = true;
-                for (var oi = 0; oi < step.Edits.Count; oi++)
+                var normFileBatch = AgentTextUtilities.NormalizeLineEndings(fileContent);
+                var assignedRanges = new List<(int editIdx, int start, int end)>();
+                for (var i = 0; i < step.Edits.Count; i++)
                 {
-                    var normO = AgentTextUtilities.NormalizeLineEndings(step.Edits[oi].OldString ?? "").Trim();
+                    var normO = AgentTextUtilities.NormalizeLineEndings(step.Edits[i].OldString ?? "").Trim();
                     if (string.IsNullOrWhiteSpace(normO)) continue;
-                    for (var oj = oi + 1; oj < step.Edits.Count; oj++)
+                    var positions = new List<int>();
+                    var sp = 0;
+                    while ((sp = normFileBatch.IndexOf(normO, sp, StringComparison.Ordinal)) >= 0)
                     {
-                        var normJ = AgentTextUtilities.NormalizeLineEndings(step.Edits[oj].OldString ?? "").Trim();
-                        if (string.IsNullOrWhiteSpace(normJ)) continue;
-                        if (normO.Contains(normJ) || normJ.Contains(normO))
+                        positions.Add(sp);
+                        sp += Math.Max(1, normO.Length);
+                    }
+                    if (positions.Count == 0) continue; // missing anchor — the sequential apply reports it
+                    var targetLine = step.Edits[i].LineNumber > 0 ? step.Edits[i].LineNumber : step.LineNumber;
+                    var chosen = positions[0];
+                    if (positions.Count > 1 && targetLine > 0)
+                    {
+                        var bestDist = int.MaxValue;
+                        foreach (var p in positions)
+                        {
+                            var lineOf = normFileBatch[..p].Count(c => c == '\n') + 1;
+                            var dist = Math.Abs(lineOf - targetLine);
+                            if (dist < bestDist) { bestDist = dist; chosen = p; }
+                        }
+                    }
+                    assignedRanges.Add((i, chosen, chosen + normO.Length));
+                }
+                for (var oi = 0; oi < assignedRanges.Count && allApplied; oi++)
+                {
+                    for (var oj = oi + 1; oj < assignedRanges.Count; oj++)
+                    {
+                        var ra = assignedRanges[oi];
+                        var rb = assignedRanges[oj];
+                        if (ra.start < rb.end && rb.start < ra.end)
                         {
                             await EmitLog(emitSse, "warn",
-                                $"Batch sub-edit overlap: edit {oi + 1} and edit {oj + 1} target overlapping oldString sections — " +
+                                $"Batch sub-edit overlap: edit {ra.editIdx + 1} and edit {rb.editIdx + 1} target overlapping oldString sections — " +
                                 $"each batch edit must target a unique, non-overlapping area of the file.", ct: ct);
                             allApplied = false;
                             break;
                         }
                     }
-                    if (!allApplied) break;
                 }
                 if (allApplied)
                 {
@@ -1033,8 +1100,16 @@ partial class AgentController
             }
             bool bypassVerifyForAppend = !string.IsNullOrWhiteSpace(newStr) &&
                 AgentTextUtilities.NormalizeLineEndings(newContent).Contains(AgentTextUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal);
+            // Deterministic batches synthesize a marker newStr ("(deterministic batch: N edits)") —
+            // the batch path already validated every sub-edit via exact TryReplaceSafe matches, so
+            // content verification is satisfied by construction. (LLM batches keep their existing
+            // marker semantics untouched.)
+            var isDeterministicBatch = newStr?.StartsWith("(deterministic batch:", StringComparison.Ordinal) == true;
             var (approved, verifyReason, _) =
-                bypassVerify || bypassVerifyForAppend ? (true, "Bypassed verify for successful append/insertion", 100) :
+                bypassVerify || bypassVerifyForAppend || isDeterministicBatch
+                    ? (true, isDeterministicBatch
+                        ? "Bypassed verify for deterministic batch — each sub-edit matched exactly"
+                        : "Bypassed verify for successful append/insertion", 100) :
                 (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent))
                 ? (true, "Bypassed verify for empty file insertion", 100)
                 : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
@@ -1086,6 +1161,7 @@ partial class AgentController
                 continue;
             }
             if (!string.IsNullOrWhiteSpace(newStr)
+                && !newStr.StartsWith("(deterministic batch:", StringComparison.Ordinal)
                 && !newContent.Contains(AgentTextUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
             {
                 var trimmedNew = string.Join("\n",
@@ -1335,9 +1411,14 @@ partial class AgentController
                     try { await onActivity("verifying"); } catch { }
                 }
                 var (decisions, reasons, scores, needsExtraStepFlags, deterministicPlaceholderReject) =
-                    await RunLlmVerifyRoundsAsync(newStr, oldStr, relPath, prompt, step.Change,
-                        preEditContent, newContent, emitSse, ct, attemptScores, explorationContext,
-                        plan, planItemIndex, sqlMigrationNote, causalContext);
+                    isDeterministicEdit
+                        ? (new List<string> { "keep", "keep", "keep" },
+                           new List<string> { "Deterministic edit — old/new synthesized server-side; verification bypassed", string.Empty, string.Empty },
+                           new List<int> { 100, 100, 100 },
+                           new List<bool> { false, false, false }, false)
+                        : await RunLlmVerifyRoundsAsync(newStr, oldStr, relPath, prompt, step.Change,
+                            preEditContent, newContent, emitSse, ct, attemptScores, explorationContext,
+                            plan, planItemIndex, sqlMigrationNote, causalContext);
                 stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
                 stepExtraStepReason = reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
                 var roundsDone = decisions.Count;

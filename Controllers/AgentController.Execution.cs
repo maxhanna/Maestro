@@ -25,6 +25,68 @@ namespace Weaver.Controllers;
 
 partial class AgentController
 {
+    /// <summary>
+    /// Resolves the implied target directory for a pathless _create_file step (a bare filename
+    /// extracted from its change description). Prefers the nearest preceding _create_directory
+    /// step in the same plan when exactly one exists (unambiguous), otherwise falls back to the
+    /// most recently created directory already executed in this run (covers the interleaved
+    /// path, where each step executes as its own single-step plan). Returns null when there is
+    /// no directory context, preserving the current behavior of placing the file at the
+    /// project root for genuinely root-level files.
+    /// </summary>
+    private static string? FindImpliedCreateDirectory(
+        string projectRoot, AgentPlan? plan, int beforeIndex, IEnumerable<object> allResults)
+    {
+        // Only accept candidates that are ACTUAL directories on disk — an extensionless file
+        // created at root (LICENSE, Makefile, Dockerfile) produces the same result shape as a
+        // created directory and must never be mistaken for one.
+        static bool IsRealDir(string root, string rel)
+        {
+            try
+            {
+                return Directory.Exists(Path.GetFullPath(
+                    Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))));
+            }
+            catch { return false; }
+        }
+
+        string? planDir = null;
+        var dirCount = 0;
+        if (plan?.Plan != null)
+        {
+            for (var i = 0; i < beforeIndex && i < plan.Plan.Count; i++)
+            {
+                var s = plan.Plan[i];
+                if (string.Equals(s.File, "_create_directory", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(s.Change))
+                {
+                    var cand = s.Change.Trim('/', '\\', '"', '\'');
+                    if (IsRealDir(projectRoot, cand))
+                    {
+                        planDir = cand;
+                        dirCount++;
+                    }
+                }
+            }
+            if (dirCount == 1) return planDir;
+        }
+        string? lastExecutedDir = null;
+        foreach (var r in allResults.OfType<Dictionary<string, object?>>())
+        {
+            if (r.GetValueOrDefault("type")?.ToString() == "create" &&
+                r.GetValueOrDefault("status")?.ToString() is "done" or "created" &&
+                r.GetValueOrDefault("path") is string p && !string.IsNullOrWhiteSpace(p))
+            {
+                var rel = p.Replace('\\', '/').Trim('/');
+                // A created-directory result carries an extensionless path (e.g. "benchmark_test_6");
+                // created FILE results carry an extension or a sub-path, so they never match.
+                if (rel.Length > 0 && !rel.Contains('/') && !Path.HasExtension(rel) && IsRealDir(projectRoot, rel))
+                    lastExecutedDir = rel;
+            }
+        }
+        return lastExecutedDir;
+    }
+
     private async Task ExecutePlan(
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
@@ -323,10 +385,51 @@ partial class AgentController
                         continue;
                     }
                 }
+                // DETERMINISTIC DIRECTORY SCOPING: a planner often omits the target folder from a
+                // _create_file change description (e.g. "Create README markdown document..."), so the
+                // path-extraction LLM guesses a bare filename and the file lands at the PROJECT ROOT
+                // even when the run just created a dedicated directory for it. If the extracted path
+                // is a bare filename, scope it to the implied directory — the nearest preceding
+                // _create_directory step in the plan, or the most recently created directory in this
+                // run (the interleaved path executes each step as its own single-step plan, so the
+                // plan scan sees nothing but allResults already holds the created-directory result).
+                if (!newFileRelPath.Contains('/') && !newFileRelPath.Contains('\\'))
+                {
+                    var impliedDir = FindImpliedCreateDirectory(projectRoot, plan, itemIdx, allResults);
+                    if (!string.IsNullOrWhiteSpace(impliedDir))
+                    {
+                        var scoped = impliedDir.Trim('/', '\\', '"', '\'') + "/" + newFileRelPath;
+                        await EmitLog(emitSse, "info",
+                            $"Pathless _create_file '{newFileRelPath}' scoped to implied directory '{impliedDir}' → {scoped}", ct: ct);
+                        newFileRelPath = scoped;
+                    }
+                }
                 var newFileFullPath = Path.GetFullPath(Path.Combine(projectRoot, newFileRelPath.Replace('/', Path.DirectorySeparatorChar)));
                 var contentToWrite = item.NewString ?? "";
                 try
                 {
+                    // Directory-target guard: never File.WriteAllText to an existing directory path
+                    // (throws UnauthorizedAccessException on Windows). Same bug class as the
+                    // ResolveAndApplyEdit guard — an extraction that lands on a folder name.
+                    if (Directory.Exists(newFileFullPath) && !System.IO.File.Exists(newFileFullPath))
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"✓ Already done: {newFileRelPath} — target is an existing directory; nothing to create", ct: ct);
+                        var dirSkip = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex,
+                            ["type"] = "create",
+                            ["status"] = "skipped",
+                            ["path"] = newFileRelPath,
+                            ["reason"] = "target is an existing directory",
+                            ["planItemIndex"] = itemIdx
+                        };
+                        if (emitSse) await SendSse(Response, "step", dirSkip, ct);
+                        allResults.Add(dirSkip);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        stepIndex++;
+                        continue;
+                    }
                     if (System.IO.File.Exists(newFileFullPath))
                     {
                         await EmitLog(emitSse, "error", $"Cannot create {newFileRelPath} — file already exists at that exact path. Convert this step to an edit of the existing file.", ct: ct);
@@ -345,8 +448,10 @@ partial class AgentController
                         stepIndex++;
                         continue;
                     }
-                    var similarExistingFile = AgentDiscovery.FindSimilarFiles(newFileRelPath, projectRoot)
-                        .FirstOrDefault(f => Path.GetFileName(f).Equals(Path.GetFileName(newFileRelPath), StringComparison.OrdinalIgnoreCase));
+                    // Same-name check is scoped to the SAME directory: a same-named file in a
+                    // different folder (e.g. benchmark_test_4/index.html) must not block creating
+                    // benchmark_test_7/index.html.
+                    var similarExistingFile = AgentDiscovery.FindSameDirectoryFile(newFileRelPath, projectRoot);
                     if (similarExistingFile != null)
                     {
                         await EmitLog(emitSse, "error", $"Cannot create {newFileRelPath} — a file with the same name ALREADY EXISTS at '{similarExistingFile}'. Retarget to the existing file.", ct: ct);

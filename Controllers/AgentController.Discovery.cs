@@ -73,6 +73,13 @@ partial class AgentController
                         }
                     }
                 }
+                // A _create_directory step (not just a converted mkdir command) also establishes
+                // the implied directory for subsequent pathless _create_file steps.
+                if (string.Equals(step.File, "_create_directory", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(step.Change))
+                {
+                    lastImpliedDir = step.Change.Trim('/', '\\', '"', '\'');
+                }
                 if (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase) && lastImpliedDir != null)
                 {
                     if (!step.Change.Contains("/") && !step.Change.Contains("\\"))

@@ -454,6 +454,19 @@ partial class AgentController
             if (declaredTypes.Contains(name)) continue;
             if (usingNamespaces.Any(ns => name.StartsWith(ns.Split('.').Last(), StringComparison.OrdinalIgnoreCase)))
                 continue;
+            // Declared as a member rather than used as a type — "public string Name { get; set; }"
+            // would otherwise be misread as a missing type "Name" and spawn a bogus `public class Name {}`.
+            // (Guarded against `new Foo { ... }` object initializers via the (?!new\s) lookbehind.)
+            if (Regex.IsMatch(newCode,
+                    @"(?<!new\s)\b[A-Za-z_]\w*(?:\s*<[^>]*>)?\s+" + Regex.Escape(name) + @"\s*(?:\{|;|=)",
+                    RegexOptions.IgnoreCase))
+                continue;
+            // ...or used as a member's declared type — "public DateTime CreatedAt { get; set; }"
+            // is a property whose type is DateTime, not a missing class named DateTime.
+            if (Regex.IsMatch(newCode,
+                    @"(?<!new\s)\b" + Regex.Escape(name) + @"(?:\s*<[^>]*>)?\s+[A-Za-z_]\w*\s*(?:\{|;|=)",
+                    RegexOptions.IgnoreCase))
+                continue;
             candidates.Add(name);
         }
         var result = new List<string>();

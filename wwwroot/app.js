@@ -445,7 +445,7 @@ angular.module('kanbanApp', [])
 
       // === Global UI Methods ===
       vm.playSound = function () {
-        var audio = new Audio('/wwwroot/zen.mp3');
+        var audio = new Audio('/wwwroot/gold_skulltula.mp3');
         audio.play();
       };
 

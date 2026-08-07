@@ -29,6 +29,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
     init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
       vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
+      // Card click — selects the card and pre-fills the AI prompt. Restored after
+      // being lost in the app.js decoupling refactor (kanban.html still binds it).
+      vm.selectCard = function (card) {
+        if (!card) return;
+        vm.selectedCardId = card.id;
+        vm.aiPrompt = card.text;
+      };
       vm.findCardById = function (cardId) {
         if (!cardId || !vm.state) return null;
         try {

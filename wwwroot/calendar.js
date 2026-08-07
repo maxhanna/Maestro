@@ -1,10 +1,117 @@
-﻿'use strict';
+'use strict';
 
-angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $timeout) {
+angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $timeout, $interval) {
+  var _calTimer = null;
+  var _vm = null; // controller instance captured in init()
+  var _scope = null; // scope captured in init()
+
   function uid() { return Math.random().toString(36).slice(2, 9); }
+
+  // ── Cron matching (5-field: minute hour day-of-month month day-of-week) ──
+  function cronMatches(expr, date) {
+    try {
+      var parts = expr.trim().split(/\s+/);
+      if (parts.length !== 5) return false;
+      function matchField(field, val) {
+        if (field === '*') return true;
+        if (field.indexOf('*/') === 0) {
+          var interval = parseInt(field.slice(2), 10);
+          return interval > 0 && val % interval === 0;
+        }
+        var vals = field.split(',');
+        for (var i = 0; i < vals.length; i++) {
+          var v = vals[i];
+          if (v.indexOf('-') > 0) {
+            var range = v.split('-');
+            var lo = parseInt(range[0], 10);
+            var hi = parseInt(range[1], 10);
+            if (val >= lo && val <= hi) return true;
+          } else if (parseInt(v, 10) === val) {
+            return true;
+          }
+        }
+        return false;
+      }
+      return matchField(parts[0], date.getMinutes()) &&
+        matchField(parts[1], date.getHours()) &&
+        matchField(parts[2], date.getDate()) &&
+        matchField(parts[3], date.getMonth() + 1) &&
+        matchField(parts[4], date.getDay());
+    } catch (e) { return false; }
+  }
+
+  // ── Cron background processor ──────────────────────────────────────────
+  // Every 60s: load calendar cards, fire any that are due (cron schedule
+  // matched, or a one-off date/time reached), create a To Do card from the
+  // task text and start it automatically when nothing else is streaming.
+  function processCalendarEvents() {
+    $http.get('/api/calendar/load').then(function (resp) {
+      try {
+        var data = resp.data;
+        if (typeof data === 'string') data = JSON.parse(data);
+        if (!Array.isArray(data)) return;
+        var now = new Date();
+        var todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+        var currentMinutes = now.getHours() * 60 + now.getMinutes();
+        var changed = false;
+
+        for (var ci = 0; ci < data.length; ci++) {
+          var cal = data[ci];
+          if (!cal.date || !cal.text) continue;
+          var shouldFire = false;
+          if (cal.cronExpression) {
+            if (cronMatches(cal.cronExpression, now)) {
+              var lastFired = cal.lastFired ? new Date(cal.lastFired).getTime() : 0;
+              if (now.getTime() - lastFired > 60000) shouldFire = true;
+            }
+          } else {
+            if (cal.processed) continue;
+            var calMinute = 0;
+            if (cal.time) {
+              var tp = cal.time.split(':');
+              calMinute = parseInt(tp[0], 10) * 60 + parseInt(tp[1], 10);
+            }
+            if (cal.date < todayStr || (cal.date === todayStr && calMinute <= currentMinutes)) shouldFire = true;
+          }
+
+          if (shouldFire) {
+            var newCard = {
+              id: uid(),
+              text: cal.text,
+              filePath: cal.filePath || cal.project || _vm.selectedProject,
+              createdAt: now.toISOString(),
+              priority: cal.priority || 'medium',
+              ready: true,
+              attached: [],
+              selfImproving: false,
+              isDecomposing: false
+            };
+            _vm.state.todo.push(newCard);
+            _vm.saveCards();
+            changed = true;
+            if (cal.cronExpression) cal.lastFired = now.toISOString(); else cal.processed = true;
+            // The interval runs outside a digest — apply so the new card shows
+            // even when the agent stays idle (no SSE stream to trigger a digest).
+            try { if (_scope && !_scope.$$phase) _scope.$applyAsync(); } catch (e) {}
+            if (!_vm.streamingActive && _vm.executeAgent) _vm.executeAgent(newCard);
+          }
+        }
+        if (changed) $http.post('/api/calendar/save', data).catch(function () { });
+      } catch (e) { console.log("processCalendarEvents error ", e); }
+    }, function () { });
+  }
+
+  function stopCalendarProcessing() {
+    if (_calTimer) { $interval.cancel(_calTimer); _calTimer = null; }
+  }
 
   return {
     init: function (vm, $scope) {
+      _vm = vm;
+      _scope = $scope;
+      // The calendar is a popup the user opens explicitly — never auto-open it
+      // on load, even if a previous session persisted showCalendar=true.
+      vm.showCalendar = false;
       vm.calCards = [];
       vm.calDays = [];
       vm.calYear = new Date().getFullYear();
@@ -46,6 +153,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
             c.time = '';
           }
         }
+        // Unify legacy "project" field onto "filePath" (what the card and
+        // cron processor use).
+        if (c.project && !c.filePath) c.filePath = c.project;
         return c;
       }
       function pad2(n) { return String(n).padStart(2, '0'); }
@@ -58,7 +168,7 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
             if ((p.Path || p.path) === path) return p.Name || p.name || path;
           }
         }
-        return path.split(/[\/\\]/).pop() || path;
+        return path.split(/[\\/]/).pop() || path;
       };
 
       vm.loadCalendarCards = function () {
@@ -98,11 +208,21 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         var cards = vm.calCards;
         var project = vm.selectedProject;
 
+        function baseName(path) {
+          if (!path) return '';
+          var parts = String(path).split(/[\\/]/);
+          return parts[parts.length - 1] || '';
+        }
+
         function cardsForDate(dateStr) {
           var result = [];
+          var projectBase = baseName(project);
           for (var ci = 0; ci < cards.length; ci++) {
             var c = cards[ci];
-            if (c.date === dateStr && (!project || c.project === project)) {
+            if (c.date !== dateStr) continue;
+            if (!project) { result.push(c); continue; }
+            // Match full path, or basename (legacy cards stored only the folder name).
+            if (c.filePath === project || baseName(c.filePath) === projectBase) {
               result.push(c);
             }
           }
@@ -167,26 +287,20 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         d.setMinutes(d.getMinutes() + 5);
         vm.calEditCardData = {
           id: null,
-          date: now,
-          time: d,
+          date: localDateStr(now),
+          time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()),
           text: '',
           priority: 'medium',
           cronExpression: '',
-          filePath: vm.selectedProject.split('/').pop() || ''
+          filePath: vm.selectedProject || ''
         };
-        console.log('Adding calendar card', vm.calEditCardData);
         scheduleUpdate();
       };
 
-      vm.cronHelp = function() {
-        return [
-          { label: 'Every minute', cron: '* * * * *' },
-          { label: 'Every hour', cron: '0 * * * *' },
-          { label: 'Every day', cron: '0 0 * * *' },
-          { label: 'Every week', cron: '0 0 * * 0' },
-          { label: 'Every month', cron: '0 0 1 * *' },
-          { label: 'Every year', cron: '0 0 1 1 *' }
-        ];
+      vm.setCronExpression = function (expr) {
+        if (vm.calEditCardData) {
+          vm.calEditCardData.cronExpression = expr;
+        }
       };
 
       vm.calEditCard = function (card, $event) {
@@ -252,6 +366,29 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         }
         scheduleUpdate();
       };
+
+      // ── Popup panel open/close ─────────────────────────────────────────
+      vm.openCalendarPanel = function () {
+        if (vm.showCalendar) return;
+        vm.showCalendar = true;
+        vm.loadCalendarCards();
+        scheduleUpdate();
+      };
+
+      vm.closeCalendarPanel = function () {
+        vm.showCalendar = false;
+        if (vm.saveSettings) vm.saveSettings(true);
+        scheduleUpdate();
+      };
+
+      // ── Cron processing lifecycle (started by app.js) ──────────────────
+      vm.startCalendarProcessing = function () {
+        stopCalendarProcessing();
+        _calTimer = $interval(processCalendarEvents, 60000, 0, false);
+        processCalendarEvents();
+      };
+
+      $scope.$on('$destroy', stopCalendarProcessing);
 
       vm.loadCalendarCards();
     }

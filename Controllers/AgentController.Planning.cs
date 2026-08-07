@@ -851,8 +851,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 var createCandidate = createPathMatch.Groups[1].Value.Replace('\\', '/');
                 var createFileName = Path.GetFileName(createCandidate);
-                var existingFile = AgentDiscovery.FindSimilarFiles(createCandidate, projectRoot)
-                    .FirstOrDefault(f => Path.GetFileName(f).Equals(createFileName, StringComparison.OrdinalIgnoreCase));
+                // Only a same-named file in the SAME directory as the target blocks creation — a
+                // same-named file in a different folder (e.g. benchmark_test_4/index.html when
+                // creating benchmark_test_7/index.html) is NOT a conflict.
+                var existingFile = AgentDiscovery.FindSameDirectoryFile(createCandidate, projectRoot);
                 if (existingFile != null)
                 {
                     var createFullPath = Path.GetFullPath(Path.Combine(projectRoot, createCandidate.Replace('/', Path.DirectorySeparatorChar)));
@@ -919,8 +921,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
             if (!fileExists)
             {
-                var similarExisting = AgentDiscovery.FindSimilarFiles(step.File, projectRoot)
-                    .FirstOrDefault(f => Path.GetFileName(f).Equals(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
+                var similarExisting = AgentDiscovery.FindSameDirectoryFile(step.File, projectRoot);
                 if (similarExisting != null)
                     return (false, $"Path '{step.File}' does not exist. A file with the same name ALREADY EXISTS at '{similarExisting}' — retarget this step to that path (do not create a duplicate).");
                 if (!string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))

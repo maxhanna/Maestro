@@ -34,6 +34,27 @@ partial class AgentController
         List<object> allResults, int stepIndex, int planItemIndex, string? cardId,
         string relPath, string fullPath)
     {
+        // Never write file content to a path that is an existing DIRECTORY — File.WriteAllText
+        // on a folder throws UnauthorizedAccessException on Windows. The ResolveAndApplyEdit
+        // directory-target guard redirects/skips first; this is defense-in-depth for other callers.
+        if (Directory.Exists(fullPath) && !System.IO.File.Exists(fullPath))
+        {
+            await EmitLog(emitSse, "info",
+                $"✓ Already done: {relPath} — target is an existing directory; nothing to create", ct: ct);
+            var skip = new Dictionary<string, object?>
+            {
+                ["index"] = stepIndex,
+                ["type"] = "edit",
+                ["status"] = "skipped",
+                ["path"] = relPath,
+                ["reason"] = "target is an existing directory",
+                ["planItemIndex"] = planItemIndex
+            };
+            if (emitSse) await SendSse(Response, "step", skip, ct);
+            allResults.Add(skip);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            return stepIndex + 1;
+        }
         if (!System.IO.File.Exists(fullPath) && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
         {
             await EmitLog(emitSse, "info",

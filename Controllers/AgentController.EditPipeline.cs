@@ -33,6 +33,37 @@ partial class AgentController
         string? prompt, AgentPlan? plan, int planItemIndex, string? cardId,
         List<string>? attachedFiles, bool skipLlmPreResolution, string relPath, string fullPath)
     {
+        var fe = System.IO.File.Exists(fullPath);
+        var fc = fe ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct) : "";
+
+        // ── Deterministic content generation — fully-resolved edit, ZERO LLM calls ──
+        // Synthesizes oldStr → newStr pairs for mechanically-describable changes
+        // (literal swaps, property/field additions, getter/setter pairs) BEFORE any
+        // exploration, intent classification or strategy resolution runs.
+        if (!skipLlmPreResolution && fe)
+        {
+            var det = DeterministicEditGenerator.TryGenerate(relPath, fe, fc, step.Change ?? "");
+            if (det != null)
+            {
+                step.OldString = det.OldStr;
+                step.NewString = det.NewStr;
+                if (det.LineNumber > 0) step.LineNumber = det.LineNumber;
+                if (det.Edits is { Count: > 0 })
+                {
+                    // Multi-match: one anchored edit per occurrence — the batch apply path
+                    // composes newContent from step.Edits; OldString/NewString are set so the
+                    // plan-provided path is taken (no LLM resolve call) before the batch runs.
+                    step.Edits = det.Edits;
+                }
+                var detDecision = new EditPlanDecision(det.Strategy, det.TargetType, det.TargetName,
+                    det.OldStr, det.Reason, det.NewStr, det.Edits);
+                await EmitLog(emitSse, "success",
+                    $"⚙️ Deterministic edit synthesized — no LLM round-trip: {det.Reason}",
+                    detDecision, ct: ct);
+                return (step, "", null, detDecision, det.TargetName);
+            }
+        }
+
         var exploration = skipLlmPreResolution
             ? new StepExplorationResult
             {
@@ -57,8 +88,6 @@ partial class AgentController
                     var (raw, _, err) = await CallLlmRaw(sys, usr, c, _infiniteTimeout, maxTokens: 128);
                     return (raw, err);
                 }, ct);
-        var fe = System.IO.File.Exists(fullPath);
-        var fc = fe ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct) : "";
         var ei = eiTask != null ? await eiTask : new EditIntent(EditIntentKind.TargetedEdit, null, null);
         var decidedEditStrategy = skipLlmPreResolution
             ? null
@@ -69,6 +98,19 @@ partial class AgentController
                 $"  🎯 AST-resolved '{decidedEditStrategy.TargetName}' ({decidedEditStrategy.ResolvedOldStr.Split('\n').Length}L) via EditStrategyResolver", decidedEditStrategy, ct: ct);
             if (decidedEditStrategy.Strategy == EditStrategy.ReplaceMethod)
                 step.OldString = decidedEditStrategy.ResolvedOldStr;
+            // Fully-resolved deterministic edit (e.g. from Decide's generator hook):
+            // both strings are server-authored — the apply loop needs zero LLM calls.
+            if (decidedEditStrategy.ResolvedNewStr != null)
+            {
+                step.OldString = decidedEditStrategy.ResolvedOldStr;
+                step.NewString = decidedEditStrategy.ResolvedNewStr;
+                if (decidedEditStrategy.ResolvedEdits is { Count: > 0 })
+                    step.Edits = decidedEditStrategy.ResolvedEdits;
+                // Include the generator's reason — for multi-match batches it reports
+                // applied N/M occurrences + skipped counts, so partial batches are visible.
+                await EmitLog(emitSse, "info",
+                    $"  ⚙️ Deterministic edit: old/new both server-resolved (no LLM authoring): {decidedEditStrategy.Reason}", ct: ct);
+            }
             explorationContext = $"### TARGET FILE: {relPath}\n\n```\n{decidedEditStrategy.ResolvedOldStr}\n```" +
                 (!string.IsNullOrWhiteSpace(explorationContext) ? "\n\n" + explorationContext : "");
         }

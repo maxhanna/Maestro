@@ -13,12 +13,50 @@ using static Weaver.Services.AgentTextUtilities;
 using static Weaver.Services.AgentCodeFormatting;
 using static Weaver.Services.AgentSkeleton;
 using static Weaver.Services.AgentDiffUtilities;
-using static Weaver.Services.AgentJsonUtilities;
+using static Weaver.Services.AgentJsonUtilities;    /// <summary>Part of the split of the former AgentUtilities monolith.</summary>
+    public static class AgentDiscovery
+    {
+        /// <summary>
+        /// Best-effort extraction of a concrete file name (with extension) from a step's change
+        /// description, e.g. "Create index.html inside benchmark_test_7" → "index.html". Returns
+        /// null when no plausible file name (extension that isn't purely numeric) appears. Used to
+        /// redirect a step that targets an existing DIRECTORY (a replanner re-emitting "create
+        /// directory X" as a normal edit step) into a named file inside it instead of attempting
+        /// to write file content to the directory path (which throws UnauthorizedAccessException
+        /// on Windows).
+        /// </summary>
+        public static string? TryExtractFileNameFromChange(string? changeDesc)
+        {
+            if (string.IsNullOrWhiteSpace(changeDesc)) return null;
+            foreach (Match m in Regex.Matches(changeDesc, @"\b([A-Za-z0-9_-]+\.\w{1,12})\b"))
+            {
+                var tok = m.Groups[1].Value;
+                var ext = Path.GetExtension(tok);
+                if (string.IsNullOrWhiteSpace(ext)) continue;
+                // Skip version-like tokens ("v1.2", "2.0") whose extension is purely numeric.
+                if (ext.TrimStart('.').All(char.IsDigit)) continue;
+                return tok;
+            }
+            return null;
+        }
 
-/// <summary>Part of the split of the former AgentUtilities monolith.</summary>
-public static class AgentDiscovery
-{
-    public static string DistillExplorationContext(
+        /// <summary>
+        /// When an edit step's resolved target turns out to be an existing DIRECTORY (a replanner
+        /// re-emitted "create directory X" as a normal edit step), decide the effective target:
+        /// if the change description names a concrete file, return that file path INSIDE the
+        /// directory (the write is redirected there); otherwise return null, meaning the step's
+        /// intent is already satisfied — the directory exists — and it should be marked done
+        /// without touching disk.
+        /// </summary>
+        public static string? ResolveDirectoryTargetForStep(string dirRelPath, string? changeDesc)
+        {
+            if (string.IsNullOrWhiteSpace(dirRelPath)) return null;
+            var namedFile = TryExtractFileNameFromChange(changeDesc);
+            if (string.IsNullOrWhiteSpace(namedFile)) return null;
+            return dirRelPath.TrimEnd('/') + "/" + namedFile;
+        }
+
+        public static string DistillExplorationContext(
         string explorationContext,
         string targetRelPath,
         string changeDesc,
@@ -191,6 +229,31 @@ public static class AgentDiscovery
             if (found.Count >= 10) break;
         }
         return found;
+    }
+
+    /// <summary>
+    /// Finds an existing file with the SAME NAME in the SAME directory as <paramref name="targetRelPath"/>
+    /// (case-insensitive). Unlike a bare basename search, a same-named file in a DIFFERENT directory
+    /// (e.g. benchmark_test_4/index.html when creating benchmark_test_7/index.html) is NOT a conflict
+    /// and must never block creation. Returns the existing relative path or null.
+    /// </summary>
+    public static string? FindSameDirectoryFile(string targetRelPath, string projectRoot)
+    {
+        var norm = (targetRelPath ?? string.Empty).Replace('\\', '/').TrimStart('/');
+        var dir = Path.GetDirectoryName(norm) ?? "";
+        var name = Path.GetFileName(norm);
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        foreach (var f in FindSimilarFiles(norm, projectRoot))
+        {
+            var fNorm = f.Replace('\\', '/');
+            var fDir = Path.GetDirectoryName(fNorm) ?? "";
+            if (string.Equals(fDir, dir, StringComparison.OrdinalIgnoreCase) &&
+                Path.GetFileName(fNorm).Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return f;
+            }
+        }
+        return null;
     }
 
     public static string? ExtractTargetPath(string changeDesc, string currentRelPath, string projectRoot)

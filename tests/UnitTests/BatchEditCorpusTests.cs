@@ -162,6 +162,51 @@ public class BatchEditCorpusTests
         Assert.Contains("overlap", error);
     }
 
+    [Fact]
+    public void BatchApply_IdenticalOldStrings_DistinctLineNumbers_ApplyCleanly()
+    {
+        // Position-aware overlap (mirrors AgentController.ApplyEdit): identical anchors
+        // are NOT an overlap when each edit carries its own LineNumber hint — the hint
+        // disambiguates which occurrence to edit. This is exactly what deterministic
+        // multi-match batches ("update all five RetryCount defaults") emit.
+        var line = "const retryCount = 3;";
+        var content = $"{line}\n{line}\n{line}\n";
+        var edits = new List<EditPair>
+        {
+            new() { OldString = line, NewString = "const retryCount = 5;", LineNumber = 1 },
+            new() { OldString = line, NewString = "const retryCount = 5;", LineNumber = 2 },
+            new() { OldString = line, NewString = "const retryCount = 5;", LineNumber = 3 },
+        };
+
+        var (replaced, applied, error) = FuzzHarness.RunBatchApplyMirror(content, edits, "update all retryCount defaults to 5");
+
+        Assert.True(replaced);
+        Assert.Null(error);
+        Assert.Equal("const retryCount = 5;\nconst retryCount = 5;\nconst retryCount = 5;\n", applied);
+    }
+
+    [Fact]
+    public void BatchApply_IdenticalOldStrings_WrongLineNumber_FailsClosed()
+    {
+        // Two identical anchors whose line hints point at the SAME occurrence must be
+        // rejected as overlap — the hints are ambiguous and the batch cannot prove each
+        // edit targets a unique area.
+        var line = "const retryCount = 3;";
+        var content = $"{line}\n{line}\n";
+        var edits = new List<EditPair>
+        {
+            new() { OldString = line, NewString = "const retryCount = 5;", LineNumber = 1 },
+            new() { OldString = line, NewString = "const retryCount = 6;", LineNumber = 1 },
+        };
+
+        var (replaced, applied, error) = FuzzHarness.RunBatchApplyMirror(content, edits, "update the retryCount defaults");
+
+        Assert.False(replaced);
+        Assert.Equal(content, applied);
+        Assert.NotNull(error);
+        Assert.Contains("overlap", error);
+    }
+
     // ── Fuzz corpus ──────────────────────────────────────────────────────────
 
     /// <summary>

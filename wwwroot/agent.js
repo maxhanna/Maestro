@@ -769,6 +769,104 @@ angular.module('kanbanApp')
                     if (!card) return;
                     vm.suggestImprovements(card, null, card.filePath || vm.selectedProject, { topup: true });
                 };
+                // ── Suggestion → To-Do card ───────────────────────────────────
+                // Clicking a suggestion in the Done column creates a new card in the To Do
+                // column pre-filled with the suggestion text and its file attachments (a
+                // suggestion may reference multiple files — all are attached). The suggestion
+                // is marked _queued so it can't be clicked twice, and the board scrolls to
+                // the new card.
+                vm.suggestionToCard = function (sourceCard, suggestion) {
+                    if (!sourceCard || !suggestion) return;
+                    if (suggestion._queued) return;
+                    if (!vm.state || !vm.state.todo) return;
+                    suggestion._queued = true;
+                    var files = Array.isArray(suggestion.files) ? suggestion.files.slice() : [];
+                    // The suggestion often builds on the finished work, so prepend the
+                    // source card's completion summary as context (bounded so the card
+                    // text stays readable). The summary lands first — context, then the
+                    // actionable suggestion — so the agent sees what was just done.
+                    var summary = (sourceCard.agentAnalysis && sourceCard.agentAnalysis.summary) || '';
+                    var contextBlock = '';
+                    var srcRef = 'Source card #' + ((sourceCard.id || '').slice(0, 6) || '?');
+                    if (summary) {
+                        var trimmed = summary.length > 2000 ? summary.slice(0, 2000) + '…' : summary;
+                        contextBlock = '[CONTEXT — ' + srcRef + ' — completion summary of the source task]\n' +
+                            trimmed + '\n[/CONTEXT]\n\n';
+                    } else if (sourceCard.text) {
+                        // No summary captured — reference the source card instead so the
+                        // agent still knows this builds on completed work. Bracketed so the
+                        // planner treats it as context, not as task requirements.
+                        contextBlock = '[CONTEXT — ' + srcRef + ' — follows up on the completed source task]\n"' +
+                            (sourceCard.text.length > 300 ? sourceCard.text.slice(0, 300) + '…' : sourceCard.text) +
+                            '"\n[/CONTEXT]\n\n';
+                    }
+                    // The suggestion itself may name the other card/feature it builds on
+                    // (e.g. "notification system built in card #a1b2c3") — carry that into
+                    // the new card so the agent knows the wider connection.
+                    if (suggestion.connection) {
+                        contextBlock += '[CONTEXT — builds on: ' + suggestion.connection + ']\n[/CONTEXT]\n\n';
+                    }
+                    var newCard = {
+                        id: uid(),
+                        text: contextBlock + (suggestion.description || ''),
+                        filePath: sourceCard.filePath || vm.selectedProject,
+                        createdAt: new Date().toISOString(),
+                        priority: 'medium',
+                        attached: files,
+                        autoPr: vm.prByDefault !== false,
+                        selfImproving: false,
+                        createTests: false,
+                        llmEndpointId: sourceCard.llmEndpointId || '',
+                        _fromSuggestion: true,
+                        _suggestionSourceCardId: sourceCard.id
+                    };
+                    vm.state.todo.push(newCard);
+                    vm.saveCards();
+                    pushAgentLog(vm, 'success', '💡 Suggestion queued as a new card: ' + (newCard.text || '').slice(0, 80));
+                    if (vm.showSideToast) vm.showSideToast('💡 Added to To Do — ' + (files.length ? files.length + ' file(s) attached' : 'no attachments'));
+                    // Scroll the new card into view so the user sees where it landed.
+                    $timeout(function () {
+                        var el = document.querySelector('[data-card-id="' + newCard.id + '"]');
+                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }, 50);
+                };
+                // ── Jump to the card a suggestion's connection references ─────────
+                // Suggestion connections name the other card/feature they build on (e.g.
+                // "notification system built in card #a1b2c3"). Clicking the 🔗 chip on a
+                // Done-column suggestion resolves the #id prefix against every column,
+                // opens the owning column if hidden, scrolls the card into view and
+                // flashes it so the user sees exactly what the suggestion builds on.
+                vm.jumpToConnectionCard = function (conn) {
+                    if (!conn) return;
+                    var m = String(conn).match(/#([a-zA-Z0-9]+)/);
+                    if (!m) return;
+                    var prefix = m[1].toLowerCase();
+                    var cols = ['todo', 'doing', 'done', 'archived', 'selfImproving'];
+                    var target = null, targetCol = null;
+                    for (var i = 0; i < cols.length && !target; i++) {
+                        var col = cols[i];
+                        (vm.state && vm.state[col] || []).forEach(function (c) {
+                            if (!target && c.id && String(c.id).toLowerCase().indexOf(prefix) === 0) { target = c; targetCol = col; }
+                        });
+                    }
+                    if (!target) {
+                        if (vm.showSideToast) vm.showSideToast('🔗 The card this suggestion builds on is no longer on the board');
+                        return;
+                    }
+                    // Open the owning column if it's hidden, and ensure the right project.
+                    if (target.filePath && vm.selectedProject !== target.filePath) vm.selectedProject = target.filePath;
+                    var showKey = 'show' + targetCol.charAt(0).toUpperCase() + targetCol.slice(1);
+                    if (vm[showKey] === false) vm[showKey] = true;
+                    if (vm.selectCard) vm.selectCard(target);
+                    $timeout(function () {
+                        var el = document.querySelector('[data-card-id="' + target.id + '"]');
+                        if (el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            el.classList.add('card-flash-highlight');
+                            $timeout(function () { el.classList.remove('card-flash-highlight'); }, 1600);
+                        }
+                    }, 60);
+                };
                 vm.suggestionContext = function (card) {
                     if (!card) return null;
                     if (card._suggestionsContext) return card._suggestionsContext;
@@ -999,7 +1097,7 @@ angular.module('kanbanApp')
                 };
                 vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; vm.checkLlmReachable(); $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; if (vm._hydrateRestoredBenchmarkQueue) vm._hydrateRestoredBenchmarkQueue(); }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
-                vm.benchSectionOpen = { run: false, local: false, specs: false };
+                vm.benchSectionOpen = { run: false, local: false, specs: false, server: false };
                 vm.toggleBenchSection = function (key) {
                     if (!vm.benchSectionOpen) vm.benchSectionOpen = {};
                     vm.benchSectionOpen[key] = !vm.benchSectionOpen[key];

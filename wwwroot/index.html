@@ -266,9 +266,7 @@
             </label>
           </div>
           <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showCalendar" ng-change="vm.saveSettings(true)" /> Show Calendar
-            </label>
+            <button class="brand-link" ng-click="vm.openCalendarPanel(); vm.toggleProjectOptions()">📅 Calendar</button>
           </div>
           <div class="form-row">
             <label>
@@ -299,7 +297,7 @@
     <div class="wireframe-bg"></div>
     <div ng-include="'kanban.html'" ng-if="vm.showKanban"></div>
 
-    <div class="right-panel" ng-class="{'full-width': !vm.showKanban && !vm.showCalendar}">
+    <div class="right-panel" ng-class="{'full-width': !vm.showKanban}">
       <!-- Ask AI Chat Panel -->
       <div class="panel ai-panel" ng-if="vm.showAI" data-panel-type="ask-ai" data-panel-id="ask-ai-panel">
         <h3>🤖 Ask AI <span class="mode-toggle" ng-click="vm.toggleChatMode()"
@@ -827,7 +825,6 @@
         </div>
       </div>
 
-      <div ng-include="'calendar.html'" ng-if="vm.showCalendar"></div>
     </div>
 
     <!-- FLOATING IDE PANEL -->
@@ -927,6 +924,15 @@
             <span class="muted" style="font-size:11px;white-space:nowrap;">Build commands:</span>
             <input ng-model="p.BuildCommands" placeholder="e.g. dotnet clean & dotnet build"
               style="flex:1; min-width:0; font-size:11px;" />
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
+            <span class="muted" style="font-size:11px;white-space:nowrap;">💡 Suggestion context:</span>
+            <select ng-model="p.SuggestionContextDepth" style="flex:1; min-width:0; font-size:11px;"
+              title="How much whole-app context the improvement-suggestion algorithm sends for this project">
+              <option value="full">Full — skeleton + board history + git</option>
+              <option value="board">Board — skeleton + board history</option>
+              <option value="skeleton">Skeleton — file layout only</option>
+            </select>
           </div>
         </div>
         <div style="padding:10px 0;">
@@ -1490,10 +1496,9 @@
               <input type="checkbox" ng-model="vm.showKanban" />
               <span>📋 Kanban Board</span>
             </label>
-            <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
-              <input type="checkbox" ng-model="vm.showCalendar" />
+            <button class="brand-link" style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;background:transparent;color:var(--text);text-align:left;" ng-click="vm.openCalendarPanel()">
               <span>📅 Calendar</span>
-            </label>
+            </button>
             <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
               <input type="checkbox" ng-model="vm.showIDE" />
               <span>📝 IDE</span>
@@ -1962,12 +1967,19 @@
 
         <!-- Server Benchmarks (fetched) -->
         <div class="bench-section" ng-if="vm.serverBenchmarks.length > 0">
-          <div class="bench-section-head">
+          <div class="bench-section-head bench-head-toggle" ng-click="vm.toggleBenchSection('server')"
+            role="button" tabindex="0"
+            ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchSection('server'); $event.preventDefault()"
+            ng-class="{open: vm.benchSectionOpen.server}"
+            title="Click to expand / collapse">
             <div>
+              <span class="bench-chevron">{{vm.benchSectionOpen.server ? '▾' : '▸'}}</span>
               <div class="bench-section-title">Server benchmarks</div>
               <div class="bench-section-sub">Scores shared from other machines. Click a card for system details.</div>
             </div>
           </div>
+
+          <div class="bench-section-body" ng-if="vm.benchSectionOpen.server">
           <div ng-repeat="s in vm.serverBenchmarks" class="bench-score-card server"
             ng-click="vm.selectedServerBenchmark = (vm.selectedServerBenchmark === s ? null : s)">
             <div class="bench-score-head">
@@ -1987,6 +1999,7 @@
               <span class="bench-chip neutral">{{s.points || 0}} pts</span>
               <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(s.durationMs)}}</span>
               <span class="bench-chip neutral" ng-if="s.modelUsed" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:24}}</span>
+              <span class="bench-chip neutral user" ng-if="s.userId" title="User ID: {{s.userId}}">👤 {{(s.userId || '') | limitTo:20}}</span>
             </div>
             <div class="bench-score-details" ng-if="vm.selectedServerBenchmark === s">
               <div class="bench-detail-grid">
@@ -1995,8 +2008,10 @@
                 <div><span class="muted">CPU</span> {{s.cpu || '—'}}</div>
                 <div><span class="muted">RAM</span> {{s.ram || '—'}} GB</div>
                 <div><span class="muted">GPU</span> {{s.gpu || '—'}}</div>
+                <div><span class="muted">User</span> {{s.userId || '—'}}</div>
               </div>
             </div>
+          </div>
           </div>
         </div>
 
@@ -2061,6 +2076,13 @@
       <div class="popup-footer">
         <button ng-click="vm.closeBenchmarksPanel()">Close</button>
       </div>
+    </div>
+  </div>
+
+  <!-- CALENDAR POPUP (month grid + cron scheduled tasks) -->
+  <div class="popup-overlay" ng-if="vm.showCalendar" ng-click="vm.closeCalendarPanel()">
+    <div class="popup-panel calendar-popup-panel" ng-click="$event.stopPropagation()">
+      <div ng-include="'calendar.html'"></div>
     </div>
   </div>
 
@@ -2163,7 +2185,6 @@
   <script src="/app.js"></script>
   <script src="/kanban.js"></script>
   <script src="/calendar.js"></script>
-  <script src="/calendar.mixin.js"></script>
   <script src="/settings.js"></script>
   <script src="/bughosted.js"></script>
   <script src="/filepicker.js"></script>

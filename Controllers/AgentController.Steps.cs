@@ -958,6 +958,27 @@ Respond with JSON only:
         string projectRoot, int stepIndex, int planItemIndex, string? cardId, bool emitSse, CancellationToken ct,
         List<object> allResults)
     {
+        // Safety net: never File.WriteAllText to an existing directory path (throws
+        // UnauthorizedAccessException on Windows). The ResolveAndApplyEdit directory-target guard
+        // redirects/skips first; this is defense-in-depth for any other call path.
+        if (Directory.Exists(fullPath) && !System.IO.File.Exists(fullPath))
+        {
+            await EmitLog(emitSse, "info",
+                $"Skipping full-file write — '{relPath}' is an existing directory, not a file", ct: ct);
+            var skip = new Dictionary<string, object?>
+            {
+                ["index"] = stepIndex,
+                ["type"] = "edit",
+                ["status"] = "skipped",
+                ["path"] = relPath,
+                ["reason"] = "target is an existing directory",
+                ["planItemIndex"] = planItemIndex
+            };
+            if (emitSse) await SendSse(Response, "step", skip, ct);
+            allResults.Add(skip);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            return stepIndex + 1;
+        }
         var dir = Path.GetDirectoryName(fullPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);

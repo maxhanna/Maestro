@@ -105,18 +105,47 @@ internal static class FuzzHarness
         string content, List<EditPair> edits, string change)
     {
         // 1. Overlap rejection — every edit must target a unique, non-overlapping area.
-        for (var oi = 0; oi < edits.Count; oi++)
+        // POSITION-AWARE (mirrors AgentController.ApplyEdit): identical anchors at DIFFERENT
+        // lines are fine — each edit carries its own LineNumber hint, which TryReplaceSafe uses
+        // to disambiguate; only edits matching at overlapping file positions are rejected.
+        var normFileBatch = AgentTextUtilities.NormalizeLineEndings(content);
+        var assignedRanges = new List<(int editIdx, int start, int end)>();
+        for (var i = 0; i < edits.Count; i++)
         {
-            var normO = AgentTextUtilities.NormalizeLineEndings(edits[oi].OldString ?? "").Trim();
+            var normO = AgentTextUtilities.NormalizeLineEndings(edits[i].OldString ?? "").Trim();
             if (string.IsNullOrWhiteSpace(normO)) continue;
-            for (var oj = oi + 1; oj < edits.Count; oj++)
+            var positions = new List<int>();
+            var sp = 0;
+            while ((sp = normFileBatch.IndexOf(normO, sp, StringComparison.Ordinal)) >= 0)
             {
-                var normJ = AgentTextUtilities.NormalizeLineEndings(edits[oj].OldString ?? "").Trim();
-                if (string.IsNullOrWhiteSpace(normJ)) continue;
-                if (normO.Contains(normJ) || normJ.Contains(normO))
+                positions.Add(sp);
+                sp += Math.Max(1, normO.Length);
+            }
+            if (positions.Count == 0) continue; // missing anchor — the sequential apply reports it
+            var targetLine = edits[i].LineNumber > 0 ? edits[i].LineNumber : 0;
+            var chosen = positions[0];
+            if (positions.Count > 1 && targetLine > 0)
+            {
+                var bestDist = int.MaxValue;
+                foreach (var p in positions)
+                {
+                    var lineOf = normFileBatch[..p].Count(c => c == '\n') + 1;
+                    var dist = Math.Abs(lineOf - targetLine);
+                    if (dist < bestDist) { bestDist = dist; chosen = p; }
+                }
+            }
+            assignedRanges.Add((i, chosen, chosen + normO.Length));
+        }
+        for (var oi = 0; oi < assignedRanges.Count; oi++)
+        {
+            for (var oj = oi + 1; oj < assignedRanges.Count; oj++)
+            {
+                var ra = assignedRanges[oi];
+                var rb = assignedRanges[oj];
+                if (ra.start < rb.end && rb.start < ra.end)
                 {
                     return (false, content,
-                        $"Batch sub-edit overlap: edit {oi + 1} and edit {oj + 1} target overlapping oldString sections");
+                        $"Batch sub-edit overlap: edit {ra.editIdx + 1} and edit {rb.editIdx + 1} target overlapping oldString sections");
                 }
             }
         }

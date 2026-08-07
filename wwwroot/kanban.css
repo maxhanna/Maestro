@@ -312,6 +312,16 @@ body.dragging-active .card:hover {
     margin-left: 6px;
 }
 
+/* Improvement-suggestion chip — cards created from a completed card's
+   'Add to To Do' suggestion. A soft violet/glow tone so it reads as a
+   generated task, distinct from READY/QUEUED/bench/self-improving tags. */
+.card .card-tag.tag-suggestion {
+    background: rgba(167, 139, 250, 0.16);
+    color: #c4b5fd;
+    font-weight: 700;
+    border: 1px solid rgba(167, 139, 250, 0.35);
+}
+
 @keyframes tag-queued-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.55; }
@@ -456,6 +466,23 @@ body.dragging-active .card:hover {
 .card .suggestion {
     padding: 8px 10px;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.card .suggestion:hover {
+    background: rgba(192, 132, 252, 0.08);
+}
+
+.card .suggestion:focus-visible {
+    outline: 1px solid #a78bfa;
+    outline-offset: -1px;
+}
+
+.card .suggestion.queued {
+    cursor: default;
+    opacity: 0.65;
+    background: rgba(255, 255, 255, 0.03);
 }
 
 .card .suggestion:first-child {
@@ -466,6 +493,63 @@ body.dragging-active .card:hover {
     font-size: 12px;
     line-height: 1.45;
     color: var(--text);
+}
+
+.card .suggestion-conn {
+    margin-top: 5px;
+    font-size: 10.5px;
+    line-height: 1.35;
+    color: #7dd3fc;
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    border-radius: 8px;
+    padding: 3px 8px;
+    display: inline-block;
+    max-width: 100%;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.card .suggestion-conn:hover,
+.card .suggestion-conn:focus-visible {
+    background: rgba(56, 189, 248, 0.18);
+    border-color: rgba(56, 189, 248, 0.5);
+    color: #bae6fd;
+    outline: none;
+}
+
+.card-flash-highlight {
+    animation: cardFlashGlow 1.6s ease-out;
+}
+
+@keyframes cardFlashGlow {
+    0% { outline: 2px solid rgba(56, 189, 248, 0.9); outline-offset: 3px; }
+    60% { outline: 2px solid rgba(56, 189, 248, 0.35); outline-offset: 3px; }
+    100% { outline: 2px solid rgba(56, 189, 248, 0); outline-offset: 3px; }
+}
+
+.card .suggestion-action {
+    margin-top: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: #a78bfa;
+    display: inline-block;
+    padding: 2px 7px;
+    border: 1px solid rgba(167, 139, 250, 0.4);
+    border-radius: 10px;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.card .suggestion:hover .suggestion-action:not(.queued) {
+    background: rgba(167, 139, 250, 0.18);
+    color: #c4b5fd;
+}
+
+.card .suggestion-action.queued {
+    color: rgba(255, 255, 255, 0.5);
+    border-color: rgba(255, 255, 255, 0.18);
 }
 
 .card .suggestion-empty {

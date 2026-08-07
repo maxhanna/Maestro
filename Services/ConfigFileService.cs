@@ -10,6 +10,12 @@ public class ProjectDto
     public string Path { get; set; } = "";
     public string Description { get; set; } = "";
     public string BuildCommands { get; set; } = "";
+    /// <summary>
+    /// How much whole-app context the improvement-suggestion algorithm should send for
+    /// this project: "full" (default — skeleton + other kanban cards + git history),
+    /// "board" (skeleton + other kanban cards, no git), or "skeleton" (layout only).
+    /// </summary>
+    public string SuggestionContextDepth { get; set; } = "full";
 }
 
 public class EmailAccountConfig

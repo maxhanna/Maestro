@@ -161,7 +161,7 @@ angular.module('kanbanApp')
 
         function normalizeProjects(raw) {
             return raw.map(function (p) {
-                return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '' };
+                return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '', SuggestionContextDepth: p.SuggestionContextDepth || p.suggestionContextDepth || 'full' };
             });
         }
 
@@ -695,8 +695,30 @@ angular.module('kanbanApp')
                 // popup showing the same stats the old chip row displayed inline.
                 vm.showUserStats = false;
                 vm.toggleUserStats = function () { vm.showUserStats = !vm.showUserStats; };
-                vm.closeUserStatsOnBlur = function () {
-                    $timeout(function () { vm.showUserStats = false; }, 200);
+                // Closing on blur must NOT fire when focus simply moved INTO the
+                // stats popup (e.g. clicking a rank-ladder row to expand it — the
+                // row is a plain div, so the browser transfers focus to the popup
+                // container, blurring the trigger button). Only close when focus
+                // truly leaves the popup area (clicking outside / Tab away).
+                // Track the last mousedown so blur caused by a click INSIDE the
+                // popup (where relatedTarget may be null/body, not the popup) is
+                // never mistaken for an outside click.
+                vm._statsMousedownInside = false;
+                document.addEventListener('mousedown', function (e) {
+                    var t = e && e.target;
+                    vm._statsMousedownInside = !!(t && typeof t.closest === 'function' && t.closest('.user-stats-popup'));
+                }, true);
+                function _focusInsideStatsPopup(el) {
+                    return !!(el && typeof el.closest === 'function' && el.closest('.user-stats-popup'));
+                }
+                vm.closeUserStatsOnBlur = function (event) {
+                    var related = event && event.relatedTarget;
+                    if (_focusInsideStatsPopup(related)) return;
+                    $timeout(function () {
+                        if (vm._statsMousedownInside) { vm._statsMousedownInside = false; return; }
+                        if (_focusInsideStatsPopup(document.activeElement)) return;
+                        vm.showUserStats = false;
+                    }, 200);
                 };
                 vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); };
                 vm.openEditProjectsPanel = function () { vm.newProjectName = ''; vm.newProjectPath = ''; vm.newProjectDescription = ''; vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.projects.forEach(function (p) { p._origPath = p.Path; }); vm.showEditProjectsPanel = true; };
@@ -716,7 +738,7 @@ angular.module('kanbanApp')
                         if (idx === -1) return $window.alert('Project not found in config');
                         var newPath = p.Path.replace(/\\/g, '/');
                         if (newPath !== originalPath && cfg.projects.some(function (cp) { return (cp.Path || cp.path) === newPath; })) return $window.alert('A project with that path already exists');
-                        cfg.projects[idx].Name = p.Name; cfg.projects[idx].Path = newPath; cfg.projects[idx].Description = p.Description || ''; cfg.projects[idx].BuildCommands = p.BuildCommands || '';
+                        cfg.projects[idx].Name = p.Name; cfg.projects[idx].Path = newPath; cfg.projects[idx].Description = p.Description || ''; cfg.projects[idx].BuildCommands = p.BuildCommands || ''; cfg.projects[idx].SuggestionContextDepth = p.SuggestionContextDepth || 'full';
                         $http.post('/api/config/save', cfg).then(function () { vm.loadConfig(); }, function (err) { $window.alert('Failed to save: ' + (err.data || err.statusText)); });
                     });
                 };

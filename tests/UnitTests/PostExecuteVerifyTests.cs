@@ -209,6 +209,59 @@ public class PostExecuteVerifyTests
         Assert.Contains("phantom", reason);
     }
 
+    // ── Triage: 'X should be Y' already-resolved renames ────────────────────
+
+    [Fact]
+    public void Triage_ShouldBeRename_OldSymbolGone_NewSymbolPresent_Drops()
+    {
+        // Mirrors the benchmark case: the verifier re-claims 'do_get should be do_GET' AFTER the
+        // fix landed — do_get is gone from the file and do_GET exists, so the issue was re-issued
+        // from stale/historical text and must not burn a repair pass re-fixing it.
+        var files = new Dictionary<string, string>
+        {
+            ["benchmark_test_4/server.py"] =
+                "class MyHandler(http.server.SimpleHTTPRequestHandler):\n" +
+                "    def do_GET(self):\n" +
+                "        return http.server.SimpleHTTPRequestHandler.do_GET(self)\n"
+        };
+        var (keep, reason) = InvokeTriageVerifierIssue(
+            "'do_get(self)' should be 'do_GET(self)' according to HTTP request handler conventions.", files);
+        Assert.False(keep);
+        Assert.Contains("already resolved", reason);
+        Assert.Contains("do_GET", reason);
+    }
+
+    [Fact]
+    public void Triage_ShouldBeRename_WrongSymbolStillPresent_Keeps()
+    {
+        // do_get is STILL in the file (the rename has not happened) — the issue is genuine and
+        // must stay actionable so the repair loop actually fixes it.
+        var files = new Dictionary<string, string>
+        {
+            ["benchmark_test_4/server.py"] =
+                "class MyHandler(http.server.SimpleHTTPRequestHandler):\n" +
+                "    def do_GET(self):\n" +
+                "        return http.server.SimpleHTTPRequestHandler.do_get(self)\n"
+        };
+        var (keep, _) = InvokeTriageVerifierIssue(
+            "'do_get(self)' should be 'do_GET(self)' according to HTTP request handler conventions.", files);
+        Assert.True(keep);
+    }
+
+    [Fact]
+    public void Triage_ShouldBeRename_NeitherSymbolPresent_FallsThroughAndKeeps()
+    {
+        // Neither the claimed-wrong nor the corrected symbol exists — not an 'already resolved'
+        // rename (no evidence the fix landed). No other rule fires, so it stays actionable.
+        var files = new Dictionary<string, string>
+        {
+            ["app.ts"] = "function loadCards() {}\n"
+        };
+        var (keep, _) = InvokeTriageVerifierIssue(
+            "'getEventIcon' should be 'getEventData' in user-events.component.ts", files);
+        Assert.True(keep);
+    }
+
     // ── Triage: event-gated reachability ────────────────────────────────────
 
     [Fact]

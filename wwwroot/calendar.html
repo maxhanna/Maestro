@@ -1,10 +1,11 @@
-﻿<div class="calendar-view">
+<div class="calendar-view">
   <div class="calendar-header">
     <button class="small" ng-click="vm.calPrevMonth()">&larr; Prev</button>
     <h3 class="calendar-month-label">{{vm.calMonthName}} {{vm.calYear}}</h3>
     <button class="small" ng-click="vm.calNextMonth()">Next &rarr;</button>
     <button class="small ghost" ng-click="vm.calToday()" style="margin-left:8px;">Today</button>
     <button class="small primary" ng-click="vm.calAddCard()" style="margin-left:auto;">+ Add Card</button>
+    <button class="small ghost" ng-click="vm.closeCalendarPanel()" title="Close calendar">&times;</button>
   </div>
 
   <div class="calendar-weekdays">
@@ -22,8 +23,8 @@
         <div class="cal-card" ng-repeat="card in day.cards track by card.id" ng-click="vm.calEditCard(card, $event)"
           ng-class="'cal-card-' + (card.priority || 'default')">
           <div class="cal-card-text">{{card.text | limitTo:40}}</div>
-          <span class="cal-card-project" ng-if="card.project"
-            title="{{card.project}}">{{vm.projectName(card.project)}}</span>
+          <span class="cal-card-project" ng-if="card.filePath"
+            title="{{card.filePath}}">{{vm.projectName(card.filePath)}}</span>
           <span class="cal-card-time" ng-if="card.time">@{{card.time}}</span>
           <span class="cal-card-cron" ng-if="card.cronExpression" title="Cron: {{card.cronExpression}}">&#9201;</span>
           <span class="cal-card-del" ng-click="vm.calDeleteCard(card, $event)">&times;</span>
@@ -42,7 +43,7 @@
       <div class="popup-body">
         <div class="form-row">
           <label>Date</label>
-          <input type="date" ng-model="vm.calEditCardData.date ?? localDateStr(now)" />
+          <input type="date" ng-model="vm.calEditCardData.date" />
         </div>
         <div class="form-row">
           <label>Time (optional)</label>
@@ -72,12 +73,14 @@
         <div class="form-row">
           <label>Cron Schedule (optional)</label>
           <input ng-model="vm.calEditCardData.cronExpression" placeholder="e.g. 0 9 * * 1-5 (weekdays at 9am)" />
-          <span class="settings-help">Runs the card automatically on schedule. Standard 5-field cron syntax.</span>
+          <span class="settings-help">Runs the card automatically on schedule — creates a To Do card and starts it. Standard 5-field cron syntax.</span>
           <div class="cron-helpers">
-            <span class="cron-helper" ng-click="vm.setCronExpression('09 * *1-5')">Weekdays at9am</span>
-            <span class="cron-helper" ng-click="vm.setCronExpression('018 * *1-5')">Weekdays at6pm</span>
-            <span class="cron-helper" ng-click="vm.setCronExpression('00 * *0')">Every Sunday</span>
-            <span class="cron-helper" ng-click="vm.setCronExpression('001 * *')">First day of month</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('0 9 * * 1-5')">Weekdays at 9am</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('0 18 * * 1-5')">Weekdays at 6pm</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('0 0 * * 0')">Every Sunday</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('0 0 1 * *')">First day of month</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('*/15 * * * *')">Every 15 min</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('')">No schedule</span>
           </div>
         </div>
       </div>

@@ -268,4 +268,89 @@ public class ImprovementSuggestionsTests
         Assert.Single(batch);
         Assert.Equal("Add retry logic to the upload service", batch[0]);
     }
+
+    // ── Board-wide project context helpers ────────────────────────────────
+    // The suggestion endpoint now feeds the LLM a broader application view (other
+    // kanban cards, project skeleton, git history) so it can propose cross-feature
+    // integrations. These pure helpers are deterministic and unit-tested directly.
+
+    private static string InvokeStripContext(string s)
+    {
+        var method = typeof(AgentController).GetMethod("StripSuggestionContext",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("StripSuggestionContext not found");
+        return (string)method.Invoke(null, new object?[] { s })!;
+    }
+
+    private static string InvokeTruncate(string s, int max)
+    {
+        var method = typeof(AgentController).GetMethod("TruncateForContext",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("TruncateForContext not found");
+        return (string)method.Invoke(null, new object?[] { s, max })!;
+    }
+
+    [Fact]
+    public void StripSuggestionContext_Removes_Prefixed_Context_Block()
+    {
+        // Suggestion-derived cards prepend [CONTEXT — source ref — summary][/CONTEXT].
+        var text = "[CONTEXT — #abc123 — completion summary of the source task]\n" +
+                   "Built the admin ban flow.\n[/CONTEXT]\n\nMake banning notify the banned user";
+        Assert.Equal("Make banning notify the banned user", InvokeStripContext(text));
+    }
+
+    [Fact]
+    public void StripSuggestionContext_Leaves_Plain_Task_Text_Untouched()
+    {
+        var plain = "Build the admin ban flow with role checks";
+        Assert.Equal(plain, InvokeStripContext(plain));
+        // Case-insensitive marker must still be stripped.
+        var upper = "[CONTEXT][/CONTEXT] Follow-up task";
+        Assert.Equal("Follow-up task", InvokeStripContext(upper));
+    }
+
+    [Fact]
+    public void TruncateForContext_Caps_Long_Text_And_Keeps_Short_Text()
+    {
+        var longText = new string('a', 500);
+        var capped = InvokeTruncate(longText, 100);
+        Assert.Equal(101, capped.Length); // 100 chars + ellipsis
+        Assert.StartsWith(new string('a', 100), capped);
+        Assert.EndsWith("…", capped);
+        Assert.Equal("short task", InvokeTruncate("  short task  ", 100));
+    }
+
+    // ── Per-project suggestion context depth ──────────────────────────────
+    // The per-project setting controls how much whole-app context the suggestion
+    // endpoint sends (skeleton only / + board history / + git). The pure normalizer
+    // is unit-tested directly; anything unrecognized must fall back to "full".
+
+    private static string InvokeNormalizeDepth(string? s)
+    {
+        var method = typeof(AgentController).GetMethod("NormalizeSuggestionDepth",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("NormalizeSuggestionDepth not found");
+        return (string)method.Invoke(null, new object?[] { s })!;
+    }
+
+    [Fact]
+    public void SuggestionDepth_Normalizes_Known_Values()
+    {
+        Assert.Equal("full", InvokeNormalizeDepth("full"));
+        Assert.Equal("full", InvokeNormalizeDepth("  Full ")); // case/whitespace tolerant
+        Assert.Equal("board", InvokeNormalizeDepth("board"));
+        Assert.Equal("board", InvokeNormalizeDepth("board-history"));
+        Assert.Equal("board", InvokeNormalizeDepth("board_history"));
+        Assert.Equal("skeleton", InvokeNormalizeDepth("skeleton"));
+        Assert.Equal("skeleton", InvokeNormalizeDepth("Skeleton"));
+    }
+
+    [Fact]
+    public void SuggestionDepth_Unknown_And_Empty_Fall_Back_To_Full()
+    {
+        Assert.Equal("full", InvokeNormalizeDepth(""));
+        Assert.Equal("full", InvokeNormalizeDepth(null));
+        Assert.Equal("full", InvokeNormalizeDepth("garbage"));
+        Assert.Equal("full", InvokeNormalizeDepth("everything"));
+    }
 }

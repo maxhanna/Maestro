@@ -395,6 +395,36 @@ public class BenchmarkService
                     Check.Contains("First stripped", "edit_strategy_15/formatter.py", ".strip()", 2),
                     Check.Contains("Unchanged function preserved", "edit_strategy_15/formatter.py", "return \"keep\"", 2, "preservation")
                 ]
+            },
+            new()
+            {
+                Level = 16, Name = "Data Fetch 1: Pokemon CSV", Description = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. Fetch real Pokemon data (id numbers, stats, and types) from a live source — the public PokeAPI (https://pokeapi.co) is recommended — and write the data into pokemon_data.csv. The CSV must contain real Pokemon data: each row should include the Pokemon's id number, its base stats (for example hp, attack, defense), and its type(s). Fetch as many Pokemon as possible — the goal is to cover the full Pokedex (~1025 species), not just the first few. Do not invent or fabricate the data.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_16"),
+                    Check.File("Pokemon CSV exists", "benchmark_test_16/pokemon_data.csv"),
+                    Check.Contains("CSV has id column", "benchmark_test_16/pokemon_data.csv", "id"),
+                    Check.Contains("CSV has type column", "benchmark_test_16/pokemon_data.csv", "type"),
+                    Check.Contains("CSV has stats column (hp)", "benchmark_test_16/pokemon_data.csv", "hp"),
+                    Check.Contains("CSV has stats column (attack)", "benchmark_test_16/pokemon_data.csv", "attack"),
+                    Check.Contains("First dex pokemon present", "benchmark_test_16/pokemon_data.csv", "bulbasaur"),
+                    Check.Contains("Iconic pokemon present", "benchmark_test_16/pokemon_data.csv", "pikachu"),
+                    Check.Contains("Mid dex pokemon present", "benchmark_test_16/pokemon_data.csv", "mewtwo"),
+                    Check.Contains("Late dex pokemon present", "benchmark_test_16/pokemon_data.csv", "lucario")
+                ]
+            },
+            new()
+            {
+                Level = 17, Name = "Web Search 1: Sequential Facts", Description = "Create a folder called 'benchmark_test_17' at the project root. Inside it, create a text file called 'internet_facts.txt'. Then perform SEVERAL separate web searches, one after another (do them sequentially — each search is independent and must be run as its own fetch, not combined into a single query), to find the answers to these unrelated questions:\n\n1. When is the next Bitcoin halving expected to occur?\n2. What is the deepest point in the ocean called?\n3. In what year did the first crewed Moon landing happen?\n\nUse real web search results for every question — do not guess or fabricate any answer. After collecting all three answers, write each one on its own line into benchmark_test_17/internet_facts.txt (three separate lines, one per question).",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_17"),
+                    Check.File("Facts file exists", "benchmark_test_17/internet_facts.txt"),
+                    Check.ContainsIc("Bitcoin halving answer present", "benchmark_test_17/internet_facts.txt", "halving"),
+                    Check.ContainsIc("Bitcoin mentioned", "benchmark_test_17/internet_facts.txt", "bitcoin"),
+                    Check.ContainsIc("Deepest point answer present", "benchmark_test_17/internet_facts.txt", "mariana trench"),
+                    Check.Contains("Moon landing year present", "benchmark_test_17/internet_facts.txt", "1969")
+                ]
             }
         };
     }
@@ -554,6 +584,8 @@ public static class Check
         new() { Name = name, Type = BenchmarkCheckType.FileContains, Path = path, Value = value, Weight = weight };
     public static BenchmarkAcceptanceCheck Contains(string name, string path, string value, double weight, string category) =>
         new() { Name = name, Type = BenchmarkCheckType.FileContains, Path = path, Value = value, Weight = weight, Category = category };
+    public static BenchmarkAcceptanceCheck ContainsIc(string name, string path, string value, double weight = 1) =>
+        new() { Name = name, Type = BenchmarkCheckType.FileContains, Path = path, Value = value, Weight = weight, IgnoreCase = true };
     public static BenchmarkAcceptanceCheck Exact(string name, string path, string value, double weight = 1) =>
         new() { Name = name, Type = BenchmarkCheckType.FileEquals, Path = path, Value = value, Weight = weight };
     public static BenchmarkAcceptanceCheck NotContains(string name, string path, string value, double weight = 1) =>
