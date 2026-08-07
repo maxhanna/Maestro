@@ -87,7 +87,7 @@ public static class DeterministicEditGenerator
             // generated must NOT degrade to editing just the first match.
             if (IsMultiMatchDescription(desc))
             {
-                var multi = TryGenerateMultiSwap(fileContent, desc);
+                var multi = TryGenerateMultiSwap(fileContent, desc, ext);
                 if (multi != null) return multi;
                 return null;
             }
@@ -167,8 +167,8 @@ public static class DeterministicEditGenerator
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex ClassExclusionRegex = new(
-        @"\b(?:except|excluding|other\s+than|apart\s+from)\b\s+(?:the\s+)?(?<excluded>(?!one\b|the\b|class\b|classes\b|record\b|records\b|interface\b|interfaces\b|struct\b|structs\b)[A-Za-z_][A-Za-z0-9_]*)\b" +
-        @"|\b(?:except|excluding)\b\s+(?:the\s+)?one\s+(?:named|called)\s+(?<excluded>[A-Za-z_][A-Za-z0-9_]*)\b",
+        @"\b(?:except|excluding|other\s+than|apart\s+from)\b\s+(?:the\s+)?(?<excluded>(?!a\b|an\b|one\b|the\b|class\b|classes\b|record\b|records\b|interface\b|interfaces\b|struct\b|structs\b)[A-Za-z_][A-Za-z0-9_]*)\b" +
+        @"|\b(?:except|excluding)\b\s+(?:the\s+)?one\s+(?:named|called)\s+(?<excluded>(?!a\b|an\b|one\b|the\b|class\b|classes\b|record\b|records\b|interface\b|interfaces\b|struct\b|structs\b)[A-Za-z_][A-Za-z0-9_]*)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static bool IsMultiClassMemberAdd(string desc)
@@ -275,9 +275,12 @@ public static class DeterministicEditGenerator
                 ? overrideName!
                 : adaptive ? ClassNameBase(b.Name) + Capitalize(req.Name) : req.Name;
             var perClassReq = req with { Name = memberName };
+            var useAnchor = b.AnchorPrefix != null && b.AnchorPrefix != b.CloseBraceLine;
             var snippet = isCs
-                ? BuildCsMemberSnippet(perClassReq, t, b.BraceIndent, b.IsInterface)
-                : BuildTsMemberSnippet(perClassReq, t, b.BraceIndent, b.IsInterface, isJs);
+                ? BuildCsMemberSnippet(perClassReq, t,
+                    MemberIndentFor(useAnchor ? b.AnchorPrefix : null, b.BraceIndent, isTs: false), b.IsInterface)
+                : BuildTsMemberSnippet(perClassReq, t,
+                    MemberIndentFor(useAnchor ? b.AnchorPrefix : null, b.BraceIndent, isTs: true), b.IsInterface, isJs);
 
             string oldStr, newStr;
             if (isCs)
@@ -363,7 +366,7 @@ public static class DeterministicEditGenerator
     /// batch apply path disambiguates identical anchors. Declines when nothing matches
     /// or the value can't be verified per line.
     /// </summary>
-    private static DeterministicEdit? TryGenerateMultiSwap(string fileContent, string desc)
+    private static DeterministicEdit? TryGenerateMultiSwap(string fileContent, string desc, string ext)
     {
         // Quantifier filler ("all five", "the", "every") is pure emphasis — removing it
         // cannot change which edit is described, and lets a camelCase name like
@@ -418,7 +421,10 @@ public static class DeterministicEditGenerator
             if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") || trimmed.StartsWith("*")
                 || trimmed.StartsWith("#"))
                 continue;
-            if (!ContainsStandaloneName(lines[i], name)) continue;
+            // Quoted-key recognition is gated to JSON-family files only: in code files a line
+            // like '"maxRetries": 3' could live INSIDE a template/string literal, so letting it
+            // match there would edit string content. JSON files are data — a quoted key is the key.
+            if (!ContainsStandaloneName(lines[i], name, ext is ".json" or ".jsonc" or ".json5")) continue;
             occurrences++;
             var next = i + 1 < lines.Length ? lines[i + 1] : null;
 
@@ -481,7 +487,7 @@ public static class DeterministicEditGenerator
 
     /// <summary>True when <paramref name="name"/> appears in the line as a standalone identifier
     /// (not inside a string, trailing comment, or a longer word).</summary>
-    private static bool ContainsStandaloneName(string line, string name)
+    private static bool ContainsStandaloneName(string line, string name, bool allowJsonQuotedKey = false)
     {
         var idx = line.IndexOf(name, StringComparison.OrdinalIgnoreCase);
         while (idx >= 0)
@@ -493,10 +499,34 @@ public static class DeterministicEditGenerator
             var okAfter = !(char.IsLetterOrDigit(after) || after == '_');
             // A trailing comment on the SAME line is not a real occurrence — "const x = 1; // retryCount = 3"
             // must not be edited (the name is inside the comment, the real variable has a different value).
-            if (okBefore && okAfter && !IsInsideLineComment(line, idx)) return true;
+            if (!IsInsideLineComment(line, idx) &&
+                ((okBefore && okAfter) || (allowJsonQuotedKey && IsJsonQuotedKey(line, idx, name.Length))))
+                return true;
             idx = line.IndexOf(name, idx + 1, StringComparison.OrdinalIgnoreCase);
         }
         return false;
+    }
+
+/// <summary>True when the identifier at <paramref name="idx"/> (length <paramref name="len"/>)
+    /// in <paramref name="line"/> is a JSON-style QUOTED KEY of a key:value pair — '"maxRetries": 3' —
+    /// the name wrapped in matching quotes, then (after whitespace) a ':', with a SCALAR value (not
+    /// '{'/'[') so a nested object's literals are never mis-swapped as the key's value. The closing
+    /// quote also doubles as the word boundary, so a longer key ("maxRetriesX") never matches "maxRetries".
+    /// Consulted only for JSON-family files (the caller gates it) — in code files the same text could
+    /// live inside a string/template literal.</summary>
+    private static bool IsJsonQuotedKey(string line, int idx, int len)
+    {
+        if (idx <= 0) return false;
+        var open = line[idx - 1];
+        if (open != '"' && open != '\'') return false;
+        var closeIdx = idx + len;
+        if (closeIdx >= line.Length || line[closeIdx] != open) return false;
+        var p = closeIdx + 1;
+        while (p < line.Length && char.IsWhiteSpace(line[p])) p++;
+        if (p >= line.Length || line[p] != ':') return false;
+        p++;
+        while (p < line.Length && char.IsWhiteSpace(line[p])) p++;
+        return p < line.Length && line[p] != '{' && line[p] != '[';
     }
 
     /// <summary>True when <paramref name="position"/> in <paramref name="line"/> sits inside a
@@ -730,7 +760,9 @@ public static class DeterministicEditGenerator
             var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface) = anchor.Value;
 
             var t = req.Type ?? InferCsType(req.Name);
-            var snippet = BuildCsMemberSnippet(req, t, braceIndent, isInterface);
+            var snippet = BuildCsMemberSnippet(req, t,
+                MemberIndentFor(anchorPrefix != null && anchorPrefix != closeBraceLine ? anchorPrefix : null, braceIndent, isTs: false),
+                isInterface);
 
             var oldStr = anchorPrefix != null && anchorPrefix != closeBraceLine
                 ? anchorPrefix + "\n" + closeBraceLine
@@ -753,8 +785,9 @@ public static class DeterministicEditGenerator
             var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface, _) = anchor.Value;
 
             var t = req.Type ?? InferJsType(req.Name);
-            var snippet = BuildTsMemberSnippet(req, t, braceIndent, isInterface,
-                ext is ".js" or ".jsx" or ".mjs" or ".cjs");
+            var snippet = BuildTsMemberSnippet(req, t,
+                MemberIndentFor(anchorPrefix != null && anchorPrefix != closeBraceLine ? anchorPrefix : null, braceIndent, isTs: true),
+                isInterface, ext is ".js" or ".jsx" or ".mjs" or ".cjs");
 
             // Widen the anchor beyond a lone '}' (G2): prefixing the class close brace
             // with the contiguous body slice (last member line — or class-open line when
@@ -836,20 +869,28 @@ public static class DeterministicEditGenerator
         return new MemberRequest(isGetterSetter, name, type, className);
     }
 
-    private static string BuildCsMemberSnippet(MemberRequest req, string type, string braceIndent, bool isInterface)
+    /// <summary>The indentation for a newly-synthesized member: mirrors the LAST EXISTING member
+    /// line's leading whitespace (so a formatter-reindented file gets style-consistent members
+    /// instead of a hardcoded default), falling back to the class indent + the language's member
+    /// indent when the class body is empty (no anchor).</summary>
+    private static string MemberIndentFor(string? anchorPrefix, string braceIndent, bool isTs)
+        => anchorPrefix != null
+            ? Regex.Match(anchorPrefix, @"^\s*").Value
+            : braceIndent + (isTs ? "  " : "    ");
+
+    private static string BuildCsMemberSnippet(MemberRequest req, string type, string memberIndent, bool isInterface)
     {
         return req.IsGetterSetter
-            ? BuildCsGetterSetter(req.Name, type, braceIndent + "    ")
+            ? BuildCsGetterSetter(req.Name, type, memberIndent)
             : isInterface
-                ? braceIndent + "    " + $"{type} {req.Name} {{ get; set; }}"
-                : braceIndent + "    " + $"public {type} {req.Name} {{ get; set; }}";
+                ? memberIndent + $"{type} {req.Name} {{ get; set; }}"
+                : memberIndent + $"public {type} {req.Name} {{ get; set; }}";
     }
 
-    private static string BuildTsMemberSnippet(MemberRequest req, string type, string braceIndent,
+    private static string BuildTsMemberSnippet(MemberRequest req, string type, string memberIndent,
         bool isInterface, bool isJs)
     {
         var memberName = GetTsMemberName(req.Name);
-        var memberIndent = braceIndent + "  ";
         if (isInterface)
             return memberIndent + $"{memberName}: {type};";
         if (!isJs)

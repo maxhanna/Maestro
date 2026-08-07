@@ -4,6 +4,25 @@ angular.module('kanbanApp')
         var _bhHeartbeatFailCount = 0, _bhHeartbeatTimer = null, _bhEditorSyncTimer = null, _bhEventSource = null, _bhCommandTimer = null, _bhTimerRunning = false, _lastSyncedEditorState = null, _isSyncingData = false;
 
         function uid() { return Math.random().toString(36).slice(2, 9); }
+        // Idempotent remote card delivery: a command can arrive twice (SSE + polling
+        // fallback, or a re-delivery after a failed ack). If a card with this id
+        // already exists ANYWHERE on the board (a re-delivered executeTask may have
+        // already moved it to doing/done), update it in place instead of pushing a
+        // duplicate — same-id cards in different columns corrupt findCardById and
+        // same-column dupes crash ng-repeat (ngRepeat:dupes).
+        function upsertRemoteCard(vm, card) {
+            var col = findCardColumn(vm, card.id);
+            if (col) {
+                var existing = (vm.state[col] || []).find(function (c) { return c.id === card.id; });
+                if (existing) {
+                    if (card.text) existing.text = card.text;
+                    if (card.priority !== undefined && card.priority !== null) existing.priority = card.priority;
+                    if (card.attached !== undefined) existing.attached = card.attached;
+                }
+                return;
+            }
+            vm.state.todo.push(card);
+        }
         function findCardColumn(vm, cardId) {
             if (!cardId || !vm.state) return null;
             var cols = ['todo', 'doing', 'done', 'archived', 'selfImproving'];
@@ -127,15 +146,22 @@ angular.module('kanbanApp')
                 vm.executeRemoteCommand = function (cmd) {
                     // [Kept identical to original logic, utilizing vm.* methods like vm.moveCard, vm.saveCards, vm.executeAgent]
                     if (cmd.command === 'executeTask' && cmd.params && cmd.params.text) {
-                        var card = { id: uid(), text: cmd.params.text, filePath: cmd.params.project || vm.selectedProject, createdAt: new Date().toISOString(), priority: cmd.params.priority || 'medium', attached: [], selfImproving: false, isDecomposing: false };
-                        vm.state.todo.push(card); vm.saveCards();
+                        var card = { id: cmd.params.cardId || uid(), text: cmd.params.text, filePath: cmd.params.project || vm.selectedProject, createdAt: new Date().toISOString(), priority: cmd.params.priority || 'medium', attached: [], selfImproving: false, isDecomposing: false };
+                        upsertRemoteCard(vm, card);
+                        vm.saveCards();
                     } else if (cmd.command === 'addCard') {
                         var card = { id: cmd.params.cardId || uid(), text: cmd.params.text || cmd.params.title || '', filePath: cmd.params.project || vm.selectedProject, createdAt: new Date().toISOString(), priority: cmd.params.priority || 'medium', attached: [], selfImproving: false, isDecomposing: false };
-                        vm.state.todo.push(card); vm.saveCards();
+                        upsertRemoteCard(vm, card);
+                        vm.saveCards();
                     } else if (cmd.command === 'moveCard' && cmd.params) {
                         var fromCol = findCardColumn(vm, cmd.params.cardId); if (fromCol && cmd.params.status && fromCol !== cmd.params.status) vm.moveCard(cmd.params.cardId, fromCol, cmd.params.status);
                     } else if (cmd.command === 'updateCard' && cmd.params) {
                         var c = vm.findCardById ? vm.findCardById(cmd.params.cardId) : null; if (c) { if (cmd.params.text) c.text = cmd.params.text; if (cmd.params.priority) c.priority = cmd.params.priority; if (cmd.params.attached !== undefined) c.attached = cmd.params.attached; if (cmd.params.autoPr !== undefined) c.autoPr = cmd.params.autoPr; vm.saveCards(); }
+                    } else if (cmd.command === 'suggestMore' && cmd.params && cmd.params.cardId) {
+                        // Remote 'More like this' — top up a card's improvement suggestions
+                        // to the cap of 3 by re-running the generator with topup context.
+                        var c = vm.findCardById ? vm.findCardById(cmd.params.cardId) : null;
+                        if (c && vm.moreLikeThis) { vm.moreLikeThis(c); }
                     } else if (cmd.command === 'archiveCard' && cmd.params) {
                         var col = findCardColumn(vm, cmd.params.cardId) || 'done'; vm.archiveCard(cmd.params.cardId, col);
                     } else if (cmd.command === 'startAgent' && cmd.params) {

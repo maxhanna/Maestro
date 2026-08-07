@@ -22,12 +22,19 @@ namespace Weaver.UnitTests;
 ///    sequential <c>TryReplaceSafe</c> with per-edit LineNumber hints → marker-preserving
 ///    verify bypass → undo save → success), changing EVERY occurrence;
 /// 3. leave the enriched "(deterministic batch: N edits, applied N/M occurrences)"
-///    marker in the step result so the meeting ticker's compact line renders.
+///    marker in the step result so the meeting ticker's compact line renders;
+/// 4. recover from drift between generation and apply: a formatter/parallel edit that breaks
+///    the anchors trips the marker-as-code guard, then G1 re-synthesizes against the CURRENT
+///    file content and re-applies the batch — still zero LLM calls (or, when the change is no
+///    longer describable, escalates to the LLM with the marker never written as code).
 ///
 /// The change description is written for the deterministic grammar's multi-set form
-/// ("update ... defaults to 5"); the file uses UNQUOTED <c>.ini</c> keys because the
-/// generator deliberately excludes identifiers preceded by a quote — JSON keys like
-/// <c>"maxRetries"</c> are treated as string content and correctly decline.
+/// ("update ... defaults to 5"). Unquoted <c>.ini</c> keys are the base case; QUOTED JSON
+/// keys (<c>"maxRetries": 3</c>) are recognized via the quoted-key form of
+/// <c>ContainsStandaloneName</c>, gated to JSON-family files (.json/.jsonc/.json5), so the
+/// same batch machinery drives appsettings.json — as long as the line is a genuine key:value
+/// pair with a scalar value (an array element or object-valued key is still treated as string
+/// content and declines).
 /// </summary>
 public class DeterministicBatchIntegrationTests : IDisposable
 {
@@ -136,16 +143,158 @@ public class DeterministicBatchIntegrationTests : IDisposable
     }
 
     /// <summary>
-    /// Regression: when a batch does NOT fully apply (one sub-edit's anchor drifted — the exact
-    /// scenario G1's comment anticipates: "parallel agent threads, an external save, a formatter"),
-    /// the batch marker must NEVER be written into the file as if it were code. Before the
-    /// marker-as-code guard, the failed batch fell through to the single-edit apply with
-    /// oldStr=edits[0].OldString / newStr=the MARKER — TryReplaceSafe would write the marker
-    /// verbatim over the first anchor, and the marker prefix would then PASS the verify bypass,
-    /// completing the step "successfully" with the marker embedded in the file.
+    /// Partial-batch transparency end-to-end: one occurrence is ALREADY the target value
+    /// (maxRetries=5 sits among maxRetries=3 lines), so the multi-swap generator emits a
+    /// single edit for the stale line and the batch applies 1/2. The done result must report
+    /// "applied 1/2 occurrences" (marker + batchApplied/batchTotal/batchUnit), the per-edit
+    /// list must contain ONLY the stale line, and the already-correct occurrence plus all
+    /// siblings must stay byte-identical — zero LLM calls throughout.
     /// </summary>
     [Fact]
-    public async Task DeterministicBatch_DriftedAnchor_NeverWritesMarkerIntoFile()
+    public async Task DeterministicMultiMatch_OneOccurrenceAlreadyCorrect_PartialBatchApplied_NoLlm()
+    {
+        const string relPath = "config.ini";
+        var fullPath = Path.Combine(_root, relPath);
+        var ini =
+            "[retry]\n" +
+            "maxRetries=3\n" +
+            "timeoutSec=30\n" +
+            "\n" +
+            "[connection]\n" +
+            "maxRetries=5\n" + // already the target — skipped as already-correct
+            "timeoutSec=60\n";
+        await File.WriteAllTextAsync(fullPath, ini);
+
+        var controller = BuildController();
+        var step = new PlanStep
+        {
+            File = relPath,
+            Change = "update all maxRetries defaults to 5",
+            LineNumber = 0,
+            OldString = null,
+            NewString = null,
+        };
+        var allResults = new List<object>();
+
+        var method = typeof(AgentController).GetMethod(
+            "ResolveAndApplyEdit", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("ResolveAndApplyEdit not found");
+        var task = (Task<int>)method.Invoke(controller, new object?[]
+        {
+            step, _root, /*emitSse*/ false, CancellationToken.None, allResults,
+            /*stepIndex*/ 0, /*prompt*/ null, /*plan*/ null, /*planItemIndex*/ -1,
+            /*cardId*/ null, /*attachedFiles*/ null, /*replanDepth*/ 0,
+            /*onActivity*/ null, /*skipLlmPreResolution*/ false
+        })!;
+
+        var nextIndex = await task;
+        Assert.Equal(1, nextIndex);
+        Assert.Equal(0, _clientFactory.CreateClientCalls);
+
+        // The result reports the PARTIAL batch: applied 1/2, not 2/2.
+        var result = Assert.Single(allResults);
+        var dict = Assert.IsType<Dictionary<string, object?>>(result);
+        Assert.Equal("done", dict["status"]);
+        var preview = Assert.IsType<string>(dict["newStringPreview"]);
+        Assert.Contains("(deterministic batch: 1 edits, applied 1/2 occurrences)", preview);
+        Assert.Equal(1, Assert.IsType<int>(dict["batchApplied"]));
+        Assert.Equal(2, Assert.IsType<int>(dict["batchTotal"]));
+        Assert.Equal("occurrences", Assert.IsType<string>(dict["batchUnit"]));
+
+        // Per-edit list contains ONLY the stale line — the already-correct one never shipped.
+        var batchEdits = Assert.IsType<List<object>>(dict["batchEdits"]);
+        var singleEdit = Assert.IsType<Dictionary<string, object?>>(Assert.Single(batchEdits));
+        Assert.Equal(2, Assert.IsType<int>(singleEdit["line"])); // the maxRetries=3 line
+        Assert.Equal("maxRetries=3", Assert.IsType<string>(singleEdit["old"]));
+        Assert.Equal("maxRetries=5", Assert.IsType<string>(singleEdit["to"]));
+
+        // Only the stale line changed: both lines now read 5, siblings and headers untouched.
+        var final = await File.ReadAllTextAsync(fullPath);
+        Assert.Equal(2, CountOccurrences(final, "maxRetries=5"));
+        Assert.Equal(0, CountOccurrences(final, "maxRetries=3"));
+        Assert.Contains("timeoutSec=30", final);
+        Assert.Contains("timeoutSec=60", final);
+        Assert.Contains("[retry]", final);
+        // The already-correct [connection] block is byte-identical — only line 2 was touched.
+        Assert.Contains("[connection]\nmaxRetries=5\ntimeoutSec=60", final);
+    }
+
+    /// <summary>
+    /// The quoted-key form end-to-end: "update all maxRetries defaults to 5" on an
+    /// appsettings.json whose keys are QUOTED ("maxRetries": 3). Previously quoted identifiers
+    /// were treated as string content and the multi-swap declined; now the key:value pair is
+    /// recognized, the batch applies with the quotes and structure preserved, and the result
+    /// reports applied 1/1 — zero LLM calls.
+    /// </summary>
+    [Fact]
+    public async Task DeterministicMultiMatch_QuotedJsonKey_AppliesThroughResolveAndApplyEdit_NoLlm()
+    {
+        const string relPath = "appsettings.json";
+        var fullPath = Path.Combine(_root, relPath);
+        var json =
+            "{\n" +
+            "  \"maxRetries\": 3,\n" +
+            "  \"timeoutSec\": 30\n" +
+            "}\n";
+        await File.WriteAllTextAsync(fullPath, json);
+
+        var controller = BuildController();
+        var step = new PlanStep
+        {
+            File = relPath,
+            Change = "update all maxRetries defaults to 5",
+            LineNumber = 0,
+            OldString = null,
+            NewString = null,
+        };
+        var allResults = new List<object>();
+
+        var method = typeof(AgentController).GetMethod(
+            "ResolveAndApplyEdit", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("ResolveAndApplyEdit not found");
+        var task = (Task<int>)method.Invoke(controller, new object?[]
+        {
+            step, _root, /*emitSse*/ false, CancellationToken.None, allResults,
+            /*stepIndex*/ 0, /*prompt*/ null, /*plan*/ null, /*planItemIndex*/ -1,
+            /*cardId*/ null, /*attachedFiles*/ null, /*replanDepth*/ 0,
+            /*onActivity*/ null, /*skipLlmPreResolution*/ false
+        })!;
+
+        var nextIndex = await task;
+        Assert.Equal(1, nextIndex);
+        Assert.Equal(0, _clientFactory.CreateClientCalls);
+
+        var result = Assert.Single(allResults);
+        var dict = Assert.IsType<Dictionary<string, object?>>(result);
+        Assert.Equal("done", dict["status"]);
+        var preview = Assert.IsType<string>(dict["newStringPreview"]);
+        Assert.Contains("(deterministic batch: 1 edits, applied 1/1 occurrences)", preview);
+        Assert.Equal(1, Assert.IsType<int>(dict["batchApplied"]));
+        Assert.Equal(1, Assert.IsType<int>(dict["batchTotal"]));
+        Assert.Equal("occurrences", Assert.IsType<string>(dict["batchUnit"]));
+
+        // Quotes and structure preserved; only the value changed.
+        var final = await File.ReadAllTextAsync(fullPath);
+        Assert.Contains("\"maxRetries\": 5,", final);
+        Assert.DoesNotContain("\"maxRetries\": 3", final);
+        Assert.Contains("\"timeoutSec\": 30", final);
+        Assert.Contains("{", final);
+        Assert.Contains("}", final);
+    }
+
+    /// <summary>
+    /// Drifted-batch regression, in two acts: (1) when a batch does NOT fully apply (one
+    /// sub-edit's anchor drifted — the exact scenario G1's comment anticipates: "parallel
+    /// agent threads, an external save, a formatter"), the batch marker must NEVER be written
+    /// into the file as if it were code — the marker-as-code guard fails fast instead.
+    /// (2) Because the step carries the deterministic-batch marker, attempt 1's G1
+    /// re-synthesis re-runs the generator against the CURRENT file content, re-anchors both
+    /// occurrences, and applies them — zero LLM calls. Before the isDeterministicEdit gate
+    /// recognized marker-carrying steps, this scenario escalated to the LLM resolver instead
+    /// of recovering for free.
+    /// </summary>
+    [Fact]
+    public async Task DeterministicBatch_DriftedAnchor_G1ReanchorsAndApplies_MarkerNeverWritten()
     {
         const string relPath = "config.ini";
         var fullPath = Path.Combine(_root, relPath);
@@ -189,18 +338,167 @@ public class DeterministicBatchIntegrationTests : IDisposable
             /*onActivity*/ null, /*skipLlmPreResolution*/ true
         })!;
 
-        try
-        {
-            await task; // LLM escalation paths throw by design — fine, we assert file integrity below.
-        }
-        catch { /* expected: the failed batch escalates toward the LLM, which the ThrowingClientFactory blocks */ }
+        // G1 re-anchored the stale batch against the current file and applied it — no LLM,
+        // no exception, step completed. The stale hand-supplied batch (whose second edit
+        // targets maxRetries=999) never matched, so success here is PROOF of the G1 path.
+        var nextIndex = await task;
+        Assert.Equal(1, nextIndex);
+        Assert.Equal(0, _clientFactory.CreateClientCalls);
 
-        // The marker was NEVER applied as code: the file is byte-identical to the original.
+        // The marker was NEVER applied as code — G1 produced a fresh, real batch instead.
         var final = await File.ReadAllTextAsync(fullPath);
-        Assert.Equal(ini, final);
+        Assert.Equal(2, CountOccurrences(final, "maxRetries=5"));
+        Assert.Equal(0, CountOccurrences(final, "maxRetries=3"));
         Assert.DoesNotContain("(deterministic batch:", final);
         Assert.DoesNotContain("(batch:", final);
-        Assert.Equal(2, CountOccurrences(final, "maxRetries=3")); // both unchanged — no partial single-edit either
+
+        // The done result still carries the fresh marker + batch counts for the ticker/board.
+        var result = Assert.Single(allResults, r => r is Dictionary<string, object?> d &&
+            d.TryGetValue("status", out var st) && "done".Equals(st));
+        var dict = Assert.IsType<Dictionary<string, object?>>(result);
+        Assert.Equal(2, Assert.IsType<int>(dict["batchApplied"]));
+        Assert.Equal(2, Assert.IsType<int>(dict["batchTotal"]));
+        Assert.Equal("occurrences", Assert.IsType<string>(dict["batchUnit"]));
+    }
+
+    /// <summary>
+    /// The full G1 drift story, using the user's example: the batch is generated against the
+    /// original file, then an EXTERNAL FORMATTER REINDENTS the file (4-space → 2-space) between
+    /// generation and apply. The stale batch's anchors no longer match on attempt 0 (marker
+    /// guard fires, marker never written as code); attempt 1's G1 re-synthesis re-runs the REAL
+    /// generator against the drifted content, re-anchors every class body, and applies the whole
+    /// batch — still zero LLM calls, exactly like an unharmed run.
+    /// </summary>
+    [Fact]
+    public async Task DeterministicBatch_ExternalFormatterReindent_G1ReanchorsAndApplies_NoLlm()
+    {
+        const string relPath = "Dtos.cs";
+        var fullPath = Path.Combine(_root, relPath);
+        var original =
+            "public class UserDto\n" +
+            "{\n" +
+            "    public int Id { get; set; }\n" +
+            "}\n" +
+            "public class OrderDto\n" +
+            "{\n" +
+            "    public string Name { get; set; }\n" +
+            "}\n";
+        // The external formatter reindents to 2 spaces — every anchor the generator built
+        // against `original` (4-space member line + close brace) is now stale.
+        var drifted = original.Replace("    public", "  public", StringComparison.Ordinal);
+        Assert.NotEqual(original, drifted);
+
+        // Generation happens FIRST (against the original content) — the stale batch is
+        // hand-supplied exactly as PrepareEditContextAsync would have produced it.
+        var generated = DeterministicEditGenerator.TryGenerate(
+            relPath, true, original, "add a string Email property to every DTO class");
+        Assert.NotNull(generated);
+        Assert.NotNull(generated!.Edits);
+        Assert.Equal(2, generated.Edits.Count);
+
+        await File.WriteAllTextAsync(fullPath, drifted);
+
+        var controller = BuildController();
+        var step = new PlanStep
+        {
+            File = relPath,
+            Change = "add a string Email property to every DTO class",
+            LineNumber = generated.LineNumber,
+            OldString = generated.OldStr,
+            NewString = generated.NewStr, // the deterministic-batch marker
+            Edits = generated.Edits,
+        };
+        var allResults = new List<object>();
+
+        var method = typeof(AgentController).GetMethod(
+            "ResolveAndApplyEdit", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("ResolveAndApplyEdit not found");
+        var task = (Task<int>)method.Invoke(controller, new object?[]
+        {
+            step, _root, /*emitSse*/ false, CancellationToken.None, allResults,
+            /*stepIndex*/ 0, /*prompt*/ null, /*plan*/ null, /*planItemIndex*/ -1,
+            /*cardId*/ null, /*attachedFiles*/ null, /*replanDepth*/ 0,
+            /*onActivity*/ null, /*skipLlmPreResolution*/ true
+        })!;
+
+        // The stale 4-space batch cannot match the 2-space file on attempt 0 — success below
+        // is only possible through G1's re-anchoring, and the ThrowingClientFactory proves it
+        // happened with zero LLM calls.
+        var nextIndex = await task;
+        Assert.Equal(1, nextIndex);
+        Assert.Equal(0, _clientFactory.CreateClientCalls);
+
+        var final = await File.ReadAllTextAsync(fullPath);
+        // Both DTO classes got the member, re-anchored with the DRIFTED (2-space) indentation.
+        Assert.Equal(2, CountOccurrences(final, "  public string Email { get; set; }"));
+        Assert.Equal(0, CountOccurrences(final, "    public string Email")); // no 4-space leak
+        Assert.Contains("public class UserDto", final);
+        Assert.Contains("public class OrderDto", final);
+        Assert.DoesNotContain("(deterministic batch:", final);
+        Assert.DoesNotContain("(batch:", final);
+
+        var result = Assert.Single(allResults, r => r is Dictionary<string, object?> d &&
+            d.TryGetValue("status", out var st) && "done".Equals(st));
+        var dict = Assert.IsType<Dictionary<string, object?>>(result);
+        Assert.Equal(2, Assert.IsType<int>(dict["batchApplied"]));
+        Assert.Equal(2, Assert.IsType<int>(dict["batchTotal"]));
+        Assert.Equal("classes", Assert.IsType<string>(dict["batchUnit"]));
+    }
+
+    /// <summary>
+    /// The marker guard's decline path: when G1's re-synthesis finds the change no longer
+    /// deterministically describable against the current content (the retry section was
+    /// removed by an external edit), the stale batch is nulled and the step escalates to the
+    /// LLM resolver — which the ThrowingClientFactory blocks. The marker must NEVER have been
+    /// written into the file, even on the escalation path.
+    /// </summary>
+    [Fact]
+    public async Task DeterministicBatch_DriftedAnchor_G1Declines_MarkerNeverWritten()
+    {
+        const string relPath = "config.ini";
+        var fullPath = Path.Combine(_root, relPath);
+        var drifted =
+            "[connection]\n" +
+            "timeoutSec=60\n"; // the retry section is gone — "maxRetries" no longer exists
+        await File.WriteAllTextAsync(fullPath, drifted);
+
+        var controller = BuildController();
+        var step = new PlanStep
+        {
+            File = relPath,
+            Change = "update all maxRetries defaults to 5",
+            LineNumber = 0,
+            OldString = "maxRetries=3",
+            NewString = "(deterministic batch: 1 edits, applied 1/1 occurrences)",
+            Edits = new List<EditPair>
+            {
+                new() { OldString = "maxRetries=3", NewString = "maxRetries=5", LineNumber = 2 }
+            }
+        };
+        var allResults = new List<object>();
+
+        var method = typeof(AgentController).GetMethod(
+            "ResolveAndApplyEdit", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("ResolveAndApplyEdit not found");
+        var task = (Task<int>)method.Invoke(controller, new object?[]
+        {
+            step, _root, /*emitSse*/ false, CancellationToken.None, allResults,
+            /*stepIndex*/ 0, /*prompt*/ null, /*plan*/ null, /*planItemIndex*/ -1,
+            /*cardId*/ null, /*attachedFiles*/ null, /*replanDepth*/ 0,
+            /*onActivity*/ null, /*skipLlmPreResolution*/ true
+        })!;
+
+        // G1 declines → LLM escalation → the ThrowingClientFactory faults the task by design.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => (Task)task);
+
+        // The marker was NEVER applied as code: the file is byte-identical to the drifted input.
+        var final = await File.ReadAllTextAsync(fullPath);
+        Assert.Equal(drifted, final);
+        Assert.DoesNotContain("(deterministic batch:", final);
+        Assert.DoesNotContain("(batch:", final);
+        // It truly escalated to the LLM (G1 declined) rather than recovering silently — the
+        // factory throws on its FIRST CreateClient, so exactly one call proves the attempt.
+        Assert.Equal(1, _clientFactory.CreateClientCalls);
     }
 
     /// <summary>

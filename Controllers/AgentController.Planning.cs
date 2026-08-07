@@ -1054,6 +1054,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var consecutiveSlotFailures = 0;
         var totalPlanningRounds = 0;
         var stepEventIndex = 0;
+        var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
+        string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
         await EmitLog(emitSse, "info", "Incremental planning: proposing steps one at a time…", ct: ct);
         if (emitSse)
             await SendSse(Response, "plan", new
@@ -1082,6 +1084,56 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.PlanComplete)
             {
+                // Web-need gate (mirror of the interleaved loop): declaring the plan
+                // complete is itself a refusal to use the web tools when the task
+                // needs current external info and no web step exists. Reject, and on
+                // the regen cap inject the search so web-needing tasks cannot escape
+                // by claiming completion.
+                if (TaskHintsWebNeed(prompt) && !planSoFar.Any(s => IsWebStep(s.File)))
+                {
+                    if (webNeedVerified == 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
+                        var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        webNeedVerified = needsWeb ? 1 : -1;
+                        if (needsWeb) webInjectedQuery = query;
+                    }
+                    if (webNeedVerified == 1)
+                    {
+                        await EmitRejectedLog(emitSse,
+                            "Incremental planning: rejected plan-complete — task needs current external info but the plan has no _web_search step",
+                            WebNeedFeedback, ct);
+                        rejectionFeedback.Add(WebNeedFeedback);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                        {
+                            var queryText = string.IsNullOrWhiteSpace(webInjectedQuery)
+                                ? BuildFallbackWebQuery(prompt)
+                                : webInjectedQuery.Trim();
+                            planSoFar.Add(new PlanStep { File = "_web_search", Change = queryText });
+                            thinkingLog.AppendLine($"Step {planSoFar.Count}: [auto-injected] {queryText}");
+                            if (emitSse)
+                            {
+                                await SendSse(Response, "thinking",
+                                    new { text = $"Auto-injected _web_search step — the planner declared completion without it after {MAX_STEP_REGEN_ATTEMPTS} rejections." }, ct);
+                                await SendSse(Response, "step", new
+                                {
+                                    index = ++stepEventIndex,
+                                    type = "plan",
+                                    status = "pending",
+                                    path = "_web_search",
+                                    description = queryText,
+                                    line = 0,
+                                    planItemIndex = planSoFar.Count
+                                }, ct);
+                            }
+                            await EmitLog(emitSse, "warn",
+                                $"The planner declared the plan complete without using _web_search after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a _web_search step: \"{queryText}\"", ct: ct);
+                            break; // plan is done — the injected search executes with the rest
+                        }
+                        continue;
+                    }
+                }
                 if (emitSse)
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
                 await EmitLog(emitSse, "success",
@@ -1209,6 +1261,69 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 rejectionFeedback.Add(discoverFb);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
+            }
+            // Missing-web-search guard (mirror of the interleaved loop): if the task
+            // hints at needing CURRENT EXTERNAL information but neither the plan nor
+            // this proposal carries a _web_search/_web_fetch step, confirm with the
+            // LLM (regex alone is too noisy — "search for" usually means searching
+            // the repo) and, when confirmed, reject with feedback steering the model
+            // to the web tools. If the model still refuses after
+            // MAX_STEP_REGEN_ATTEMPTS rejections, auto-inject a _web_search step so
+            // genuinely web-needing tasks always get the search.
+            if (proposal.Step.File != null &&
+                !IsWebStep(proposal.Step.File) &&
+                !planSoFar.Any(s => IsWebStep(s.File)) &&
+                TaskHintsWebNeed(prompt))
+            {
+                if (webNeedVerified == 0)
+                {
+                    await EmitLog(emitSse, "info",
+                        "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
+                    var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                    webNeedVerified = needsWeb ? 1 : -1;
+                    if (needsWeb) webInjectedQuery = query;
+                }
+                if (webNeedVerified == 1)
+                {
+                    var webFb = WebNeedFeedback;
+                    await EmitRejectedLog(emitSse,
+                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — task needs current external info but the plan has no _web_search step",
+                        webFb, ct);
+                    rejectionFeedback.Add(webFb);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                    {
+                        // The planner kept refusing _web_search after MAX_STEP_REGEN_ATTEMPTS
+                        // rejections. Genuinely web-needing tasks must still complete, so stop
+                        // asking and inject the web step directly into the plan; the model can
+                        // then plan the follow-up steps (e.g. writing the results to a file).
+                        var queryText = string.IsNullOrWhiteSpace(webInjectedQuery)
+                            ? BuildFallbackWebQuery(prompt)
+                            : webInjectedQuery.Trim();
+                        planSoFar.Add(new PlanStep { File = "_web_search", Change = queryText });
+                        thinkingLog.AppendLine($"Step {planSoFar.Count}: [auto-injected] {queryText}");
+                        if (emitSse)
+                        {
+                            await SendSse(Response, "thinking",
+                                new { text = $"Auto-injected _web_search step — the planner refused after {MAX_STEP_REGEN_ATTEMPTS} rejections." }, ct);
+                            await SendSse(Response, "step", new
+                            {
+                                index = ++stepEventIndex,
+                                type = "plan",
+                                status = "pending",
+                                path = "_web_search",
+                                description = queryText,
+                                line = 0,
+                                planItemIndex = planSoFar.Count
+                            }, ct);
+                        }
+                        await EmitLog(emitSse, "warn",
+                            $"The planner refused to use _web_search after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a _web_search step: \"{queryText}\"", ct: ct);
+                        regenAttempts = 0;
+                        rejectionFeedback.Clear();
+                        continue; // model can now plan the follow-up steps around the injected search
+                    }
+                    continue;
+                }
             }
             if (emitSse && !string.IsNullOrWhiteSpace(proposal.Thinking))
             {
@@ -1392,6 +1507,105 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             live = true
         }, ct);
     }
+    // Trigger phrases that hint a task may want CURRENT EXTERNAL information.
+    // Deliberately broad — "search for"/"look up" often mean searching the repo,
+    // so a hit only opens the LLM verification gate, never rejects by itself.
+    private static readonly string[] WebNeedHints =
+    {
+        "web search", "search the web", "web_search", "web fetch", "web_fetch",
+        "internet", "online", "current", "up to date", "up-to-date", "latest",
+        "live data", "today's", "todays", "fetch from", "fetch the", "google",
+        "api docs", "search for", "look up", "find out"
+    };
+
+    /// <summary>Feedback shown whenever a step is rejected because the task needs current external info.</summary>
+    private const string WebNeedFeedback =
+        "The task needs CURRENT EXTERNAL information (live data, web/API docs, latest versions) that cannot be found inside this repository. " +
+        "Use a \"_web_search\" step (put the query in \"change\") or a \"_web_fetch\" step (put the URL in \"change\") — do NOT write code to fetch it.";
+
+    private static bool TaskHintsWebNeed(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var lower = prompt.ToLowerInvariant();
+        foreach (var hint in WebNeedHints)
+            if (lower.Contains(hint)) return true;
+        return false;
+    }
+
+    private static bool IsWebStep(string? file)
+    {
+        return file != null &&
+            (file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
+             file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// LLM-confirmed version of the missing-web-search gate. Regex hints alone
+    /// false-positive on repo-internal "search"/"look up" phrasing, so a cheap
+    /// classifier call decides whether the task genuinely needs current external
+    /// information. Fails closed (returns (false, null)) so a flaky LLM call never
+    /// blocks a step — the model just keeps its code-writing plan.
+    /// When the task DOES need the web, the same single call also yields the search
+    /// query used later for the auto-injected _web_search step if the planner
+    /// refuses to plan one after repeated rejections.
+    /// </summary>
+    private async Task<(bool NeedsWeb, string? Query)> ConfirmWebNeedAsync(string prompt, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            var taskPreview = AgentTextUtilities.Truncate(prompt ?? "", 1200);
+            var sb = new StringBuilder();
+            sb.AppendLine("TASK:");
+            sb.AppendLine(taskPreview);
+            sb.AppendLine();
+            sb.AppendLine("DECIDE: does this task REQUIRE CURRENT, EXTERNAL information from the web (live prices, breaking news, up-to-date API docs, latest package versions, facts that change over time) — information that CANNOT be found or computed inside the local repository?");
+            sb.AppendLine("Tasks about the repo's own code, files, or tests NEVER need the web, even if they contain words like 'search', 'look up', or 'find'.");
+            sb.AppendLine("Output ONLY JSON: {\"needsWeb\": true|false, \"reason\": \"one short sentence\", \"query\": \"concise web search query under 80 chars — only when needsWeb is true, else an empty string\"}");
+            var (raw, _, err) = await CallLlmRaw(
+                "You are a strict task classifier. Output ONLY the requested JSON.",
+                sb.ToString(), ct, _infiniteTimeout, maxTokens: 120);
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn", $"Web-need verification failed ({err}) — treating as no web need.", ct: ct);
+                return (false, null);
+            }
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            var needsWeb = doc.RootElement.TryGetProperty("needsWeb", out var nw) && nw.ValueKind == JsonValueKind.True;
+            var query = needsWeb && doc.RootElement.TryGetProperty("query", out var q) && q.ValueKind == JsonValueKind.String
+                ? q.GetString()
+                : null;
+            return (needsWeb, query);
+        }
+        catch
+        {
+            return (false, null);
+        }
+    }
+
+    /// <summary>
+    /// Deterministic fallback query for the auto-injected _web_search step when the
+    /// LLM verification produced no usable query (or the LLM call failed). The
+    /// flattened task text itself is a serviceable search query for the task's most
+    /// important topic.
+    /// </summary>
+    private static string BuildFallbackWebQuery(string? prompt)
+    {
+        if (!string.IsNullOrWhiteSpace(prompt))
+        {
+            var flat = Regex.Replace(prompt.Replace('\r', ' ').Replace('\n', ' '), @"\s+", " ").Trim();
+            if (flat.Length > 160)
+            {
+                flat = flat.Substring(0, 160);
+                // Don't split a UTF-16 surrogate pair (emoji) at the cutoff.
+                if (flat.Length > 0 && char.IsHighSurrogate(flat[^1])) flat = flat[..^1];
+                flat = flat.TrimEnd();
+            }
+            if (flat.Length > 0) return flat;
+        }
+        return "latest information";
+    }
+
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
@@ -1410,6 +1624,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
         var totalPlanningRounds = 0;
+        var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
+        string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
         if (emitSse)
         {
             await SendSse(Response, "plan", new
@@ -1562,6 +1778,41 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.PlanComplete)
             {
+                // Web-need gate: declaring the plan complete is itself a refusal to
+                // use the web tools when the task needs current external info and no
+                // web step exists. Reject, and on the regen cap inject the search so
+                // web-needing tasks cannot escape by claiming completion.
+                if (TaskHintsWebNeed(prompt) && !planSoFar.Any(s => IsWebStep(s.File)))
+                {
+                    if (webNeedVerified == 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
+                        var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        webNeedVerified = needsWeb ? 1 : -1;
+                        if (needsWeb) webInjectedQuery = query;
+                    }
+                    if (webNeedVerified == 1)
+                    {
+                        await EmitRejectedLog(emitSse,
+                            "Interleaved execution: rejected plan-complete — task needs current external info but the plan has no _web_search step",
+                            WebNeedFeedback, ct);
+                        rejectionFeedback.Add(WebNeedFeedback);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                        {
+                            var queryText = string.IsNullOrWhiteSpace(webInjectedQuery)
+                                ? BuildFallbackWebQuery(prompt)
+                                : webInjectedQuery.Trim();
+                            pendingSteps.Enqueue(new PlanStep { File = "_web_search", Change = queryText });
+                            await EmitLog(emitSse, "warn",
+                                $"The planner declared the plan complete without using _web_search after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a _web_search step: \"{queryText}\"", ct: ct);
+                            regenAttempts = 0;
+                            rejectionFeedback.Clear();
+                            continue; // loop top executes the injected step, then planning resumes
+                        }
+                        continue;
+                    }
+                }
                 if (emitSse)
                 {
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
@@ -1696,6 +1947,53 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         $"Interleaved execution: rejected duplicate step — [{proposal.Step.File}] {proposal.Step.Change} repeats completed step [{duplicateOf.File}] {duplicateOf.Change}", dupFb, ct);
                     rejectionFeedback.Add(dupFb);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
+            }
+            // Missing-web-search guard: if the task hints at needing CURRENT
+            // EXTERNAL information but neither the plan nor this proposal carries a
+            // _web_search/_web_fetch step, confirm with the LLM (regex alone is too
+            // noisy — "search for" usually means searching the repo) and, when
+            // confirmed, reject with feedback steering the model to the web tools.
+            // The verification is memoized so it costs at most one call per run.
+            if (proposal.Step.File != null &&
+                !IsWebStep(proposal.Step.File) &&
+                !planSoFar.Any(s => IsWebStep(s.File)) &&
+                TaskHintsWebNeed(prompt))
+            {
+                if (webNeedVerified == 0)
+                {
+                    await EmitLog(emitSse, "info",
+                        "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
+                    var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                    webNeedVerified = needsWeb ? 1 : -1;
+                    if (needsWeb) webInjectedQuery = query;
+                }
+                if (webNeedVerified == 1)
+                {
+                    var webFb = WebNeedFeedback;
+                    await EmitRejectedLog(emitSse,
+                        $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — task needs current external info but the plan has no _web_search step",
+                        webFb, ct);
+                    rejectionFeedback.Add(webFb);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                    {
+                        // The planner kept refusing _web_search after MAX_STEP_REGEN_ATTEMPTS
+                        // rejections. Genuinely web-needing tasks must still complete, so stop
+                        // asking and auto-inject a _web_search step. It is queued, so it flows
+                        // through the exact same execution path as any model-proposed step
+                        // (loop-top pendingSteps branch → ExecutePlan), board persistence and
+                        // SSE included.
+                        var queryText = string.IsNullOrWhiteSpace(webInjectedQuery)
+                            ? BuildFallbackWebQuery(prompt)
+                            : webInjectedQuery.Trim();
+                        pendingSteps.Enqueue(new PlanStep { File = "_web_search", Change = queryText });
+                        await EmitLog(emitSse, "warn",
+                            $"The planner refused to use _web_search after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a _web_search step: \"{queryText}\"", ct: ct);
+                        regenAttempts = 0;
+                        rejectionFeedback.Clear();
+                        continue; // loop top picks up the injected step and executes it
+                    }
                     continue;
                 }
             }

@@ -8,6 +8,53 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
 
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
+  // Keep one card per id — a stale save or double-delivered push can persist two
+  // copies of a calendar card, and duplicate ids inside a day's cards crash the
+  // calendar's ng-repeat (ngRepeat:dupes), same as the kanban board.
+  function dedupeById(arr) {
+    var seen = {};
+    return arr.filter(function (c) {
+      if (!c || c.id == null) return true;
+      if (seen[c.id]) return false;
+      seen[c.id] = true;
+      return true;
+    });
+  }
+
+  // ── Live-instance idempotency guard ───────────────────────────────────
+  // A scheduled (cron) calendar card re-fires on every matching window, and each
+  // fire pushes a FRESH To Do card (new uid) and starts it. So stopping a running
+  // calendar card does NOT stop the schedule — the next window spawns a look-alike
+  // duplicate (new id, same text) and auto-starts it, which reads exactly like
+  // "I pressed stop and it duplicated and started again". Before pushing a new
+  // card, check whether the same calendar card (same text + same schedule key)
+  // already has a live instance in To Do or Doing; if so, the fire is suppressed
+  // and the schedule's lastFired/processed is advanced so it doesn't retry every
+  // tick. The next card is only created once the current instance leaves the
+  // board (Done/archive/delete).
+  function hasLiveCalendarInstance(boardState, cal) {
+    if (!boardState || !cal || !cal.text) return false;
+    var textKey = String(cal.text).trim();
+    var cronKey = cal.cronExpression || '';
+    var cols = ['todo', 'doing'];
+    for (var c = 0; c < cols.length; c++) {
+      var cards = boardState[cols[c]] || [];
+      for (var i = 0; i < cards.length; i++) {
+        var b = cards[i];
+        if (!b || !b._fromCron) continue;
+        if (cronKey) {
+          // Cron/dated cards: match on schedule key AND text so two different
+          // tasks on the same schedule never block each other.
+          if ((b._cronExpression || '') === cronKey && (b.text || '').trim() === textKey) return true;
+        } else if ((b.text || '').trim() === textKey) {
+          // Date-only one-off: match on text.
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   // ── Cron matching (5-field: minute hour day-of-month month day-of-week) ──
   function cronMatches(expr, date) {
     try {
@@ -122,6 +169,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         var data = resp.data;
         if (typeof data === 'string') data = JSON.parse(data);
         if (!Array.isArray(data)) return;
+        // Heal duplicates before firing — two copies of the same cron card would
+        // double-create To Do cards (and the save below would persist both).
+        data = dedupeById(data);
         var now = new Date();
         var todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
         var currentMinutes = now.getHours() * 60 + now.getMinutes();
@@ -147,6 +197,16 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           }
 
           if (shouldFire) {
+            // Idempotency guard — never push a second card for a calendar card
+            // that already has a live instance on the board. Stops the
+            // "I pressed stop and it duplicated and started again" loop: the
+            // schedule keeps firing, but while the stopped card still sits in
+            // To Do/Doing no new card is created or auto-started.
+            if (hasLiveCalendarInstance(_vm.state, cal)) {
+              if (cal.cronExpression) cal.lastFired = now.toISOString(); else cal.processed = true;
+              changed = true;
+              continue;
+            }
             var newCard = {
               id: uid(),
               text: cal.text,
@@ -160,7 +220,8 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
               // Marks the card as created by a calendar schedule so the board can
               // render a ⏰ chip on it (and keep it recognizable through Doing/Done).
               _fromCron: true,
-              _cronExpression: cal.cronExpression || (cal.time ? cal.date + ' ' + cal.time : '')
+              _cronExpression: cal.cronExpression || (cal.time ? cal.date + ' ' + cal.time : ''),
+              _cronLabel: cal.label || ''
             };
             _vm.state.todo.push(newCard);
             _vm.saveCards();
@@ -185,8 +246,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
     init: function (vm, $scope) {
       _vm = vm;
       _scope = $scope;
-      // The calendar is a popup the user opens explicitly — never auto-open it
-      // on load, even if a previous session persisted showCalendar=true.
+      // Default to closed; loadConfig restores the persisted showCalendar value
+      // (saved by open/close) once the config arrives, so the calendar reopens
+      // on reload exactly as the user left it.
       vm.showCalendar = false;
       vm.calCards = [];
       vm.calDays = [];
@@ -235,6 +297,25 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         return c;
       }
       function pad2(n) { return String(n).padStart(2, '0'); }
+      // The add/edit form binds native date/time pickers, which require Date
+      // objects — while the calendar's persisted model uses "YYYY-MM-DD" and
+      // "HH:MM" strings. These bridge the two using LOCAL components only, so
+      // no timezone can shift the day or hour.
+      function dateToLocal(date) {
+        if (!date) return null;
+        if (date instanceof Date) return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        var m = String(date).match(/^(\d{4,})-(\d{2})-(\d{2})/);
+        if (m) return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+        var p = new Date(date);
+        return isNaN(p.getTime()) ? null : new Date(p.getFullYear(), p.getMonth(), p.getDate());
+      }
+      function timeToDate(time) {
+        if (!time) return null;
+        if (time instanceof Date) return new Date(2000, 0, 1, time.getHours(), time.getMinutes());
+        var m = String(time).match(/^(\d{1,2}):(\d{2})/);
+        return m ? new Date(2000, 0, 1, parseInt(m[1], 10), parseInt(m[2], 10)) : null;
+      }
+      function timeStr(d) { return d ? pad2(d.getHours()) + ':' + pad2(d.getMinutes()) : ''; }
 
       vm.projectName = function (path) {
         if (!path) return '';
@@ -254,7 +335,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
             if (typeof data === 'string') data = JSON.parse(data);
             if (Array.isArray(data)) {
               for (var ci = 0; ci < data.length; ci++) normalizeCalCard(data[ci]);
-              vm.calCards = data;
+              // Heal duplicate ids so a persisted double-delivery can never crash
+              // the calendar's ng-repeat. In-memory only; the next save persists.
+              vm.calCards = dedupeById(data);
             }
           } catch (e) {
             console.warn('Failed to parse calendar data');
@@ -302,7 +385,8 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
               result.push(c);
             }
           }
-          return result;
+          // Last-resort render guard: never hand the ng-repeat a duplicate id.
+          return dedupeById(result);
         }
 
         function isWeekend(d) {
@@ -384,6 +468,15 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         vm.calBuildDays();
       };
 
+      // Shared relative-countdown label for a fire datetime (minutes from now),
+      // used by both the card tooltip and the live cron-input preview.
+      function fireCountdownText(mins) {
+        if (mins < 1) return 'now';
+        if (mins < 60) return 'in ' + mins + 'm';
+        if (mins < 1440) return 'in ' + Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+        return 'in ' + Math.floor(mins / 1440) + 'd ' + Math.floor((mins % 1440) / 60) + 'h';
+      }
+
       // Tooltip for a cron card's ⏰ icon: the expression plus when it fires next.
       // Uses the next-fire map computed in calBuildDays (free on every digest); only
       // falls back to a live scan before the first build.
@@ -391,15 +484,60 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         if (!card || !card.cronExpression) return '';
         var nf = _cronNext[card.id];
         if (nf === undefined) nf = nextCronFire(card.cronExpression, new Date());
-        var base = 'Cron: ' + card.cronExpression;
+        var base = (card.label ? card.label + ' · ' : '') + 'Cron: ' + card.cronExpression;
         if (!nf) return base + ' · no fire within ~3 years';
-        var mins = Math.round((nf.getTime() - Date.now()) / 60000);
-        var rel;
-        if (mins < 1) rel = 'now';
-        else if (mins < 60) rel = 'in ' + mins + 'm';
-        else if (mins < 1440) rel = 'in ' + Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
-        else rel = 'in ' + Math.floor(mins / 1440) + 'd ' + Math.floor((mins % 1440) / 60) + 'h';
+        var rel = fireCountdownText(Math.round((nf.getTime() - Date.now()) / 60000));
         return base + ' · next: ' + formatFireDateTime(nf) + ' (' + rel + ')';
+      };
+
+      // Live preview under the cron input in the add/edit popup: resolves the
+      // expression the user is typing with nextCronFire and shows when it will
+      // fire next. Memoized on expr+minute so repeated digests are free (the
+      // template calls it twice — text and class — the second hits the cache).
+      var _cronPreviewCache = { key: null, out: { text: '', cls: '' } };
+      vm.calCronPreview = function () {
+        var d = vm.calEditCardData;
+        if (!d) return _cronPreviewCache.out;
+        var expr = (d.cronExpression || '').trim();
+        var now = new Date();
+        var minuteKey = now.getFullYear() + '-' + now.getMonth() + '-' + now.getDate() + '-' + now.getHours() + '-' + now.getMinutes();
+        var dateStr = d.date instanceof Date ? localDateStr(d.date) : (d.date || '');
+        var timeV = d.time instanceof Date ? timeStr(d.time) : (d.time || '00:00');
+        var key = expr + '|' + dateStr + '|' + timeV + '|' + minuteKey;
+        if (_cronPreviewCache.key === key) return _cronPreviewCache.out;
+        var out;
+        if (!expr) {
+          // Date-only / date+time cards fire once (no recurring schedule). The
+          // one-off moment is the date at its time, or midnight when no time.
+          var oneOff = null;
+          if (dateStr) {
+            var fd = new Date(dateStr + 'T' + timeV);
+            if (!isNaN(fd.getTime())) oneOff = fd;
+          }
+          if (oneOff && oneOff.getTime() <= now.getTime()) {
+            out = { text: 'Fires once: ' + formatFireDateTime(oneOff) + ' — already due', cls: 'cron-preview--wait' };
+          } else if (oneOff) {
+            out = { text: 'Fires once: ' + formatFireDateTime(oneOff) + ' — ' + fireCountdownText(Math.round((oneOff.getTime() - now.getTime()) / 60000)), cls: 'cron-preview--valid' };
+          } else {
+            out = { text: 'No schedule — fires once on its date', cls: 'cron-preview--none' };
+          }
+        } else {
+          var parts = expr.split(/\s+/);
+          var nf = parts.length === 5 ? nextCronFire(expr, now) : null;
+          if (parts.length !== 5) {
+            out = { text: 'Invalid cron — needs 5 fields: minute hour day-of-month month weekday', cls: 'cron-preview--invalid' };
+          } else if (!nf) {
+            out = {
+              text: 'Valid, but no fire within ~3 years — check field ranges',
+              hint: 'Ranges: minute 0-59 · hour 0-23 · day-of-month 1-31 · month 1-12 · weekday 0-6',
+              cls: 'cron-preview--wait'
+            };
+          } else {
+            out = { text: 'Next fire: ' + formatFireDateTime(nf) + ' — ' + fireCountdownText(Math.round((nf.getTime() - Date.now()) / 60000)), cls: 'cron-preview--valid' };
+          }
+        }
+        _cronPreviewCache = { key: key, out: out };
+        return out;
       };
 
       vm.calAddCard = function () {
@@ -408,19 +546,67 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         d.setMinutes(d.getMinutes() + 5);
         vm.calEditCardData = {
           id: null,
-          date: localDateStr(now),
-          time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()),
+          date: new Date(now.getFullYear(), now.getMonth(), now.getDate()),
+          time: d,
           text: '',
           priority: 'medium',
           cronExpression: '',
+          label: '',
           filePath: vm.selectedProject || ''
         };
         scheduleUpdate();
       };
 
+      // "Today" quick-fill next to the date picker: resets the form's date to
+      // the current local day (the form holds Date objects for the native input).
+      vm.calSetDateToday = function () {
+        if (!vm.calEditCardData) return;
+        var n = new Date();
+        vm.calEditCardData.date = new Date(n.getFullYear(), n.getMonth(), n.getDate());
+        scheduleUpdate();
+      };
+
+      // ✕ on the time field: clears it so a card becomes date-only (fires at
+      // midnight). null renders empty in the native input and normalizes to ''
+      // on save; the cron preview falls back to 00:00.
+      vm.calClearTime = function () {
+        if (!vm.calEditCardData) return;
+        vm.calEditCardData.time = null;
+        scheduleUpdate();
+      };
+
+      // Extracts "HH:MM" from a cron preset's first two fields, or null when
+      // they aren't plain numbers (e.g. */15) — interval presets stay recurring.
+      function cronPresetTime(expr) {
+        try {
+          var parts = expr.trim().split(/\s+/);
+          if (parts.length !== 5) return null;
+          var m = parseInt(parts[0], 10), h = parseInt(parts[1], 10);
+          if (isNaN(m) || isNaN(h)) return null;
+          if (m < 0 || m > 59 || h < 0 || h > 23) return null;
+          return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+        } catch (e) { return null; }
+      }
+
       vm.setCronExpression = function (expr) {
-        if (vm.calEditCardData) {
-          vm.calEditCardData.cronExpression = expr;
+        if (!vm.calEditCardData) return;
+        var d = vm.calEditCardData;
+        if (!expr) {
+          // "No schedule" → plain one-off card (fires once on its date).
+          d.cronExpression = '';
+          return;
+        }
+        var hm = cronPresetTime(expr);
+        if (hm && d.date && !d.cronExpression) {
+          // The card already has a date and no recurring cron: apply the
+          // preset's time as a one-off fire on that date instead of installing
+          // a recurring schedule. Clear the Date field to make it recurring.
+          d.cronExpression = '';
+          d.time = timeToDate(hm);
+          var dStr = d.date instanceof Date ? localDateStr(d.date) : d.date;
+          if (_vm.showSideToast) _vm.showSideToast('⏰ One-off: fires once at ' + hm + ' on ' + dStr + ' — clear the Date field to make it recurring');
+        } else {
+          d.cronExpression = expr;
         }
       };
 
@@ -430,6 +616,15 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           vm.calEditCardData = JSON.parse(JSON.stringify(card));
         } catch (e) {
           vm.calEditCardData = angular.copy(card);
+        }
+        // The form's native date/time pickers require Date objects — convert
+        // the stored "YYYY-MM-DD"/"HH:MM" strings (calSaveCard converts back).
+        // Read from the ORIGINAL card: the JSON round-trip would have turned a
+        // Date into a UTC ISO string, shifting the day for positive offsets.
+        var ce = vm.calEditCardData;
+        if (ce) {
+          ce.date = dateToLocal(card && card.date !== undefined ? card.date : ce.date);
+          ce.time = timeToDate(card && card.time !== undefined ? card.time : ce.time);
         }
         scheduleUpdate();
       };
@@ -445,6 +640,12 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           var data = vm.calEditCardData;
           if (!data || !data.text || !data.date) return;
 
+          // The form holds Date objects for the native pickers; JSON.stringify
+          // would turn them into UTC ISO strings and shift the day/time. Convert
+          // to the calendar's string model FIRST, then round-trip. (This also
+          // fixes calRunNow, which reads data.date/time after calSaveCard.)
+          if (data.date instanceof Date) data.date = localDateStr(data.date);
+          if (data.time instanceof Date) data.time = timeStr(data.time);
           var saved = normalizeCalCard(JSON.parse(JSON.stringify(data)));
           if (saved.id) {
             var idx = -1;
@@ -491,7 +692,8 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
             selfImproving: false,
             isDecomposing: false,
             _fromCron: true,
-            _cronExpression: data.cronExpression || (data.time ? data.date + ' ' + data.time : '')
+            _cronExpression: data.cronExpression || (data.time ? (data.date instanceof Date ? localDateStr(data.date) : data.date) + ' ' + (data.time instanceof Date ? timeStr(data.time) : data.time) : ''),
+            _cronLabel: data.label || ''
           };
           if (!_vm.state.todo) _vm.state.todo = [];
           _vm.state.todo.push(newCard);
@@ -530,6 +732,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         if (vm.showCalendar) return;
         vm.showCalendar = true;
         vm.loadCalendarCards();
+        // Persist the open state so the calendar comes back open after a reload
+        // (closeCalendarPanel already saves on close).
+        if (vm.saveSettings) vm.saveSettings(true);
         scheduleUpdate();
       };
 
@@ -537,6 +742,20 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         vm.showCalendar = false;
         if (vm.saveSettings) vm.saveSettings(true);
         scheduleUpdate();
+      };
+
+      // Options-menu checkbox toggle. ng-change runs AFTER the model has already
+      // flipped, so branch on the NEW state: a now-checked box means open (the
+      // panel shows via ng-if; refresh cards since openCalendarPanel early-returns
+      // once showCalendar is already true), a now-unchecked box means close.
+      vm.toggleCalendarPanel = function () {
+        if (vm.showCalendar) {
+          if (vm.loadCalendarCards) vm.loadCalendarCards();
+          // ng-model already flipped the checkbox — persist the new open state.
+          if (vm.saveSettings) vm.saveSettings(true);
+        } else {
+          if (vm.closeCalendarPanel) vm.closeCalendarPanel();
+        }
       };
 
       // ── Cron processing lifecycle (started by app.js) ──────────────────

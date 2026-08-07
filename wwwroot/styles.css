@@ -1809,6 +1809,57 @@ h1 .brand-e:hover::before {
 	color: var(--brand-primary);
 }
 
+/* Discord popup brand header — big gold skulltula logo + README ASCII wordmark */
+.discord-brand {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	padding: 22px 16px 16px;
+	background:
+		radial-gradient(ellipse at 50% 0%, rgba(212, 175, 55, 0.14), transparent 70%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent);
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.discord-brand-icon {
+	width: 92px;
+	height: 92px;
+	filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4)) drop-shadow(0 0 12px rgba(212, 175, 55, 0.25));
+}
+
+.discord-brand .brand-leg {
+	transform-box: view-box;
+	transform-origin: center;
+	animation: brandLegBreathe 3.6s ease-in-out infinite;
+}
+
+.discord-brand .brand-ring {
+	transform-box: view-box;
+	transform-origin: center;
+	animation: brandWebSpin 40s linear infinite;
+}
+
+.discord-brand-ascii {
+	margin: 0;
+	font-family: Consolas, 'Courier New', monospace;
+	font-size: 13px;
+	line-height: 1.25;
+	letter-spacing: 0.5px;
+	color: #d4af37;
+	text-shadow: 0 0 10px rgba(212, 175, 55, 0.35);
+	white-space: pre;
+	user-select: all;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+	.discord-brand .brand-leg,
+	.discord-brand .brand-ring {
+		animation: none;
+	}
+}
+
 h1 .brand-text {
 	color: var(--text);
 	margin-right: 8px;

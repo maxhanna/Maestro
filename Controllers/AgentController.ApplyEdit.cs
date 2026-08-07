@@ -113,7 +113,11 @@ partial class AgentController
         step = preparedStep;
         // Fully deterministic edits (old+new synthesized server-side) need no causal
         // reasoning and no multi-round LLM verification — they are correct by construction.
-        var isDeterministicEdit = decidedEditStrategy?.ResolvedNewStr != null;
+        // A step that ALREADY carries the server-authored batch marker (OldString/NewString/
+        // Edits set by an earlier generation, e.g. skipLlmPreResolution runs) is deterministic
+        // too: on drift it must go through G1's zero-LLM re-synthesis, never the LLM resolver.
+        var isDeterministicEdit = decidedEditStrategy?.ResolvedNewStr != null ||
+            step.NewString?.StartsWith("(deterministic batch:", StringComparison.Ordinal) == true;
         await PersistStepStatusAsync(cardId, planItemIndex, "applying", emitSse, ct);
         var history = new List<(string old, string @new, string error)>();
         var planOldStr = step.OldString;

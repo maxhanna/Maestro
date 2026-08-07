@@ -534,6 +534,7 @@ angular.module('kanbanApp')
                         cfg.llmTimeoutMinutes = vm.llmInfiniteTimeout || !vm.llmTimeoutMinutes ? 0 : Math.max(5, vm.llmTimeoutMinutes);
                         cfg.showNotes = vm.showNotes === true;
                         cfg.showMeeting = vm.showMeeting === true;
+                        cfg.showCalendar = vm.showCalendar === true;
                         cfg.meetingVolume = Math.round(vm.meetingVolume || 0);
                         cfg.meetingMuted = (vm.meetingVolume || 0) <= 0;
                         if (vm.meeting) cfg.meetingPanel = { left: vm.meeting.left, top: vm.meeting.top, width: vm.meeting.width, height: vm.meeting.height };

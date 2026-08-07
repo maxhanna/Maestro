@@ -490,7 +490,11 @@ angular.module('kanbanApp')
                                                                 if (run._doneProcessed) { pushAgentLog(vm, 'warn', 'Duplicate done event ignored'); break; }
                                                                 run._doneProcessed = true;
                                                                 vm.llmProgress = null; vm.llmProgressPercent = 0; vm.llmProgressState = '';
-                                                                vm.sendSystemToast(); vm.steeringContext = '';
+                                                                // A lone benchmark (or any single card) chimes on completion, but a
+                                                                // Run-All batch defers the gold skulltula to _finishBenchmarkAll so it
+                                                                // plays once for the whole batch — not once per level.
+                                                                if (!(card._benchmark && vm.benchmarkAllActive)) vm.sendSystemToast();
+                                                                vm.steeringContext = '';
                                                                 var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                                                                 run.active = false; run.status = 'done'; run.elapsed = Date.now() - run.startedAt; vm.refreshStreamingActive();
                                                                 if (vm.loadEndpointHealth) vm.loadEndpointHealth();
@@ -707,6 +711,17 @@ angular.module('kanbanApp')
                     if (wasCurrent) pushAgentLog(vm, 'warn', 'Agent run stopped by user.');
                     if (run && run.log) run.log.push({ ts: new Date().toLocaleTimeString(), level: 'warn', message: 'Agent run stopped by user.', detail: undefined });
                 };
+                // Tooltip for a scheduled (cron) card's ⏰ chip: explains the card
+                // came from a calendar job, naming the schedule label and expression.
+                vm.cronChipTitle = function (card) {
+                    if (!card || !card._fromCron) return '';
+                    var label = card._cronLabel;
+                    var expr = card._cronExpression;
+                    var mid = label ? ' — ' + label : (expr ? ' — ' + expr : '');
+                    if (label && expr) mid += ' (' + expr + ')';
+                    return 'This card was created by a scheduled calendar job' + mid + '.';
+                };
+
                 vm.suggestImprovements = function (card, summary, project, opts) {
                     if (!card) return;
                     var topup = !!(opts && opts.topup);
@@ -1358,6 +1373,10 @@ angular.module('kanbanApp')
                     pushAgentLog(vm, 'info', '📊 Benchmark All finished — completed ' + vm.benchmarkAllResult.completedLevels + ' benchmark(s), ' +
                         (failed != null ? 'stopped at ' + vm.benchmarkLevelName(failed) + ' due to error steps' : 'all benchmarks passed') +
                         ' (' + vm.benchmarkAllResult.totalPoints + ' pts)');
+                    // The gold skulltula marks the end of the whole batch — win or lose.
+                    // (Same Windows gate as sendSystemToast so the sound behaves
+                    // identically to single-run completions.)
+                    if (vm.playSound && navigator.userAgent.indexOf('Win') !== -1) vm.playSound();
                 };
                 vm.stopBenchmarkAll = function () {
                     if (!vm.benchmarkAllActive) return;

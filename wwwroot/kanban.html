@@ -64,14 +64,14 @@
                 title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
               <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
               <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
-              <span class="card-tag tag-cron" ng-if="card._fromCron" title="This card was created by a scheduled calendar job{{card._cronExpression ? ' — ' + card._cronExpression : ''}}.">⏰ SCHEDULED</span>
+              <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
               <label class="pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create a branch then PR on completion">
                 <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
               </label>
-              <label class="pr-toggle" ng-click="$event.stopPropagation()" title="Self-improving card — queued when agent is idle">
+              <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()" title="Self-improving card — queued when agent is idle">
                 <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
               </label>
-              <label class="pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create tests for the code changes">
+              <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()" title="Auto-create tests for the code changes">
                 <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
               </label>
             </div>
@@ -303,7 +303,7 @@
             <div class="card-tags">
               <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
               <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
-              <span class="card-tag tag-cron" ng-if="card._fromCron" title="This card was created by a scheduled calendar job{{card._cronExpression ? ' — ' + card._cronExpression : ''}}.">⏰ SCHEDULED</span>
+              <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
               <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
                 title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
               <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
@@ -737,7 +737,7 @@
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
-            <span class="card-tag tag-cron" ng-if="card._fromCron" title="This card was created by a scheduled calendar job{{card._cronExpression ? ' — ' + card._cronExpression : ''}}.">⏰ SCHEDULED</span>
+            <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
             <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">

@@ -60,6 +60,58 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
               data = JSON.parse(data);
             }
             if (data && (data.todo || data.doing || data.done || data.archived || data.selfImproving)) {
+              // Heal duplicate card ids before they reach the ng-repeat (a stale
+              // save or double-delivered push can persist two copies of a card,
+              // which crashes the board with ngRepeat:dupes).
+              var droppedIds = [];
+              ['todo', 'doing', 'done', 'archived', 'selfImproving'].forEach(function (col) {
+                if (!Array.isArray(data[col])) return;
+                var seen = {};
+                data[col] = data[col].filter(function (c) {
+                  if (!c || c.id == null) return true;
+                  if (seen[c.id]) { droppedIds.push(c.id); return false; }
+                  seen[c.id] = true;
+                  return true;
+                });
+              });
+              // Cross-column heal: the same id must never exist in two columns.
+              // A double-delivered push can leave a stale copy in todo while the
+              // original runs in doing — findCardById would then return the wrong
+              // card. Keep the most-advanced copy (done/archived > doing > todo)
+              // and drop the rest.
+              var seenGlobally = {};
+              ['archived', 'done', 'doing', 'selfImproving', 'todo'].forEach(function (col) {
+                if (!Array.isArray(data[col])) return;
+                data[col] = data[col].filter(function (c) {
+                  if (!c || c.id == null) return true;
+                  if (seenGlobally[c.id]) { droppedIds.push(c.id); return false; }
+                  seenGlobally[c.id] = true;
+                  return true;
+                });
+              });
+              // Tell the user the board repaired itself — but only ONCE per card
+              // id per session. The heal is in-memory only, so a reload of the
+              // same corrupted save would otherwise re-toast every time; recording
+              // reported ids keeps a repeated load of the same data silent.
+              if (droppedIds.length) {
+                if (!vm._reportedHealedIds) vm._reportedHealedIds = {};
+                // fresh = DISTINCT ids not yet reported this session (the count in
+                // the message uses droppedIds.length — actual copies removed, since
+                // one id can have several dropped copies).
+                var freshMap = {};
+                var fresh = [];
+                for (var fi = 0; fi < droppedIds.length; fi++) {
+                  var did = droppedIds[fi];
+                  if (vm._reportedHealedIds[did] || freshMap[did]) continue;
+                  freshMap[did] = true;
+                  fresh.push(did);
+                }
+                if (fresh.length) {
+                  fresh.forEach(function (id) { vm._reportedHealedIds[id] = true; });
+                  console.warn('[boarddata] healed ' + droppedIds.length + ' duplicate card copy/copies on load: ' + fresh.join(', ') + ' — extra copies removed so the board can render.');
+                  if (vm.showSideToast) vm.showSideToast('♻️ Board repaired: removed ' + droppedIds.length + ' duplicate card(s) found in saved data');
+                }
+              }
               vm.state = data;
 
               // Restore benchmark panel state (running flag + run-all queue/results)
@@ -166,6 +218,16 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         var cached = _cardsCache[key];
         if (cached && cached._version === _cardsVersion && cached._length === all.length) return cached;
         var filtered = all.filter(function (c) { return c.filePath === vm.selectedProject; });
+        // Last-resort guard: never hand the ng-repeat a duplicate id, or Angular
+        // throws ngRepeat:dupes and kills the whole digest. Keeps the board alive
+        // even if a double-delivered push slips through elsewhere.
+        var seen = {};
+        filtered = filtered.filter(function (c) {
+          if (!c || c.id == null) return true;
+          if (seen[c.id]) return false;
+          seen[c.id] = true;
+          return true;
+        });
         // If we're in file search context, bypass filtering to show all files/folders
         if (vm.isInFileSearch && vm.fileSearchFilter) {
           return filtered;

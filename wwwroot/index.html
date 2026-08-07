@@ -164,7 +164,9 @@
             </label>
           </div>
           <div class="form-row">
-            <button class="brand-link" ng-click="vm.openCalendarPanel(); vm.toggleProjectOptions()">📅 Calendar</button>
+            <label>
+              <input type="checkbox" ng-model="vm.showCalendar" ng-change="vm.toggleCalendarPanel()" /> Show Calendar
+            </label>
           </div>
           <div class="form-row">
             <label>
@@ -873,6 +875,65 @@
   <!-- DISCORD MODAL -->
   <div class="popup-overlay" ng-if="vm.showDiscordPanel" ng-click="vm.closeDiscordPanel()">
     <div class="popup-panel" style="max-width:420px;" ng-click="$event.stopPropagation()">
+      <!-- Brand header: big gold skulltula logo + the WEAVER ASCII art from README.md -->
+      <div class="discord-brand">
+        <svg class="discord-brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- Gold Skulltula (Zelda 64) &times; weaver spider — web rings -->
+          <circle class="brand-ring" cx="12" cy="12" r="8" fill="none" stroke="#d4af37" stroke-width="0.5" stroke-dasharray="2,2" opacity="0.45" />
+          <circle class="brand-ring" cx="12" cy="12" r="6" fill="none" stroke="#d4af37" stroke-width="0.5" stroke-dasharray="2,2" opacity="0.45" />
+          <circle class="brand-ring" cx="12" cy="12" r="10" fill="none" stroke="#d4af37" stroke-width="0.3" stroke-dasharray="1,3" opacity="0.3" />
+          <circle class="brand-ring" cx="12" cy="12" r="12" fill="none" stroke="#d4af37" stroke-width="0.3" stroke-dasharray="1,3" opacity="0.3" />
+          <g stroke="#d4af37" stroke-width="0.3" opacity="0.35">
+            <line x1="12" y1="12" x2="12" y2="3" />
+            <line x1="12" y1="12" x2="12" y2="21" />
+            <line x1="12" y1="12" x2="3" y2="12" />
+            <line x1="12" y1="12" x2="21" y2="12" />
+            <line x1="12" y1="12" x2="7.5" y2="7.5" />
+            <line x1="12" y1="12" x2="16.5" y2="16.5" />
+            <line x1="12" y1="12" x2="7.5" y2="16.5" />
+            <line x1="12" y1="12" x2="16.5" y2="7.5" />
+          </g>
+          <!-- Eight jointed skulltula legs (weaver's breathing animation preserved) -->
+          <g class="brand-leg" stroke="#d4af37" stroke-width="1.3" stroke-linecap="round" fill="none">
+            <path d="M7.6 7.4 L4.4 4.6 L2.6 6.4" />
+            <path d="M6.4 9.2 L2.8 8.2 L1.8 10.6" />
+            <path d="M6.2 12.2 L2.8 12.6 L1.8 15" />
+            <path d="M7.2 15 L4.6 17.4 L3 19.8" />
+            <path d="M16.4 7.4 L19.6 4.6 L21.4 6.4" />
+            <path d="M17.6 9.2 L21.2 8.2 L22.2 10.6" />
+            <path d="M17.8 12.2 L21.2 12.6 L22.2 15" />
+            <path d="M16.8 15 L19.4 17.4 L21 19.8" />
+          </g>
+          <!-- Skull abdomen (the gold skulltula's back) -->
+          <path d="M7.6 10.6 C7.6 6.8 9.5 5 12 5 C14.5 5 16.4 6.8 16.4 10.6 C16.4 12.6 15.6 13.8 14.5 14.6 L14.9 16.3 C14.2 17.4 13.4 17.9 12 17.9 C10.6 17.9 9.8 17.4 9.1 16.3 L9.5 14.6 C8.4 13.8 7.6 12.6 7.6 10.6 Z" fill="#d4af37" stroke="#8a6a17" stroke-width="0.4" />
+          <path d="M8.8 7.4 C9.4 6.2 10.4 5.6 11.6 5.4" stroke="#f7dd86" stroke-width="0.6" fill="none" stroke-linecap="round" opacity="0.9" />
+          <!-- Eye sockets with amber glow -->
+          <circle cx="10.1" cy="10.3" r="1.75" fill="#241703" />
+          <circle cx="13.9" cy="10.3" r="1.75" fill="#241703" />
+          <circle cx="10.3" cy="10.5" r="0.65" fill="#ffd54f" />
+          <circle cx="13.7" cy="10.5" r="0.65" fill="#ffd54f" />
+          <circle cx="10.55" cy="10.3" r="0.2" fill="#fff3c4" />
+          <circle cx="13.95" cy="10.3" r="0.2" fill="#fff3c4" />
+          <!-- Nasal cavity -->
+          <path d="M12 11.4 L11.45 12.7 L12.55 12.7 Z" fill="#241703" />
+          <!-- Teeth -->
+          <rect x="10.15" y="15.3" width="0.8" height="1.5" rx="0.25" fill="#f6e7b5" />
+          <rect x="11.3" y="15.3" width="0.8" height="1.7" rx="0.25" fill="#f6e7b5" />
+          <rect x="12.45" y="15.3" width="0.8" height="1.7" rx="0.25" fill="#f6e7b5" />
+          <rect x="13.6" y="15.3" width="0.8" height="1.5" rx="0.25" fill="#f6e7b5" />
+          <!-- Spinnerets -->
+          <circle cx="11.3" cy="19.4" r="0.7" fill="#d4af37" stroke="#8a6a17" stroke-width="0.3" />
+          <circle cx="12.7" cy="19.4" r="0.7" fill="#d4af37" stroke="#8a6a17" stroke-width="0.3" />
+          <circle cx="11.3" cy="19.4" r="0.28" fill="#f7dd86" />
+          <circle cx="12.7" cy="19.4" r="0.28" fill="#f7dd86" />
+          <!-- Fangs -->
+          <path d="M10 17.6 L9 18.7" stroke="#f2d16b" stroke-width="0.7" stroke-linecap="round" fill="none" />
+          <path d="M14 17.6 L15 18.7" stroke="#f2d16b" stroke-width="0.7" stroke-linecap="round" fill="none" />
+        </svg>
+        <pre class="discord-brand-ascii">░█░█░█▀▀░█▀█░█░█░█▀▀░█▀▄
+░█▄█░█▀▀░█▀█░▀▄▀░█▀▀░█▀▄
+░▀░▀░▀▀▀░▀░▀░░▀░░▀▀▀░▀░▀</pre>
+      </div>
       <div class="popup-header">
         <strong>Join our Discord</strong>
         <button ng-click="vm.closeDiscordPanel()">✕</button>
@@ -946,45 +1007,13 @@
         </div>
       </div>
       <div class="popup-body">
-        <details class="faq-container">
-          <summary>
-            <h3>FAQ</h3>
-          </summary>
-          <details>
-            <summary>How do I get started with Weaver?</summary>
-            <p>Weaver is an agentic kanban system that helps you manage projects with AI assistance. To get started,
-              create a new project or select an existing one from the project picker.</p>
-          </details>
-          <details>
-            <summary>What if the backend application won't close?</summary>
-            <p>If the backend application won't close, try closing the website first. Sometimes the backend process
-              remains active even after closing the browser tab, so explicitly closing the website interface can help
-              terminate the backend application properly.</p>
-          </details>
-          <details>
-            <summary>Force File Edits</summary>
-            <p>In cases where the edit pipeline isn't being chosen,</p>
-            <p>Employ 'Fix the' keywords to force the agent to make file edits.
-              For example, phrase your request as 'Fix the README.md file to add a new section about forced edits'
-              or 'Fix the configuration section to clarify the llamaUrl setting'.
-              This mechanism ensures that the standard edit pipeline is automatically selected.</p>
-          </details>
-          <details>
-            <summary>Configuration</summary>
-            <p>`weaverconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server
-              is at a different address</p>
-          </details>
-          <details>
-            <summary>How do I add tasks to my project?</summary>
-            <p>You can add tasks by using the 'Add Task' button in the kanban board or by asking the AI assistant to
-              create tasks for you.</p>
-          </details>
-          <details>
-            <summary>What is the purpose of the agent activity log?</summary>
-            <p>The agent activity log shows all the actions taken by the AI agent during project management. It helps
-              you track what the agent is doing and why.</p>
-          </details>
-        </details>
+        <a href="https://bughosted.com/WeaverHelp" target="_blank" rel="noopener noreferrer"
+          style="display:block; text-align:center; padding:13px 16px; background:rgba(212,175,55,0.12); color:#fbbf24; border:1px solid rgba(212,175,55,0.4); border-radius:8px; text-decoration:none; font-weight:bold; font-size:1.05em; transition:all 0.15s ease;"
+          onmouseover="this.style.background='rgba(212,175,55,0.22)'" onmouseout="this.style.background='rgba(212,175,55,0.12)'">
+          📚 Open Documentation
+        </a>
+        <p style="margin-top:10px; color:#888; font-size:0.85em; text-align:center;">The complete guide — features, settings,
+          cron, benchmarks &amp; more.</p>
       </div>
       <div class="popup-footer">
         <button ng-click="vm.closeDiscordPanel()">Close</button>

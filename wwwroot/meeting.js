@@ -145,7 +145,10 @@ angular.module('kanbanApp')
               grumpStreak: 0, 
               grumpFlash: 0,  
               steps: 0,       
-              glaringAt: null  
+              glaringAt: null, 
+              drunk: 0,        
+              drunkT: 0,       
+              drunkPhase: Math.random() * 6.28 
             };
           });
           return {
@@ -179,6 +182,7 @@ angular.module('kanbanApp')
             verdictGossiped: false,  
             _lastStepType: '',       
             _editFailStreak: 0,      
+            editorDrunk: 0,          
             confetti: [],            
             calmQuipFired: false,    
             steam: [],               
@@ -998,6 +1002,38 @@ angular.module('kanbanApp')
             "💢 8 LEGS. 100% RAGE. ZERO ACCEPTANCE OF THIS OUTCOME."
           ]
         ];
+        // Drunk-editor lines for hallucination aborts: the editor's pre-plan reasoning got
+        // flagged as a wall of text and aborted, so he slurs out his (non-)proposal.
+        // Escalation tiers by how many aborts have happened this run.
+        var EDITOR_DRUNK_QUIPS = [
+          "Jusht give me a minute. I have the plan… it'sh in here shomewhere. *hic*",
+          "Lishen. LISHEN. Thish edit ish going to be perfect. I've done it a hundred timesh.",
+          "The file? I know the file. The file and I are… *hic*… closhe.",
+          "Don't worry, I've got thish. I'm a professional. I do thish for a living. Ish.",
+          "Sho… the plan ish to put the code right here. Right. Here. Yesh. Perfect.",
+          "I've been shtaring at thish file sho long the lettersh are shtarting to dance. *hic*"
+        ];
+        var EDITOR_DRUNK_WORSE = [
+          "Hold on. Hold on. I'm reading the plan out loud to make sure it shounds right. 'Create the— *hic*— the thing.' Flawlesh.",
+          "The model told me to shlow down. The model. A thing I built. It'sh like the GPU ish parenting me now.",
+          "I have shteps. Manysh shteps. Shtep one: shay the thing. Shtep two: shay it again, but with more… conviction.",
+          "Every word I type ish a word I believe in. Thish ish the way. Thish ish the— *hic* — way. Ish.",
+          "I'm not slurring. The code ish slurring. It'sh *hic* contagious, apparently."
+        ];
+        var EDITOR_DRUNK_BLAME = [
+          "And frankly? The planner gave me the wrong— *hic* — file path. I'm shaying that out loud. I'm shaying it.",
+          "It'sh not my fault the edit wash… squiggly. The verifier made me nervoush.",
+          "The file wash moved. By whom? *hic* Con-shpiracy. I'm the victim here.",
+          "If the model hadn't kept interrupting me with itsh 'finithe' thoughts… I'd have nailed it. I'm shaying it."
+        ];
+        var DRUNK_WITNESS = [
+          "Editor… are you okay?",
+          "Did he pregame the sprint?",
+          "Someone get him a glass of water. And a diff.",
+          "I think the model got to him.",
+          "He's speaking in code now. Not the good kind.",
+          "How many context windows has he had?"
+        ];
         function editorRageLine(rage) {
           var r = rage || 0;
           var tier = r >= 90 ? 3 : r >= 60 ? 2 : r >= 30 ? 1 : 0;
@@ -1706,6 +1742,23 @@ angular.module('kanbanApp')
             g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
             osc.connect(g); g.connect(masterGain());
             osc.start(t); osc.stop(t + 0.32);
+          } catch (e) { }
+        }
+        function playHiccup() {
+          var ctx = sfx(); if (!ctx) return;
+          markSoundActive();
+          try {
+            var t = ctx.currentTime;
+            var osc = ctx.createOscillator();
+            var g = ctx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(520, t);
+            osc.frequency.exponentialRampToValueAtTime(180, t + 0.09);
+            g.gain.setValueAtTime(0, t);
+            g.gain.linearRampToValueAtTime(0.07, t + 0.012);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+            osc.connect(g); g.connect(masterGain());
+            osc.start(t); osc.stop(t + 0.24);
           } catch (e) { }
         }
         function playPromotionSting() {
@@ -3821,6 +3874,9 @@ angular.module('kanbanApp')
         }
         function roleForEntry(level, message) {
           var m = (message || '').toLowerCase();
+          // Hallucination aborts are the editor's own doing — he proposed the rambling
+          // that got cut off, so he owns the incident on the board (and writes it drunk).
+          if (/hallucination|wall of text|aborted early/.test(m)) return 'editor';
           if (level === 'phase') {
             if (/plan/.test(m)) return 'planner';
             if (/explor/.test(m)) return 'explorer';
@@ -3853,6 +3909,44 @@ angular.module('kanbanApp')
           if (/agent started/.test(m)) return 'planner';
           return null;
         }
+        function hashStr(str) {
+          var h = 2166136261;
+          for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+          return h >>> 0;
+        }
+        function seededRand(seed) {
+          var x = seed >>> 0 || 1;
+          return function () {
+            x ^= x << 13; x >>>= 0;
+            x ^= x >> 17;
+            x ^= x << 5; x >>>= 0;
+            return x / 4294967296;
+          };
+        }
+        // Drunk text mangler: slurred 'd' for 'th', doubled consonants, the odd swapped
+        // letter pair, and a *hic* every few words. Seeded from the input so the same
+        // message slurs identically on replay (the board stays faithful to the run).
+        function drunkText(str, opts) {
+          opts = opts || {};
+          var words = String(str == null ? '' : str).split(' ');
+          var rand = seededRand(hashStr(String(str)));
+          var hicEvery = opts.hicEvery || 8;
+          var bias = opts.slurBias || 1;
+          var out = [], sinceHic = 0;
+          for (var i = 0; i < words.length; i++) {
+            var w = words[i];
+            if (w.length > 3 && rand() < 0.16 * bias) w = w.replace(/th/gi, 'd');
+            if (w.length > 4 && rand() < 0.12 * bias) w = w.replace(/([bcdfgjklmnpqrstvz])/i, '$1$1');
+            if (w.length > 5 && rand() < 0.09 * bias) {
+              var idx = 1 + Math.floor(rand() * (w.length - 2));
+              w = w.slice(0, idx) + w.charAt(idx + 1) + w.charAt(idx) + w.slice(idx + 2);
+            }
+            out.push(w);
+            sinceHic++;
+            if (sinceHic >= hicEvery) { out.push('*hic*'); sinceHic = 0; }
+          }
+          return out.join(' ');
+        }
         function logBoardText(entry) {
           var msg = entry && entry.message ? String(entry.message) : '';
           var level = entry && entry.level ? String(entry.level) : 'info';
@@ -3868,6 +3962,7 @@ angular.module('kanbanApp')
               if (trimmed.length > 2) text = trimmed;
             }
           }
+          if (/hallucination|wall of text|aborted early/.test(msg)) text = drunkText(text, { hicEvery: 9 });
           if (text.length > 180) text = text.slice(0, 180) + '…';
           return { role: role, text: text };
         }
@@ -4543,6 +4638,41 @@ angular.module('kanbanApp')
           if (vm.showMeeting) playDing();
           return true;
         }
+        function editorHallucinateReact(entry, fromReplay) {
+          if (!scene || scene.done) return;
+          var sp = spiderFor('editor');
+          if (!sp) return;
+          // Each abort gets him more wasted; the wobble escalates with the streak.
+          scene.editorDrunk = (scene.editorDrunk || 0) + 1;
+          var cnt = scene.editorDrunk;
+          sp.drunk = Math.min(1, 0.45 + cnt * 0.12);
+          sp.drunkT = 5 + Math.min(10, cnt * 1.5);
+          sp.drunkPhase = Math.random() * 6.28;
+          if (fromReplay) return; // visuals only during replay; chat comes from recorded events
+          var who = sp.icon + ' ' + sp.name;
+          var stepNo = (String(entry && entry.message || '').match(/step\s+(\d+)/i) || [])[1];
+          var line;
+          if (cnt >= 6 && Math.random() < 0.45) line = pick(EDITOR_DRUNK_BLAME);
+          else if (cnt >= 3) line = pick(EDITOR_DRUNK_WORSE);
+          else line = pick(EDITOR_DRUNK_QUIPS);
+          if (stepNo) line += ' (shtep ' + stepNo + ' wash… fine. Ish.)';
+          logGossipEntry(who, line);
+          recordEvent({ type: 'chat', who: who, text: line });
+          pushTicker('bad', '🍺 Editor hallucinated' + (stepNo ? ' (step ' + stepNo + ')' : '') + ' — aborting his proposal', true);
+          if (vm.showMeeting) playHiccup();
+          var witness = randomSpider();
+          if (witness && witness !== sp) {
+            var wSp = witness;
+            $timeout(function () {
+              if (destroyed || !scene || scene.done) return;
+              var wLine = pick(DRUNK_WITNESS);
+              logGossipEntry(wSp.icon + ' ' + wSp.name, wLine);
+              recordEvent({ type: 'chat', who: wSp.icon + ' ' + wSp.name, text: wLine });
+              wSp.reactT = 1.1;
+              wSp.reactKind = 'bad';
+            }, 2600);
+          }
+        }
         function complexityReactToLog(low, fromReplay) {
           if (fromReplay || !scene) return false;
           var sp = spiderFor('complexity');
@@ -4623,6 +4753,9 @@ angular.module('kanbanApp')
             if (!fromReplay) finishMeeting();
             return;
           }
+          if (/hallucination|wall of text|repetition loop|aborted early/.test(low)) {
+            editorHallucinateReact(entry, fromReplay);
+          }
           var parsed = logBoardText(entry);
           if (!parsed) return;
           scene.activeRole = parsed.role;
@@ -4695,6 +4828,7 @@ angular.module('kanbanApp')
             applyCrownCarryover(); 
             scene.calmQuipFired = false; 
             scene._editFailStreak = 0;
+            scene.editorDrunk = 0; 
             scene.meltdownFired = false; 
             scene.shoutFired = false;    
             scene.jokeCd = 45;           
@@ -4963,6 +5097,7 @@ angular.module('kanbanApp')
             }
             if (s.speechTtl > 0) s.speechTtl -= dt;
             if (s.reactT > 0) s.reactT -= dt;
+            if (s.drunkT > 0) { s.drunkT -= dt; if (s.drunkT <= 0) s.drunk = 0; }
           });
           if (scene.writer && scene.writer.state === 'write') {
             var w = scene.writer;
@@ -5968,8 +6103,17 @@ angular.module('kanbanApp')
           if (rageFactor > 0) {
             rageShake = rageShakeWave(Date.now() / 1000, s.walkPhase, rageFactor) * (0.6 + rageFactor * 2.6) * scale;
           }
-          var px = s.x * W + tremble + rageShake;
-          var cy = py + bob;
+          var drunk = s.drunkT > 0 ? (s.drunk || 0) : 0;
+          var dTime = Date.now() / 1000;
+          var drunkSway = 0, drunkBob = 0, drunkPup = 0;
+          if (drunk > 0) {
+            drunkSway = Math.sin(dTime * 5 + s.walkPhase * 7 + s.drunkPhase) * 7 * scale * drunk;
+            drunkBob = Math.sin(dTime * 11 + s.walkPhase * 3) * 2.6 * scale * drunk;
+            if (Math.sin(dTime * 1.7 + s.walkPhase * 5) > 0.93) drunkBob -= 5 * scale * drunk; // hiccup jolt
+            drunkPup = Math.sin(dTime * 4 + s.walkPhase + s.drunkPhase) * 2.6 * scale * drunk;
+          }
+          var px = s.x * W + tremble + rageShake + drunkSway;
+          var cy = py + bob + drunkBob;
           var smugFactor = Math.min(1, (s.smug || 0) / 100);
           var bodyColor = rageFactor > 0 ? blendHex(s.color, '#ff3b30', rageFactor) : s.color;
           if (smugFactor > 0) bodyColor = blendHex(bodyColor, '#ffcf6b', smugFactor * 0.55);
@@ -5985,7 +6129,7 @@ angular.module('kanbanApp')
             var attachY = cy - bodyH * 0.3 + (i / 3) * bodyH * 0.7;
             var off = 8 + i * 3;
             var stompLegs = s.stomping ? 7 * scale : 4 * scale;
-            var sway = legSwing * (i % 2 === 0 ? 1 : -1) * stompLegs;
+            var sway = legSwing * (i % 2 === 0 ? 1 : -1) * stompLegs + (drunk > 0 ? Math.sin(dTime * 8 + i * 2.5 + s.drunkPhase) * 1.3 * scale * drunk : 0);
             ctx.beginPath();
             ctx.moveTo(px - bodyW * 0.35, attachY);
             ctx.lineTo(px - bodyW * 0.35 - off * scale, attachY + 8 * scale + sway);
@@ -6046,8 +6190,8 @@ angular.module('kanbanApp')
           ctx.beginPath(); ctx.arc(px - bodyW * 0.18, ey, eyeR, 0, 6.283); ctx.fill();
           ctx.beginPath(); ctx.arc(px + bodyW * 0.18, ey, eyeR, 0, 6.283); ctx.fill();
           ctx.fillStyle = '#111';
-          ctx.beginPath(); ctx.arc(px - bodyW * 0.18 + ex * 0.4, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
-          ctx.beginPath(); ctx.arc(px + bodyW * 0.18 + ex * 0.4, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(px - bodyW * 0.18 + ex * 0.4 + drunkPup, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(px + bodyW * 0.18 + ex * 0.4 - drunkPup, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
           if (scene.writer === s && s.state === 'write') {
             ctx.strokeStyle = '#222';
             ctx.lineWidth = 2.5 * scale;

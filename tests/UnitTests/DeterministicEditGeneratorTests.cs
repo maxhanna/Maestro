@@ -49,6 +49,101 @@ public class DeterministicEditGeneratorTests
         Assert.Equal("maxRetries: \"5\",", edit.NewStr);
     }
 
+    // ── Quoted JSON keys: '"maxRetries": 3' is a key:value pair, not string content ──
+
+    [Fact]
+    public void Swap_SetTo_QuotedJsonKey_UnquotedValue()
+    {
+        const string file =
+            "{\n" +
+            "  \"maxRetries\": 3,\n" +
+            "  \"timeoutSec\": 30\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "appsettings.json", true, file, "update all maxRetries defaults to 5");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Single(edit.Edits);
+        Assert.Equal("  \"maxRetries\": 3,", edit.Edits[0].OldString); // the full indented line
+        Assert.Equal("  \"maxRetries\": 5,", edit.Edits[0].NewString);
+        Assert.Contains("applied 1/1 occurrences", edit.Reason);
+    }
+
+    [Fact]
+    public void Swap_SetTo_QuotedJsonKey_QuotedValue()
+    {
+        const string file = "\"maxRetries\": \"3\",\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "appsettings.json", true, file, "update all maxRetries defaults to 5");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Single(edit.Edits);
+        Assert.Equal("\"maxRetries\": \"5\",", edit.Edits[0].NewString);
+    }
+
+    [Fact]
+    public void Swap_FromTo_QuotedJsonKey()
+    {
+        // The MULTI from-to form ("all ... from 3 to 5") — the quoted-key form lives in
+        // ContainsStandaloneName, which only the multi-swap path consults.
+        const string file = "\"maxRetries\": 3,\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "appsettings.json", true, file, "update all maxRetries from 3 to 5");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Single(edit.Edits);
+        Assert.Equal("\"maxRetries\": 5,", edit.Edits[0].NewString);
+    }
+
+    [Fact]
+    public void Swap_QuotedJsonKey_AllOccurrencesUpdated()
+    {
+        const string file =
+            "\"maxRetries\": 3,\n" +
+            "\"maxRetries\": 3\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "appsettings.json", true, file, "update all maxRetries defaults to 5");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("applied 2/2 occurrences", edit.Reason);
+        Assert.Contains("(deterministic batch: 2 edits, applied 2/2 occurrences)", edit.NewStr);
+    }
+
+    [Fact]
+    public void Swap_QuotedKey_NonJsonFile_Declines()
+    {
+        // The quoted-key form is gated to JSON-family files: the same text in a .ts file could
+        // live inside a string/template literal ('"maxRetries": 3' as literal content), so it
+        // must still decline — the LLM handles it instead of editing string content.
+        const string file = "\"maxRetries\": 3,\n";
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "config.ts", true, file, "update all maxRetries defaults to 5"));
+    }
+
+    [Fact]
+    public void Swap_QuotedName_NotAKeyPair_Declines()
+    {
+        // An array element (or any quoted identifier NOT followed by ':') stays string content.
+        const string file = "[\"maxRetries\", \"other\"]\n";
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "appsettings.json", true, file, "update all maxRetries defaults to 5"));
+    }
+
+    [Fact]
+    public void Swap_QuotedKey_ObjectValue_Declines()
+    {
+        // An object-valued key must NOT be swapped: its nested literals are not the key's value,
+        // so the whole request declines (safe) rather than mis-editing 'count' inside the object.
+        const string file = "\"retry\": { \"count\": 3 }\n";
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "appsettings.json", true, file, "update all retry defaults to 5"));
+    }
+
     [Fact]
     public void Swap_FromTo_UnitSuffix_PreservesUnit()
     {
@@ -964,6 +1059,37 @@ public class DeterministicEditGeneratorTests
     }
 
     [Fact]
+    public void MultiMember_CSharp_Exclusion_OneNamedForm()
+    {
+        // "except the one named BaseDto" — the explicit-name alternative form excludes
+        // exactly the named class.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, ExclusionFile,
+            "add a string Email property to every DTO class, except the one named BaseDto");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("excluding 'BaseDto'", edit.Reason);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_Exclusion_ArticleGuard_NoOverExclude()
+    {
+        // "except a base class" — the article "a" must NOT be captured as the excluded word
+        // (Contains("a") would exclude nearly every class). The clause falls through to no
+        // exclusion, so ALL DTO classes (incl. BaseDto) are edited.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, ExclusionFile,
+            "add a string Email property to every DTO class except a base class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(3, edit.Edits.Count); // no exclusion fired — BaseDto included
+        Assert.DoesNotContain("excluding", edit.Reason);
+    }
+
+    [Fact]
     public void MultiMember_CSharp_ExclusionAndOverride_Combine()
     {
         // Narrowing + per-class naming compose: the override resolves among the REMAINING
@@ -1057,6 +1183,40 @@ public class DeterministicEditGeneratorTests
         Assert.Equal(2, edit.Edits.Count);
         Assert.Contains("public string NameKey { get; set; }", edit.Edits[0].NewString);       // override wins
         Assert.Contains("public string OrderEmail { get; set; }", edit.Edits[1].NewString);   // adaptive elsewhere
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_ReindentedFile_MemberMirrorsExistingIndent()
+    {
+        // A formatter-reindented (2-space) file must get style-consistent members, not a
+        // hardcoded 4-space default — this is what lets G1's re-synthesis blend in after drift.
+        const string file =
+            "public class UserDto\n" +
+            "{\n" +
+            "  public int Id { get; set; }\n" +
+            "}\n" +
+            "public class OrderDto\n" +
+            "{\n" +
+            "  public string Name { get; set; }\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, file, "add a string Email property to every DTO class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.All(edit.Edits, e => Assert.Contains("  public string Email { get; set; }", e.NewString));
+        Assert.All(edit.Edits, e => Assert.DoesNotContain("    public string Email", e.NewString));
+
+        var content = file;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Equal(2, content.Split("  public string Email { get; set; }").Length - 1);
+        Assert.Equal(0, content.Split("    public string Email").Length - 1);
     }
 
     [Fact]
@@ -1263,6 +1423,25 @@ public class DeterministicEditGeneratorTests
         Assert.NotNull(edit!.Edits);
         Assert.Single(edit.Edits);
         Assert.Contains("deterministic batch", edit.NewStr);
+    }
+
+    [Fact]
+    public void Multi_SetTo_OneAlreadyCorrect_ReportsSkipped1()
+    {
+        // The exact partial combination the batch integration test drives end-to-end:
+        // 1 of 2 occurrences is already the target → applied 1/2, skipped 1: already-correct.
+        const string file =
+            "maxRetries=3\n" +
+            "maxRetries=5\n"; // already the target — skipped
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "config.ini", true, file, "update all maxRetries defaults to 5");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Single(edit.Edits);
+        Assert.Contains("applied 1/2 occurrences", edit.Reason);
+        Assert.Contains("skipped 1: 1 already-correct", edit.Reason);
+        Assert.Contains("(deterministic batch: 1 edits, applied 1/2 occurrences)", edit.NewStr);
     }
 
     [Fact]
