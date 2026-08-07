@@ -548,6 +548,21 @@ partial class AgentController
             sb.AppendLine("### REJECTED ATTEMPTS FOR THE NEXT STEP (fix these issues) ###");
             foreach (var r in rejectionFeedback) sb.AppendLine($"  - {r}");
         }
+        // Only nudge when results were ACTUALLY harvested into the context — a failed or empty
+        // search produces no '### WEB RESULTS' section, and telling the model to look for one it
+        // can't find would mislead it (it would hunt for a section that does not exist).
+        if (discoveryContext.Contains("### WEB RESULTS", StringComparison.Ordinal) &&
+            planSoFar.Any(s => IsWebStep(s.File)))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### WEB RESULTS ARE IN CONTEXT ###");
+            sb.AppendLine("An earlier _web_search/_web_fetch step already ran — its results are in the " +
+                "DISCOVERY CONTEXT above under '### WEB RESULTS [<query>] ###'. Base the NEXT step on " +
+                "that content: reference the actual article/title/URL from the results, and do NOT " +
+                "search the web again or write code to fetch pages — the information is already in " +
+                "context. If you must save it to a file, create the file with the content drawn from " +
+                "those results.");
+        }
         sb.AppendLine();
         sb.AppendLine("Propose the NEXT step now, or declare the plan complete. Output ONLY JSON.");
         return sb.ToString();

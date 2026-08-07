@@ -303,6 +303,14 @@ partial class AgentController
             {
                 related = SelectRelatedFilesForThinking(discoveryContext, prompt, null);
             }
+            // Web results (from executed _web_search/_web_fetch steps) are external facts, NOT
+            // repo files — so neither SelectRelatedFilesForThinking nor the attached-only rule
+            // surfaces them. The reasoning engine MUST see what a search actually returned, or
+            // the next step re-invents scraping instead of using the results (the original bug).
+            // Append them explicitly in BOTH branches.
+            var webSections = ExtractWebResultSectionsForThinking(discoveryContext);
+            if (webSections.Length > 0)
+                related = (related.Length > 0 ? related + "\n" : "") + webSections;
 
             var system =
                 "You are the deep-reasoning engine of an autonomous coding agent. BEFORE the planner proposes the next step, " +
@@ -445,6 +453,26 @@ partial class AgentController
     /// All sections up to the budget are included (ordered by relevance), because a
     /// cross-directory reference file is often exactly what the step must copy from.
     /// </summary>
+    /// <summary>
+    /// Pulls "### WEB RESULTS [...]" sections (appended by AppendWebResultsToDiscoveryContext
+    /// after an executed _web_search/_web_fetch step) out of the discovery context so the
+    /// deep pre-plan reasoning engine can reference what the search actually returned.
+    /// </summary>
+    private static string ExtractWebResultSectionsForThinking(string discoveryContext)
+    {
+        if (string.IsNullOrWhiteSpace(discoveryContext)) return "";
+        var sb = new StringBuilder();
+        // Stop only at REAL section boundaries (another WEB RESULTS block, a file section, or the
+        // end) — a lookahead of bare "### " would truncate web content that itself contains
+        // markdown headings (common in fetched articles). The header regex is lazy up to the
+        // closing "] ###" so a query containing ']' cannot break the match.
+        foreach (Match m in Regex.Matches(discoveryContext, @"### WEB RESULTS \[.*?\] ###[\s\S]*?(?=\n### WEB RESULTS |\n### read |\n### list |\z)"))
+        {
+            var section = m.Value.TrimEnd();
+            if (section.Length > 0) sb.AppendLine(section);
+        }
+        return sb.ToString().Trim();
+    }
     private static string SelectRelatedFilesForThinking(string discoveryContext, string prompt, string? targetPath, int maxChars = 200000)
     {
         if (string.IsNullOrWhiteSpace(discoveryContext)) return "";

@@ -1616,6 +1616,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
+    /// Harvests executed _web_search/_web_fetch outputs from a step's results and appends
+    /// them to the discovery context so the NEXT planning/thinking round can see what the
+    /// search/fetch actually returned. ExecuteWebPlanStep accumulates results into a local
+    /// webCtx that is only flushed via ReplanRemainingSteps when the SAME plan has further
+    /// steps — in the interleaved loop each step runs as its own single-step plan, so that
+    /// flush never fires and the model re-invented scraping code instead of using results.
+    /// </summary>
+    private static string AppendWebResultsToDiscoveryContext(
+        string discoveryContext, IEnumerable<Dictionary<string, object?>> newResults)
+    {
+        foreach (var r in newResults)
+        {
+            var type = r.GetValueOrDefault("type")?.ToString();
+            if (!IsWebStep(type)) continue;
+            // Only successful fetches are real web data — an error result carrying text (e.g. an
+            // exception message) must never be presented to the planner as search output.
+            if (r.GetValueOrDefault("status")?.ToString() != "done") continue;
+            var query = r.GetValueOrDefault("query")?.ToString() ?? r.GetValueOrDefault("url")?.ToString() ?? "";
+            var output = r.GetValueOrDefault("output")?.ToString();
+            if (string.IsNullOrWhiteSpace(output) || output.Length <= 80) continue;
+            var capped = output.Length > 20000 ? output[..20000] + "…" : output;
+            discoveryContext += $"\n\n### WEB RESULTS [{query}] ###\n{capped}\n";
+        }
+        return discoveryContext;
+    }
+
+    /// <summary>
     /// LLM-confirmed version of the missing-web-search gate. Regex hints alone
     /// false-positive on repo-internal "search"/"look up" phrasing, so a cheap
     /// classifier call decides whether the task genuinely needs current external
@@ -1864,6 +1891,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var stepSucceeded = newResults.Any(r => r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
                 await EmitLog(emitSse, "info",
                     $"DIAG: After queued step — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}", ct: ct);
+                discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
                 {
@@ -2383,6 +2411,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "info",
                     $"DIAG: After ExecutePlan — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}, newResults.Count={newResults.Count}",
                     ct: ct);
+                discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
                 {
