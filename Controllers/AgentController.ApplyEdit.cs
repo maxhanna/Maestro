@@ -139,6 +139,27 @@ partial class AgentController
         (planOldStr, causalContext) = await ResolveAstOldStringAndCausalAsync(
             step, planOldStr, explorationTargetSymbol, relPath, fullPath, fileExt,
             prompt, projectRoot, skipLlmPreResolution || isDeterministicEdit, emitSse, ct);
+        // ANCHOR SANITY (deterministic, pre-loop): a plan-provided oldString that is bare
+        // punctuation (the "}" anchor class) is never a usable anchor — it matches dozens of
+        // places or deletes structural code. Bounce it before the attempt loop so no LLM
+        // round-trip is wasted resolving replacement code against it; the resolver then
+        // re-anchors against the real file content from scratch.
+        if (!string.IsNullOrWhiteSpace(planOldStr) &&
+            (IsBarePunctuationAnchor(planOldStr) || IsLoneClosingBraceFirstLine(planOldStr)))
+        {
+            await EmitLog(emitSse, "warn",
+                $"✗ Plan-provided oldString for {relPath} is bare punctuation ('{OneLinePreview(planOldStr)}') — not a usable anchor. " +
+                "Bouncing to the edit resolver to re-anchor against the real file content.", ct: ct);
+            if (skipLlmPreResolution)
+            {
+                // The bounce breaks the caller's zero-LLM intent (the plan was supposed to be
+                // fully deterministic) — make that visible rather than mysterious.
+                await EmitLog(emitSse, "info",
+                    $"  Note: skipLlmPreResolution was set, but the garbage anchor forces one resolver round-trip for {relPath}", ct: ct);
+            }
+            planOldStr = null;
+            planNewStr = null;
+        }
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
             if (attempt > 0 && !string.IsNullOrWhiteSpace(preEditContent))
@@ -331,6 +352,22 @@ partial class AgentController
                         continue;
                     }
                 }
+            }
+            // ANCHOR SANITY (post-resolve, deterministic): bounce bare-punctuation oldStrings
+            // the resolver produced — the same "}" class — without any apply attempt or verify
+            // call, feeding the model clear feedback on why the anchor is unusable.
+            if (resolveError == null && !string.IsNullOrWhiteSpace(oldStr) &&
+                (IsBarePunctuationAnchor(oldStr) || IsLoneClosingBraceFirstLine(oldStr)))
+            {
+                var err = "ANCHOR SANITY: oldString is bare punctuation (e.g. a lone '}'), which would match dozens of places " +
+                          "or destroy structural code. Output a real, unique code line (with surrounding context) as your oldString.";
+                await EmitLog(emitSse, "warn",
+                    $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                history.Add((oldStr, newStr ?? "", err));
+                if (string.Equals(AgentTextUtilities.NormalizeLineEndings(oldStr ?? ""), AgentTextUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentTextUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                if (stuckCount >= 2) goto RecordFailure;
+                continue;
             }
             if (resolveError != null)
             {
@@ -1084,9 +1121,7 @@ partial class AgentController
                     goto continueResolveLoop;
                 }
             }
-            var firstOldLineTrimmed = oldStr?.TrimStart().Split('\n', '\r')
-                .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-            if (firstOldLineTrimmed?.TrimStart() is "}" or "})" or "};")
+            if (IsLoneClosingBraceFirstLine(oldStr))
             {
                 var err = $"oldString starts with a standalone '}}' (just a closing brace) — it includes the previous method's closing brace. " +
                     "Set oldString to start AT the target method declaration, not before it.";

@@ -203,6 +203,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
             // schedule keeps firing, but while the stopped card still sits in
             // To Do/Doing no new card is created or auto-started.
             if (hasLiveCalendarInstance(_vm.state, cal)) {
+              // Suppress this fire — the same calendar card already has a live
+              // card on the board, so firing again would duplicate it.
+              console.log('[calendar] suppressed fire for "' + (cal.text || '').slice(0, 40) + '" — a live instance is already on the board; the schedule resumes once it leaves To Do/Doing');
               if (cal.cronExpression) cal.lastFired = now.toISOString(); else cal.processed = true;
               changed = true;
               continue;

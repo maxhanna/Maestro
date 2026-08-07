@@ -39,8 +39,11 @@ const guardMatch = /function hasLiveCalendarInstance\(boardState, cal\) \{[\s\S]
 assert(guardMatch, 'hasLiveCalendarInstance not found in wwwroot/calendar.js — marker format may have drifted');
 const hasLive = eval('(function () { ' + guardMatch[0] + '\n return hasLiveCalendarInstance; })()');
 
+// Board cards carry _cronExpression; the checked calendar card carries
+// cronExpression — the guard reads cal.cronExpression and board cards' _cronExpression.
 function cronCard(text, cronKey) {
-  return { _fromCron: true, text: text, _cronExpression: cronKey || '' };
+  const key = cronKey || '';
+  return { _fromCron: true, text: text, _cronExpression: key, cronExpression: key };
 }
 
 test('same cron card with live instance in todo suppresses the fire', () => {

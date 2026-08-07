@@ -41,6 +41,82 @@ partial class AgentController
         var ext = Path.GetExtension(file ?? "").ToLowerInvariant();
         return ext is ".css" or ".scss" or ".sass" or ".less" or ".styl";
     }
+
+    /// <summary>
+    /// Detects tasks that operate on the OS filesystem OUTSIDE the repository —
+    /// e.g. "create a 'Daily Post' folder on the desk", "delete the Downloads
+    /// folder", "rename a file in Documents", "create a folder at C:\Users\me\Desktop".
+    /// Such tasks need ZERO repository knowledge, so pulling in top-BM25 project
+    /// files only anchors the planner on unrelated code (the classic "wrote an HTTP
+    /// endpoint to create a desktop folder" failure).
+    /// Fires only when BOTH an OS location (unambiguous phrase like "on the desk" /
+    /// "my desktop" / "downloads folder", or an absolute OS path) AND a filesystem
+    /// ARTIFACT word (folder/directory/file/shortcut) appear. A repo-context escape
+    /// hatch returns false whenever the prompt references the repo/project/src, so
+    /// "fix the bug in the desktop folder" or "read the documents folder in the
+    /// project" never trip it — and plain action verbs alone are never enough
+    /// ("create a desktop app" stays a repo task).
+    /// </summary>
+    internal static bool IsExternalFilesystemTask(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var lower = prompt.ToLowerInvariant();
+        // Repo-context escape hatch: any explicit repo/project/src reference means the
+        // "desktop folder"/"documents folder" is repo-relative, not the OS desktop.
+        var repoContexts = new[]
+        {
+            "in the repo", "in the repository", "in the repo's", "of the repo", "the repo's",
+            "in the project", "of the project", "the project's", "at the project root",
+            "in the codebase", "in src", "under src", "src/"
+        };
+        foreach (var ctx in repoContexts)
+        {
+            if (lower.Contains(ctx)) return false;
+        }
+        // NOTE: never list bare "desktop"/"the desk" — "the desk" is a prefix of
+        // "the desktop", so "fix the bug in the desktop folder" would falsely fire.
+        var osLocations = new[]
+        {
+            "on the desk", "my desk", "my desktop", "on the desktop",
+            "to the desktop", "from the desktop", "downloads folder", "download folder",
+            "documents folder", "document folder", "my documents", "in documents",
+            "to documents", "in downloads", "to downloads", "home directory", "home folder",
+            "user folder", "temp folder", "tmp folder", "recycle bin", "program files",
+            "appdata", "startup folder", "pictures folder", "music folder", "videos folder",
+            "screenshots folder"
+        };
+        var hasLocation = false;
+        foreach (var loc in osLocations)
+        {
+            if (lower.Contains(loc)) { hasLocation = true; break; }
+        }
+        if (!hasLocation &&
+            Regex.IsMatch(lower, @"[a-z]:[\\/]|~/|/home/|/users/|%userprofile%|%temp%|%tmp%|%appdata%"))
+        {
+            hasLocation = true;
+        }
+        if (!hasLocation) return false;
+        // Repo-y compound phrases that contain "file" but are code concepts, never OS
+        // operations (e.g. "fix the desktop file picker" is repo work).
+        var repoFileCompounds = new[]
+        {
+            "file picker", "file upload", "file name", "file path", "file type",
+            "file format", "file size", "file preview", "file tree", "file system"
+        };
+        foreach (var compound in repoFileCompounds)
+        {
+            if (lower.Contains(compound)) return false;
+        }
+        var fsArtifacts = new[]
+        {
+            "folder", "directory", "mkdir", "new folder", "subfolder", "file", "shortcut"
+        };
+        foreach (var art in fsArtifacts)
+        {
+            if (lower.Contains(art)) return true;
+        }
+        return false;
+    }
     private async Task<string?> ValidatePlanAsync(string userPrompt, AgentPlan plan, CancellationToken ct)
     {
         if (plan?.Plan != null)
@@ -443,6 +519,24 @@ partial class AgentController
         if (!Directory.Exists(projectRoot)) return ("", allSteps);
         var allFiles = EnumerateProjectFiles(projectRoot);
         if (allFiles.Count == 0) return ("", allSteps);
+        // OS-filesystem tasks (folders/files on the desktop, home dir, Downloads, etc.)
+        // need ZERO repo knowledge. Pulling in top-BM25 files only anchors the planner on
+        // unrelated code — the classic "wrote an HTTP endpoint to create a desktop folder"
+        // failure. Detect such tasks and skip the auto-read entirely, steering the model
+        // to the marker tools instead of the repo.
+        if (IsExternalFilesystemTask(prompt))
+        {
+            await EmitLog(emitSse, "info",
+                "Phase 1 — task targets the OS filesystem OUTSIDE the repository (desktop/home/Downloads/etc.) — skipping BM25 auto-read so no repo file content can anchor the plan; use _create_directory/_create_file/_command for the operation", ct: ct);
+            var osSb = new StringBuilder();
+            osSb.AppendLine("THIS TASK OPERATES ON THE OS FILESYSTEM OUTSIDE THE REPOSITORY (desktop/home/Downloads/etc.).");
+            osSb.AppendLine("The repository's files are NOT relevant to this task — do NOT plan edits to them.");
+            osSb.AppendLine("Use _command for OS paths outside the repo (e.g. mkdir/New-Item for folders, rm/Move-Item for files) — _create_directory/_create_file take repo-relative paths only. Never write application code to perform the operation.");
+            osSb.AppendLine();
+            await EmitLog(emitSse, "info",
+                $"Phase 1 complete — {allSteps.Count} step(s), OS-filesystem task — no repo files auto-read", ct: ct);
+            return (osSb.ToString(), allSteps);
+        }
         // NEW: BM25-first auto-read — rank the whole project against the task lexically and
         // auto-read the top files so the planner starts with the right context instead of
         // flailing with _explore/_discover one file at a time.
@@ -640,6 +734,14 @@ partial class AgentController
     {
         await EmitLog(emitSse, "info", "🔎 Discovery tool: scanning project for task-relevant files…", ct: ct);
         await SendSse(Response, "phase", new { phase = "discover", message = "Discovery tool: scanning project files...", contextSize = 0 }, ct);
+        // OS-filesystem tasks need no repo files — _discover would only re-contaminate
+        // the context with unrelated code, so short-circuit it.
+        if (IsExternalFilesystemTask(prompt))
+        {
+            await EmitLog(emitSse, "info",
+                "🔎 Discovery tool: task targets the OS filesystem outside the repository — no repo files to discover; use _create_directory/_create_file/_command", ct: ct);
+            return discoveryContext;
+        }
         var allFiles = EnumerateProjectFiles(projectRoot);
         if (allFiles.Count == 0)
         {

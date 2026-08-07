@@ -14,6 +14,61 @@ public class BenchmarkService
         _db = db;
     }
 
+    /// <summary>
+    /// Resolves the benchmark project root exactly the way ExecuteStreamCore does: the
+    /// user-configured custom root when set (from the benchmark system-info panel), else
+    /// the desktop benchmark_sandbox. The kanban project created for benchmark cards must
+    /// use this same root so the board view, the cards' filePath, and the directory the
+    /// agent actually works in all agree.
+    /// </summary>
+    public static string ResolveBenchmarkRoot(string? customRoot)
+    {
+        var root = !string.IsNullOrWhiteSpace(customRoot)
+            ? Path.GetFullPath(customRoot)
+            : AgentProjectUtilities.GetBenchmarkSandboxPath();
+        return NormalizeProjectPath(root);
+    }
+
+    /// <summary>Normalized (full, trailing-separator-stripped) form of a project path.</summary>
+    public static string NormalizeProjectPath(string path)
+    {
+        return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    /// <summary>
+    /// Ensures the "Weaver Benchmarks" project entry exists in the config list and points
+    /// at the given benchmark root. Priority: an existing project whose path matches the
+    /// root is reused (idempotent); otherwise an existing "Weaver Benchmarks" entry is
+    /// re-pointed at the root (updated); otherwise a fresh entry is created. Pure so it
+    /// can be unit-tested without touching the config store.
+    /// </summary>
+    public static (ProjectDto project, bool created, bool updated) ResolveBenchmarkProjectEntry(
+        List<ProjectDto> projects, string root)
+    {
+        var norm = NormalizeProjectPath(root);
+        var existing = projects.FirstOrDefault(p =>
+            !string.IsNullOrWhiteSpace(p.Path) &&
+            string.Equals(NormalizeProjectPath(p.Path), norm, StringComparison.OrdinalIgnoreCase));
+        if (existing != null) return (existing, false, false);
+
+        var named = projects.FirstOrDefault(p =>
+            string.Equals(p.Name, "Weaver Benchmarks", StringComparison.OrdinalIgnoreCase));
+        if (named != null)
+        {
+            named.Path = norm;
+            return (named, false, true);
+        }
+
+        var created = new ProjectDto
+        {
+            Name = "Weaver Benchmarks",
+            Path = norm,
+            Description = "Auto-created for benchmark runs — benchmark cards land here."
+        };
+        projects.Add(created);
+        return (created, true, false);
+    }
+
     public static SystemInfo DetectSystemInfo()
     {
         var info = new SystemInfo

@@ -9,11 +9,36 @@ public class BenchmarkController : ControllerBase
 {
     private readonly BenchmarkService _benchmark;
     private readonly IWebHostEnvironment _env;
+    private readonly ConfigFileService _configFile;
 
-    public BenchmarkController(IWebHostEnvironment env, DatabaseService db)
+    public BenchmarkController(IWebHostEnvironment env, DatabaseService db, ConfigFileService configFile)
     {
         _env = env;
         _benchmark = new BenchmarkService(db);
+        _configFile = configFile;
+    }
+
+    /// <summary>
+    /// Ensures a "Weaver Benchmarks" project exists whose root is the benchmark project
+    /// root (custom system-info root, else the desktop benchmark_sandbox). Benchmark cards
+    /// are created under this project so they land in a dedicated kanban instead of whatever
+    /// project happens to be selected. Idempotent: the existing entry is reused when the
+    /// path already matches, re-pointed when the name exists with a stale root, or created.
+    /// </summary>
+    [HttpPost("ensure-project")]
+    public async Task<IActionResult> EnsureProject()
+    {
+        var custom = _benchmark.LoadCustomSystemInfo();
+        var root = BenchmarkService.ResolveBenchmarkRoot(custom?.BenchmarkProjectRoot);
+        var cfg = await _configFile.LoadConfigAsync();
+        cfg.projects ??= new List<ProjectDto>();
+        var (proj, created, updated) = BenchmarkService.ResolveBenchmarkProjectEntry(cfg.projects, root);
+        if (created || updated)
+            await _configFile.WriteConfigAsync(cfg);
+        // Always return the NORMALIZED path so the board's filePath === selectedProject
+        // filter stays exactly consistent even when an existing entry was stored with a
+        // trailing separator or differing case.
+        return Ok(new { path = BenchmarkService.NormalizeProjectPath(proj.Path), name = proj.Name, created, updated });
     }
 
     [HttpGet("scores")]

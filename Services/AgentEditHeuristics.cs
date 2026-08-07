@@ -994,4 +994,41 @@ public static class AgentEditHeuristics
         }
         return depth != 0;
     }
+
+    /// <summary>
+    /// True when an oldString is nothing but punctuation/symbol characters (e.g. "}", "{",
+    /// ";", "})", "};", ",") — an anchor that can never be reliable: it matches dozens of
+    /// places in any real file or deletes structural code. Used to bounce garbage anchors
+    /// deterministically BEFORE any LLM round-trip or apply machinery runs.
+    /// </summary>
+    public static bool IsBarePunctuationAnchor(string? oldStr)
+    {
+        if (string.IsNullOrWhiteSpace(oldStr)) return false;
+        var trimmed = oldStr.Trim();
+        // 7+ chars of punctuation isn't the classic bare-anchor shape ("}", "};", "},") —
+        // leave those to the normal match-count machinery instead of over-blocking.
+        if (trimmed.Length == 0 || trimmed.Length > 6) return false;
+        return Regex.IsMatch(trimmed, @"^[\p{P}\p{S}]+$");
+    }
+
+    /// <summary>First non-blank line of a string, trimmed. Null when the string is blank.</summary>
+    public static string? FirstNonBlankLine(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        return s.Split('\n', '\r')
+            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))
+            ?.Trim();
+    }
+
+    /// <summary>
+    /// True when an anchor's first real line is a lone closing brace ("}", "})", "};") —
+    /// the classic garbage shape where the model starts its oldString with the PREVIOUS
+    /// block's closing brace before the real declaration, which either matches dozens of
+    /// times or starts the replacement inside the wrong scope.
+    /// </summary>
+    public static bool IsLoneClosingBraceFirstLine(string? s)
+    {
+        var first = FirstNonBlankLine(s);
+        return first is "}" or "})" or "};";
+    }
 }

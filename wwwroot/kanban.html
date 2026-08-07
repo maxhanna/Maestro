@@ -616,11 +616,11 @@
 
           <!-- Actions -->
           <div class="card-actions">
-            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'doing','done')"
+            <button ng-if="!card._benchmark && !card._fromCron" ng-click="vm.moveCard(card.id,'doing','done')"
               class="{{vm.isCardActive(card.id) ? 'ghost' : 'success'}} small"
               title="{{vm.isCardActive(card.id) ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.isCardActive(card.id)">✔ Done</button>
-            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'doing')"
+            <button ng-if="card._benchmark || card._fromCron" ng-click="vm.deleteCard(card.id, 'doing')"
               class="small {{ vm.isCardActive(card.id) ? 'ghost' : '' }}"
               ng-style="{'color': vm.isCardActive(card.id) ? '' : '#e5c07b' }"
               title="{{ vm.isCardActive(card.id) ? 'Disabled while active' : 'Deletes the card.' }}"
@@ -884,11 +884,11 @@
 
           <!-- Actions -->
           <div class="card-actions">
-            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
-            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'done')" class="small" style="color:#e5c07b;">🗑 Delete</button>
+            <button ng-if="!card._benchmark && !card._fromCron" ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
+            <button ng-if="card._benchmark || card._fromCron" ng-click="vm.deleteCard(card.id, 'done')" class="small" style="color:#e5c07b;">🗑 Delete</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card"
-              ng-if="!card._benchmark || vm.activeCardId === card.id">✕ Delete</button>
+              ng-if="(!card._benchmark && !card._fromCron) || vm.activeCardId === card.id">✕ Delete</button>
           </div>
         </div>
       </div>

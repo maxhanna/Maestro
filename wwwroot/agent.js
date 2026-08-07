@@ -280,7 +280,7 @@ angular.module('kanbanApp')
                             pushAgentLog(vm, 'info', isAutoRestart ? 'Agent restarting (' + (card._agentIteration || 0) + '/5)' : 'Agent started', { project: proj, task: card.text });
                             vm.activeCardText = card.text; vm._agentStartTime = Date.now();
                             var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-                            var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, buildCommands: vm.getProjectBuildCommands(proj) || null, endpointId: card.llmEndpointId || '', runId: run.runId };
+                            var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) || '', buildCommands: vm.getProjectBuildCommands(proj) || null, endpointId: card.llmEndpointId || '', runId: run.runId };
                             vm.moveCardToDoing(card.id); vm.activeCardId = card.id; vm.activeCardIds.add(card.id);
                             var localAbortController = run.abortController;
                             fetch('/api/agent/execute-stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: localAbortController.signal })
@@ -520,9 +520,13 @@ angular.module('kanbanApp')
                                                                         var mvCard = vm.state[mvCol].splice(mvIdx, 1)[0];
                                                                         mvCard.agentAnalysis = concAnalysis;
                                                                         mvCard.agentLog = angular.copy(run.log);
-                                                                        vm.state.done.push(mvCard);
+                                                                        // Scheduled (cron) cards are one-shot jobs — don't keep them on the
+                                                                        // board (the card is already spliced out, so just skip the done push).
+                                                                        if (!mvCard._fromCron) {
+                                                                            vm.state.done.push(mvCard);
+                                                                        }
                                                                         vm.saveCards();
-                                                                        if (vm.suggestImprovements && mvCol === 'doing' && !mvCard.selfImproving) vm.suggestImprovements(mvCard, concAnalysis.summary, proj);
+                                                                        if (vm.suggestImprovements && mvCol === 'doing' && !mvCard.selfImproving && !mvCard._fromCron) vm.suggestImprovements(mvCard, concAnalysis.summary, proj);
                                                                     } else if (vm.saveCards) { vm.saveCards(); }
                                                                     if (vm.reconcileBenchmarkRunning) vm.reconcileBenchmarkRunning();
                                                                     $scope.$applyAsync(); return;
@@ -594,6 +598,17 @@ angular.module('kanbanApp')
                                                                     vm._agentStartTime = null;
                                                                     if (!vm.agentRuns.some(function (r) { return r.active; })) vm.cancelAgentTimer();
                                                                     if (!incomplete) {
+                                                                        if (card._fromCron) {
+                                                                            // Scheduled (cron) cards are one-shot jobs: when they finish,
+                                                                            // delete the card instead of keeping it on the board.
+                                                                            pushAgentLog(vm, 'log', 'Plan completed — deleting scheduled card (one-shot job).');
+                                                                            vm.deleteCard(card.id, 'doing');
+                                                                            $timeout(function () {
+                                                                                if (!vm.autoQueue) return;
+                                                                                vm.processQueuedCards();
+                                                                            }, 500);
+                                                                            return;
+                                                                        }
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
                                                                         if (vm.suggestImprovements && !card.selfImproving) vm.suggestImprovements(card, finalSummary, proj);
@@ -1188,6 +1203,11 @@ angular.module('kanbanApp')
                     var todo = (vm.state.todo || []).filter(function (c) { return c && c._benchmark && c.ready; });
                     var liveCard = doing[0] || todo[0];
                     var hasLiveRun = !!vm._benchmarkLiveRun();
+                    if (liveCard && vm.ensureBenchmarkProject) {
+                        // A benchmark was left running/interrupted — show its dedicated kanban so
+                        // the user sees where the benchmark cards live on reload.
+                        vm.ensureBenchmarkProject(function () { });
+                    }
                     if (liveCard && !vm.benchmarkAllActive) {
                         // Only claim "running" while a stream for this card is actually
                         // live in this tab. A leftover card (page reload, dropped stream)
@@ -1293,7 +1313,7 @@ angular.module('kanbanApp')
                     }
                     pushAgentLog(vm, 'info', '▶ Resuming interrupted benchmark run…');
                     vm._persistBenchmarkRun();
-                    vm._runNextBenchmarkFromQueue();
+                    vm.ensureBenchmarkProject(function () { vm._runNextBenchmarkFromQueue(); });
                 };
                 // Single-benchmark rerun: a stuck card in Doing (stream died with the
                 // tab, no live run) gets a one-click retry. Clears the dead benchmark
@@ -1313,13 +1333,13 @@ angular.module('kanbanApp')
                     }
                     var plan = (vm.benchmarkPlans || []).find(function (p) { return p.level === level; });
                     if (plan) {
-                        vm._runBenchmarkLevel(plan);
+                        vm.ensureBenchmarkProject(function () { vm._runBenchmarkLevel(plan); });
                     } else {
                         $http.get('/api/benchmark/plans').then(function (resp) {
                             vm.benchmarkPlans = resp.data || [];
                             if (vm._hydrateRestoredBenchmarkQueue) vm._hydrateRestoredBenchmarkQueue();
                             var p = (vm.benchmarkPlans || []).find(function (x) { return x.level === level; });
-                            if (p) vm._runBenchmarkLevel(p);
+                            if (p) vm.ensureBenchmarkProject(function () { vm._runBenchmarkLevel(p); });
                             else pushAgentLog(vm, 'warn', '⚠ Cannot rerun benchmark — no plan found for level ' + level + '.');
                         }).catch(function () { pushAgentLog(vm, 'warn', '⚠ Cannot rerun benchmark — failed to load plans.'); });
                     }
@@ -1336,11 +1356,39 @@ angular.module('kanbanApp')
                         totalFailed: r.reduce(function (s, x) { return s + (x.failed || 0); }, 0)
                     };
                 };
+                // Benchmark cards must land in a dedicated "Weaver Benchmarks" kanban, not
+                // whatever project happens to be selected. Ensures the backend project entry
+                // exists (created on first run / when missing), then switches the board to it
+                // so the cards are visible in the right column view.
+                vm.ensureBenchmarkProject = function (cb) {
+                    $http.post('/api/benchmark/ensure-project').then(function (resp) {
+                        var path = resp.data && resp.data.path;
+                        if (!path) { if (cb) cb(); return; }
+                        vm._benchmarkProjectPath = path;
+                        if (resp.data && resp.data.created) {
+                            pushAgentLog(vm, 'success', '📁 Created the "Weaver Benchmarks" project for benchmark cards.');
+                            if (vm.showSideToast) vm.showSideToast('📁 Created "Weaver Benchmarks" project for benchmark cards');
+                        }
+                        if (vm.selectedProject === path) { if (cb) cb(); return; }
+                        // Keep the user's chosen default intact — only the selected view switches.
+                        var prevDefault = vm.defaultProject;
+                        vm.selectedProject = path;
+                        if (!vm.loadConfig) { if (cb) cb(); return; }
+                        vm.loadConfig(path).then(function () {
+                            vm.defaultProject = prevDefault || vm.defaultProject;
+                            if (vm.countArchivedCards) vm.countArchivedCards();
+                            if (vm.loadFilePickerEntries) vm.loadFilePickerEntries();
+                            if (cb) cb();
+                        }, function () { if (cb) cb(); });
+                    }, function () { if (cb) cb(); });
+                };
                 vm._runBenchmarkLevel = function (plan) {
                     vm.benchmarkRunning = true; vm.benchmarkLevel = plan.level;
                     if (!vm.benchSectionOpen) vm.benchSectionOpen = {};
                     vm.benchSectionOpen.run = true;
-                    var card = { id: 'benchmark_' + plan.level + '_' + Date.now(), text: plan.description, filePath: vm.selectedProject, priority: 'high', _benchmark: true, _benchmarkLevel: plan.level, ready: true };
+                    var benchProj = vm._benchmarkProjectPath || vm.selectedProject;
+                    var card = { id: 'benchmark_' + plan.level + '_' + Date.now(), text: plan.description, filePath: benchProj, priority: 'high', _benchmark: true, _benchmarkLevel: plan.level, ready: true };
+                    vm._benchmarkProjectPath = benchProj;
                     vm.state.todo.push(card); vm.saveCards(); vm.executeAgent(card);
                 };
                 vm.startBenchmark = function (level) {
@@ -1360,7 +1408,9 @@ angular.module('kanbanApp')
                     $http.get('/api/benchmark/plans').then(function (resp) {
                         var plan = (resp.data || []).find(function (p) { return p.level === level; });
                         if (!plan) return;
-                        vm._runBenchmarkLevel(plan); vm.closeBenchmarksPanel();
+                        vm.ensureBenchmarkProject(function () {
+                            vm._runBenchmarkLevel(plan); vm.closeBenchmarksPanel();
+                        });
                     }).catch(function () { vm.benchmarkRunning = false; });
                 };
                 vm._finishBenchmarkAll = function () {
@@ -1422,7 +1472,7 @@ angular.module('kanbanApp')
                         vm.benchmarkAllResult = null;
                         vm._benchmarkQueue = plans;
                         vm._persistBenchmarkRun();
-                        vm._runNextBenchmarkFromQueue();
+                        vm.ensureBenchmarkProject(function () { vm._runNextBenchmarkFromQueue(); });
                     }).catch(function () { vm.benchmarkAllActive = false; });
                 };
                 vm._advanceBenchmarkAll = function (level, successful, failed, totalAttempts, status, points, scorePercent) {

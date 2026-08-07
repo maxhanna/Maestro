@@ -1056,6 +1056,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var stepEventIndex = 0;
         var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
         string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
+        // OS-filesystem task guard state: pure OS tasks reject repo file edits
+        // deterministically; hint-y tasks get one memoized LLM verdict per file.
+        var osTaskGuard = IsExternalFilesystemTask(prompt);
+        var osTaskPure = osTaskGuard && !OsPromptHintsRepoWork(prompt);
+        var osRepoEditVerdicts = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         await EmitLog(emitSse, "info", "Incremental planning: proposing steps one at a time…", ct: ct);
         if (emitSse)
             await SendSse(Response, "plan", new
@@ -1345,6 +1350,47 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     justification = proposal.CompletionReason
                 }, ct);
             }
+            // Task-tool mismatch guard (mirror of the web-need gate): a task that
+            // targets the OS filesystem outside the repo must NOT be implemented by
+            // editing repo source files — that is the "wrote an HTTP endpoint to
+            // create a desktop folder" failure. Pure OS tasks reject repo edits
+            // deterministically; when the task also hints at repo work (e.g. "save a
+            // link in the README"), one memoized LLM call per file adjudicates
+            // whether the edit is genuinely required.
+            if (osTaskGuard &&
+                proposal.Step.File != null &&
+                !AgentProjectUtilities.IsSpecialMarker(proposal.Step.File))
+            {
+                var rejectOsEdit = osTaskPure;
+                if (!osTaskPure)
+                {
+                    var allowed = false;
+                    if (osRepoEditVerdicts.TryGetValue(proposal.Step.File, out var cached))
+                    {
+                        allowed = cached;
+                    }
+                    else
+                    {
+                        var (isRequired, verified) = await ConfirmRepoEditRequiredAsync(prompt, proposal.Step.File, proposal.Step.Change, emitSse, ct);
+                        // Cache only SUCCESSFUL verdicts — a transient LLM failure must
+                        // not permanently lock a file out of a legitimately needed edit;
+                        // a later re-proposal then retries the verification. A cached
+                        // "allowed" also lets subsequent edits to that file through.
+                        if (verified) osRepoEditVerdicts[proposal.Step.File] = isRequired;
+                        allowed = isRequired;
+                    }
+                    rejectOsEdit = !allowed;
+                }
+                if (rejectOsEdit)
+                {
+                    await EmitRejectedLog(emitSse,
+                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — task targets the OS filesystem, not the repository",
+                        OsTaskEditFeedback, ct);
+                    rejectionFeedback.Add(OsTaskEditFeedback);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
+            }
             var skipLlm = regenAttempts > 0;
             if (!skipLlm && proposal.Step != null && !AgentProjectUtilities.IsSpecialMarker(proposal.Step.File))
             {
@@ -1583,6 +1629,72 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
     }
 
+    /// <summary>Feedback shown whenever a repo file edit is rejected for an OS-filesystem task.</summary>
+    private const string OsTaskEditFeedback =
+        "This task operates on the OS filesystem OUTSIDE the repository (desktop/home/Downloads/etc.) — the repository's source files are NOT the target. " +
+        "Use \"_command\" (e.g. mkdir/New-Item for folders, rm/Move-Item for files) or \"_create_directory\" for the OS operation. Do NOT edit repository source files to perform it.";
+
+    /// <summary>
+    /// True when an OS-filesystem task ALSO mentions repo work (README, link, note,
+    /// docs, "add to"...). Pure OS tasks reject repo edits deterministically; only
+    /// this case pays an LLM call to adjudicate whether a specific repo edit is
+    /// genuinely part of the task (e.g. "create the folder AND save a link in the
+    /// README").
+    /// </summary>
+    private static bool OsPromptHintsRepoWork(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var lower = prompt.ToLowerInvariant();
+        var hints = new[] { "readme", "link", "mention", "note", "document", "add to" };
+        foreach (var h in hints)
+        {
+            if (lower.Contains(h)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// LLM adjudication for a repo file edit proposed while the task targets the OS
+    /// filesystem: decides whether editing this specific repo file is genuinely part
+    /// of the task (e.g. "create the folder AND add a link in the README"). Fails
+    /// closed to (false, false) — for an OS task the prior is that repo edits are
+    /// wrong, and the rejection feedback steers the model to marker tools. The
+    /// Verified flag tells the caller whether to CACHE the verdict: a transient LLM
+    /// failure must not permanently lock a file out, so a re-proposal retries.
+    /// </summary>
+    private async Task<(bool Required, bool Verified)> ConfirmRepoEditRequiredAsync(
+        string prompt, string file, string? change, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            var taskPreview = AgentTextUtilities.Truncate(prompt ?? "", 1200);
+            var sb = new StringBuilder();
+            sb.AppendLine("TASK:");
+            sb.AppendLine(taskPreview);
+            sb.AppendLine();
+            sb.AppendLine($"PROPOSED STEP: edit repository file \"{file}\" — {(string.IsNullOrWhiteSpace(change) ? "(no description)" : change)}");
+            sb.AppendLine();
+            sb.AppendLine("The task appears to target the OS filesystem OUTSIDE the repository (desktop/home/Downloads/etc.).");
+            sb.AppendLine("DECIDE: is editing this repository source file GENUINELY required by the task (e.g. the task explicitly says to also update a repo file such as a README, add a link, or record something in the repo), or is the model wrongly reaching into the repo when the task is purely about the OS filesystem?");
+            sb.AppendLine("Output ONLY JSON: {\"repoEditRequired\": true|false, \"reason\": \"one short sentence\"}");
+            var (raw, _, err) = await CallLlmRaw(
+                "You are a strict task classifier. Output ONLY the requested JSON.",
+                sb.ToString(), ct, _infiniteTimeout, maxTokens: 120);
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn", $"OS-task repo-edit verification failed ({err}) — rejecting the repo edit this round (re-proposal will retry).", ct: ct);
+                return (false, false);
+            }
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            return (doc.RootElement.TryGetProperty("repoEditRequired", out var r) && r.ValueKind == JsonValueKind.True, true);
+        }
+        catch
+        {
+            return (false, false);
+        }
+    }
+
     /// <summary>
     /// Deterministic fallback query for the auto-injected _web_search step when the
     /// LLM verification produced no usable query (or the LLM call failed). The
@@ -1626,6 +1738,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var totalPlanningRounds = 0;
         var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
         string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
+        // OS-filesystem task guard state: pure OS tasks reject repo file edits
+        // deterministically; hint-y tasks get one memoized LLM verdict per file.
+        var osTaskGuard = IsExternalFilesystemTask(prompt);
+        var osTaskPure = osTaskGuard && !OsPromptHintsRepoWork(prompt);
+        var osRepoEditVerdicts = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         if (emitSse)
         {
             await SendSse(Response, "plan", new
@@ -1994,6 +2111,47 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         rejectionFeedback.Clear();
                         continue; // loop top picks up the injected step and executes it
                     }
+                    continue;
+                }
+            }
+            // Task-tool mismatch guard (mirror of the web-need gate): a task that
+            // targets the OS filesystem outside the repo must NOT be implemented by
+            // editing repo source files — that is the "wrote an HTTP endpoint to
+            // create a desktop folder" failure. Pure OS tasks reject repo edits
+            // deterministically; when the task also hints at repo work (e.g. "save a
+            // link in the README"), one memoized LLM call per file adjudicates
+            // whether the edit is genuinely required.
+            if (osTaskGuard &&
+                proposal.Step.File != null &&
+                !AgentProjectUtilities.IsSpecialMarker(proposal.Step.File))
+            {
+                var rejectOsEdit = osTaskPure;
+                if (!osTaskPure)
+                {
+                    var allowed = false;
+                    if (osRepoEditVerdicts.TryGetValue(proposal.Step.File, out var cached))
+                    {
+                        allowed = cached;
+                    }
+                    else
+                    {
+                        var (isRequired, verified) = await ConfirmRepoEditRequiredAsync(prompt, proposal.Step.File, proposal.Step.Change, emitSse, ct);
+                        // Cache only SUCCESSFUL verdicts — a transient LLM failure must
+                        // not permanently lock a file out of a legitimately needed edit;
+                        // a later re-proposal then retries the verification. A cached
+                        // "allowed" also lets subsequent edits to that file through.
+                        if (verified) osRepoEditVerdicts[proposal.Step.File] = isRequired;
+                        allowed = isRequired;
+                    }
+                    rejectOsEdit = !allowed;
+                }
+                if (rejectOsEdit)
+                {
+                    await EmitRejectedLog(emitSse,
+                        $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — task targets the OS filesystem, not the repository",
+                        OsTaskEditFeedback, ct);
+                    rejectionFeedback.Add(OsTaskEditFeedback);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
                 }
             }

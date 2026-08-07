@@ -269,7 +269,7 @@ partial class AgentController
                     // }
                     var (d, reason, score, needsEs) = await LlmVerifyEditStepAsync(
                         relPath, prompt ?? stepChange ?? "", stepChange ?? "",
-                        oldStr!, newStr!, preEditContent, newContent, emitSse, ct,
+                        oldStr!, newStr!, preEditContent ?? "", newContent, emitSse, ct,
                         priorAttempts: attemptScores.Count > 0
                             ? attemptScores.Select(a => (a.score, a.reason, a.failedNew)).ToList()
                             : null,
