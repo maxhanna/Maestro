@@ -66,6 +66,15 @@ public static class DeterministicEditGenerator
             @"\b(add|create|insert|define)\b.{0,60}\b(property|field|getter|get\s+and\s+set|get/set)\b");
         if (wantsMember && ext is ".cs" or ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
         {
+            // Multi-class: "add a string Email property to every DTO class" → one anchored
+            // FillClassBody edit per matching class, applied via the batch path. A multi
+            // request that can't be safely generated must NOT degrade to a single-class edit.
+            if (IsMultiClassMemberAdd(desc))
+            {
+                var multiMember = TryGenerateMultiMember(relPath, ext, fileContent, desc);
+                if (multiMember != null) return multiMember;
+                return null;
+            }
             var prop = TryGenerateMember(relPath, ext, fileContent, desc);
             if (prop != null) return prop;
         }
@@ -117,6 +126,54 @@ public static class DeterministicEditGenerator
         @"|\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty)\b\s*",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // ── Multi-class member add: "add a string Email property to every DTO class" ──
+
+    // Target spec: quantifier form ("every DTO class", "all the DTO classes", "both
+    // interfaces") or plural+in-file form ("the DTO classes in this file"). The optional
+    // name-filter word ("DTO") restricts which classes get the member.
+    private static readonly Regex MultiClassTargetRegex = new(
+        @"\b(?:every|each|all|both)\b(?:\s+(?:of\s+the|the))?\s+" +
+        @"(?:(?<filter>[A-Za-z_][A-Za-z0-9_]*)\s+)?(?<kind>class|interface|record|struct)(?:es|s)?\b" +
+        @"|\b(?:(?<filter2>[A-Za-z_][A-Za-z0-9_]*)\s+)?(?<kind2>classes|interfaces|records|structs)\b" +
+        @".{0,25}\b(?:in\s+(?:this|the)\s+file|throughout)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Per-class member naming (multi-class add only):
+    //   "... but NameKey on the first one"  → the Nth matching class gets a differently-named member.
+    //   "... named after the class"          → every member is prefixed with its own class's name.
+    // Both clauses are optional; without them every class gets the description's base member name.
+    private static readonly Regex PerClassOverrideRegex = new(
+        @"\b(?:but|except)\b\s+(?<name>(?!on\b|the\b|one\b|a\b|an\b)[A-Za-z_][A-Za-z0-9_]*)\s+on\s+(?:the\s+)?(?<ordinal>first|second|third|fourth|fifth|last|[1-9]\d*)\b" +
+        @"|\b(?:but|except)\b\s+on\s+(?:the\s+)?(?<ordinal>first|second|third|fourth|fifth|last|[1-9]\d*)\b(?:\s+one)?\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex ClassNameAdaptiveRegex = new(
+        @"\bnamed\s+after\b" +
+        @"|\b(?:following|matching|mirroring)\s+(?:the\s+)?(?:class|record|interface|struct)s?\s+names?\b" +
+        @"|\b(?:adapt|adapted|adapting|adjusts?)\b.{0,15}\b(?:class|record|interface|struct)s?\s+names?\b" +
+        @"|\bper\s+(?:[a-z0-9_]*\s+)?(?:class|record|interface|struct)\s+names?\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Class-set narrowing (multi-class add only):
+    //   "all classes ending in Repository"       → only names carrying the suffix
+    //   "every class starting with Api"          → only names carrying the prefix
+    //   "every DTO class except the base one"    → drop names containing the excluded word
+    private static readonly Regex ClassSuffixFilterRegex = new(
+        @"\b(?:ending|end)\s+(?:in|with)\s+(?<suffix>[A-Za-z_][A-Za-z0-9_]*)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex ClassPrefixFilterRegex = new(
+        @"\b(?:starting|beginning)\s+with\s+(?<prefix>[A-Za-z_][A-Za-z0-9_]*)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex ClassExclusionRegex = new(
+        @"\b(?:except|excluding|other\s+than|apart\s+from)\b\s+(?:the\s+)?(?<excluded>(?!one\b|the\b|class\b|classes\b|record\b|records\b|interface\b|interfaces\b|struct\b|structs\b)[A-Za-z_][A-Za-z0-9_]*)\b" +
+        @"|\b(?:except|excluding)\b\s+(?:the\s+)?one\s+(?:named|called)\s+(?<excluded>[A-Za-z_][A-Za-z0-9_]*)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool IsMultiClassMemberAdd(string desc)
+        => MultiClassTargetRegex.IsMatch(desc);
+
     private static bool IsMultiMatchDescription(string desc)
     {
         var lower = desc.ToLowerInvariant();
@@ -124,6 +181,179 @@ public static class DeterministicEditGenerator
         // "update the timeout values to 60" — plural noun + change verb implies multiple.
         return PluralNounRegex.IsMatch(lower) &&
                Regex.IsMatch(lower, @"\b(update|change|set|bump|increase|decrease|adjust|modify|switch)\b");
+    }
+
+    /// <summary>
+    /// Splits a member addition across every matching class in the file — "add a string
+    /// Email property to every DTO class" → one FillClassBody anchored edit per matching
+    /// class, applied via the same batch path as multi-swap. The class-set spec is
+    /// parsed from the description (kind: class/interface/record/struct, optional name
+    /// filter like "DTO") and optional narrowing (suffix: "ending in Repository", prefix:
+    /// "starting with Api", exclusion: "except the base one"); each edit carries its
+    /// class's close-brace line number so identical anchors are disambiguated. Optional
+    /// per-class naming clauses rename one class's member ("but NameKey on the first one")
+    /// or prefix every member with its own class name ("named after the class"). Declines
+    /// (null) when the spec doesn't match any anchorable class — a multi request must
+    /// NEVER degrade to a single-class edit.
+    /// </summary>
+    private static DeterministicEdit? TryGenerateMultiMember(string relPath, string ext, string fileContent, string desc)
+    {
+        var req = ParseMemberRequest(desc);
+        if (req == null) return null;
+
+        // Class-set spec: kind ("class", "interface", ...) + optional name filter ("DTO").
+        // Only the PLURAL spec form ("the DTO classes in this file" → kind2 group) is
+        // normalized to the singular — the singular form already yields "class" and must
+        // not be naively de-pluralized ("class".TrimEnd('s') would break it).
+        string? kind = null;
+        string? nameFilter = null;
+        var m = MultiClassTargetRegex.Match(desc);
+        if (m.Success)
+        {
+            if (m.Groups["kind2"].Success)
+            {
+                kind = m.Groups["kind2"].Value;
+                kind = kind.EndsWith("es", StringComparison.OrdinalIgnoreCase) ? kind[..^2] : kind[..^1];
+            }
+            else if (m.Groups["kind"].Success)
+            {
+                kind = m.Groups["kind"].Value;
+            }
+            nameFilter = m.Groups["filter"].Success ? m.Groups["filter"].Value
+                       : m.Groups["filter2"].Success ? m.Groups["filter2"].Value : null;
+        }
+
+        // Narrowing filters: "all classes ending in Repository", "every class starting
+        // with Api", "every DTO class except the base one" — all optional, all composable.
+        string? suffix = null, prefix = null, excluded = null;
+        var sufM = ClassSuffixFilterRegex.Match(desc);
+        if (sufM.Success) suffix = sufM.Groups["suffix"].Value;
+        var preM = ClassPrefixFilterRegex.Match(desc);
+        if (preM.Success) prefix = preM.Groups["prefix"].Value;
+        var excM = ClassExclusionRegex.Match(desc);
+        if (excM.Success) excluded = excM.Groups["excluded"].Value;
+
+        var bodies = ext == ".cs"
+            ? FindAllCsClassBodies(fileContent, nameFilter, kind)
+            : ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs"
+                ? FindAllTsClassBodies(fileContent, nameFilter, kind)
+                : null;
+        if (bodies is not { Count: > 0 }) return null;
+
+        if (suffix != null || prefix != null || excluded != null)
+        {
+            bodies = bodies.Where(b =>
+                    (suffix == null || b.Name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) &&
+                    (prefix == null || b.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) &&
+                    (excluded == null || !b.Name.Contains(excluded, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            if (bodies.Count == 0) return null; // the narrowed set is empty — never degrade
+        }
+
+        var isJs = ext is ".js" or ".jsx" or ".mjs" or ".cjs";
+        var isCs = ext == ".cs";
+        var t = isCs ? req.Type ?? InferCsType(req.Name) : req.Type ?? InferJsType(req.Name);
+
+        // Per-class member naming — optional clauses on the multi description:
+        //   "... but NameKey on the first one" → the Nth matching class gets a renamed member
+        //   "... named after the class"         → every member is prefixed with its class name
+        var (overrideIndex, overrideName, overrideOrdinal) = ParseOverrideClause(desc, bodies.Count);
+        if (overrideIndex > bodies.Count) return null; // an unhonorable override must decline, never silently drop
+        if (overrideIndex > 0 && bodies[overrideIndex - 1].CloseBraceLine == null)
+            return null; // the overridden class is unanchorable — the NameKey intent must not silently vanish
+        var adaptive = ClassNameAdaptiveRegex.IsMatch(desc);
+
+        var edits = new List<EditPair>();
+        var matched = 0;
+        var skipped = 0;
+        for (var i = 0; i < bodies.Count; i++)
+        {
+            var b = bodies[i];
+            matched++;
+            if (b.CloseBraceLine == null) { skipped++; continue; } // unanchorable (single-line) body
+            var memberName = overrideIndex == i + 1
+                ? overrideName!
+                : adaptive ? ClassNameBase(b.Name) + Capitalize(req.Name) : req.Name;
+            var perClassReq = req with { Name = memberName };
+            var snippet = isCs
+                ? BuildCsMemberSnippet(perClassReq, t, b.BraceIndent, b.IsInterface)
+                : BuildTsMemberSnippet(perClassReq, t, b.BraceIndent, b.IsInterface, isJs);
+
+            string oldStr, newStr;
+            if (isCs)
+            {
+                oldStr = b.AnchorPrefix != null && b.AnchorPrefix != b.CloseBraceLine
+                    ? b.AnchorPrefix + "\n" + b.CloseBraceLine
+                    : b.CloseBraceLine;
+                newStr = b.AnchorPrefix != null && b.AnchorPrefix != b.CloseBraceLine
+                    ? b.AnchorPrefix + "\n" + snippet + "\n" + b.CloseBraceLine
+                    : snippet + "\n" + b.CloseBraceLine;
+            }
+            else
+            {
+                oldStr = b.AnchorPrefix != null ? b.AnchorPrefix + b.CloseBraceLine : b.CloseBraceLine;
+                newStr = b.AnchorPrefix != null
+                    ? b.AnchorPrefix + snippet + "\n" + b.CloseBraceLine
+                    : snippet + "\n" + b.CloseBraceLine;
+            }
+            edits.Add(new EditPair { OldString = oldStr, NewString = newStr, LineNumber = b.LineNumber });
+        }
+        if (edits.Count == 0) return null;
+
+        var kindWord = kind ?? "class";
+        var kindLabel = kindWord + (matched == 1 ? "" : kindWord == "class" ? "es" : "s");
+        var skipText = skipped > 0 ? $", skipped {skipped} unanchorable" : "";
+        var specText = (suffix != null ? $", ending in '{suffix}'" : "")
+                     + (prefix != null ? $", starting with '{prefix}'" : "")
+                     + (excluded != null ? $", excluding '{excluded}'" : "");
+        var variation = overrideIndex > 0
+            ? $", '{t} {overrideName}' on the {overrideOrdinal}"
+            : adaptive ? ", class-prefixed names" : "";
+        var reason = $"Synthesized {edits.Count} member edits: '{t} {req.Name}'{variation} " +
+                     $"(applied {edits.Count}/{matched} matching {kindLabel}{specText}{skipText}) — no LLM";
+
+        // The marker carries the applied/total counts so the meeting ticker can render a
+        // single compact "N/M classes updated" line instead of a line per edit.
+        return new DeterministicEdit(
+            EditStrategy.FillClassBody, "class", req.Name,
+            edits[0].OldString,
+            $"(deterministic batch: {edits.Count} edits, applied {edits.Count}/{matched} {kindLabel})",
+            edits[0].LineNumber,
+            reason, edits);
+    }
+
+    /// <summary>Reads the optional "... but &lt;name&gt; on the &lt;ordinal&gt;" clause. Returns the
+    /// 1-based index of the matching class the override applies to (or -1 when absent), the
+    /// override member name, and the literal ordinal word the user wrote ("first"/"last"/…).
+    /// "last" resolves to <paramref name="bodyCount"/>.</summary>
+    private static (int index1Based, string? name, string ordinal) ParseOverrideClause(string desc, int bodyCount)
+    {
+        var m = PerClassOverrideRegex.Match(desc);
+        if (!m.Success || !m.Groups["name"].Success || !m.Groups["ordinal"].Success)
+            return (-1, null, "");
+        var ordinal = m.Groups["ordinal"].Value.ToLowerInvariant();
+        var index = ordinal switch
+        {
+            "first" => 1, "second" => 2, "third" => 3, "fourth" => 4, "fifth" => 5,
+            "last" => bodyCount,
+            _ => int.TryParse(ordinal, out var n) ? n : -1
+        };
+        return (index, m.Groups["name"].Value, ordinal);
+    }
+
+    private static string Capitalize(string s)
+        => char.ToUpperInvariant(s[0]) + (s.Length > 1 ? s.Substring(1) : "");
+
+    /// <summary>Class name minus a trailing DTO-ish suffix, so "add a Name property ... named
+    /// after the class" turns UserDto → "User" + "Name" → UserName instead of UserDtoName.</summary>
+    private static string ClassNameBase(string className)
+    {
+        foreach (var suffix in new[] { "Dto", "DTO", "Entity", "Model", "Vm", "VM", "Info" })
+        {
+            if (className.Length > suffix.Length && className.EndsWith(suffix, StringComparison.Ordinal))
+                return className.Substring(0, className.Length - suffix.Length);
+        }
+        return className;
     }
 
     /// <summary>
@@ -238,9 +468,13 @@ public static class DeterministicEditGenerator
         var reason = $"Synthesized {edits.Count} anchored edits: '{name}' → {toRaw} " +
                      $"(applied {edits.Count}/{occurrences} occurrences, {skipText}) — no LLM";
 
+        // The marker carries the applied/total counts so the meeting ticker can render a
+        // single compact "N/M occurrences updated" line instead of a line per edit.
         return new DeterministicEdit(
             EditStrategy.AnchoredEdit, null, name,
-            edits[0].OldString, $"(deterministic batch: {edits.Count} edits)", edits[0].LineNumber,
+            edits[0].OldString,
+            $"(deterministic batch: {edits.Count} edits, applied {edits.Count}/{occurrences} occurrences)",
+            edits[0].LineNumber,
             reason,
             edits);
     }
@@ -486,6 +720,71 @@ public static class DeterministicEditGenerator
 
     private static DeterministicEdit? TryGenerateMember(string relPath, string ext, string fileContent, string desc)
     {
+        var req = ParseMemberRequest(desc);
+        if (req == null) return null;
+
+        if (ext == ".cs")
+        {
+            var anchor = FindCsClassBody(fileContent, req.ClassName);
+            if (anchor == null) return null;
+            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface) = anchor.Value;
+
+            var t = req.Type ?? InferCsType(req.Name);
+            var snippet = BuildCsMemberSnippet(req, t, braceIndent, isInterface);
+
+            var oldStr = anchorPrefix != null && anchorPrefix != closeBraceLine
+                ? anchorPrefix + "\n" + closeBraceLine
+                : closeBraceLine;
+            var newStr = anchorPrefix != null && anchorPrefix != closeBraceLine
+                ? anchorPrefix + "\n" + snippet + "\n" + closeBraceLine
+                : snippet + "\n" + closeBraceLine;
+
+            return new DeterministicEdit(
+                EditStrategy.FillClassBody, "class", req.ClassName ?? req.Name, oldStr, newStr, lineNumber,
+                req.IsGetterSetter
+                    ? $"Synthesized getter/setter pair for '{req.Name}' in {(req.ClassName ?? "last class")} — no LLM"
+                    : $"Synthesized property '{t} {req.Name}' in {(req.ClassName ?? "last class")} — no LLM");
+        }
+
+        if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+        {
+            var anchor = FindTsClassBody(fileContent, req.ClassName);
+            if (anchor == null) return null;
+            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface, _) = anchor.Value;
+
+            var t = req.Type ?? InferJsType(req.Name);
+            var snippet = BuildTsMemberSnippet(req, t, braceIndent, isInterface,
+                ext is ".js" or ".jsx" or ".mjs" or ".cjs");
+
+            // Widen the anchor beyond a lone '}' (G2): prefixing the class close brace
+            // with the contiguous body slice (last member line — or class-open line when
+            // the body is empty — through to the close brace) makes the anchor unique, so
+            // a duplicate '}' can't silently place the member in a nested block or the
+            // wrong class. The prefix ends with the line break, so oldStr is an exact,
+            // contiguous slice of the file and always matches.
+            var oldStr = anchorPrefix != null
+                ? anchorPrefix + closeBraceLine
+                : closeBraceLine;
+            var newStr = anchorPrefix != null
+                ? anchorPrefix + snippet + "\n" + closeBraceLine
+                : snippet + "\n" + closeBraceLine;
+
+            return new DeterministicEdit(
+                EditStrategy.FillClassBody, "class", req.ClassName ?? req.Name, oldStr, newStr, lineNumber,
+                $"Synthesized member '{GetTsMemberName(req.Name)}: {t}' in {(req.ClassName ?? "last class")} — no LLM");
+        }
+
+        return null;
+    }
+
+    /// <summary>The parsed member-request vocabulary: getter/setter form, the member
+    /// name, the explicit type (or null to infer), and the optional single-class anchor.</summary>
+    private sealed record MemberRequest(bool IsGetterSetter, string Name, string? Type, string? ClassName);
+
+    /// <summary>Parses a member-request description into its vocabulary. Returns null
+    /// when no member name can be extracted (the caller then declines).</summary>
+    private static MemberRequest? ParseMemberRequest(string desc)
+    {
         var isGetterSetter = Regex.IsMatch(desc,
             @"\b(getter|get\s+and\s+set|get/set)\b", RegexOptions.IgnoreCase);
 
@@ -534,74 +833,35 @@ public static class DeterministicEditGenerator
         var anchorM = ClassAnchorRegex.Match(desc);
         if (anchorM.Success) className = anchorM.Groups[1].Value;
 
-        if (ext == ".cs")
-        {
-            var anchor = FindCsClassBody(fileContent, className);
-            if (anchor == null) return null;
-            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface) = anchor.Value;
-
-            var t = type ?? InferCsType(name);
-            var snippet = isGetterSetter
-                ? BuildCsGetterSetter(name, t, braceIndent + "    ")
-                : isInterface
-                    ? braceIndent + "    " + $"{t} {name} {{ get; set; }}"
-                    : braceIndent + "    " + $"public {t} {name} {{ get; set; }}";
-
-            var oldStr = anchorPrefix != null && anchorPrefix != closeBraceLine
-                ? anchorPrefix + "\n" + closeBraceLine
-                : closeBraceLine;
-            var newStr = anchorPrefix != null && anchorPrefix != closeBraceLine
-                ? anchorPrefix + "\n" + snippet + "\n" + closeBraceLine
-                : snippet + "\n" + closeBraceLine;
-
-            return new DeterministicEdit(
-                EditStrategy.FillClassBody, "class", className ?? name, oldStr, newStr, lineNumber,
-                isGetterSetter
-                    ? $"Synthesized getter/setter pair for '{name}' in {(className ?? "last class")} — no LLM"
-                    : $"Synthesized property '{t} {name}' in {(className ?? "last class")} — no LLM");
-        }
-
-        if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
-        {
-            var anchor = FindTsClassBody(fileContent, className);
-            if (anchor == null) return null;
-            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface, _) = anchor.Value;
-
-            var t = type ?? InferJsType(name);
-            // TS/JS members are conventionally camelCase — "Name" becomes "name".
-            var memberName = Char.ToLowerInvariant(name[0]) + (name.Length > 1 ? name.Substring(1) : "");
-            var memberIndent = braceIndent + "  ";
-            var isJs = ext is ".js" or ".jsx" or ".mjs" or ".cjs";
-            string snippet;
-            if (isInterface)
-                snippet = memberIndent + $"{memberName}: {t};";
-            else if (!isJs)
-                snippet = DefaultTsValue(t) != null
-                    ? memberIndent + $"public {memberName}: {t} = {DefaultTsValue(t)};"
-                    : memberIndent + $"public {memberName}!: {t};";
-            else
-                snippet = memberIndent + $"{memberName} = {DefaultJsValue(t)};";
-
-            // Widen the anchor beyond a lone '}' (G2): prefixing the class close brace
-            // with the contiguous body slice (last member line — or class-open line when
-            // the body is empty — through to the close brace) makes the anchor unique, so
-            // a duplicate '}' can't silently place the member in a nested block or the
-            // wrong class. The prefix ends with the line break, so oldStr is an exact,
-            // contiguous slice of the file and always matches.
-            var oldStr = anchorPrefix != null
-                ? anchorPrefix + closeBraceLine
-                : closeBraceLine;
-            var newStr = anchorPrefix != null
-                ? anchorPrefix + snippet + "\n" + closeBraceLine
-                : snippet + "\n" + closeBraceLine;
-
-            return new DeterministicEdit(
-                EditStrategy.FillClassBody, "class", className ?? name, oldStr, newStr, lineNumber,
-                $"Synthesized member '{memberName}: {t}' in {(className ?? "last class")} — no LLM");
-        }
-
-        return null;
+        return new MemberRequest(isGetterSetter, name, type, className);
     }
+
+    private static string BuildCsMemberSnippet(MemberRequest req, string type, string braceIndent, bool isInterface)
+    {
+        return req.IsGetterSetter
+            ? BuildCsGetterSetter(req.Name, type, braceIndent + "    ")
+            : isInterface
+                ? braceIndent + "    " + $"{type} {req.Name} {{ get; set; }}"
+                : braceIndent + "    " + $"public {type} {req.Name} {{ get; set; }}";
+    }
+
+    private static string BuildTsMemberSnippet(MemberRequest req, string type, string braceIndent,
+        bool isInterface, bool isJs)
+    {
+        var memberName = GetTsMemberName(req.Name);
+        var memberIndent = braceIndent + "  ";
+        if (isInterface)
+            return memberIndent + $"{memberName}: {type};";
+        if (!isJs)
+            return DefaultTsValue(type) != null
+                ? memberIndent + $"public {memberName}: {type} = {DefaultTsValue(type)};"
+                : memberIndent + $"public {memberName}!: {type};";
+        return memberIndent + $"{memberName} = {DefaultJsValue(type)};";
+    }
+
+    /// <summary>TS/JS members are conventionally camelCase — "Name" becomes "name".</summary>
+    private static string GetTsMemberName(string name)
+        => Char.ToLowerInvariant(name[0]) + (name.Length > 1 ? name.Substring(1) : "");
 
     private static string BuildCsGetterSetter(string name, string type, string indent)
     {
@@ -676,43 +936,75 @@ public static class DeterministicEditGenerator
         return (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface);
     }
 
+    /// <summary>One anchorable class body for the multi-member batch path. CloseBraceLine
+    /// is null when the body can't be safely anchored (single-line declaration) — such
+    /// classes are counted as skipped, not silently edited.</summary>
+    private sealed record ClassBody(
+        string Name, string Kind, string? AnchorPrefix, string? CloseBraceLine,
+        int LineNumber, string BraceIndent, bool IsInterface);
+
+    /// <summary>Finds every C# type declaration (class/interface/struct/record) whose name
+    /// matches <paramref name="nameFilter"/> (optional substring, case-insensitive) and
+    /// whose kind matches <paramref name="kind"/> (optional: "class"/"interface"/"struct"/"record").
+    /// Uses the same Roslyn anchor rules as the single-class path — each returned body
+    /// carries its close-brace line number so the batch apply disambiguates identical anchors.</summary>
+    private static List<ClassBody>? FindAllCsClassBodies(string source, string? nameFilter, string? kind)
+    {
+        SyntaxTree tree;
+        try { tree = CSharpSyntaxTree.ParseText(source); }
+        catch { return null; }
+
+        var root = tree.GetRoot();
+        var result = new List<ClassBody>();
+        foreach (var cls in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
+            AddCsClassBody(source, cls, "class", result, nameFilter, kind);
+        foreach (var itf in root.DescendantNodes().OfType<InterfaceDeclarationSyntax>())
+            AddCsClassBody(source, itf, "interface", result, nameFilter, kind);
+        foreach (var st in root.DescendantNodes().OfType<StructDeclarationSyntax>())
+            AddCsClassBody(source, st, "struct", result, nameFilter, kind);
+        foreach (var rec in root.DescendantNodes().OfType<RecordDeclarationSyntax>())
+            AddCsClassBody(source, rec, "record", result, nameFilter, kind);
+        return result.Count > 0 ? result : null;
+    }
+
+    private static void AddCsClassBody(string source, TypeDeclarationSyntax decl, string kind,
+        List<ClassBody> result, string? nameFilter, string? kindFilter)
+    {
+        if (kindFilter != null && !kind.Equals(kindFilter, StringComparison.OrdinalIgnoreCase)) return;
+        if (nameFilter != null && !decl.Identifier.Text.Contains(nameFilter, StringComparison.OrdinalIgnoreCase)) return;
+
+        var closePos = decl.CloseBraceToken.SpanStart;
+        var closeBraceLine = ExtractLine(source, closePos, out var lineNumber);
+        // Close brace must open its own line — single-line classes are too risky to anchor.
+        if (!Regex.IsMatch(closeBraceLine, @"^\s*}\s*;?(?:\s*//.*)?$"))
+        {
+            result.Add(new ClassBody(decl.Identifier.Text, kind, null, null, 0, "", false));
+            return;
+        }
+        var braceIndent = Regex.Match(closeBraceLine, @"^\s*").Value;
+
+        string? anchorPrefix = null;
+        var lastMember = decl.Members.LastOrDefault();
+        if (lastMember != null)
+        {
+            var lastPos = lastMember.GetLastToken().SpanStart;
+            var memberLine = ExtractLine(source, lastPos, out _);
+            if (memberLine != closeBraceLine &&
+                Regex.IsMatch(memberLine, @"^\s*[^\s]", RegexOptions.Singleline))
+                anchorPrefix = memberLine;
+        }
+
+        result.Add(new ClassBody(decl.Identifier.Text, kind, anchorPrefix, closeBraceLine,
+            lineNumber, braceIndent, decl is InterfaceDeclarationSyntax));
+    }
+
     // ── TS/JS class-body anchor via brace matching ───────────────────────────
 
     private static (string? anchorPrefix, string closeBraceLine, int lineNumber, string braceIndent, bool isInterface, bool isTs)?
         FindTsClassBody(string source, string? className)
     {
-        // Mark which characters are real code (vs strings/comments) so a class/interface
-        // mention inside a doc comment, JSDoc tag, or string can't inflate the decl count
-        // (G3) or mis-anchor the chosen class.
-        var isCode = new bool[source.Length];
-        {
-            var mode = 0; // 0 = code, 1 = string/template, 2 = line comment, 3 = block comment
-            var strCh = '\0';
-            for (var i = 0; i < source.Length; i++)
-            {
-                var c = source[i];
-                if (mode == 2) { if (c == '\n') mode = 0; continue; }
-                if (mode == 3)
-                {
-                    if (c == '*' && i + 1 < source.Length && source[i + 1] == '/') { mode = 0; i++; }
-                    continue;
-                }
-                if (mode == 1)
-                {
-                    if (c == '\\') { i++; continue; }
-                    if (c == strCh) { mode = 0; continue; }
-                    continue;
-                }
-                if (c == '/' && i + 1 < source.Length && source[i + 1] == '/') { mode = 2; i++; continue; }
-                if (c == '/' && i + 1 < source.Length && source[i + 1] == '*') { mode = 3; i++; continue; }
-                if (c == '"' || c == '\'' || c == '`') { mode = 1; strCh = c; continue; }
-                isCode[i] = true;
-            }
-        }
-
-        var declRx = new Regex(@"\b(class|interface)\s+([A-Za-z_$][\w$]*)\b");
-        var matches = declRx.Matches(source).Cast<Match>()
-            .Where(m => isCode[m.Index]).ToList();
+        var isCode = BuildIsCodeMask(source);
+        var matches = FindTsDeclarations(source, isCode);
         if (matches.Count == 0) return null;
 
         // Guard G3: an unnamed member add with multiple class/interface declarations is
@@ -726,6 +1018,85 @@ public static class DeterministicEditGenerator
         chosen ??= matches.LastOrDefault();
         if (chosen == null) return null;
 
+        var anchor = TryAnchorTsBody(source, chosen);
+        if (anchor == null) return null;
+        return (anchor.Value.AnchorPrefix, anchor.Value.CloseBraceLine, anchor.Value.LineNumber,
+            anchor.Value.BraceIndent, anchor.Value.IsInterface, anchor.Value.Kind == "class");
+    }
+
+    /// <summary>Finds every class/interface declaration in a TS/JS file whose name matches
+    /// <paramref name="nameFilter"/> (optional substring, case-insensitive) and whose kind
+    /// matches <paramref name="kind"/> (optional: "class"/"interface"/...), returning one
+    /// anchorable body per declaration for the multi-member batch path. Comment/string
+    /// mentions are excluded via the code mask, so a JSDoc @class tag can't inflate the set.</summary>
+    private static List<ClassBody>? FindAllTsClassBodies(string source, string? nameFilter, string? kind)
+    {
+        var isCode = BuildIsCodeMask(source);
+        var matches = FindTsDeclarations(source, isCode);
+        if (matches.Count == 0) return null;
+
+        var result = new List<ClassBody>();
+        foreach (var m in matches)
+        {
+            var declKind = m.Groups[1].Value;
+            var declName = m.Groups[2].Value;
+            if (kind != null && !declKind.Equals(kind, StringComparison.OrdinalIgnoreCase)) continue;
+            if (nameFilter != null && !declName.Contains(nameFilter, StringComparison.OrdinalIgnoreCase)) continue;
+            var anchor = TryAnchorTsBody(source, m);
+            result.Add(new ClassBody(declName, declKind,
+                anchor?.AnchorPrefix,
+                anchor?.CloseBraceLine,
+                anchor?.LineNumber ?? 0,
+                anchor?.BraceIndent ?? "",
+                anchor?.IsInterface ?? false));
+        }
+        return result.Count > 0 ? result : null;
+    }
+
+    /// <summary>Marks which characters are real code (vs strings/comments) so a
+    /// class/interface mention inside a doc comment, JSDoc tag, or string can't inflate
+    /// the decl count (G3) or mis-anchor the chosen class.</summary>
+    private static bool[] BuildIsCodeMask(string source)
+    {
+        var isCode = new bool[source.Length];
+        var mode = 0; // 0 = code, 1 = string/template, 2 = line comment, 3 = block comment
+        var strCh = '\0';
+        for (var i = 0; i < source.Length; i++)
+        {
+            var c = source[i];
+            if (mode == 2) { if (c == '\n') mode = 0; continue; }
+            if (mode == 3)
+            {
+                if (c == '*' && i + 1 < source.Length && source[i + 1] == '/') { mode = 0; i++; }
+                continue;
+            }
+            if (mode == 1)
+            {
+                if (c == '\\') { i++; continue; }
+                if (c == strCh) { mode = 0; continue; }
+                continue;
+            }
+            if (c == '/' && i + 1 < source.Length && source[i + 1] == '/') { mode = 2; i++; continue; }
+            if (c == '/' && i + 1 < source.Length && source[i + 1] == '*') { mode = 3; i++; continue; }
+            if (c == '"' || c == '\'' || c == '`') { mode = 1; strCh = c; continue; }
+            isCode[i] = true;
+        }
+        return isCode;
+    }
+
+    private static List<Match> FindTsDeclarations(string source, bool[] isCode)
+    {
+        var declRx = new Regex(@"\b(class|interface)\s+([A-Za-z_$][\w$]*)\b");
+        return declRx.Matches(source).Cast<Match>()
+            .Where(m => isCode[m.Index]).ToList();
+    }
+
+    /// <summary>Builds the anchor for one chosen TS/JS declaration: the close-brace line
+    /// plus the contiguous G2 anchor prefix. Returns null when the body can't be safely
+    /// anchored (no brace, close brace not alone on its line, or indentation mismatch).</summary>
+    private static (string? AnchorPrefix, string CloseBraceLine, int LineNumber, string BraceIndent, bool IsInterface, string Kind)?
+        TryAnchorTsBody(string source, Match chosen)
+    {
         var open = source.IndexOf('{', chosen.Index + chosen.Length);
         if (open < 0) return null;
         var close = FindMatchingBrace(source, open);
@@ -775,7 +1146,7 @@ public static class DeterministicEditGenerator
         }
 
         return (anchorPrefix, closeBraceLine, lineNumber, braceIndent,
-            chosen.Groups[1].Value == "interface", chosen.Groups[1].Value == "class");
+            chosen.Groups[1].Value == "interface", chosen.Groups[1].Value);
     }
 
     /// <summary>Finds the brace matching <paramref name="openBraceIndex"/>, skipping strings,

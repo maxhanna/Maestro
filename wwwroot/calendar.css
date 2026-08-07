@@ -105,6 +105,36 @@
   border-radius: 8px;
 }
 
+/* Subtle 'next fire' hint on the day a cron schedule lands next — a small
+   amber clock so it reads as time-triggered without competing with the
+   card-count badge. Tooltip lists which tasks fire that day and when. */
+.cal-day-nextfire {
+  font-size: 9px;
+  line-height: 1;
+  color: #fbbf24;
+  opacity: 0.8;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: default;
+}
+
+.cal-day-today .cal-day-nextfire {
+  color: #fcd34d;
+  opacity: 1;
+}
+
+.cal-day-nextfire-count {
+  font-size: 8px;
+  font-weight: 700;
+  background: rgba(245, 158, 11, 0.22);
+  color: #fbbf24;
+  border-radius: 7px;
+  padding: 0 4px;
+  line-height: 1.4;
+}
+
 .cal-day-cards {
   display: flex;
   flex-direction: column;

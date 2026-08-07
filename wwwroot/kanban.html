@@ -64,6 +64,7 @@
                 title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
               <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
               <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
+              <span class="card-tag tag-cron" ng-if="card._fromCron" title="This card was created by a scheduled calendar job{{card._cronExpression ? ' — ' + card._cronExpression : ''}}.">⏰ SCHEDULED</span>
               <label class="pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create a branch then PR on completion">
                 <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
               </label>
@@ -234,6 +235,9 @@
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
                         <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
                       </span>
+                      <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
+                        ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
+                        title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
@@ -299,6 +303,7 @@
             <div class="card-tags">
               <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
               <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
+              <span class="card-tag tag-cron" ng-if="card._fromCron" title="This card was created by a scheduled calendar job{{card._cronExpression ? ' — ' + card._cronExpression : ''}}.">⏰ SCHEDULED</span>
               <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
                 title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
               <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
@@ -320,6 +325,9 @@
                   ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                   <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
                   <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                  <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
+                    ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
+                    title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
                 </span>
               </div>
             </div>
@@ -509,11 +517,27 @@
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
                         <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
                       </span>
+                      <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
+                        ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
+                        title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
-                        <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
-                        <div class="diff-sbs">
+                        <div class="diff-meta" ng-if="s.editAction && s.batchApplied === undefined">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
+                        <div class="diff-meta batch-meta" ng-if="s.batchApplied !== undefined" ng-class="{'batch-partial': s.batchApplied < s.batchTotal}">
+                          <span>{{s.batchApplied < s.batchTotal ? '⚠' : '⚡'}}</span>
+                          <span><strong>{{s.batchApplied}}/{{s.batchTotal}}</strong> {{s.batchUnit}} updated</span>
+                          <span class="batch-skip-note" ng-if="s.batchApplied < s.batchTotal">{{s.batchTotal - s.batchApplied}} skipped</span>
+                        </div>
+                        <div class="batch-edit-list" ng-if="s.batchEdits && s.batchEdits.length">
+                          <div class="batch-edit-row" ng-repeat="e in s.batchEdits track by $index">
+                            <span class="batch-edit-line">L{{e.line}}</span>
+                            <code class="batch-edit-old" title="{{e.old}}">{{e.old}}</code>
+                            <span class="batch-edit-arrow">→</span>
+                            <code class="batch-edit-new" title="{{e.to}}">{{e.to}}</code>
+                          </div>
+                        </div>
+                        <div class="diff-sbs" ng-if="!(s.batchEdits && s.batchEdits.length)">
                           <div class="diff-header">
                             <div class="diff-header-cell diff-header-old">Old</div>
                             <div class="diff-header-cell diff-header-new">New</div>
@@ -713,6 +737,7 @@
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
+            <span class="card-tag tag-cron" ng-if="card._fromCron" title="This card was created by a scheduled calendar job{{card._cronExpression ? ' — ' + card._cronExpression : ''}}.">⏰ SCHEDULED</span>
             <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
@@ -803,6 +828,9 @@
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
                         <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
                       </span>
+                      <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
+                        ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
+                        title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>

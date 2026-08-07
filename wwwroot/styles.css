@@ -2098,6 +2098,10 @@ header h1 span.brand-badge {
 }
 
 .user-stats-popup-title {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
 	font-size: 12px;
 	font-weight: 700;
 	color: var(--brand-secondary);
@@ -2105,6 +2109,33 @@ header h1 span.brand-badge {
 	margin-bottom: 2px;
 	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 	letter-spacing: 0.3px;
+}
+
+.user-stats-popup-title-text {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.user-stats-popup-close {
+	flex: none;
+	background: transparent;
+	border: none;
+	color: var(--muted, rgba(255, 255, 255, 0.55));
+	font-size: 13px;
+	line-height: 1;
+	cursor: pointer;
+	padding: 2px 5px;
+	border-radius: 4px;
+	transition: color 0.15s ease, background 0.15s ease;
+}
+
+.user-stats-popup-close:hover,
+.user-stats-popup-close:focus-visible {
+	color: var(--brand-secondary, #22d3ee);
+	background: rgba(255, 255, 255, 0.08);
+	outline: none;
 }
 
 .rank-progress {
@@ -2230,8 +2261,14 @@ header h1 span.brand-badge {
 	cursor: pointer;
 }
 
-.rank-ladder-row:hover {
+.rank-ladder-row:hover,
+.rank-ladder-row:focus-visible {
 	background: rgba(255, 255, 255, 0.04);
+}
+
+.rank-ladder-row:focus-visible {
+	outline: 1px solid var(--brand-secondary, #22d3ee);
+	outline-offset: -1px;
 }
 
 .rank-ladder-row--open {
@@ -3543,6 +3580,88 @@ h3 .small.ghost:hover {
 	font-size: 10px;
 	color: var(--muted);
 	margin-bottom: 4px;
+}
+
+.diff-meta.batch-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+	color: var(--green);
+	font-size: 11px;
+}
+
+.step-summary-batch {
+	font-size: 10px;
+	font-weight: 700;
+	color: var(--green);
+	background: rgba(152, 195, 121, 0.12);
+	border: 1px solid rgba(152, 195, 121, 0.35);
+	border-radius: 8px;
+	padding: 0 6px;
+	margin-left: 6px;
+	flex-shrink: 0;
+	font-variant-numeric: tabular-nums;
+}
+
+.step-summary-batch.batch-partial {
+	color: #e5c07b;
+	background: rgba(229, 192, 123, 0.12);
+	border-color: rgba(229, 192, 123, 0.4);
+}
+
+.diff-meta.batch-meta.batch-partial {
+	color: #e5c07b;
+	font-weight: 600;
+}
+
+.batch-skip-note {
+	opacity: 0.8;
+}
+
+.batch-edit-list {
+	margin: 4px 0 6px;
+	padding: 4px 8px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 4px;
+	background: rgba(0, 0, 0, 0.18);
+	max-height: 160px;
+	overflow-y: auto;
+	font-size: 10px;
+}
+
+.batch-edit-row {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 2px 0;
+}
+
+.batch-edit-line {
+	color: var(--muted);
+	font-family: monospace;
+	font-size: 0.9em;
+	flex-shrink: 0;
+	min-width: 30px;
+}
+
+.batch-edit-old {
+	color: #e06c75;
+	text-decoration: line-through;
+	opacity: 0.85;
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
+.batch-edit-arrow {
+	color: var(--muted);
+	flex-shrink: 0;
+}
+
+.batch-edit-new {
+	color: #98c379;
+	white-space: pre-wrap;
+	word-break: break-all;
 }
 
 .diff-sbs {
@@ -6170,6 +6289,11 @@ h3 .small.ghost:hover {
 
 .meeting-ticker-feud {
 	color: #ffca8a;
+	font-weight: 600;
+}
+
+.meeting-ticker-partial {
+	color: #e5c07b;
 	font-weight: 600;
 }
 

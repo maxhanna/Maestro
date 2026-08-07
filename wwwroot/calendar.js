@@ -4,6 +4,7 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
   var _calTimer = null;
   var _vm = null; // controller instance captured in init()
   var _scope = null; // scope captured in init()
+  var _cronNext = {}; // card.id -> next-fire Date (or null), rebuilt in calBuildDays
 
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
@@ -38,6 +39,77 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         matchField(parts[3], date.getMonth() + 1) &&
         matchField(parts[4], date.getDay());
     } catch (e) { return false; }
+  }
+
+  // ── Next-fire computation (same 5-field semantics as cronMatches) ─────
+  // Returns the next Date (strictly after `fromDate`) at which the cron will
+  // fire, or null when the expression is invalid / has no upcoming match.
+  // Day-of-month AND day-of-week must BOTH match (matching the app's actual
+  // firing behavior), so the hint always reflects when the task really runs.
+  function nextCronFire(expr, fromDate) {
+    try {
+      var parts = expr.trim().split(/\s+/);
+      if (parts.length !== 5) return null;
+      function parseField(field, lo, hi) {
+        var out = [];
+        if (field === '*') {
+          for (var i = lo; i <= hi; i++) out.push(i);
+          return out;
+        }
+        var vals = field.split(',');
+        for (var vi = 0; vi < vals.length; vi++) {
+          var v = vals[vi];
+          if (v.indexOf('*/') === 0) {
+            var interval = parseInt(v.slice(2), 10);
+            if (interval > 0) for (var i = lo; i <= hi; i++) if (i % interval === 0) out.push(i);
+          } else if (v.indexOf('-') > 0) {
+            var range = v.split('-');
+            var rlo = parseInt(range[0], 10), rhi = parseInt(range[1], 10);
+            for (var i = Math.max(lo, rlo); i <= Math.min(hi, rhi); i++) out.push(i);
+          } else {
+            var n = parseInt(v, 10);
+            if (!isNaN(n) && n >= lo && n <= hi) out.push(n);
+          }
+        }
+        out.sort(function (a, b) { return a - b; });
+        return out;
+      }
+      var minutes = parseField(parts[0], 0, 59);
+      var hours = parseField(parts[1], 0, 23);
+      var doms = parseField(parts[2], 1, 31);
+      var months = parseField(parts[3], 1, 12);
+      var dows = parseField(parts[4], 0, 6);
+      if (!minutes.length || !hours.length || !doms.length || !months.length || !dows.length) return null;
+      var from = new Date(fromDate.getTime());
+      from.setSeconds(0, 0);
+      from.setMinutes(from.getMinutes() + 1); // strictly after now
+      // Scan day-by-day (bounded to ~3 years) for the first day whose date fields
+      // match, then the first matching hour:minute on that day at/after `from`.
+      for (var day = 0; day <= 366 * 3; day++) {
+        var d = new Date(from.getFullYear(), from.getMonth(), from.getDate() + day);
+        var dm = d.getMonth() + 1, dd = d.getDate(), dw = d.getDay();
+        if (months.indexOf(dm) === -1 || doms.indexOf(dd) === -1 || dows.indexOf(dw) === -1) continue;
+        for (var hi = 0; hi < hours.length; hi++) {
+          var h = hours[hi];
+          for (var mi = 0; mi < minutes.length; mi++) {
+            var m = minutes[mi];
+            var cand = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0, 0);
+            if (cand < from) continue;
+            return cand;
+          }
+        }
+      }
+      return null;
+    } catch (e) { return null; }
+  }
+
+  // Compact "when" label for a fire datetime: "Today 09:00", "Mon, Sep 8 09:00"...
+  function formatFireDateTime(d) {
+    var now = new Date();
+    var sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    var hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    if (sameDay) return 'Today ' + hm;
+    return d.toLocaleDateString('default', { weekday: 'short', month: 'short', day: 'numeric' }) + ' ' + hm;
   }
 
   // ── Cron background processor ──────────────────────────────────────────
@@ -84,7 +156,11 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
               ready: true,
               attached: [],
               selfImproving: false,
-              isDecomposing: false
+              isDecomposing: false,
+              // Marks the card as created by a calendar schedule so the board can
+              // render a ⏰ chip on it (and keep it recognizable through Doing/Done).
+              _fromCron: true,
+              _cronExpression: cal.cronExpression || (cal.time ? cal.date + ' ' + cal.time : '')
             };
             _vm.state.todo.push(newCard);
             _vm.saveCards();
@@ -234,26 +310,53 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           return day === 0 || day === 6;
         }
 
+        // Next-fire hints: compute each cron card's next fire ONCE, bucket by fire
+        // date, and reuse the map for both the day-cell hints and the card tooltips
+        // (so tooltips never re-run the scan on every digest).
+        var nowForCron = new Date();
+        _cronNext = {};
+        var firesByDate = {}; // 'YYYY-MM-DD' -> [{ card, fire }]
+        for (var cn = 0; cn < cards.length; cn++) {
+          var cc = cards[cn];
+          if (!cc.cronExpression) continue;
+          var nf = nextCronFire(cc.cronExpression, nowForCron);
+          _cronNext[cc.id] = nf;
+          if (nf) {
+            var dsKey = localDateStr(nf);
+            if (!firesByDate[dsKey]) firesByDate[dsKey] = [];
+            firesByDate[dsKey].push({ card: cc, fire: nf });
+          }
+        }
+        function nextFiresTitle(list) {
+          if (!list || !list.length) return '';
+          var lines = ['Next fire:'];
+          for (var li = 0; li < list.length; li++) {
+            lines.push(formatFireDateTime(list[li].fire) + ' — ' + String(list[li].card.text || '').slice(0, 40));
+          }
+          return lines.join('\n');
+        }
+        function makeDay(num, dateStr, inMonth, dt) {
+          var nfList = firesByDate[dateStr] || [];
+          return { num: num, date: dateStr, inMonth: inMonth, isToday: dateStr === todayStr, isWeekend: isWeekend(dt), cards: cardsForDate(dateStr), nextFires: nfList, nextFiresTitle: nextFiresTitle(nfList) };
+        }
+
         var prevMonthLast = new Date(year, month, 0).getDate();
         for (var p = startPad - 1; p >= 0; p--) {
           var d = prevMonthLast - p;
           var dt = new Date(year, month - 1, d);
-          var ds = localDateStr(dt);
-          days.push({ num: d, date: ds, inMonth: false, isToday: ds === todayStr, isWeekend: isWeekend(dt), cards: cardsForDate(ds) });
+          days.push(makeDay(d, localDateStr(dt), false, dt));
         }
 
         for (var i = 1; i <= daysInMonth; i++) {
           var dt2 = new Date(year, month, i);
-          var ds2 = localDateStr(dt2);
-          days.push({ num: i, date: ds2, inMonth: true, isToday: ds2 === todayStr, isWeekend: isWeekend(dt2), cards: cardsForDate(ds2) });
+          days.push(makeDay(i, localDateStr(dt2), true, dt2));
         }
 
         var remaining = 7 - (days.length % 7);
         if (remaining < 7) {
           for (var j = 1; j <= remaining; j++) {
             var dt3 = new Date(year, month + 1, j);
-            var ds3 = localDateStr(dt3);
-            days.push({ num: j, date: ds3, inMonth: false, isToday: ds3 === todayStr, isWeekend: isWeekend(dt3), cards: cardsForDate(ds3) });
+            days.push(makeDay(j, localDateStr(dt3), false, dt3));
           }
         }
 
@@ -279,6 +382,24 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         vm.calYear = now.getFullYear();
         vm.calMonth = now.getMonth();
         vm.calBuildDays();
+      };
+
+      // Tooltip for a cron card's ⏰ icon: the expression plus when it fires next.
+      // Uses the next-fire map computed in calBuildDays (free on every digest); only
+      // falls back to a live scan before the first build.
+      vm.calNextFireText = function (card) {
+        if (!card || !card.cronExpression) return '';
+        var nf = _cronNext[card.id];
+        if (nf === undefined) nf = nextCronFire(card.cronExpression, new Date());
+        var base = 'Cron: ' + card.cronExpression;
+        if (!nf) return base + ' · no fire within ~3 years';
+        var mins = Math.round((nf.getTime() - Date.now()) / 60000);
+        var rel;
+        if (mins < 1) rel = 'now';
+        else if (mins < 60) rel = 'in ' + mins + 'm';
+        else if (mins < 1440) rel = 'in ' + Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+        else rel = 'in ' + Math.floor(mins / 1440) + 'd ' + Math.floor((mins % 1440) / 60) + 'h';
+        return base + ' · next: ' + formatFireDateTime(nf) + ' (' + rel + ')';
       };
 
       vm.calAddCard = function () {
@@ -345,6 +466,43 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           console.error('Error saving calendar card:', e);
         }
         scheduleUpdate();
+      };
+
+      // ── "Run once now" — fire the card immediately ─────────────────────
+      // Mirrors what the cron processor does on schedule: persist the calendar
+      // entry, then push a To Do card (marked _fromCron) and start it if the
+      // agent is idle. Lets users test a schedule without waiting for it.
+      vm.calRunNow = function () {
+        try {
+          var data = vm.calEditCardData;
+          if (!data || !data.text) return $window.alert('Enter a task first');
+          if (!data.date) return $window.alert('A date is required');
+          // Persist first so an unsaved (new) card isn't lost when we close the editor.
+          vm.calSaveCard();
+          var now = new Date();
+          var newCard = {
+            id: uid(),
+            text: data.text,
+            filePath: data.filePath || data.project || _vm.selectedProject,
+            createdAt: now.toISOString(),
+            priority: data.priority || 'medium',
+            ready: true,
+            attached: [],
+            selfImproving: false,
+            isDecomposing: false,
+            _fromCron: true,
+            _cronExpression: data.cronExpression || (data.time ? data.date + ' ' + data.time : '')
+          };
+          if (!_vm.state.todo) _vm.state.todo = [];
+          _vm.state.todo.push(newCard);
+          _vm.saveCards();
+          // The interval runs outside a digest — apply so the card shows immediately.
+          try { if (_scope && !_scope.$$phase) _scope.$applyAsync(); } catch (e) {}
+          if (_vm.showSideToast) _vm.showSideToast('⏰ Calendar card fired now — added to To Do' + (_vm.streamingActive ? ' (queued)' : ' and started'));
+          if (!_vm.streamingActive && _vm.executeAgent) _vm.executeAgent(newCard);
+        } catch (e) {
+          console.error('Error running calendar card now:', e);
+        }
       };
 
       vm.calDeleteCard = function (card, $event) {

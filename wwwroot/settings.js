@@ -695,6 +695,9 @@ angular.module('kanbanApp')
                 // popup showing the same stats the old chip row displayed inline.
                 vm.showUserStats = false;
                 vm.toggleUserStats = function () { vm.showUserStats = !vm.showUserStats; };
+                // Explicit dismiss — the ✕ button in the popup header, so closing never
+                // depends on blur/outside-click (which is fragile on touch and keyboard).
+                vm.closeUserStats = function () { vm.showUserStats = false; };
                 // Closing on blur must NOT fire when focus simply moved INTO the
                 // stats popup (e.g. clicking a rank-ladder row to expand it — the
                 // row is a plain div, so the browser transfers focus to the popup

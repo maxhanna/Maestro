@@ -588,6 +588,538 @@ public class DeterministicEditGeneratorTests
         Assert.NotEqual(EditStrategy.AnchoredEdit, decision.Strategy);
     }
 
+    // ── Multi-class member add: "add an Email property to every DTO class" ────────
+
+    private const string MultiDtoFile =
+        "public class UserDto\n" +
+        "{\n" +
+        "    public string Name { get; set; }\n" +
+        "}\n" +
+        "public class OrderDto\n" +
+        "{\n" +
+        "    public decimal Total { get; set; }\n" +
+        "}\n" +
+        "public class User\n" +
+        "{\n" +
+        "    public int Id { get; set; }\n" +
+        "}\n";
+
+    private const string MultiTsFile =
+        "export class UserDto {\n" +
+        "  name = '';\n" +
+        "}\n" +
+        "export class OrderDto {\n" +
+        "  total = 0;\n" +
+        "}\n" +
+        "export interface IMeta {\n" +
+        "  created: Date;\n" +
+        "}\n";
+
+    [Fact]
+    public void MultiMember_CSharp_OneEditPerMatchingDtoClass()
+    {
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile, "add a string Email property to every DTO class");
+
+        Assert.NotNull(edit);
+        Assert.Equal(EditStrategy.FillClassBody, edit!.Strategy);
+        Assert.NotNull(edit.Edits);
+        // UserDto + OrderDto get the property; User (no "DTO") is filtered out.
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("deterministic batch: 2 edits", edit.NewStr);
+        Assert.Contains("(deterministic batch: 2 edits, applied 2/2 classes)", edit.NewStr);
+        Assert.Contains("applied 2/2", edit.Reason);
+        Assert.Equal(4, edit.Edits[0].LineNumber); // UserDto close brace
+        Assert.Equal(8, edit.Edits[1].LineNumber); // OrderDto close brace
+        Assert.All(edit.Edits, e => Assert.Contains("public string Email { get; set; }", e.NewString));
+
+        // Each class body anchor is distinct — applying both in order works end-to-end.
+        var content = MultiDtoFile;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Contains("public class UserDto", content);
+        Assert.Contains("public class OrderDto", content);
+        Assert.Equal(2, content.Split("public string Email { get; set; }").Length - 1);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_UnanchorableSingleLineClass_SkippedNotSilentlyEdited()
+    {
+        const string file =
+            "public class OneDto { public int X { get; set; } }\n" +
+            "public class TwoDto\n" +
+            "{\n" +
+            "    public int Y { get; set; }\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, file, "add an Email property to every DTO class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Single(edit.Edits); // only the anchorable class gets edited
+        Assert.Equal(5, edit.Edits[0].LineNumber);
+        Assert.Contains("applied 1/2 matching classes", edit.Reason);
+        Assert.Contains("skipped 1 unanchorable", edit.Reason);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_NoMatchingClass_Declines()
+    {
+        // No class name contains "DTO" → the whole multi request declines, never
+        // degrading to a single-class edit.
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "Models/Entities.cs", true, MultiDtoFile, "add a string Email property to every Entity class"));
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_SingleMatchingClass_StillBatches()
+    {
+        const string file =
+            "public class UserDto\n" +
+            "{\n" +
+            "    public string Name { get; set; }\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, file, "add a string Email property to every DTO class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Single(edit.Edits);
+        Assert.Contains("applied 1/1 matching class", edit.Reason);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PluralInFileForm_NormalizesKind()
+    {
+        // "the DTO classes in this file" — the PLURAL spec form (kind2 group) whose
+        // de-pluralization must NOT mangle the kind ("class".TrimEnd('s') → "clas" bug).
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile, "add a string Email property to the DTO classes in this file");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count); // both DTO classes — kind normalized back to "class"
+        Assert.Contains("matching classes", edit.Reason);
+        Assert.Contains("deterministic batch: 2 edits", edit.NewStr);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_IdenticalAnchors_DisambiguatedByLineNumber()
+    {
+        // Two structurally identical classes — same last member line + same close brace
+        // produce IDENTICAL oldStrings. The batch path disambiguates via each edit's
+        // LineNumber hint (position-aware TryReplaceSafe), never silently collapsing.
+        const string file =
+            "public class OneDto\n" +
+            "{\n" +
+            "    public string Name { get; set; }\n" +
+            "}\n" +
+            "public class TwoDto\n" +
+            "{\n" +
+            "    public string Name { get; set; }\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, file, "add a string Email property to every DTO class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Equal(edit.Edits[0].OldString, edit.Edits[1].OldString); // identical anchor text
+        Assert.Equal(4, edit.Edits[0].LineNumber);
+        Assert.Equal(8, edit.Edits[1].LineNumber);
+
+        // Both apply cleanly with their line hints — each class gets the property.
+        var content = file;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Equal(2, content.Split("public string Email { get; set; }").Length - 1);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PerClassOverride_FirstNameKey()
+    {
+        // "... but NameKey on the first one" — the FIRST matching class gets a differently
+        // named member; every other class keeps the description's base name (Email).
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every DTO class, but NameKey on the first one");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public string NameKey { get; set; }", edit.Edits[0].NewString); // UserDto — first
+        Assert.Contains("public string Email { get; set; }", edit.Edits[1].NewString);  // OrderDto — base
+        Assert.Contains("'string NameKey' on the first", edit.Reason);
+
+        // Both apply cleanly; the override lands in the earlier class, base name in the later.
+        var content = MultiDtoFile;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Contains("public string NameKey { get; set; }", content);
+        Assert.Contains("public string Email { get; set; }", content);
+        Assert.True(content.IndexOf("public string NameKey", StringComparison.Ordinal)
+                    < content.IndexOf("public string Email", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PerClassOverride_LastName()
+    {
+        // "... but NameKey on the last one" — the override applies to the LAST matching class.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every DTO class, but NameKey on the last one");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public string Email { get; set; }", edit.Edits[0].NewString);
+        Assert.Contains("public string NameKey { get; set; }", edit.Edits[1].NewString);
+        Assert.Contains("'string NameKey' on the last", edit.Reason);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PerClassOverride_OutOfRange_Declines()
+    {
+        // "the fourth one" can't be honored with only two matching classes — a multi request
+        // must never silently drop the override, so the whole thing declines to the LLM.
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every DTO class, but NameKey on the fourth one"));
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PerClassOverride_SecondClauseForm()
+    {
+        // Same clause, worded "but on the first one NameKey" — the second alternative form.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every DTO class, but on the first one NameKey");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public string NameKey { get; set; }", edit.Edits[0].NewString);
+        Assert.Contains("public string Email { get; set; }", edit.Edits[1].NewString);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_NonOverrideBut_Ignored()
+    {
+        // "but skip the OrderDto" is NOT an override clause — the "but" is a different sense.
+        // No override may fire: both classes keep the base name, no "on the first" in Reason.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every DTO class, but skip the OrderDto");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.All(edit.Edits, e => Assert.Contains("public string Email { get; set; }", e.NewString));
+        Assert.DoesNotContain("on the first", edit.Reason);
+        Assert.DoesNotContain("on the last", edit.Reason);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PerClassOverride_NameStartingWithOn_NotBlocked()
+    {
+        // A name that STARTS with an article-ish prefix ("OnTime") must still be honored —
+        // the exclusion list only bans the bare words "on/the/one/a/an", not longer names.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every DTO class, but OnTime on the first one");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public string OnTime { get; set; }", edit.Edits[0].NewString);
+        Assert.Contains("public string Email { get; set; }", edit.Edits[1].NewString);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PerClassOverride_UnanchorableOverride_Declines()
+    {
+        // The "first one" is a single-line class (unanchorable) — honoring the NameKey intent
+        // would be impossible, so the whole multi request declines instead of silently dropping it.
+        const string file =
+            "public class OneDto { public int X { get; set; } }\n" +
+            "public class TwoDto\n" +
+            "{\n" +
+            "    public int Y { get; set; }\n" +
+            "}\n";
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, file,
+            "add an Email property to every DTO class, but NameKey on the first one"));
+    }
+
+    // ── Class-set narrowing: suffix / prefix / exclusion filters ─────────────────
+
+    private const string RepoFile =
+        "public class UserRepository\n" +
+        "{\n" +
+        "    public User Find(int id) => new();\n" +
+        "}\n" +
+        "public class OrderRepository\n" +
+        "{\n" +
+        "    public Order Find(int id) => new();\n" +
+        "}\n" +
+        "public class UserService\n" +
+        "{\n" +
+        "    public void Run() { }\n" +
+        "}\n";
+
+    private const string ExclusionFile =
+        "public class BaseDto\n" +
+        "{\n" +
+        "    public int Id { get; set; }\n" +
+        "}\n" +
+        "public class UserDto\n" +
+        "{\n" +
+        "    public string Name { get; set; }\n" +
+        "}\n" +
+        "public class OrderDto\n" +
+        "{\n" +
+        "    public decimal Total { get; set; }\n" +
+        "}\n";
+
+    [Fact]
+    public void MultiMember_CSharp_SuffixFilter_EndingInRepository()
+    {
+        // "all classes ending in Repository" — only names carrying the suffix are edited;
+        // UserService (no suffix) is left alone.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Data/Repos.cs", true, RepoFile,
+            "add a string Audit property to all classes ending in Repository");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.All(edit.Edits, e => Assert.Contains("public string Audit { get; set; }", e.NewString));
+        Assert.Contains("ending in 'Repository'", edit.Reason);
+
+        var content = RepoFile;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Equal(2, content.Split("public string Audit { get; set; }").Length - 1);
+        Assert.DoesNotContain("public string Audit { get; set; }", content.Substring(content.IndexOf("public class UserService", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_PrefixFilter_StartingWith()
+    {
+        // "every class starting with User" — UserDto + User get the member; OrderDto doesn't.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every class starting with User");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.All(edit.Edits, e => Assert.Contains("public string Email { get; set; }", e.NewString));
+        Assert.Contains("starting with 'User'", edit.Reason);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_Exclusion_ExceptBaseClass()
+    {
+        // "every DTO class except the base one" — BaseDto matches the DTO filter but is
+        // dropped by the exclusion; UserDto + OrderDto get the member.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, ExclusionFile,
+            "add a string Email property to every DTO class except the base one");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("excluding 'base'", edit.Reason);
+        Assert.Contains("applied 2/2", edit.Reason); // applied/total count the post-filter set
+
+        var content = ExclusionFile;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Equal(2, content.Split("public string Email { get; set; }").Length - 1);
+        // BaseDto's block is untouched — its Email count stays zero.
+        var baseBlock = content.Substring(content.IndexOf("public class BaseDto", StringComparison.Ordinal),
+            content.IndexOf("public class UserDto", StringComparison.Ordinal) - content.IndexOf("public class BaseDto", StringComparison.Ordinal));
+        Assert.DoesNotContain("Email", baseBlock);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_ExclusionAndOverride_Combine()
+    {
+        // Narrowing + per-class naming compose: the override resolves among the REMAINING
+        // classes, so "first one" = first non-excluded DTO class (UserDto).
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, ExclusionFile,
+            "add a string Email property to every DTO class except the base one, but NameKey on the first one");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public string NameKey { get; set; }", edit.Edits[0].NewString); // UserDto
+        Assert.Contains("public string Email { get; set; }", edit.Edits[1].NewString);  // OrderDto
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_SuffixFilter_NoMatch_Declines()
+    {
+        // No class ends in "Repository" in MultiDtoFile — the narrowed set is empty, so
+        // the whole multi request declines instead of editing something unrelated.
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to all classes ending in Repository"));
+    }
+
+    [Fact]
+    public void MultiMember_TypeScript_SuffixFilter_EndingInDto()
+    {
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/models.ts", true, MultiTsFile,
+            "add a string updatedAt property to all classes ending in Dto");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count); // UserDto + OrderDto — the IMeta interface is kind-excluded
+        Assert.All(edit.Edits, e => Assert.Contains("public updatedAt: string = '';", e.NewString));
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_AdaptiveClassName_PrefixesMember()
+    {
+        // "... named after the class" — the member name adapts to each class: UserDto → UserName,
+        // OrderDto → OrderName (DTO-ish suffix stripped before the class name is prefixed).
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Name property to every DTO class, named after the class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public string UserName { get; set; }", edit.Edits[0].NewString);
+        Assert.Contains("public string OrderName { get; set; }", edit.Edits[1].NewString);
+        Assert.Contains("class-prefixed names", edit.Reason);
+
+        var content = MultiDtoFile;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Equal(1, content.Split("public string UserName { get; set; }").Length - 1);
+        Assert.Equal(1, content.Split("public string OrderName { get; set; }").Length - 1);
+    }
+
+    [Fact]
+    public void MultiMember_TypeScript_AdaptiveClassName_CamelCased()
+    {
+        // TS members are camelCased — "UserName" becomes "userName", "OrderName" → "orderName".
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/models.ts", true, MultiTsFile,
+            "add a string name property to every DTO class, named after the class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public userName: string = '';", edit.Edits[0].NewString);
+        Assert.Contains("public orderName: string = '';", edit.Edits[1].NewString);
+    }
+
+    [Fact]
+    public void MultiMember_CSharp_OverrideBeatsAdaptive_OnThatClass()
+    {
+        // Override + adaptive together: the override wins on its class, adaptive names the rest.
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Dtos.cs", true, MultiDtoFile,
+            "add a string Email property to every DTO class, named after the class, but NameKey on the first one");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Contains("public string NameKey { get; set; }", edit.Edits[0].NewString);       // override wins
+        Assert.Contains("public string OrderEmail { get; set; }", edit.Edits[1].NewString);   // adaptive elsewhere
+    }
+
+    [Fact]
+    public void MultiMember_TypeScript_OneEditPerMatchingClass_InterfaceExcluded()
+    {
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/models.ts", true, MultiTsFile, "add a string email property to every DTO class");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        // UserDto + OrderDto (camelCased member), but NOT the IMeta interface.
+        Assert.Equal(2, edit.Edits.Count);
+        Assert.Equal(3, edit.Edits[0].LineNumber);
+        Assert.Equal(6, edit.Edits[1].LineNumber);
+        Assert.All(edit.Edits, e => Assert.Contains("public email: string = '';", e.NewString));
+
+        var content = MultiTsFile;
+        foreach (var e in edit.Edits)
+        {
+            var (replaced, nc, _, _) = TryReplaceSafe(content, e.OldString, e.NewString, e.LineNumber);
+            Assert.True(replaced);
+            content = nc;
+        }
+        Assert.Equal(2, content.Split("public email: string = '';").Length - 1);
+    }
+
+    [Fact]
+    public void MultiMember_TypeScript_EveryInterface_KindFilter()
+    {
+        const string file =
+            "export class UserDto {\n  name = '';\n}\n" +
+            "export interface IMeta {\n  created: Date;\n}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/models.ts", true, file, "add a string updatedAt property to every interface");
+
+        Assert.NotNull(edit);
+        Assert.NotNull(edit!.Edits);
+        Assert.Single(edit.Edits);
+        Assert.Contains("updatedAt: string;", edit.Edits[0].NewString);
+    }
+
+    [Fact]
+    public void MultiMember_NoMatchingClasses_Declines()
+    {
+        const string file = "export class User {\n  name = '';\n}\n";
+        Assert.Null(DeterministicEditGenerator.TryGenerate(
+            "app/user.ts", true, file, "add a string Email property to every DTO class"));
+    }
+
+    [Fact]
+    public void Decide_MultiClassMemberAdd_ReturnsResolvedEdits()
+    {
+        var intent = new EditIntent(EditIntentKind.AddProperty, null, null);
+        var decision = EditStrategyResolver.Decide(
+            "Models/Dtos.cs", true, MultiDtoFile, "add a string Email property to every DTO class", intent);
+
+        Assert.Equal(EditStrategy.FillClassBody, decision.Strategy);
+        Assert.NotNull(decision.ResolvedEdits);
+        Assert.Equal(2, decision.ResolvedEdits.Count);
+        Assert.Contains("deterministic batch: 2 edits", decision.ResolvedNewStr);
+        Assert.Contains("member edits", decision.Reason);
+    }
+
     // ── Multi-match batch: "update all five X defaults" → one edit per occurrence ──
 
     private const string FiveDefaults =
@@ -608,6 +1140,8 @@ public class DeterministicEditGeneratorTests
         Assert.Equal(5, edit.Edits.Count);
         Assert.Contains("deterministic batch", edit.NewStr);
         Assert.Contains("applied 5/5 occurrences, skipped 0", edit.Reason); // full batch — no skips
+        // The marker carries applied/total so the meeting ticker can render one compact line.
+        Assert.Contains("(deterministic batch: 5 edits, applied 5/5 occurrences)", edit.NewStr);
         for (var i = 0; i < edit.Edits.Count; i++)
         {
             Assert.Equal("const retryCount = 3;", edit.Edits[i].OldString);
@@ -851,5 +1385,59 @@ public class DeterministicEditGeneratorTests
         // through the plan-provided apply path; the batch marker lives in ResolvedNewStr.
         Assert.Equal("const retryCount = 3;", decision.ResolvedOldStr);
         Assert.Contains("deterministic batch: 5 edits", decision.ResolvedNewStr);
+    }
+
+    // ── G1: drift recovery — re-generate against the CURRENT file content ─────
+
+    [Fact]
+    public void G1_DriftRecovery_FreshGenerationReAnchorsAgainstCurrentContent()
+    {
+        // The deterministic edit was generated against the ORIGINAL content…
+        var originalEdit = DeterministicEditGenerator.TryGenerate(
+            "config.ts", true, "const retryCount = 3;\n", "change retryCount from 3 to 5");
+        Assert.NotNull(originalEdit);
+        Assert.Equal("const retryCount = 3;", originalEdit!.OldStr);
+
+        // …but the file drifted (retyped) before the apply ran — the original anchor
+        // no longer exists, so attempt 0 fails (this is the apply failure G1 catches).
+        const string drifted = "let retryCount: number = 3;\n";
+        var (replaced, _, _, _) = TryReplaceSafe(drifted, originalEdit.OldStr!, originalEdit.NewStr!, originalEdit.LineNumber);
+        Assert.False(replaced);
+
+        // G1: re-running the generator against the CURRENT content re-anchors the edit
+        // (old anchor + fresh new string), so attempt 1 applies with zero LLM calls.
+        var freshEdit = DeterministicEditGenerator.TryGenerate(
+            "config.ts", true, drifted, "change retryCount from 3 to 5");
+        Assert.NotNull(freshEdit);
+        Assert.Equal("let retryCount: number = 3;", freshEdit!.OldStr);
+        Assert.Equal("let retryCount: number = 5;", freshEdit.NewStr);
+        var (replaced2, content2, _, _) = TryReplaceSafe(drifted, freshEdit.OldStr!, freshEdit.NewStr!, freshEdit.LineNumber);
+        Assert.True(replaced2);
+        Assert.Contains("let retryCount: number = 5;", content2);
+    }
+
+    [Fact]
+    public void G1_DriftRecovery_BatchRegeneratesAllOccurrences()
+    {
+        // Original content the batch was generated against…
+        const string original = "timeout = 30\ntimeout = 45\ntimeout = 60\n";
+        var originalBatch = DeterministicEditGenerator.TryGenerate(
+            "config.ini", true, original, "update the timeout values to 60");
+        Assert.NotNull(originalBatch);
+        Assert.Equal(2, originalBatch!.Edits!.Count); // the 30 and 45 lines
+
+        // …drifts (a 45 line becomes 50, a new 30 line appears) — the old batch anchors
+        // no longer line up exactly.
+        const string drifted = "timeout = 30\ntimeout = 50\ntimeout = 60\ntimeout = 30\n";
+        // Re-generation against current content yields the correct, fresh batch.
+        var freshBatch = DeterministicEditGenerator.TryGenerate(
+            "config.ini", true, drifted, "update the timeout values to 60");
+        Assert.NotNull(freshBatch);
+        Assert.NotNull(freshBatch!.Edits);
+        Assert.Equal(3, freshBatch.Edits.Count); // lines 1, 2 (50) and 4 (30)
+        Assert.Equal("timeout = 60", freshBatch.Edits[0].NewString);
+        Assert.Equal("timeout = 60", freshBatch.Edits[1].NewString);
+        Assert.Equal("timeout = 60", freshBatch.Edits[2].NewString);
+        Assert.Contains("applied 3/4 occurrences", freshBatch.Reason); // 60 line already correct
     }
 }

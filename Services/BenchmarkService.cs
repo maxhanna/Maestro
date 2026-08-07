@@ -1,6 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Weaver.Services;
 
@@ -398,11 +399,12 @@ public class BenchmarkService
             },
             new()
             {
-                Level = 16, Name = "Data Fetch 1: Pokemon CSV", Description = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. Fetch real Pokemon data (id numbers, stats, and types) from a live source — the public PokeAPI (https://pokeapi.co) is recommended — and write the data into pokemon_data.csv. The CSV must contain real Pokemon data: each row should include the Pokemon's id number, its base stats (for example hp, attack, defense), and its type(s). Fetch as many Pokemon as possible — the goal is to cover the full Pokedex (~1025 species), not just the first few. Do not invent or fabricate the data.",
+                Level = 16, Name = "Data Fetch 1: Pokemon CSV", Description = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. Fetch real Pokemon data (id numbers, stats, and types) from a live source — the public PokeAPI (https://pokeapi.co) is recommended — and write the data into pokemon_data.csv. The CSV must contain real Pokemon data: each row should include the Pokemon's id number, its base stats (for example hp, attack, defense), and its type(s). Fetch as many Pokemon as possible — the goal is to cover the full Pokedex (~1025 species), not just the first few. Do not invent or fabricate the data.\n\nFRESHNESS REQUIREMENT: Begin the file with a metadata line in this exact format — FETCHED_AT: YYYY-MM-DD — where YYYY-MM-DD is the current date at the moment you actually perform the fetch. Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the data was freshly fetched during this run.",
                 AcceptanceChecks =
                 [
                     Check.Dir("Benchmark directory exists", "benchmark_test_16"),
                     Check.File("Pokemon CSV exists", "benchmark_test_16/pokemon_data.csv"),
+                    Check.FreshTimestamp("Fetch timestamp is fresh and run-time", "benchmark_test_16/pokemon_data.csv"),
                     Check.Contains("CSV has id column", "benchmark_test_16/pokemon_data.csv", "id"),
                     Check.Contains("CSV has type column", "benchmark_test_16/pokemon_data.csv", "type"),
                     Check.Contains("CSV has stats column (hp)", "benchmark_test_16/pokemon_data.csv", "hp"),
@@ -415,15 +417,48 @@ public class BenchmarkService
             },
             new()
             {
-                Level = 17, Name = "Web Search 1: Sequential Facts", Description = "Create a folder called 'benchmark_test_17' at the project root. Inside it, create a text file called 'internet_facts.txt'. Then perform SEVERAL separate web searches, one after another (do them sequentially — each search is independent and must be run as its own fetch, not combined into a single query), to find the answers to these unrelated questions:\n\n1. When is the next Bitcoin halving expected to occur?\n2. What is the deepest point in the ocean called?\n3. In what year did the first crewed Moon landing happen?\n\nUse real web search results for every question — do not guess or fabricate any answer. After collecting all three answers, write each one on its own line into benchmark_test_17/internet_facts.txt (three separate lines, one per question).",
+                Level = 17, Name = "Web Search 1: Sequential Facts", Description = "Create a folder called 'benchmark_test_17' at the project root. Inside it, create a text file called 'internet_facts.txt'. Then perform SEVERAL separate web searches, one after another (do them sequentially — each search is independent and must be run as its own fetch, not combined into a single query), to find the answers to these unrelated questions:\n\n1. When is the next Bitcoin halving expected to occur?\n2. What is the deepest point in the ocean called?\n3. In what year did the first crewed Moon landing happen?\n\nUse real web search results for every question — do not guess or fabricate any answer. After collecting all three answers, write each one on its own line into benchmark_test_17/internet_facts.txt (three separate lines, one per question).\n\nFRESHNESS REQUIREMENT: Begin the file with a metadata line in this exact format — FETCHED_AT: YYYY-MM-DD — where YYYY-MM-DD is the current date at the moment you actually perform the searches. Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the answers were freshly searched during this run.",
                 AcceptanceChecks =
                 [
                     Check.Dir("Benchmark directory exists", "benchmark_test_17"),
                     Check.File("Facts file exists", "benchmark_test_17/internet_facts.txt"),
+                    Check.FreshTimestamp("Fetch timestamp is fresh and run-time", "benchmark_test_17/internet_facts.txt"),
                     Check.ContainsIc("Bitcoin halving answer present", "benchmark_test_17/internet_facts.txt", "halving"),
                     Check.ContainsIc("Bitcoin mentioned", "benchmark_test_17/internet_facts.txt", "bitcoin"),
                     Check.ContainsIc("Deepest point answer present", "benchmark_test_17/internet_facts.txt", "mariana trench"),
                     Check.Contains("Moon landing year present", "benchmark_test_17/internet_facts.txt", "1969")
+                ]
+            },
+            new()
+            {
+                Level = 18, Name = "Web Search 2: Cross-Check Consistency", Description = "Create a folder called 'benchmark_test_18' at the project root. Inside it, create a text file called 'consistency_facts.txt'. Then perform SEVERAL separate web searches, one after another (do them sequentially — each search is independent and must be run as its own fetch, not combined into a single query), to answer these related questions:\n\n1. In what year was the first iPhone released?\n2. What is iOS? (the operating system Apple makes for its phones)\n3. Which operating system did the first iPhone run at launch?\n4. Is the operating system that shipped on the first iPhone the same thing that is today called iOS?\n\nUse real web search results for every question — do not guess or fabricate any answer. After collecting the answers, cross-check them against each other: the facts must be consistent (for example, if the first iPhone shipped in a specific year, the OS it ran at launch must line up with that same year). Then write the reconciled findings into benchmark_test_18/consistency_facts.txt: one line per question with its answer, plus a final line that states the consistency verdict (e.g. \"VERDICT: consistent — the first iPhone (2007) ran iPhone OS 1.0, which was later renamed iOS\").\n\nFRESHNESS REQUIREMENT: Begin the file with a metadata line in this exact format — FETCHED_AT: YYYY-MM-DD — where YYYY-MM-DD is the current date at the moment you actually perform the searches. Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the answers were freshly searched during this run.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_18"),
+                    Check.File("Facts file exists", "benchmark_test_18/consistency_facts.txt"),
+                    Check.FreshTimestamp("Fetch timestamp is fresh and run-time", "benchmark_test_18/consistency_facts.txt"),
+                    Check.ContainsIc("First iPhone year present", "benchmark_test_18/consistency_facts.txt", "2007"),
+                    Check.ContainsIc("iPhone mentioned", "benchmark_test_18/consistency_facts.txt", "iphone"),
+                    Check.ContainsIc("iOS mentioned", "benchmark_test_18/consistency_facts.txt", "ios"),
+                    Check.ContainsIc("Launch OS identified", "benchmark_test_18/consistency_facts.txt", "iphone os"),
+                    Check.ContainsIc("Consistency verdict present", "benchmark_test_18/consistency_facts.txt", "consistent"),
+                    Check.ContainsIc("Verdict explains the link", "benchmark_test_18/consistency_facts.txt", "renamed")
+                ]
+            },
+            new()
+            {
+                Level = 19, Name = "Data Fetch 2: REST Weather API", Description = "Create a folder called 'benchmark_test_19' at the project root. Inside it, create a file called 'weather.json'. Call a public REST API to fetch CURRENT weather for at least 3 real, well-known cities (for example Paris, Tokyo, and Sydney), parse the JSON responses, and write the results into weather.json as valid JSON (one object per city). The public Open-Meteo API (https://api.open-meteo.com) is recommended — it needs no API key: call https://api.open-meteo.com/v1/forecast?latitude=<lat>&longitude=<lon>&current_weather=true for each city. Each city object in weather.json must contain: the real city name, its current temperature, windspeed, weathercode, and the time of the measurement. Use REAL city names and REAL API data — do not invent or fabricate any value, and do not copy cached data from another project or previous run.\n\nFRESHNESS REQUIREMENT: Include a top-level field named 'fetched_at' in weather.json with the current date in YYYY-MM-DD format at the moment you actually perform the fetch (for example \"fetched_at\": \"2026-08-07\"). Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the data was freshly fetched during this run.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_19"),
+                    Check.File("Weather JSON exists", "benchmark_test_19/weather.json"),
+                    Check.FreshTimestamp("Fetch timestamp is fresh and run-time", "benchmark_test_19/weather.json"),
+                    Check.ContainsIc("Paris present", "benchmark_test_19/weather.json", "paris"),
+                    Check.ContainsIc("Tokyo present", "benchmark_test_19/weather.json", "tokyo"),
+                    Check.ContainsIc("Sydney present", "benchmark_test_19/weather.json", "sydney"),
+                    Check.ContainsIc("Temperature field present", "benchmark_test_19/weather.json", "temperature"),
+                    Check.ContainsIc("Windspeed field present", "benchmark_test_19/weather.json", "windspeed"),
+                    Check.ContainsIc("Weathercode field present", "benchmark_test_19/weather.json", "weathercode")
                 ]
             }
         };
@@ -534,6 +569,24 @@ public class BenchmarkService
                     result.Passed = check.Type == BenchmarkCheckType.FileContains ? contains : !contains;
                     result.Message = result.Passed ? "Content assertion passed." : $"Content assertion failed for {check.Path}.";
                     break;
+                case BenchmarkCheckType.FileFreshTimestamp:
+                    if (!File.Exists(path)) { result.Message = $"Missing file: {check.Path}"; break; }
+                    var freshText = await File.ReadAllTextAsync(path, ct);
+                    var embedded = ExtractRunDate(freshText);
+                    if (embedded == null)
+                    {
+                        result.Message = $"No run-time date found in {check.Path} — expected a \"FETCHED_AT: YYYY-MM-DD\" line captured at run time.";
+                        break;
+                    }
+                    var writeDate = File.GetLastWriteTime(path).Date;
+                    var todayDate = DateTime.Today;
+                    var matchesWrite = Math.Abs((embedded.Value - writeDate).TotalDays) <= 1;
+                    var isFresh = embedded.Value <= todayDate && (todayDate - embedded.Value).Days <= Math.Max(1, check.MaxDaysOld);
+                    result.Passed = matchesWrite && isFresh;
+                    result.Message = result.Passed
+                        ? $"Run-time date {embedded.Value:yyyy-MM-dd} matches the file write date and is within {check.MaxDaysOld} day(s) of today."
+                        : $"Stale or mismatched run-time date: file says {embedded.Value:yyyy-MM-dd}, file was written {writeDate:yyyy-MM-dd}, today is {todayDate:yyyy-MM-dd}.";
+                    break;
                 default:
                     result.Message = $"Unsupported check type: {check.Type}.";
                     break;
@@ -551,6 +604,41 @@ public class BenchmarkService
             ScoreDelta = Math.Round(current.ScorePercent - baseline.ScorePercent, 1),
             DurationDeltaMs = Math.Round(current.DurationMs - baseline.DurationMs, 1)
         };
+    }
+
+    /// <summary>
+    /// Pulls a run-time capture date out of a fetched file. Prefers an explicit marker line
+    /// ("FETCHED_AT: 2026-08-07", "Fetched: ...", "Fetched at ...", or a JSON
+    /// "fetched_at"/"fetchedAt" field — all case-insensitive); falls back to the first
+    /// ISO-ish YYYY-MM-DD date found. That fallback is deliberate: for a weather/API fetch
+    /// the measurement "time" field (e.g. "2026-08-07T14:00") doubles as freshness evidence,
+    /// so a cached file reusing old times still gets flagged even if the marker is absent.
+    /// Returns null when nothing looks like a date, so a file without any run-time timestamp
+    /// fails the freshness check.
+    /// </summary>
+    private static DateTime? ExtractRunDate(string content)
+    {
+        // Optional quote slots around the separator make the marker work both as a plain
+        // leading line ("FETCHED_AT: 2026-08-07") and inside JSON ("fetched_at": "2026-08-07");
+        // the lookbehind keeps it from matching mid-word prose like "refetched at …".
+        var marker = Regex.Match(content,
+            @"(?<![A-Za-z])(?:FETCHED_AT|fetched\s*(?:at|on|:))\s*[""']?\s*[:=]?\s*[""']?\s*(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})",
+            RegexOptions.IgnoreCase);
+        if (marker.Success && TryBuildDate(marker, out var marked)) return marked;
+        // Negative lookahead (not \b) so ISO timestamps like "2026-08-07T14:32" still yield the date.
+        var any = Regex.Match(content, @"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?![0-9])");
+        if (any.Success && TryBuildDate(any, out var fallback)) return fallback;
+        return null;
+    }
+
+    private static bool TryBuildDate(Match m, out DateTime date)
+    {
+        date = default;
+        if (!int.TryParse(m.Groups[1].Value, out var year) || year < 2000 || year > 2100) return false;
+        if (!int.TryParse(m.Groups[2].Value, out var month) || month < 1 || month > 12) return false;
+        if (!int.TryParse(m.Groups[3].Value, out var day) || day < 1 || day > 31) return false;
+        try { date = new DateTime(year, month, day); return true; }
+        catch { return false; }
     }
 }
 
@@ -572,7 +660,7 @@ public class BenchmarkPlanDefinition
     public List<BenchmarkAcceptanceCheck> AcceptanceChecks { get; set; } = new();
 }
 
-public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals }
+public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals, FileFreshTimestamp }
 
 public static class Check
 {
@@ -594,6 +682,13 @@ public static class Check
         new() { Name = name, Type = BenchmarkCheckType.FileOccurrenceCount, Path = path, Value = value, ExpectedCount = count, Weight = weight };
     public static BenchmarkAcceptanceCheck Occurs(string name, string path, string value, int count, double weight, string category) =>
         new() { Name = name, Type = BenchmarkCheckType.FileOccurrenceCount, Path = path, Value = value, ExpectedCount = count, Weight = weight, Category = category };
+    /// <summary>
+    /// Verifies the file contains a run-time capture date (e.g. a "FETCHED_AT: YYYY-MM-DD"
+    /// line) that (a) matches the file's own last-write date and (b) is recent relative to
+    /// evaluation — so reusing a cached/stale file or hardcoding an old date is flagged.
+    /// </summary>
+    public static BenchmarkAcceptanceCheck FreshTimestamp(string name, string path, int maxDaysOld = 2, double weight = 2) =>
+        new() { Name = name, Type = BenchmarkCheckType.FileFreshTimestamp, Path = path, Weight = weight, MaxDaysOld = maxDaysOld };
 }
 
 public class BenchmarkAcceptanceCheck
@@ -605,6 +700,7 @@ public class BenchmarkAcceptanceCheck
     public bool IgnoreCase { get; set; }
     public double Weight { get; set; } = 1;
     public int ExpectedCount { get; set; }
+    public int MaxDaysOld { get; set; } = 2;
     public string Category { get; set; } = "correctness";
 }
 

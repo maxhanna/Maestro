@@ -2150,6 +2150,29 @@ angular.module('kanbanApp')
           }
           return detail ? type + ' ' + detail : type;
         }
+        // Deterministic multi-match batches carry an enriched marker in newStringPreview
+        // ("(deterministic batch: 5 edits, applied 5/5 occurrences)") — render ONE compact
+        // ticker/chat line instead of a generic per-file label. The basename is appended so two
+        // sequential batches on different files don't collapse under pushTicker's
+        // consecutive-duplicate suppression. `partial` is true when the batch was only
+        // partially applied (applied < total), so the ticker can flag it as a warning.
+        function batchTickerInfo(st) {
+          if (!st) return null;
+          var ns = st.newStringPreview ? String(st.newStringPreview) : '';
+          var m = /^\(deterministic batch: (\d+) edits, applied (\d+)\/(\d+) ([a-z]+)\)$/.exec(ns);
+          if (!m) return null;
+          var applied = parseInt(m[2], 10), total = parseInt(m[3], 10), unit = m[4];
+          var label = applied + '/' + total + ' ' + unit + ' updated';
+          var file = st.path ? basename(String(st.path).split('\n')[0]) : '';
+          if (file && file.length > 40) file = file.slice(0, 40) + '…';
+          return {
+            label: file ? label + ' · ' + file : label,
+            partial: applied < total,
+            applied: applied,
+            total: total,
+            unit: unit
+          };
+        }
         var CONFETTI_COLORS = ['#61afef', '#98c379', '#e5c07b', '#c678dd', '#e06c75', '#56b6c2', '#ffd866', '#f97583', '#7ee787', '#79c0ff'];
         function stompLand(s) {
           if (!scene || !s) return;
@@ -2344,6 +2367,18 @@ angular.module('kanbanApp')
         vm.expandedRung = null;
         vm.toggleRung = function (rlRow) {
           vm.expandedRung = (vm.expandedRung === rlRow.min) ? null : rlRow.min;
+        };
+        // Keyboard twin of toggleRung for the rank-ladder rows (role=button): Enter and
+        // Space expand/collapse a rung exactly like a click. Space is prevented so the
+        // page doesn't scroll; other keys (Tab, arrows) pass through untouched so focus
+        // can keep moving through the popup.
+        vm.onRungKeydown = function ($event, rlRow) {
+          if (!$event || !rlRow) return;
+          if ($event.key === 'Enter' || $event.key === ' ') {
+            // Space would scroll the page; Enter needs no default action on a div.
+            $event.preventDefault();
+            vm.toggleRung(rlRow);
+          }
         };
         vm.isRungExpanded = function (rlRow) {
           return vm.expandedRung === rlRow.min;
@@ -6113,8 +6148,28 @@ angular.module('kanbanApp')
               if (scene) scene._lastStepType = st.type;
               if (status === 'done' || status === 'applied' || status === 'created' || status === 'ok') {
                 if (scene && scene.meetingOn && prev !== 'done') {
-                  fireReaction('good', pick(REACT_SUCCESS));
-                  pushTicker('good', tickerLabelForStep(st));
+                  // Deterministic batches collapse to one compact "N/M occurrences updated"
+                  // ticker line instead of a generic per-file label; a partially-applied
+                  // batch (applied < total) flashes amber as its own 'partial' kind so it
+                  // can't be mistaken for a clean win — and skips the "Nice catch!"
+                  // celebration. The compact line is also posted to the office chat so the
+                  // transcript shows it.
+                  var _batch = batchTickerInfo(st);
+                  if (_batch) {
+                    if (!_batch.partial) fireReaction('good', pick(REACT_SUCCESS));
+                    pushTicker(_batch.partial ? 'partial' : 'good', (_batch.partial ? '⚠ ' : '') + _batch.label, _batch.partial);
+                    if (!_replay) {
+                      var _edSp = spiderFor('editor');
+                      var _bWho = _edSp ? _edSp.icon + ' ' + _edSp.name : '✏️ Editor';
+                      var _bText = (_batch.partial ? '⚠️ ' : '⚡ ') + _batch.label +
+                        (_batch.partial ? ' — ' + (_batch.total - _batch.applied) + ' skipped' : '');
+                      logGossipEntry(_bWho, _bText);
+                      recordEvent({ type: 'chat', who: _bWho, text: _bText });
+                    }
+                  } else {
+                    fireReaction('good', pick(REACT_SUCCESS));
+                    pushTicker('good', tickerLabelForStep(st));
+                  }
                 }
                 if (!_replay) {
                   bumpComplexityRage(3); 

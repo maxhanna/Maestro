@@ -322,6 +322,16 @@ body.dragging-active .card:hover {
     border: 1px solid rgba(167, 139, 250, 0.35);
 }
 
+/* Scheduled (cron) chip — cards created by a calendar job's scheduler.
+   A warm amber/clock tone so it reads as time-triggered, distinct from
+   the violet suggestion chip and the READY/QUEUED/bench tags. */
+.card .card-tag.tag-cron {
+    background: rgba(245, 158, 11, 0.16);
+    color: #fbbf24;
+    font-weight: 700;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
 @keyframes tag-queued-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.55; }

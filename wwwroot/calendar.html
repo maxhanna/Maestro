@@ -18,6 +18,9 @@
       <div class="cal-day-header">
         <span class="cal-day-num">{{day.num}}</span>
         <span class="cal-day-card-count" ng-if="day.cards.length">{{day.cards.length}}</span>
+        <span class="cal-day-nextfire" ng-if="day.nextFires.length" title="{{day.nextFiresTitle}}">
+          &#9201;<span class="cal-day-nextfire-count" ng-if="day.nextFires.length > 1">{{day.nextFires.length}}</span>
+        </span>
       </div>
       <div class="cal-day-cards">
         <div class="cal-card" ng-repeat="card in day.cards track by card.id" ng-click="vm.calEditCard(card, $event)"
@@ -26,7 +29,7 @@
           <span class="cal-card-project" ng-if="card.filePath"
             title="{{card.filePath}}">{{vm.projectName(card.filePath)}}</span>
           <span class="cal-card-time" ng-if="card.time">@{{card.time}}</span>
-          <span class="cal-card-cron" ng-if="card.cronExpression" title="Cron: {{card.cronExpression}}">&#9201;</span>
+          <span class="cal-card-cron" ng-if="card.cronExpression" title="{{vm.calNextFireText(card)}}">&#9201;</span>
           <span class="cal-card-del" ng-click="vm.calDeleteCard(card, $event)">&times;</span>
         </div>
       </div>
@@ -87,6 +90,9 @@
       <div class="popup-footer">
         <button ng-if="vm.calEditCardData.id" class="danger"
           ng-click="vm.calDeleteCard(vm.calEditCardData)">Delete</button>
+        <button class="success" ng-click="vm.calRunNow()"
+          title="Fire this card immediately — push to To Do and start it now. Test a cron schedule without waiting.">
+          ▶ Run now</button>
         <button ng-click="vm.calCloseEdit()">Cancel</button>
         <button class="primary" ng-click="vm.calSaveCard()">Save</button>
       </div>

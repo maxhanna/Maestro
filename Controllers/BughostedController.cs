@@ -616,6 +616,7 @@ start """" ""{currentExe}"" --no-open-browser
                 ["ram"] = b.TryGetValue("ram", out var ram) ? JsonString(ram) : "",
                 ["gpu"] = b.TryGetValue("gpu", out var gpu) ? JsonString(gpu) : "",
                 ["userId"] = b.TryGetValue("userId", out var uid) ? JsonString(uid) : "",
+                ["userName"] = b.TryGetValue("userName", out var un) ? JsonString(un) : "",
                 ["_source"] = "server"
             }).ToList();
 
@@ -1011,6 +1012,7 @@ public class BenchmarkDataDTO
     public string? RAM { get; set; }
     public string? GPU { get; set; }
     public string? UserId { get; set; }
+    public string? UserName { get; set; }
 }
 
 

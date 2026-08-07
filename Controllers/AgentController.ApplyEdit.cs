@@ -254,18 +254,65 @@ partial class AgentController
                         $"Resolve retry {attempt + 1} for {relPath}",
                         new { step, projectRoot }, ct: ct);
                 }
-                (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError, fromFormatC) =
-                    await ResolveEditForStep(
-                        step, projectRoot, emitSse, ct, history,
-                        explorationContext: explorationContext,
-                        targetSymbol: explorationTargetSymbol,
-                        originalPrompt: prompt,
-                        preservationDirective: preservationDirective,
-                        fullPlan: plan,
-                        planItemIndex: planItemIndex,
-                        filteredEditKnowledge: filteredEditKnowledge,
-                        causalContext: causalContext);
-                if (resolveError == null)
+                // G1 — a deterministic step that failed on attempt 0 gets ONE free
+                // re-synthesis against the CURRENT file content before escalating to the
+                // LLM resolver (which escalates toward full-file rewrite). The file may
+                // have drifted between generation and apply (parallel agent threads, an
+                // external save, a formatter), so re-running the generator re-anchors the
+                // edit at zero LLM cost. If the generator declines now — the change is no
+                // longer deterministically describable against this content — fall through
+                // to the normal LLM resolve path.
+                var usedFreshDeterministic = false;
+                if (attempt == 1 && isDeterministicEdit)
+                {
+                    var freshExists = System.IO.File.Exists(fullPath);
+                    var freshContent = freshExists
+                        ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
+                        : string.Empty;
+                    var freshDet = DeterministicEditGenerator.TryGenerate(
+                        relPath, freshExists, freshContent, step.Change ?? "");
+                    if (freshDet != null)
+                    {
+                        oldStr = freshDet.OldStr;
+                        newStr = freshDet.NewStr;
+                        step.OldString = freshDet.OldStr;
+                        step.NewString = freshDet.NewStr;
+                        step.Edits = freshDet.Edits is { Count: > 0 } ? freshDet.Edits : null;
+                        if (freshDet.LineNumber > 0) step.LineNumber = freshDet.LineNumber;
+                        fullFile = false;
+                        fullContent = null;
+                        alreadyDone = false;
+                        resolveError = null;
+                        fromFormatC = false;
+                        usedFreshDeterministic = true;
+                        await EmitLog(emitSse, "info",
+                            $"⚙️ G1: deterministic edit re-synthesized against current file content — {freshDet.Reason}", ct: ct);
+                    }
+                    else
+                    {
+                        // The generator declined — the change is no longer deterministically
+                        // describable against this content, so the stale batch (if any) must
+                        // not re-run after the LLM resolve below.
+                        step.Edits = null;
+                        await EmitLog(emitSse, "info",
+                            "⚙️ G1: deterministic re-synthesis declined against current content — escalating to LLM resolver", ct: ct);
+                    }
+                }
+                if (!usedFreshDeterministic)
+                {
+                    (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError, fromFormatC) =
+                        await ResolveEditForStep(
+                            step, projectRoot, emitSse, ct, history,
+                            explorationContext: explorationContext,
+                            targetSymbol: explorationTargetSymbol,
+                            originalPrompt: prompt,
+                            preservationDirective: preservationDirective,
+                            fullPlan: plan,
+                            planItemIndex: planItemIndex,
+                            filteredEditKnowledge: filteredEditKnowledge,
+                            causalContext: causalContext);
+                }
+                if (resolveError == null && !usedFreshDeterministic)
                 {
                     var fmt = fullFile ? "fullFile" : alreadyDone ? "alreadyDone" : fromFormatC ? "FORMAT C" : "oldString/newString";
                     var oldLen = oldStr?.Length ?? 0;
@@ -480,7 +527,16 @@ partial class AgentController
                         matchError = null;
                         snippet = null;
                         oldStr = step.Edits[0].OldString ?? "";
-                        newStr = "(batch: " + step.Edits.Count + " edits)";
+                        // Preserve the deterministic-batch marker VERBATIM when the batch came
+                        // from DeterministicEditGenerator (step.NewString carries it, enriched
+                        // with "applied N/M occurrences") so the isDeterministicBatch verify
+                        // bypass fires AND the meeting ticker can render the compact applied
+                        // count — every sub-edit was validated by an exact TryReplaceSafe match,
+                        // so content verification is satisfied by construction. LLM batches keep
+                        // their existing "(batch:" marker semantics untouched.
+                        newStr = step.NewString?.StartsWith("(deterministic batch:", StringComparison.Ordinal) == true
+                            ? step.NewString
+                            : "(batch: " + step.Edits.Count + " edits)";
                         await EmitLog(emitSse, "info",
                             $"Applied batch of {step.Edits.Count} edits to {relPath}", ct: ct);
                     }
@@ -488,6 +544,23 @@ partial class AgentController
             }
             if (!replaced)
             {
+                // A batch that failed to fully apply must NEVER fall through to the single-edit
+                // path: newStr here is the batch MARKER ("(deterministic batch: ...)" or
+                // "(batch: ...)"), not real code — TryReplaceSafe would happily write it verbatim
+                // into the file, and the marker prefix would then pass the verify bypass,
+                // "succeeding" with the marker embedded in the code. Fail fast so attempt 1's G1
+                // re-synthesis (or the LLM resolver) re-anchors against the current file content.
+                if (newStr?.StartsWith("(deterministic batch:", StringComparison.Ordinal) == true ||
+                    newStr?.StartsWith("(batch:", StringComparison.Ordinal) == true)
+                {
+                    var markerErr = "Batch did not fully apply (anchor drift or overlapping edits) — re-anchoring, marker never applied as code";
+                    await EmitLog(emitSse, "warn", $"✗ {markerErr} for {relPath}", ct: ct);
+                    history.Add((oldStr ?? "", newStr, markerErr));
+                    if (string.Equals(AgentTextUtilities.NormalizeLineEndings(oldStr ?? ""), AgentTextUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                    else { stuckCount = 0; lastOld = AgentTextUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                    if (stuckCount >= 2) goto RecordFailure;
+                    continue;
+                }
                 if (string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
                 {
                     var oldLinesCount = oldStr!.Split('\n').Length;
@@ -1214,7 +1287,14 @@ partial class AgentController
             await SaveEditWithUndoAsync(fullPath, newContent, relPath, projectRoot, preEditContent, ct);
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
             {
-                var missing = ScanMissingTypes(newContent, newStr);
+                // For deterministic batches, newStr is the "(deterministic batch: ...)" MARKER —
+                // scan the ACTUAL member snippets instead, so missing-type stub generation for
+                // batch-added members behaves like single-edit adds (the marker text would scan
+                // as a silent no-op).
+                var scanNewCode = newStr.StartsWith("(deterministic batch:", StringComparison.Ordinal) && step.Edits is { Count: > 0 }
+                    ? string.Join("\n", step.Edits.Select(e => e.NewString))
+                    : newStr;
+                var missing = ScanMissingTypes(newContent, scanNewCode);
                 var stubsToAdd = new List<string>();
                 foreach (var t in missing)
                 {

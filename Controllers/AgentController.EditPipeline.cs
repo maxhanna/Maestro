@@ -303,6 +303,16 @@ partial class AgentController
         }
         return (decisions, reasons, scores, needsExtraStepFlags, deterministicPlaceholderReject);
     }
+    /// <summary>First line of a snippet, trimmed and capped, for compact per-edit display.</summary>
+    private static string OneLinePreview(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var first = s.Trim();
+        var nl = first.IndexOf('\n');
+        if (nl >= 0) first = first[..nl].TrimEnd();
+        return first.Length > 80 ? first[..80] + "…" : first;
+    }
+
     // ── Phase: successful-edit completion (record outcome, wire new methods, emit result) ──
     // Verbatim from ResolveAndApplyEdit lines 1785-1853. Returns the next step index.
     private async Task<int> CompleteSuccessfulEditAsync(
@@ -366,6 +376,27 @@ partial class AgentController
             }
             var result = new Dictionary<string, object?>();
             PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
+            // Deterministic multi-match batches: surface the applied/total counts plus the
+            // per-edit lines so the board step card can render "5/5 occurrences updated"
+            // with each sub-edit expanded — instead of the confusing first-edit diff.
+            if (newStr != null && newStr.StartsWith("(deterministic batch:", StringComparison.Ordinal) &&
+                step.Edits != null && step.Edits.Count > 0)
+            {
+                var batchMarker = Regex.Match(newStr,
+                    @"^\(deterministic batch: \d+ edits, applied (\d+)/(\d+) ([a-z]+)\)$");
+                if (batchMarker.Success)
+                {
+                    result["batchApplied"] = int.Parse(batchMarker.Groups[1].Value);
+                    result["batchTotal"] = int.Parse(batchMarker.Groups[2].Value);
+                    result["batchUnit"] = batchMarker.Groups[3].Value;
+                    result["batchEdits"] = step.Edits.Select(e => (object)new Dictionary<string, object?>
+                    {
+                        ["line"] = e.LineNumber,
+                        ["old"] = OneLinePreview(e.OldString),
+                        ["to"] = OneLinePreview(e.NewString)
+                    }).ToList();
+                }
+            }
             result["index"] = stepIndex; result["planItemIndex"] = planItemIndex;
             result["needsExtraStep"] = stepNeedsExtraStep;
             result["extraStepReason"] = stepExtraStepReason;
