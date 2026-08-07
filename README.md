@@ -1,5 +1,6 @@
 ﻿
-# 🕷️ Weaver — AI‑Powered Assistant
+# 🕷️ Weaver 
+## Your AI‑Powered Assistant
 
 Weaver is an intelligent, agent‑driven development environment that can **modify your entire project from a single natural‑language prompt**. It understands your codebase, plans multi‑step edits, applies atomic diffs, verifies results, and even handles Git operations — all inside a beautiful, integrated IDE.
 
