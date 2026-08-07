@@ -527,11 +527,27 @@ partial class AgentController
         if (IsExternalFilesystemTask(prompt))
         {
             await EmitLog(emitSse, "info",
-                "Phase 1 — task targets the OS filesystem OUTSIDE the repository (desktop/home/Downloads/etc.) — skipping BM25 auto-read so no repo file content can anchor the plan; use _create_directory/_create_file/_command for the operation", ct: ct);
+                "Phase 1 — task targets the OS filesystem OUTSIDE the repository (desktop/home/Downloads/etc.) — skipping BM25 auto-read so no repo file content can anchor the plan; only _command can reach outside the repo (_create_directory/_create_file are repo-relative)", ct: ct);
+            // Tell the model WHICH OS it's on and WHERE the desktop actually is. Without
+            // this, smaller models invent Linux paths (/home/user/...) and the repo-relative
+            // _create_directory/_create_file then silently create folders INSIDE the project.
+            var osName = OperatingSystem.IsWindows()
+                ? $"Windows ({Environment.OSVersion})"
+                : Environment.OSVersion.ToString();
+            var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            var homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             var osSb = new StringBuilder();
             osSb.AppendLine("THIS TASK OPERATES ON THE OS FILESYSTEM OUTSIDE THE REPOSITORY (desktop/home/Downloads/etc.).");
+            osSb.AppendLine($"You are running on {osName}. Use THIS operating system's path syntax (Windows backslashes like C:\\Users\\Name\\Desktop\\...) — never Linux paths like /home/user/...");
+            osSb.AppendLine($"Desktop folder: {desktopPath}");
+            osSb.AppendLine($"Home folder: {homePath}");
             osSb.AppendLine("The repository's files are NOT relevant to this task — do NOT plan edits to them.");
-            osSb.AppendLine("Use _command for OS paths outside the repo (e.g. mkdir/New-Item for folders, rm/Move-Item for files) — _create_directory/_create_file take repo-relative paths only. Never write application code to perform the operation.");
+            osSb.AppendLine("_create_directory/_create_file write RELATIVE TO THE PROJECT ROOT ONLY — they CANNOT create folders/files on the Desktop or anywhere outside the repo. Only a _command step can touch the OS filesystem.");
+            osSb.AppendLine("For Desktop targets, output a _command step whose change IS a real command with an absolute path, e.g.:");
+            osSb.AppendLine($"  _command | change: New-Item -ItemType Directory -Path \"{desktopPath}\\<name>\" -Force");
+            osSb.AppendLine($"  _command | change: Set-Content -Path \"{desktopPath}\\<file>.txt\" -Value \"<content>\" -Encoding UTF8");
+            osSb.AppendLine($"  _command | change: Invoke-RestMethod https://example.com/api | Set-Content -Path \"{desktopPath}\\<file>.txt\"");
+            osSb.AppendLine("Never write application code (Python/JS/C# scripts) to perform the operation.");
             osSb.AppendLine();
             await EmitLog(emitSse, "info",
                 $"Phase 1 complete — {allSteps.Count} step(s), OS-filesystem task — no repo files auto-read", ct: ct);

@@ -8,6 +8,45 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
 
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
+  // ── Cron run log ──────────────────────────────────────────────────────
+  // Lightweight audit trail for scheduled jobs. Each calendar card keeps a
+  // small capped list of its runs (fire time, outcome, duration) so one-shot
+  // cron jobs leave a trace even though the board card is deleted when the
+  // job completes. Stored in board data (vm.state._cronRunLog) so it survives
+  // reloads; the log is cleared when the calendar card itself is deleted.
+  function cronRunLogEnsure(vm) {
+    if (!vm.state) vm.state = {};
+    if (!Array.isArray(vm.state._cronRunLog)) vm.state._cronRunLog = [];
+    return vm.state._cronRunLog;
+  }
+  // Keys a run-log entry back to the calendar card it came from. Board cards
+  // created by the scheduler carry _cronSourceId (the calendar card id); when
+  // that's missing (older cards) fall back to matching task text + schedule.
+  function cronRunLogKey(calCard) {
+    if (!calCard) return '';
+    if (calCard.id) return 'id:' + calCard.id;
+    return 'text:' + String(calCard.text || '').trim() + '|' + String(calCard.cronExpression || calCard.time || '').trim();
+  }
+  // Records a run entry. `outcome` is one of 'ran', 'success', 'error',
+  // 'stopped' or 'skipped'; durationMs is the run length (0 for fire/skip).
+  function cronRunLogAdd(vm, key, entry) {
+    if (!key) return;
+    try {
+      var log = cronRunLogEnsure(vm);
+      var base = {
+        key: key,
+        firedAt: entry.firedAt || new Date().toISOString(),
+        outcome: entry.outcome || 'ran',
+        durationMs: entry.durationMs || 0,
+        summary: entry.summary || '',
+        cardId: entry.cardId || ''
+      };
+      log.unshift(base);
+      if (log.length > 100) log.length = 100;
+      if (vm.saveCards) vm.saveCards();
+    } catch (e) { console.log('cronRunLogAdd error', e); }
+  }
+
   // Keep one card per id — a stale save or double-delivered push can persist two
   // copies of a calendar card, and duplicate ids inside a day's cards crash the
   // calendar's ng-repeat (ngRepeat:dupes), same as the kanban board.
@@ -206,6 +245,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
               // Suppress this fire — the same calendar card already has a live
               // card on the board, so firing again would duplicate it.
               console.log('[calendar] suppressed fire for "' + (cal.text || '').slice(0, 40) + '" — a live instance is already on the board; the schedule resumes once it leaves To Do/Doing');
+              // Audit trail: note the suppressed fire so skipped runs show up
+              // in the card's run history instead of silently vanishing.
+              cronRunLogAdd(_vm, cronRunLogKey(cal), { outcome: 'skipped', summary: 'Schedule fired while a live card was still on the board — no duplicate created.' });
               if (cal.cronExpression) cal.lastFired = now.toISOString(); else cal.processed = true;
               changed = true;
               continue;
@@ -224,11 +266,17 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
               // render a ⏰ chip on it (and keep it recognizable through Doing/Done).
               _fromCron: true,
               _cronExpression: cal.cronExpression || (cal.time ? cal.date + ' ' + cal.time : ''),
-              _cronLabel: cal.label || ''
+              _cronLabel: cal.label || '',
+              // Link the board card back to the calendar card it came from so
+              // the cron run log can attribute outcomes to the right schedule.
+              _cronSourceId: cal.id
             };
             _vm.state.todo.push(newCard);
             _vm.saveCards();
             changed = true;
+            // Audit trail: this fire produced a board card — record it now (the
+            // outcome/duration get filled in when the card finishes or is deleted).
+            cronRunLogAdd(_vm, cronRunLogKey(cal), { outcome: 'ran', cardId: newCard.id, summary: 'Fired on schedule — card pushed to To Do.' });
             if (cal.cronExpression) cal.lastFired = now.toISOString(); else cal.processed = true;
             // The interval runs outside a digest — apply so the new card shows
             // even when the agent stays idle (no SSE stream to trigger a digest).
@@ -259,6 +307,64 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
       vm.calMonth = new Date().getMonth();
       vm.calWeekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       vm.calEditCardData = null;
+      vm.calShowHistory = null; // calendar card id whose run-history popup is open
+
+      // ── Cron run log (audit trail for scheduled jobs) ───────────────────
+      // Entries live in board data (vm.state._cronRunLog) so they survive
+      // reloads; recorded when a job fires, when it finishes/deletes, and when
+      // a fire is suppressed because a live instance is already on the board.
+      vm.cronRunLogFor = function (card) {
+        var key = cronRunLogKey(card);
+        if (!key) return [];
+        return (cronRunLogEnsure(vm) || []).filter(function (e) { return e && e.key === key; });
+      };
+      vm.cronRunCount = function (card) { return vm.cronRunLogFor(card).length; };
+      vm.cronRunOutcomeClass = function (e) {
+        if (!e || !e.outcome) return 'cron-run--ran';
+        return 'cron-run--' + String(e.outcome);
+      };
+      vm.cronRunDuration = function (e) {
+        if (!e || !e.durationMs) return '';
+        var s = Math.round(e.durationMs / 1000);
+        if (s < 60) return s + 's';
+        return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+      };
+      vm.cronRunLabel = function (e) {
+        if (!e) return '';
+        if (e.outcome === 'success') return '✅ Done';
+        if (e.outcome === 'error') return '❌ Error';
+        if (e.outcome === 'stopped') return '⏹ Stopped';
+        if (e.outcome === 'skipped') return '⏭ Skipped (already running)';
+        return '▶ Fired';
+      };
+      vm.calOpenHistory = function (card, $event) {
+        if ($event) $event.stopPropagation();
+        vm.calShowHistory = card ? card.id : null;
+        scheduleUpdate();
+      };
+      vm.calHistoryCard = function () {
+        var id = vm.calShowHistory;
+        if (!id) return null;
+        for (var ci = 0; ci < vm.calCards.length; ci++) {
+          if (vm.calCards[ci] && vm.calCards[ci].id === id) return vm.calCards[ci];
+        }
+        return null;
+      };
+      vm.calCloseHistory = function (event) {
+        if (event) event.stopPropagation();
+        vm.calShowHistory = null;
+        scheduleUpdate();
+      };
+      vm.calClearHistory = function (card, $event) {
+        if ($event) $event.stopPropagation();
+        if (!card || !card.id) return;
+        if (!$window.confirm('Clear the run history for this scheduled card?')) return;
+        var key = cronRunLogKey(card);
+        if (!key) return;
+        cronRunLogEnsure(vm);
+        vm.state._cronRunLog = (vm.state._cronRunLog || []).filter(function (e) { return e && e.key !== key; });
+        if (vm.saveCards) vm.saveCards();
+      };
 
       vm.calMonthName = (function () {
         var m = new Date(vm.calYear, vm.calMonth, 1);
@@ -696,11 +802,15 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
             isDecomposing: false,
             _fromCron: true,
             _cronExpression: data.cronExpression || (data.time ? (data.date instanceof Date ? localDateStr(data.date) : data.date) + ' ' + (data.time instanceof Date ? timeStr(data.time) : data.time) : ''),
-            _cronLabel: data.label || ''
+            _cronLabel: data.label || '',
+            _cronSourceId: data.id
           };
           if (!_vm.state.todo) _vm.state.todo = [];
           _vm.state.todo.push(newCard);
           _vm.saveCards();
+          // Audit trail: 'Run now' is a manual fire — record it so the calendar
+          // card's history shows when it was fired by hand vs on schedule.
+          cronRunLogAdd(_vm, cronRunLogKey(data), { outcome: 'ran', cardId: newCard.id, summary: 'Fired manually (Run now) — card pushed to To Do.' });
           // The interval runs outside a digest — apply so the card shows immediately.
           try { if (_scope && !_scope.$$phase) _scope.$applyAsync(); } catch (e) {}
           if (_vm.showSideToast) _vm.showSideToast('⏰ Calendar card fired now — added to To Do' + (_vm.streamingActive ? ' (queued)' : ' and started'));

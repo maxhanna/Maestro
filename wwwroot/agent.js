@@ -520,6 +520,9 @@ angular.module('kanbanApp')
                                                                         var mvCard = vm.state[mvCol].splice(mvIdx, 1)[0];
                                                                         mvCard.agentAnalysis = concAnalysis;
                                                                         mvCard.agentLog = angular.copy(run.log);
+                                                                        // Audit trail: scheduled (cron) cards are deleted when done, so record
+                                                                        // the outcome + duration BEFORE the card disappears from the board.
+                                                                        if (mvCard._fromCron) vm.cronRunLogEnd(mvCard, incomplete ? 'error' : 'success', run.elapsed, concAnalysis.summary);
                                                                         // Scheduled (cron) cards are one-shot jobs — don't keep them on the
                                                                         // board (the card is already spliced out, so just skip the done push).
                                                                         if (!mvCard._fromCron) {
@@ -602,6 +605,9 @@ angular.module('kanbanApp')
                                                                             // Scheduled (cron) cards are one-shot jobs: when they finish,
                                                                             // delete the card instead of keeping it on the board.
                                                                             pushAgentLog(vm, 'log', 'Plan completed — deleting scheduled card (one-shot job).');
+                                                                            // Audit trail: the card is about to be deleted, so record the run
+                                                                            // outcome + duration on the calendar card's run log first.
+                                                                            vm.cronRunLogEnd(card, 'success', run.elapsed, finalSummary);
                                                                             vm.deleteCard(card.id, 'doing');
                                                                             $timeout(function () {
                                                                                 if (!vm.autoQueue) return;
@@ -726,6 +732,50 @@ angular.module('kanbanApp')
                     if (wasCurrent) pushAgentLog(vm, 'warn', 'Agent run stopped by user.');
                     if (run && run.log) run.log.push({ ts: new Date().toLocaleTimeString(), level: 'warn', message: 'Agent run stopped by user.', detail: undefined });
                 };
+                // ── Cron run log ───────────────────────────────────────────────
+                // Scheduled (cron) cards are deleted when they finish, so their run
+                // summary would be lost with them. Record the outcome + duration on
+                // the calendar card's run log (stored in board data by CalendarMixin
+                // as vm.state._cronRunLog) so one-shot jobs leave an audit trail.
+                vm.cronRunLogEnd = function (card, outcome, elapsedMs, summary) {
+                    if (!card || !card._fromCron) return;
+                    try {
+                        if (!vm.state) return;
+                        if (!Array.isArray(vm.state._cronRunLog)) return;
+                        var sourceId = card._cronSourceId || '';
+                        var textKey = 'text:' + String(card.text || '').trim() + '|' + String(card._cronExpression || '').trim();
+                        // Update the newest matching entry in place (the fire record).
+                        var found = false;
+                        for (var i = 0; i < vm.state._cronRunLog.length; i++) {
+                            var e = vm.state._cronRunLog[i];
+                            if (!e) continue;
+                            var matches = sourceId ? (e.key === 'id:' + sourceId) : (e.key === textKey);
+                            if (!matches || e.cardId !== card.id) continue;
+                            e.outcome = outcome;
+                            e.durationMs = elapsedMs || e.durationMs || 0;
+                            if (summary) e.summary = summary;
+                            found = true;
+                            break;
+                        }
+                        if (!found) {
+                            // No fire record (e.g. card created before logging) — add one.
+                            vm.state._cronRunLog.unshift({
+                                key: sourceId ? 'id:' + sourceId : textKey,
+                                firedAt: card.createdAt || new Date().toISOString(),
+                                outcome: outcome,
+                                durationMs: elapsedMs || 0,
+                                summary: summary || '',
+                                cardId: card.id
+                            });
+                            if (vm.state._cronRunLog.length > 100) vm.state._cronRunLog.length = 100;
+                        }
+                        // Mark the card as resolved so a later manual delete of the
+                        // same card doesn't overwrite this outcome with 'stopped'.
+                        card._cronResolved = true;
+                        if (vm.saveCards) vm.saveCards();
+                    } catch (e) { console.log('cronRunLogEnd error', e); }
+                };
+
                 // Tooltip for a scheduled (cron) card's ⏰ chip: explains the card
                 // came from a calendar job, naming the schedule label and expression.
                 vm.cronChipTitle = function (card) {
@@ -1003,7 +1053,13 @@ angular.module('kanbanApp')
                     return false;
                 };
                 vm.applyDiff = function (diffPath, step, card) {
-                    if (!diffPath || !vm.selectedProject) return;
+                    if (!diffPath) return;
+                    // Resolve against the CARD's project (falling back to the selected
+                    // one) so apply/preview/delete/open all hit the same root — a diff
+                    // lives in the card's project, which may be an absolute path outside
+                    // the workspace root (e.g. a benchmark sandbox).
+                    var proj = (card && card.filePath) || vm.selectedProject;
+                    if (!proj) return;
                     if (vm.diffIsApplied(step, diffPath, card)) return;
                     var wasRunning = vm.streamingActive;
                     var savedCardId = vm.activeCardId;
@@ -1012,7 +1068,7 @@ angular.module('kanbanApp')
                         vm.stopAgent();
                     }
                     step._applyingDiff = true;
-                    $http.post('/api/agent/apply-diff', { project: vm.selectedProject, diffPath: diffPath }).then(function (resp) {
+                    $http.post('/api/agent/apply-diff', { project: proj, diffPath: diffPath }).then(function (resp) {
                         step._applyingDiff = false;
                         if (resp.data && resp.data.success) {
                             step._diffApplied = true;
@@ -1043,13 +1099,15 @@ angular.module('kanbanApp')
                         if (vm.addLogEntry) vm.addLogEntry({ type: 'error', message: '✕ Diff HTTP error: ' + (step._diffError) });
                     });
                 };
-                vm.previewDiff = function (diffPath, step) {
-                    if (!diffPath || !vm.selectedProject) return;
+                vm.previewDiff = function (diffPath, step, card) {
+                    if (!diffPath) return;
+                    var proj = (card && card.filePath) || vm.selectedProject;
+                    if (!proj) return;
                     step._previews = step._previews || {};
                     var p = step._previews[diffPath] = step._previews[diffPath] || {};
                     if (p.content) { p.show = !p.show; return; }
                     p.loading = true;
-                    $http.get('/api/agent/diff-content', { params: { project: vm.selectedProject, diffPath: diffPath } }).then(function (resp) {
+                    $http.get('/api/agent/diff-content', { params: { project: proj, diffPath: diffPath } }).then(function (resp) {
                         p.loading = false;
                         if (resp.data && resp.data.success) {
                             p.content = resp.data.content;
@@ -1062,13 +1120,20 @@ angular.module('kanbanApp')
                         p.error = 'HTTP error';
                     });
                 };
-                vm.deleteDiff = function (diffPath, step, $event) {
+                vm.deleteDiff = function (diffPath, step, card, $event) {
+                    // Legacy call sites pass ($event) as the third argument.
+                    if (card && !card.filePath && !card.id && card.stopPropagation) {
+                        $event = card;
+                        card = null;
+                    }
                     if ($event) $event.stopPropagation();
-                    if (!diffPath || !vm.selectedProject) return;
+                    if (!diffPath) return;
+                    var proj = (card && card.filePath) || vm.selectedProject;
+                    if (!proj) return;
                     step._previews = step._previews || {};
                     var p = step._previews[diffPath] = step._previews[diffPath] || {};
                     p.deleting = true;
-                    $http.post('/api/agent/delete-diff', { project: vm.selectedProject, diffPath: diffPath }).then(function (resp) {
+                    $http.post('/api/agent/delete-diff', { project: proj, diffPath: diffPath }).then(function (resp) {
                         p.deleting = false;
                         if (resp.data && resp.data.success) {
                             p.deleted = true;
@@ -1086,14 +1151,29 @@ angular.module('kanbanApp')
                         p.deleteError = 'HTTP error';
                     });
                 };
-                vm.openDiffInIde = function (diffPath, step, $event) {
+                // Open an undo diff in the IDE. The diff path is relative to the CARD's
+                // project (which for a benchmark is the sandbox folder — an absolute path
+                // that may live OUTSIDE the workspace root), so the card's filePath is
+                // passed through; without it the editor/content endpoint would resolve the
+                // diff against the wrong root and fail with 400 "Path outside workspace
+                // root". Backslashes are normalized so the tab shows a clean filename.
+                vm.openDiffInIde = function (diffPath, step, card, $event) {
+                    // Legacy call sites pass ($event) as the third argument — detect that
+                    // shape (an event object, not a card) and shift it into the event slot.
+                    if (card && !card.filePath && !card.id && card.stopPropagation) {
+                        $event = card;
+                        card = null;
+                    }
                     if ($event) $event.stopPropagation();
-                    if (!diffPath || !vm.selectedProject) return;
+                    if (!diffPath) return;
+                    var proj = (card && card.filePath) || vm.selectedProject;
+                    if (!proj) return;
+                    var normalized = String(diffPath).replace(/\\/g, '/');
                     vm.showIDE = true;
                     if (vm.openFile) {
-                        vm.openFile(diffPath);
+                        vm.openFile(normalized, proj);
                     } else if (vm.ide && vm.ide.openFile) {
-                        vm.ide.openFile(diffPath);
+                        vm.ide.openFile(normalized, proj);
                     }
                 };
                 vm.verifyDiffs = function (planItems) {
@@ -1125,7 +1205,7 @@ angular.module('kanbanApp')
                         }
                     });
                 };
-                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; vm.checkLlmReachable(); $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; if (vm._hydrateRestoredBenchmarkQueue) vm._hydrateRestoredBenchmarkQueue(); }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
+                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; vm.checkLlmReachable(); $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; if (vm._hydrateRestoredBenchmarkQueue) vm._hydrateRestoredBenchmarkQueue(); }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; vm.defaultBenchmarkRoot = resp.data.defaultBenchmarkRoot || vm.defaultBenchmarkRoot || ''; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
                 vm.benchSectionOpen = { run: false, local: false, specs: false, server: false };
                 vm.toggleBenchSection = function (key) {
@@ -1382,6 +1462,19 @@ angular.module('kanbanApp')
                         }, function () { if (cb) cb(); });
                     }, function () { if (cb) cb(); });
                 };
+                // The root the NEXT benchmark run will write to: the custom
+                // benchmarkProjectRoot from the system-info panel when set, else the
+                // desktop benchmark_sandbox default resolved by the backend. Surfaced in
+                // the panel before a run so users aren't surprised where work lands.
+                vm.benchmarkEffectiveRoot = function () {
+                    var custom = vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot;
+                    var root = (custom && String(custom).trim()) ? String(custom) : (vm.defaultBenchmarkRoot || '');
+                    return root.replace(/\\/g, '/').replace(/\/+$/g, '').trim();
+                };
+                vm.benchmarkUsesCustomRoot = function () {
+                    var custom = vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot;
+                    return !!(custom && String(custom).trim());
+                };
                 vm._runBenchmarkLevel = function (plan) {
                     vm.benchmarkRunning = true; vm.benchmarkLevel = plan.level;
                     if (!vm.benchSectionOpen) vm.benchSectionOpen = {};
@@ -1389,7 +1482,12 @@ angular.module('kanbanApp')
                     var benchProj = vm._benchmarkProjectPath || vm.selectedProject;
                     var card = { id: 'benchmark_' + plan.level + '_' + Date.now(), text: plan.description, filePath: benchProj, priority: 'high', _benchmark: true, _benchmarkLevel: plan.level, ready: true };
                     vm._benchmarkProjectPath = benchProj;
-                    vm.state.todo.push(card); vm.saveCards(); vm.executeAgent(card);
+                    vm.state.todo.push(card); vm.saveCards();
+                    // Match the panel note: log the effective root (custom or default sandbox)
+                    // so the transcript and the Benchmarks panel agree on where work lands.
+                    pushAgentLog(vm, 'info', '📍 ' + (vm.benchmarkLevelName ? vm.benchmarkLevelName(plan.level) : ('Benchmark ' + plan.level)) +
+                        ' writing to ' + (vm.benchmarkEffectiveRoot ? vm.benchmarkEffectiveRoot() : benchProj));
+                    vm.executeAgent(card);
                 };
                 vm.startBenchmark = function (level) {
                     if (vm.benchmarksRunning()) return;

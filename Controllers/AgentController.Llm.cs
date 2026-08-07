@@ -505,6 +505,13 @@ partial class AgentController
         }
     }
     /// <summary>
+    /// Wall-of-text floor: fewer than 1 newline per 1000 chars. Dense single-paragraph prose
+    /// from smaller models legitimately lands at ~1 newline per 200-500 chars, so anything
+    /// above this floor is normal prose — only genuinely break-free walls trip the check.
+    /// </summary>
+    private const double WallOfTextMinNewlineRatio = 0.001;
+
+    /// <summary>
     /// Global hallucination detection — call on full LLM output (post-streaming or non-streaming).
     /// Returns an error string if hallucination is detected, null otherwise.
     /// Checks: wall-of-text (very low newline density), semantic repetition of long substrings.
@@ -513,11 +520,15 @@ partial class AgentController
     {
         if (string.IsNullOrWhiteSpace(raw) || raw.Length < 1000) return null;
 
-        // 1. Wall-of-text check: very low newline density (fewer than 1 newline per 200 chars)
-        //    Legitimate JSON/code has ~1 newline per 50-100 chars. Hallucinated rambling has almost none.
+        // 1. Wall-of-text check: very low newline density. Deliberately EXTREME
+        //    (fewer than 1 newline per 1000 chars) — dense single-paragraph prose from
+        //    smaller models legitimately lands at ~1 newline per 200-500 chars, and
+        //    treating that band as hallucination kept aborting useful pre-plan reasoning
+        //    (e.g. "2249 chars with 8 line breaks" on a web-search task). Real stuck-ramble
+        //    output runs thousands of chars with near-zero breaks.
         var newlineCount = raw.Count(c => c == '\n');
         var newlineRatio = (double)newlineCount / raw.Length;
-        if (raw.Length > 2000 && newlineRatio < 0.005) // fewer than 1 newline per 200 chars
+        if (raw.Length > 2000 && newlineRatio < WallOfTextMinNewlineRatio)
         {
             return $"Hallucination (wall of text): {raw.Length} chars with {newlineCount} line breaks " +
                    $"(ratio {newlineRatio:F4}). The model is rambling without structure. Output truncated.";
@@ -560,7 +571,7 @@ partial class AgentController
             if (sb[i] == '\n') newlineCount++;
 
         var ratio = (double)newlineCount / len;
-        if (ratio < 0.005) // fewer than 1 newline per 200 chars
+        if (ratio < WallOfTextMinNewlineRatio) // extreme, not just dense prose
         {
             return $"Hallucination (wall of text): {len} chars with {newlineCount} line breaks (ratio {ratio:F4}) — aborted early.";
         }

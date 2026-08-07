@@ -817,6 +817,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         if (string.IsNullOrWhiteSpace(step.File) || string.IsNullOrWhiteSpace(step.Change))
             return (false, "Step is missing file or change description.");
+        // OS-filesystem tasks: _create_directory/_create_file are repo-relative and CANNOT
+        // reach the Desktop — only a _command step touches the OS filesystem. Knowing the OS
+        // also lets the _command rejection teach the model the real desktop path instead of
+        // letting it invent Linux paths.
+        var osTask = IsExternalFilesystemTask(originalPrompt);
+        var osDesktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
         var normNew = NormalizeChangeForDedup(step.Change);
         foreach (var existing in planSoFar)
         {
@@ -867,7 +873,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
             !AgentProjectUtilities.LooksLikeShellCommand(step.Change))
         {
+            if (osTask)
+                return (false, $"_command step is not an executable shell command. You are on {(OperatingSystem.IsWindows() ? "Windows" : Environment.OSVersion)} and the Desktop is at {osDesktopPath}. A _command step's change must BE the real command with an absolute path, e.g. New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force. Never put planning notes in a _command step.");
             return (false, "_command step is not an executable shell command. Use _command only for real terminal commands such as `dotnet test`, `npm install`, or `cd app; npx ng g c name`. Put planning notes in the thinking field, not in a command step.");
+        }
+        // OS tasks: _create_directory/_create_file write relative to the PROJECT ROOT — a step
+        // whose change names an OS location would silently create the folder/file INSIDE the
+        // project (the "/home/user/search_results" failure). Reject and steer to _command.
+        if (osTask &&
+            (string.Equals(step.File, "_create_directory", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase)))
+        {
+            var ch = (step.Change ?? "").Trim();
+            var looksOsPath = ch.StartsWith("/")
+                || ch.StartsWith("~")
+                || ch.StartsWith("\\\\") // UNC \\server\share
+                || Regex.IsMatch(ch, @"^[A-Za-z]:[\\/]") // C:\ or C:/
+                || Regex.IsMatch(ch, @"\b(desktop|downloads|documents|userprofile|%userprofile%|home dir|home directory)\b", RegexOptions.IgnoreCase);
+            if (looksOsPath)
+                return (false, $"{step.File} writes RELATIVE TO THE PROJECT ROOT — it cannot create \"{ch}\" on the Desktop/OS filesystem. Use a _command step whose change is a real command with an absolute path, e.g. New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force (Desktop is at {osDesktopPath}).");
         }
         if (string.Equals(step.File, "_show", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(step.File, "_display", StringComparison.OrdinalIgnoreCase))
@@ -889,7 +913,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             "If the task is functionally complete, return planComplete=true.");
         }
         var researchVerbs = new[] { "locate", "find", "examine", "understand", "read", "explore", "look at", "inspect", "review", "check", "see", "search" };
+        // _web_search/_web_fetch are ACTIONABLE research markers — their change field IS the
+        // query/URL. The web-need gate decides whether web steps are allowed, not this guard;
+        // rejecting them here deadlocks web-needing tasks (the model proposes the right tool
+        // and the loop bounces it, exactly like the "Search the web…" run).
         if (!step.File.Equals("_discover", StringComparison.OrdinalIgnoreCase) &&
+            !step.File.Equals("_web_search", StringComparison.OrdinalIgnoreCase) &&
+            !step.File.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) &&
             researchVerbs.Any(v => changeLower.StartsWith(v)))
         {
             return (false, $"Research step rejected — '{changeLower.Split(' ')[0]}' is not an actionable edit. " +

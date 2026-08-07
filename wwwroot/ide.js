@@ -94,7 +94,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
           vm.ide.openTabs.forEach(function (tab) {
             if (!tab.path || !tab.lastModified) return;
             $http.get('/api/editor/check-modified', {
-              params: { project: vm.selectedProject || '', path: tab.path, since: tab.lastModified }
+              params: { project: tab.project || vm.selectedProject || '', path: tab.path, since: tab.lastModified }
             }).then(function (resp) {
               var data = resp.data;
               if (!data || !data.exists) return;
@@ -110,7 +110,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
               }
               // No unsaved changes — reload silently
               $http.get('/api/editor/content', {
-                params: { project: vm.selectedProject || '', path: tab.path }
+                params: { project: tab.project || vm.selectedProject || '', path: tab.path }
               }).then(function (cr) {
                 var newContent = cr.data && cr.data.content !== undefined ? cr.data.content : (cr.data || '');
                 var wasCurrent = vm.ide.currentFile === tab.path;
@@ -805,10 +805,15 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm._rebuildTreeDisplay();
       }
 
-      vm.openFile = function(path) {
+      // Open a file in a tab. `project` is optional and defaults to the currently
+      // selected project — a diff opened from a card's plan is resolved against the
+      // CARD's project (which may be an absolute path outside the workspace root,
+      // e.g. a benchmark sandbox) so the tab keeps working even after the user
+      // switches projects.
+      vm.openFile = function(path, project) {
         vm.ide.sharedEditorActive = false;
         vm.ide.breadcrumbPath = path;
-        var existing = vm.findTab(path);
+        var existing = vm.findTab(path, project);
         if (existing) {
           vm.switchTab(path);
           _navigateExplorerToFile(path);
@@ -817,6 +822,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         var displayName = path.split('/').pop() || path;
         var tab = {
           path: path,
+          project: project || vm.selectedProject || '',
           displayName: displayName,
           content: '',
           savedContent: '',
@@ -837,9 +843,18 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         _navigateExplorerToFile(path);
       };
 
-      vm.findTab = function(path) {
+      vm.findTab = function(path, project) {
+        var proj = (project || '').replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
         for (var i = 0; i < vm.ide.openTabs.length; i++) {
-          if (vm.ide.openTabs[i].path === path) return vm.ide.openTabs[i];
+          var t = vm.ide.openTabs[i];
+          if (t.path !== path) continue;
+          // When a project is supplied, only reuse a tab from the SAME project — a
+          // diff path like data/undo/x.diff can exist in two projects at once.
+          if (proj) {
+            var tproj = (t.project || '').replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+            if (tproj !== proj) continue;
+          }
+          return t;
         }
         return null;
       };
@@ -1047,7 +1062,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       };
 
       vm.loadFileContent = function(path, tab) {
-        $http.get('/api/editor/content', { params: { project: vm.selectedProject, path: path } }).then(function(resp) {
+        $http.get('/api/editor/content', { params: { project: tab.project || vm.selectedProject || '', path: path } }).then(function(resp) {
           var content = resp.data && resp.data.content !== undefined ? resp.data.content : (resp.data || '');
           tab.content = content;
           tab.savedContent = content;
@@ -1136,7 +1151,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         }
 
         var payload = {
-          project: vm.selectedProject,
+          project: tab.project || vm.selectedProject || '',
           path: vm.ide.currentFile,
           content: content
         };
@@ -1168,6 +1183,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         var displayName = fileName.split('/').pop() || fileName;
         var tab = {
           path: fullPath,
+          project: vm.selectedProject || '',
           displayName: displayName,
           content: '',
           savedContent: '',

@@ -1019,6 +1019,21 @@ body.dragging-active .card:hover {
     color: #f87171;
 }
 
+/* 'Done & Delete' for scheduled (cron) cards — a warm amber tint matching
+   the tag-cron chip family so time-triggered cards read as scheduled at a
+   glance, distinct from the benchmark gold (#e5c07b). */
+.card .card-actions .btn-cron-done {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    color: #fbbf24;
+    font-weight: 700;
+}
+
+.card .card-actions .btn-cron-done:hover {
+    background: rgba(245, 158, 11, 0.22);
+    border-color: rgba(245, 158, 11, 0.7);
+}
+
 .card-endpoint-select {
     font-size: 11px;
     padding: 3px 24px 3px 8px;

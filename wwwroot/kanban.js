@@ -386,12 +386,23 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         };
       };
 
+      // Audit trail: a scheduled (cron) card deleted BY HAND (not by the agent
+      // finishing it) never reached cronRunLogEnd — record it as stopped so the
+      // calendar run history shows an unresolved fire instead of a phantom
+      // '▶ Fired' entry. Auto-completed cards are already marked _cronResolved.
+      vm._recordCronStoppedIfManual = function (card) {
+        if (card && card._fromCron && !card._cronResolved && vm.cronRunLogEnd) {
+          vm.cronRunLogEnd(card, 'stopped', 0, 'Card deleted before the job completed.');
+        }
+      };
+
       vm.confirmDeleteCard = function () {
         if (!vm.deleteCardConfirm || !vm.deleteCardConfirm.id) return;
         var id = vm.deleteCardConfirm.id;
         var col = vm.deleteCardConfirm.col;
         var idx = vm.state[col].findIndex(function (c) { return c.id === id; });
         if (idx !== -1) {
+          vm._recordCronStoppedIfManual(vm.state[col][idx]);
           vm.state[col].splice(idx, 1);
           console.log('Deleted card with id', id);
           vm.saveCards();
@@ -425,6 +436,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         col = col || 'todo';
         var idx = vm.state[col].findIndex(function (c) { return c.id === id; });
         if (idx !== -1) {
+          vm._recordCronStoppedIfManual(vm.state[col][idx]);
           vm.state[col].splice(idx, 1);
           vm.saveCards();
         }
@@ -690,16 +702,21 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         vm.saveCards();
       };
 
-      vm.openInIde = function (filePath) {
+      // Open an attached file (or any project-relative path) in the IDE. `project` is
+      // optional and defaults to the selected project — pass the card's filePath so
+      // files in projects outside the workspace root (e.g. a benchmark sandbox) resolve
+      // against the right root.
+      vm.openInIde = function (filePath, project) {
+        var proj = project || vm.selectedProject || '';
         if (vm.useVSCodeInsteadOfIDE) {
-          var fullPath = (vm.selectedProject || '') + '/' + filePath;
+          var fullPath = proj + '/' + filePath;
           $http.post('/api/config/open-in-vscode', { filePath: fullPath }).then(function () {}, function (err) {
             console.error('Failed to open in VS Code', err);
           });
           return;
         }
         vm.showIDE = true;
-        if (vm.openFile) vm.openFile(filePath);
+        if (vm.openFile) vm.openFile(filePath, proj);
       };
 
       vm.editCardText = function (card) {

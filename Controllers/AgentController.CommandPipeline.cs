@@ -43,6 +43,9 @@ partial class AgentController
         var isWindows = OperatingSystem.IsWindows();
         var shellName = isWindows ? "PowerShell" : "Bash";
         var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        // OS-filesystem tasks must NOT be redirected back into the repo — that is what made
+        // desktop writes land inside the project folder. For those, keep absolute desktop paths.
+        var osTaskPrompt = IsExternalFilesystemTask(prompt);
         var baseInstructions = new StringBuilder();
         baseInstructions.AppendLine("You are a senior terminal automation agent. You have full terminal access and must complete the user's task end-to-end.");
         baseInstructions.AppendLine($"You are running on {shellName} ({Environment.OSVersion}).");
@@ -162,7 +165,10 @@ partial class AgentController
                         changeLower.StartsWith("validate") ||
                         changeLower.StartsWith("confirm") ||
                         changeLower.StartsWith("ensure");
-                    var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}).\nThe working directory (project root) is: {projectRoot}\nALL files and folders must be created INSIDE this working directory — translate desktop paths to this directory.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
+                    var pathRule = osTaskPrompt
+                        ? $"The task targets the OS filesystem OUTSIDE the repo. Write to the location the task asks for using ABSOLUTE paths (Desktop: {desktopPath}). Do NOT redirect those paths into the project directory."
+                        : "ALL files and folders must be created INSIDE this working directory — translate desktop paths to this directory.";
+                    var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}).\nThe working directory (project root) is: {projectRoot}\n{pathRule}\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
                     var (cmdRaw, _, _) = await CallLlmRaw(
                         "You are a terminal command translator. Output only the command, no markdown, no explanation.",
                         translatePrompt, ct, _infiniteTimeout);

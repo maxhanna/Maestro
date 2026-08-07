@@ -145,8 +145,8 @@
         <span class="header-stat" title="Best benchmark score">📊 {{vm.userStats().bestScore}}% best score</span>
         <span class="header-stat" title="Total archived cards">🗄 {{vm.userStats().archived}} archived</span>
       </div> 
-      <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
-        ng-change="vm.changeProject()"></select>
+      <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as vm.projectLabel(p) for p in vm.projects"
+        ng-change="vm.changeProject()" ng-class="{'benchmark-project-selected': vm.isBenchmarkProject(vm.selectedProject)}"></select>
       <div class="project-desc" ng-if="vm.selectedProject && vm.getSelectedProjectDescription()">—
         {{vm.getSelectedProjectDescription()}}</div>
       <div class="project-options">
@@ -863,7 +863,7 @@
         <div class="form-row">
           <label for="edit-projects-default">Default Project</label>
           <select id="edit-projects-default" ng-model="vm.settingsDefaultProject"
-            ng-options="p.Path as p.Name for p in vm.projects"></select>
+            ng-options="p.Path as vm.projectLabel(p) for p in vm.projects"></select>
         </div>
       </div>
       <div class="popup-footer">
@@ -1709,6 +1709,13 @@
                 title="The run was interrupted by a page reload or dropped stream — resume the remaining benchmarks from here.">↻ Resume</button>
             </div>
 
+            <div class="bench-root-note" ng-class="{custom: vm.benchmarkUsesCustomRoot()}"
+              title="Benchmark work lands in this folder — the 'Weaver Benchmarks' kanban project points here. Set a custom root in System specs → ✎ Edit.">
+              <span class="bench-root-icon">📍</span>
+              <span class="bench-root-text">Next run writes to <code class="bench-mono">{{vm.benchmarkEffectiveRoot()}}</code></span>
+              <span class="bench-root-tag">{{vm.benchmarkUsesCustomRoot() ? 'custom root' : 'default'}}</span>
+            </div>
+
             <div ng-if="vm.benchmarkPlans.length > 0">
               <div ng-repeat="plan in vm.benchmarkPlans" class="bench-plan-card">
                 <span class="bench-plan-chip">L{{plan.level}}</span>
@@ -2004,7 +2011,7 @@
               <input type="text" ng-model="vm.systemInfoCustom.model" placeholder="e.g. GPT-4, Claude 3.5 Sonnet" />
             </div>
             <div class="form-row"><label class="muted">Benchmark Project Root</label>
-              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot" placeholder="{{vm.defaultBenchmarkRoot}}" class="bench-mono" />
+              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot" placeholder="{{vm.benchmarkEffectiveRoot()}}" class="bench-mono" />
             </div>
             <div class="bench-spec-actions">
               <button ng-click="vm.saveSystemInfo()" class="primary small">Save</button>

@@ -112,7 +112,7 @@
                     </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
-                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item)" title="Click to preview diff">
+                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
                           <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
                           <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                           <code>{{d.split('/').pop()}}</code>
@@ -124,11 +124,11 @@
                           <span class="diff-applied"
                             ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
                              title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
-                          <button ng-click="vm.deleteDiff(d, item, $event)"
+                          <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#e06c75;" title="Delete this diff file">🗑</button>
-                          <button ng-click="vm.openDiffInIde(d, item, $event)"
+                          <button ng-click="vm.openDiffInIde(d, item, card, $event)"
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
                           <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
@@ -191,7 +191,7 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f.path || f}}">{{f.path || f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f); $event.stopPropagation()" title="Open in IDE">📄</span>
+                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
                   <span class="remove" ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
                 </div>
               </div>
@@ -370,7 +370,7 @@
                     </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
-                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item)" title="Click to preview diff">
+                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
                           <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
                           <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                           <code>{{d.split('/').pop()}}</code>
@@ -381,11 +381,11 @@
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
                           <span class="diff-applied" ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
                              title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
-                          <button ng-click="vm.deleteDiff(d, item, $event)"
+                          <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#e06c75;" title="Delete this diff file">🗑</button>
-                          <button ng-click="vm.openDiffInIde(d, item, $event)"
+                          <button ng-click="vm.openDiffInIde(d, item, card, $event)"
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
                           <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
@@ -462,7 +462,7 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f); $event.stopPropagation()" title="Open in IDE">📄</span>
+                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
                 </div>
               </div>
             </div>
@@ -621,10 +621,10 @@
               title="{{vm.isCardActive(card.id) ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.isCardActive(card.id)">✔ Done</button>
             <button ng-if="card._benchmark || card._fromCron" ng-click="vm.deleteCard(card.id, 'doing')"
-              class="small {{ vm.isCardActive(card.id) ? 'ghost' : '' }}"
-              ng-style="{'color': vm.isCardActive(card.id) ? '' : '#e5c07b' }"
-              title="{{ vm.isCardActive(card.id) ? 'Disabled while active' : 'Deletes the card.' }}"
-              ng-disabled="vm.isCardActive(card.id)">🗑 Done &amp; Delete</button>
+              class="small {{ vm.isCardActive(card.id) ? 'ghost' : (card._fromCron ? 'btn-cron-done' : '') }}"
+              ng-style="{'color': vm.isCardActive(card.id) ? '' : (card._fromCron ? '#fbbf24' : '#e5c07b') }"
+              title="{{ vm.isCardActive(card.id) ? 'Disabled while active' : (card._fromCron ? 'Deletes the scheduled card once its task is complete.' : 'Deletes the card.') }}"
+              ng-disabled="vm.isCardActive(card.id)">{{ card._fromCron ? '⏰ Done &amp; Delete' : '🗑 Done &amp; Delete' }}</button>
             <button ng-if="card._benchmark && !vm.isCardActive(card.id) && !vm.benchmarkAllActive && vm.cardRunInterrupted(card)"
               ng-click="vm.rerunBenchmark(card)"
               class="small"
@@ -795,7 +795,7 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f); $event.stopPropagation()" title="Open in IDE">📄</span>
+                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
                 </div>
               </div>
             </div>
@@ -941,7 +941,7 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f); $event.stopPropagation()" title="Open in IDE">📄</span>
+                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
                   <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
                 </div>
               </div>

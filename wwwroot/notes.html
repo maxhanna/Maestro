@@ -3,7 +3,7 @@
     <span class="ide-drag-handle" title="Drag to reposition">⠿</span>
     <span class="ide-panel-title">📝 Notes</span>
     <div class="ide-panel-controls">
-      <select ng-model="vm.notesProject" ng-options="p.Path as p.Name for p in vm.projects"
+      <select ng-model="vm.notesProject" ng-options="p.Path as vm.projectLabel(p) for p in vm.projects"
         ng-change="vm.loadNotes()"
         style="background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; font-size: 11px; padding: 2px 4px; max-width: 150px;">
       </select>

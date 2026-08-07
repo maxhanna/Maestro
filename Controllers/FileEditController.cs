@@ -26,24 +26,15 @@ public class FileEditController : ControllerBase
     public async Task<IActionResult> Write([FromBody] EditRequest req)
     {
         if (req == null) return BadRequest("Missing request");
-        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
-        string workspaceRoot;
-        if (!string.IsNullOrWhiteSpace(configuredRoot))
-        {
-            workspaceRoot = Path.IsPathRooted(configuredRoot)
-                ? configuredRoot
-                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
-        }
-        else
-        {
-            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
-        }
-        var projectSegment = string.IsNullOrWhiteSpace(req.Project) ? "" : req.Project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        // Containment is validated against the resolved PROJECT root (which may be an
+        // absolute path outside the workspace root, e.g. a benchmark sandbox) so writes
+        // stay consistent with reads/renames/deletes on such projects.
+        var projectRoot = ResolveProjectRoot(req.Project ?? "");
         var relativePath = req.Path?.Trim() ?? "";
-        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment, relativePath));
-        if (!targetFull.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase))
+        var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
+        if (!IsPathWithinWorkspace(targetFull, projectRoot))
         {
-            return BadRequest("Path outside workspace root is not allowed.");
+            return BadRequest("Path outside project root is not allowed.");
         }
         if (!req.Apply)
         {
@@ -296,24 +287,18 @@ public class FileEditController : ControllerBase
         {
             return BadRequest("Path is required");
         }
-        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
-        string workspaceRoot;
-        if (!string.IsNullOrWhiteSpace(configuredRoot))
-        {
-            workspaceRoot = Path.IsPathRooted(configuredRoot)
-                ? configuredRoot
-                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
-        }
-        else
-        {
-            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
-        }
-        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        // The project may be an absolute path OUTSIDE the configured workspace root
+        // (e.g. a benchmark sandbox folder). Resolve the project root exactly like the
+        // agent endpoints (GetProjectRoot) do — Path.Combine with a rooted second
+        // segment yields that segment — and validate containment against THAT root,
+        // not the workspace root. Otherwise opening undo diffs (data/undo/*.diff) for
+        // such projects fails with a spurious 400 "Path outside workspace root".
+        var projectRoot = ResolveProjectRoot(project);
         var relativePath = path.Trim();
-        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment, relativePath));
-        if (!targetFull.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase))
+        var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
+        if (!IsPathWithinWorkspace(targetFull, projectRoot))
         {
-            return BadRequest("Path outside workspace root is not allowed.");
+            return BadRequest("Path outside project root is not allowed.");
         }
         if (!System.IO.File.Exists(targetFull))
         {
@@ -466,19 +451,13 @@ public class FileEditController : ControllerBase
     {
         if (string.IsNullOrEmpty(path))
             return BadRequest("Path is required");
-        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
-        string workspaceRoot;
-        if (!string.IsNullOrWhiteSpace(configuredRoot))
-            workspaceRoot = Path.IsPathRooted(configuredRoot)
-                ? configuredRoot
-                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
-        else
-            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
-        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        // Containment is validated against the resolved PROJECT root so file-change
+        // polling also works for absolute-path projects outside the workspace root.
+        var projectRoot = ResolveProjectRoot(project);
         var relativePath = path.Trim();
-        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment, relativePath));
-        if (!targetFull.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase))
-            return BadRequest("Path outside workspace root is not allowed.");
+        var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
+        if (!IsPathWithinWorkspace(targetFull, projectRoot))
+            return BadRequest("Path outside project root is not allowed.");
         if (!System.IO.File.Exists(targetFull))
             return Ok(new { exists = false, modified = false, lastModified = (string?)null });
         var lastModified = System.IO.File.GetLastWriteTimeUtc(targetFull);
@@ -493,24 +472,15 @@ public class FileEditController : ControllerBase
     public async Task<IActionResult> Save([FromBody] EditRequest req)
     {
         if (req == null) return BadRequest("Missing request");
-        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
-        string workspaceRoot;
-        if (!string.IsNullOrWhiteSpace(configuredRoot))
-        {
-            workspaceRoot = Path.IsPathRooted(configuredRoot)
-                ? configuredRoot
-                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
-        }
-        else
-        {
-            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
-        }
-        var projectSegment = string.IsNullOrWhiteSpace(req.Project) ? "" : req.Project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        // Containment is validated against the resolved PROJECT root (which may be an
+        // absolute path outside the workspace root, e.g. a benchmark sandbox) so saves
+        // stay consistent with reads/renames/deletes on such projects.
+        var projectRoot = ResolveProjectRoot(req.Project ?? "");
         var relativePath = req.Path?.Trim() ?? "";
-        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment, relativePath));
-        if (!targetFull.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase))
+        var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
+        if (!IsPathWithinWorkspace(targetFull, projectRoot))
         {
-            return BadRequest("Path outside workspace root is not allowed.");
+            return BadRequest("Path outside project root is not allowed.");
         }
         if (!req.Apply)
         {

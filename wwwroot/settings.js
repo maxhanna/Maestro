@@ -175,6 +175,26 @@ angular.module('kanbanApp')
                 vm.defaultProject = '';
                 vm.settingsDefaultProject = '';
                 vm.autoQueue = true;
+                // The "Weaver Benchmarks" project (auto-created by /api/benchmark/ensure-project)
+                // gets a 🎯 badge in the header project picker chip + dropdown so it stands out
+                // from the user's real repos. Matches by name (works before any benchmark ran,
+                // since _benchmarkProjectPath is only set after the first ensure call) or by the
+                // resolved benchmark root path.
+                vm._normProjPath = function (s) {
+                    if (!s) return '';
+                    return String(s).replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+                };
+                vm.isBenchmarkProject = function (p) {
+                    if (!p) return false;
+                    var name = (typeof p === 'string') ? '' : (p.Name || p.name || '');
+                    var path = (typeof p === 'string') ? p : (p.Path || p.path || '');
+                    if (/weaver\s*benchmarks/i.test(name)) return true;
+                    return !!(vm._benchmarkProjectPath && vm._normProjPath(path) === vm._normProjPath(vm._benchmarkProjectPath));
+                };
+                vm.projectLabel = function (p) {
+                    if (!p) return '';
+                    return (vm.isBenchmarkProject(p) ? '🎯 ' : '') + (p.Name || p.name || '');
+                };
                 // Self-improving cards must be physically started by the user. Once armed
                 // (selfImprovingAgentActive), they cycle 1-by-1 forever while no regular
                 // card (todo/doing/done) is active.

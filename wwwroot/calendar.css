@@ -214,6 +214,28 @@
   opacity: 0.5;
 }
 
+/* Run-count chip — number of times this scheduled card has fired, from the
+   cron run log (board data). Amber to match the ⏰ clock, clickable to open
+   the run-history popup (audit trail for one-shot jobs). */
+.cal-card-runs {
+  font-size: 9px;
+  font-weight: 700;
+  flex-shrink: 0;
+  line-height: 1.4;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 7px;
+  padding: 0 4px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.cal-card-runs:hover {
+  background: rgba(245, 158, 11, 0.3);
+  border-color: rgba(245, 158, 11, 0.7);
+}
+
 .cal-card-del {
   font-size: 12px;
   opacity: 0;
@@ -232,6 +254,118 @@
 
 .cal-edit-panel {
   max-width: 470px;
+}
+
+/* Run-history popup — audit trail of when each scheduled job fired, its
+   outcome and duration. Outcome colors follow the log severity palette. */
+.cal-history-panel {
+  max-width: 460px;
+}
+
+.cal-history-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cal-history-task {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cal-history-task strong {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.cal-history-schedule {
+  font-family: ui-monospace, monospace;
+  font-size: 10.5px;
+  color: #fbbf24;
+  opacity: 0.9;
+}
+
+.cal-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.cal-history-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cal-history-entry.cron-run--success {
+  border-color: rgba(74, 222, 128, 0.35);
+  background: rgba(74, 222, 128, 0.06);
+}
+
+.cal-history-entry.cron-run--error {
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.cal-history-entry.cron-run--stopped {
+  border-color: rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.cal-history-entry.cron-run--skipped {
+  opacity: 0.65;
+  border-style: dashed;
+}
+
+.cal-history-icon {
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.cal-history-entry.cron-run--success .cal-history-icon { color: #7ee2a8; }
+.cal-history-entry.cron-run--error .cal-history-icon { color: #f87171; }
+.cal-history-entry.cron-run--stopped .cal-history-icon { color: #fbbf24; }
+.cal-history-entry.cron-run--ran .cal-history-icon { color: var(--accent); }
+.cal-history-entry.cron-run--skipped .cal-history-icon { color: var(--muted); }
+
+.cal-history-when {
+  color: var(--muted);
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+
+.cal-history-dur {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.cal-history-summary {
+  flex-basis: 100%;
+  color: var(--text);
+  opacity: 0.85;
+  line-height: 1.4;
+}
+
+.cal-history-empty {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+  padding: 8px 0;
 }
 
 /* Popup panel hosting the calendar view */

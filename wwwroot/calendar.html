@@ -30,6 +30,11 @@
             title="{{card.filePath}}">{{vm.projectName(card.filePath)}}</span>
           <span class="cal-card-time" ng-if="card.time">@{{card.time}}</span>
           <span class="cal-card-cron" ng-if="card.cronExpression" title="{{vm.calNextFireText(card)}}">&#9201;</span>
+          <span class="cal-card-runs" ng-if="vm.cronRunCount(card) > 0"
+            ng-click="vm.calOpenHistory(card, $event)"
+            title="{{vm.cronRunCount(card)}} run(s) — click for the run history audit trail">
+            {{vm.cronRunCount(card)}}&#9654;
+          </span>
           <span class="cal-card-del" ng-click="vm.calDeleteCard(card, $event)">&times;</span>
         </div>
       </div>
@@ -68,7 +73,7 @@
           <select ng-model="vm.calEditCardData.filePath">
             <option value="">— No project —</option>
             <option ng-repeat="p in vm.projects" ng-value="p.Path || p.path">
-              {{ p.Name || p.name }}
+              {{ vm.projectLabel(p) }}
             </option>
           </select>
         </div>
@@ -178,6 +183,42 @@
           ▶ Run now</button>
         <button ng-click="vm.calCloseEdit()">Cancel</button>
         <button class="primary" ng-click="vm.calSaveCard()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Run History Popup (audit trail for scheduled jobs) -->
+  <div class="popup-overlay" ng-if="vm.calShowHistory" ng-click="vm.calCloseHistory($event)">
+    <div class="popup-panel cal-history-panel" ng-click="$event.stopPropagation()">
+      <div class="popup-header">
+        <strong>⏰ Run History</strong>
+        <button ng-click="vm.calCloseHistory()">&times;</button>
+      </div>
+      <div class="popup-body" ng-init="histCard = vm.calHistoryCard()">
+        <div class="cal-history-card">
+          <div class="cal-history-task" ng-if="histCard">
+            <strong>{{histCard.text}}</strong>
+            <span class="cal-history-schedule" ng-if="histCard.cronExpression">{{histCard.cronExpression}}</span>
+            <span class="cal-history-schedule" ng-if="!histCard.cronExpression && histCard.time">One-off @ {{histCard.time}}</span>
+          </div>
+          <div class="cal-history-list" ng-if="histCard && vm.cronRunLogFor(histCard).length">
+            <div class="cal-history-entry" ng-repeat="e in vm.cronRunLogFor(histCard) track by e.firedAt + '|' + $index"
+              ng-class="vm.cronRunOutcomeClass(e)">
+              <span class="cal-history-icon">{{vm.cronRunLabel(e)}}</span>
+              <span class="cal-history-when">{{e.firedAt | date:'MMM d, HH:mm'}}</span>
+              <span class="cal-history-dur" ng-if="e.durationMs">{{vm.cronRunDuration(e)}}</span>
+              <span class="cal-history-summary" ng-if="e.summary">{{e.summary}}</span>
+            </div>
+          </div>
+          <div class="cal-history-empty" ng-if="!histCard || !vm.cronRunLogFor(histCard).length">
+            No runs recorded yet for this schedule.
+          </div>
+        </div>
+      </div>
+      <div class="popup-footer">
+        <button class="danger" ng-if="histCard && vm.cronRunCount(histCard) > 0"
+          ng-click="vm.calClearHistory(histCard, $event)">Clear history</button>
+        <button class="primary" ng-click="vm.calCloseHistory()">Close</button>
       </div>
     </div>
   </div>
