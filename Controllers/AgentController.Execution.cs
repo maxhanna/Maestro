@@ -1046,6 +1046,21 @@ partial class AgentController
         stepIndex += cr.Count; allResults.AddRange(cr);
         return stepIndex;
     }
+    /// <summary>
+    /// Caps web step output before it is sent to the client over SSE. A _web_fetch returns
+    /// an entire page's text (megabytes after tag-stripping), which bloats the step card and
+    /// can choke JSON parsing in the browser. Only the SSE payload is capped — the full output
+    /// stays in allResults so the agent's context (AppendWebResultsToDiscoveryContext, which
+    /// applies its own 20k cap) is never starved.
+    /// </summary>
+    private static (string capped, bool truncated) CapWebStepOutputForClient(string? output)
+    {
+        const int MaxClientWebChars = 12000;
+        if (string.IsNullOrEmpty(output)) return ("", false);
+        if (output.Length <= MaxClientWebChars) return (output, false);
+        return (output[..MaxClientWebChars] + "\n\n… [truncated — full results kept for the agent's context]", true);
+    }
+
     private async Task<(int stepIndex, string discoveryContext)> ExecuteWebPlanStep(
         string planFile, string changeDesc, string prompt,
         string projectRoot, bool emitSse, CancellationToken ct,
@@ -1065,10 +1080,19 @@ partial class AgentController
             ["type"] = planFile,
             [isSearch ? "query" : "url"] = query,
             ["status"] = err == null ? "done" : "error",
-            ["output"] = outp
+            ["output"] = outp // FULL output — allResults feeds the agent's context
         };
         allResults.Add(wr);
-        if (emitSse) await SendSse(Response, "step", wr, ct);
+        if (emitSse)
+        {
+            // The client gets a capped copy so a multi-megabyte page can't bloat the step card.
+            var (displayOutp, truncated) = CapWebStepOutputForClient(outp);
+            await SendSse(Response, "step", new Dictionary<string, object?>(wr)
+            {
+                ["output"] = displayOutp,
+                ["truncated"] = truncated
+            }, ct);
+        }
         if (!string.IsNullOrWhiteSpace(outp) && outp.Length > 80)
             webCtx.AppendLine($"\n## Web [{query}]\n{outp}");
         var nextIsWeb = itemIdx + 1 < planItems.Count &&

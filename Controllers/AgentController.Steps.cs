@@ -74,13 +74,28 @@ partial class AgentController
                 var outputPreview = outputRaw != null && outputRaw.Length > 200 ? outputRaw[..200] + "…" : outputRaw;
                 await EmitLog(emitSse, st == "error" ? "error" : "info", $"✓ {step.Type} ({st})",
                     new { path = result.GetValueOrDefault("path"), error = result.GetValueOrDefault("error"), output = outputPreview }, ct: ct);
-                await SendSse(Response, "step", result, ct);
+                // The result dict keeps its FULL output (it flows into allResults → agent context),
+                // but the browser gets a capped copy so a multi-megabyte fetched page can't bloat
+                // the step card or choke SSE JSON parsing.
+                object clientResult = result;
+                if (result.GetValueOrDefault("type")?.ToString() is "web" or "web_search" or "web_fetch")
+                {
+                    var (cappedOut, cappedTrunc) = CapWebStepOutputForClient(outputRaw);
+                    clientResult = new Dictionary<string, object?>(result)
+                    {
+                        ["output"] = cappedOut,
+                        ["truncated"] = cappedTrunc
+                    };
+                }
+                await SendSse(Response, "step", clientResult, ct);
             }
         }
         return results;
     }
     private async Task<List<object>> ExecuteDiscoveryStepsConcurrent(
-        List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse)
+        List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse,
+        Func<string, List<string>, string, (string snippet, string? focusIds)>? focusReader = null,
+        List<string>? focusTokens = null)
     {
         var count = steps.Count;
         var results = new Dictionary<string, object?>[count];
@@ -115,6 +130,11 @@ partial class AgentController
             result["status"] = AgentTextUtilities.NormalizeUiStatus(result["status"]?.ToString());
         }));
         await Task.WhenAll(tasks);
+        // Focused reads: when a focusReader is supplied, large files whose identifiers
+        // matched INSIDE get the enclosing-region snippet attached to the step event
+        // (focusedOutput + matched focusIds + focused flag), so the UI can show the
+        // region with a collapse/expand affordance instead of dumping the whole file.
+        AgentDiscovery.AttachFocusedRegions(results, steps, focusReader, focusTokens);
         for (var i = 0; i < count; i++)
         {
             if (emitSse)

@@ -360,6 +360,31 @@ partial class AgentController
         sb.Append("You will be shown the task, the discovered file contents, and the PLAN SO FAR (steps already committed).\n");
         sb.Append("Your job on EACH turn is to propose exactly ONE new step — the next atomic action required — ");
         sb.Append("or declare the plan complete if no further step is needed.\n\n");
+        // HOST ENVIRONMENT is included for ALL tasks, not just OS-filesystem ones: a repo task
+        // that touches an absolute path (config files, paths in strings, _command steps) will
+        // otherwise make models assume Linux paths (/home/user/...) on a Windows host.
+        var osName = OperatingSystem.IsWindows() ? "Windows"
+            : OperatingSystem.IsMacOS() ? "macOS"
+            : OperatingSystem.IsLinux() ? "Linux"
+            : Environment.OSVersion.ToString();
+        var osDesktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        if (string.IsNullOrWhiteSpace(osDesktopPath))
+        {
+            // Headless/service hosts have no Desktop folder — give the model a usable anchor anyway.
+            var osProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            osDesktopPath = string.IsNullOrWhiteSpace(osProfile)
+                ? (OperatingSystem.IsWindows() ? "C:\\Users\\<username>\\Desktop" : "$HOME/Desktop")
+                : Path.Combine(osProfile, "Desktop");
+        }
+        var osPathStyle = OperatingSystem.IsWindows()
+            ? "backslashes and drive letters, e.g. C:\\Users\\Name\\Desktop"
+            : "forward slashes, e.g. /home/user/Desktop";
+        sb.Append("### HOST ENVIRONMENT ###\n");
+        sb.Append($"You are running on {osName}. The current user's desktop directory is: \"{osDesktopPath}\".\n");
+        sb.Append($"Absolute paths on this OS use {osPathStyle}. ");
+        sb.Append("When a step needs an absolute OS path (config, logs, files outside the repo), use the REAL path above — ");
+        sb.Append($"NEVER invent a Unix-style path like /home/user/... on {osName} unless you are actually on a Unix host. ");
+        sb.Append("Only a _command step can touch the OS filesystem outside the repo; _create_directory/_create_file are relative to the project root.\n\n");
         sb.Append("Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n");
         if (atomicStepEstimate is > 0)
         {
@@ -384,6 +409,7 @@ partial class AgentController
         else
             sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: ").Append(markerStr).Append("\",\n");
         sb.Append("    \"change\": \"SHORT natural-language description — e.g. 'Add ElementRef import' or 'Add escape key handler in ngOnInit'. ");
+        sb.Append("For a single-variable/expression swap, name BOTH tokens explicitly (e.g. 'Replace `b` with `group` in the benchmark-item ngFor' or 'change the loop variable from `b` to `group`'). ");
         sb.Append("NEVER put code here. For markers: the path (_create_directory/_create_file/_delete_file), SQL table (_sql_migration), command (_command/_git), ");
         sb.Append("query (_web_search), or URL (_web_fetch) — not a description.\",\n");
         sb.Append("    \"targetSymbol\": \"getTimedGreetingMessage\",\n");
@@ -451,6 +477,7 @@ partial class AgentController
         if (stepMode != "command")
         {
             sb.Append("10. Each edit step MUST include the \"targetSymbol\" field with the exact function/method/property/selector name being edited (e.g., \"getTimedGreetingMessage\", \"toolBtn\", \"_timer\"). ");
+            sb.Append("   For a single-variable/expression swap, set targetSymbol to the VARIABLE being replaced (e.g. \"b\" or \"benchmarks\"), not an enclosing method. ");
             sb.Append("   For non-code files (.md, .txt, .json, .yaml, .css, etc.) that have no functions, set targetSymbol to empty string \"\". ");
             sb.Append("   Do NOT invent fake symbol names like \"_append_text\" or \"_add_content\".\n");
             sb.Append("11. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n");
@@ -480,6 +507,13 @@ partial class AgentController
             sb.Append("     newString: \"  await this.loadRecipes();\\n  this.registerEscapeHandler();\"\n");
             sb.Append("   When ADDING a NEW method or REPLACING an ENTIRE method, use the FORMAT C/D fields instead (see RULE 18) — NEVER dump a whole method body into newString.\n");
             sb.Append("   Never include more than 3 lines in oldString. If the target has no single unique line, add an identifying comment first.\n");
+            sb.Append("   VARIABLE/EXPRESSION SWAP (e.g. grouping benchmarks by name): if the change replaces ONE token (a loop variable, ");
+            sb.Append("property, or pipe), the SINGLE unique line containing that token is the entire oldString — an easily ");
+            sb.Append("findable variable never needs a big anchor. newString = that same line with ONLY the token swapped, plus ");
+            sb.Append("any new lines after it. NEVER reproduce the enclosing block/section. Example:\n");
+            sb.Append("     oldString: \"<div *ngFor=\\\"let b of benchmarks\\\" class=\\\"benchmark-item\\\">\"\n");
+            sb.Append("     newString: \"<div *ngFor=\\\"let group of groupedBenchmarks | keyvalue\\\" class=\\\"benchmark-group\\\">\\n<h3>{{ group.key }}</h3>\\n<div *ngFor=\\\"let b of group.value\\\" class=\\\"benchmark-item\\\">\"\n");
+            sb.Append("   The change field names both tokens ('Replace `b` with `group` …') so the classifier treats it as a small targeted edit, never a method rewrite.\n");
             // NOTE: the FORMAT C field semantics shown here are the compact step-schema form
             // for the PLANNER. The canonical full JSON examples + rules for the RESOLVER live in
             // BuildFormatCExamples(FormatCVariant.Insert|Replace) — keep wording consistent.

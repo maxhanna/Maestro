@@ -92,6 +92,15 @@ partial class AgentController
         var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
         var filteredEditKnowledge = EditKnowledgeService.FormatForContext(
             editKnowledge, fileExt, step.Change ?? prompt ?? "");
+        // Harvested _web_search/_web_fetch outputs flow into the edit-resolution prompt too —
+        // when the step is "write the article data into a file", the FORMAT C/D generation must
+        // see the real titles/URLs/facts instead of inventing them.
+        var webResultsContext = HarvestWebResultsForEditContext(allResults.OfType<Dictionary<string, object?>>());
+        if (!string.IsNullOrWhiteSpace(webResultsContext))
+        {
+            await EmitLog(emitSse, "info",
+                $"🌐 Injected {webResultsContext.Length} chars of harvested web results into the edit-resolution context for {relPath}", ct: ct);
+        }
         await EmitLog(emitSse, "info",
             $"▶ Resolving Edits: {relPath} — {step.Change}", new { prompt, plan, stepIndex, allResults }, ct: ct);
         if (emitSse)
@@ -335,7 +344,8 @@ partial class AgentController
                             fullPlan: plan,
                             planItemIndex: planItemIndex,
                             filteredEditKnowledge: filteredEditKnowledge,
-                            causalContext: causalContext);
+                            causalContext: causalContext,
+                            webResultsContext: webResultsContext);
                 }
                 if (resolveError == null && !usedFreshDeterministic)
                 {

@@ -532,6 +532,22 @@ partial class AgentController
                 break;
             }
             var replanResults = new List<object>();
+            // Carry executed web results into the replan: ResolveAndApplyEdit harvests web
+            // results from the allResults arg it receives, which here is the fresh
+            // replanResults list. Without seeding, a re-resolved edit would lose the real
+            // titles/URLs and invent them. The seeded dicts are already in the outer
+            // allResults, so they are skipped on merge (reference equality) and excluded
+            // from the step-index count.
+            var seededWebCount = 0;
+            foreach (var prior in allResults.OfType<Dictionary<string, object?>>())
+            {
+                if (IsWebStep(prior.GetValueOrDefault("type")?.ToString()) &&
+                    prior.GetValueOrDefault("status")?.ToString() == "done")
+                {
+                    replanResults.Add(prior);
+                    seededWebCount++;
+                }
+            }
             foreach (var replanStep in replanSteps)
             {
                 var replanStepIndex = stepIndex;
@@ -552,12 +568,12 @@ partial class AgentController
             {
                 await EmitLog(emitSse, "success",
                     $"✓ Replan cycle {replanAttempts} succeeded for {relPath}", ct: ct);
-                allResults.AddRange(replanResults);
+                allResults.AddRange(replanResults.Skip(seededWebCount));
                 await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
-                return stepIndex + replanResults.Count;
+                return stepIndex + replanResults.Count - seededWebCount;
             }
             failureContext = $"Replan attempt {replanAttempts} also failed.\n" + failureContext;
-            allResults.AddRange(replanResults);
+            allResults.AddRange(replanResults.Skip(seededWebCount));
         }
         await EmitLog(emitSse, "error",
             $"✗ FATAL: All resolve attempts AND {MaxReplanAttempts} replan cycles failed for {relPath}: {lastErr}",

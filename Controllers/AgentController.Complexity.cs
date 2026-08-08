@@ -386,15 +386,23 @@ partial class AgentController
                     _complexityScores.TryGetValue(cardId ?? "", out var cs) ? cs : 100));
             if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
             {
+                // Attach the actual reason as detail so the agent panel and meeting UI can
+                // surface WHY reasoning was skipped — a false-positive hallucination flag
+                // (e.g. dense prose tripping the wall-of-text heuristic) is visible instead
+                // of an unexplained warn line.
+                var reason = error ?? "empty response";
                 await EmitLog(emitSse, "warn",
-                    $"Pre-plan reasoning skipped for step {planSoFar.Count + 1}: {error ?? "empty response"}", ct: ct);
+                    $"Pre-plan reasoning skipped for step {planSoFar.Count + 1}: {reason}",
+                    new { reason, rawLength = raw?.Length ?? 0 }, ct: ct);
                 return null;
             }
             var cleaned = CapThinking(raw);
             if (cleaned.Length < 20)
             {
+                var reason = $"produced only {cleaned.Length} usable char(s) from {raw.Length} raw char(s) after CapThinking";
                 await EmitLog(emitSse, "warn",
-                    $"Pre-plan reasoning produced no usable text for step {planSoFar.Count + 1}", ct: ct);
+                    $"Pre-plan reasoning skipped for step {planSoFar.Count + 1}: {reason}",
+                    new { reason, rawLength = raw.Length, cleanedLength = cleaned.Length }, ct: ct);
                 return null;
             }
             if (emitSse)
@@ -418,7 +426,8 @@ partial class AgentController
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            await EmitLog(emitSse, "warn", $"Pre-plan thinking error: {ex.Message}", ct: ct);
+            await EmitLog(emitSse, "warn", $"Pre-plan thinking error: {ex.Message}",
+                new { reason = ex.Message }, ct: ct);
             return null;
         }
     }

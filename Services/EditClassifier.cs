@@ -33,6 +33,12 @@ public static class EditClassifier
         var (_, supportsFormatC, _) = AgentMethodInventory.GetLanguageProfile(ext);
 
         if (IsDeletion(change))           return EditStrategy.DeleteLines;
+        // A single-variable/expression swap ("replace `b` with `group`", "change X to Y") is
+        // a tiny targeted edit — NEVER a method rewrite. Must be checked before
+        // IsFullMethodRewrite, which would otherwise FORMAT C the whole enclosing method
+        // when the planner names the swapped variable as targetSymbol (the benchmarks-ngFor
+        // failure: a 30-line wall-of-text oldString). AnchoredEdit keeps oldString small.
+        if (IsVariableSwap(change, step.TargetSymbol)) return EditStrategy.AnchoredEdit;
         if (IsClassPropertyFill(change))
             return ext == ".cs" ? EditStrategy.FillClassBody : EditStrategy.AnchoredEdit;
         if (supportsFormatC && IsNewMethodOrEndpoint(change, step.TargetSymbol))
@@ -53,6 +59,15 @@ public static class EditClassifier
 
         if (IsDeletion(change))
             return new EditIntent(EditIntentKind.DeleteContent, null, null);
+
+        // A variable swap on an HTML file is a TARGETED DOM replace — ReplaceSymbol keeps
+        // EditStrategyResolver.Decide mapping it to HtmlReplace (targeted single-line
+        // replace). TargetedEdit would map to HtmlInsertBefore, which is wrong for a swap.
+        // For code files the swap is a tiny anchored edit (never a method rewrite).
+        if (IsVariableSwap(change, step.TargetSymbol))
+            return HtmlDomEditor.IsHtmlDomFile(step.File)
+                ? new EditIntent(EditIntentKind.ReplaceSymbol, step.TargetSymbol, null)
+                : new EditIntent(EditIntentKind.TargetedEdit, step.TargetSymbol, null);
 
         if (IsClassPropertyFill(change))
             return new EditIntent(EditIntentKind.AddProperty, step.TargetSymbol, "property");
@@ -113,6 +128,49 @@ public static class EditClassifier
             Regex.IsMatch(changeLower, @"\b(add|create|implement|introduce)\b"))
             return true;
 
+        return false;
+    }
+
+    /// <summary>
+    /// True when the step swaps ONE variable/expression for another — "replace `b` with
+    /// `group`", "change X to Y", "swap A for B", "from X to Y". These are the smallest
+    /// possible edits: the single line containing the token is the whole oldString. The
+    /// planner is prompted to name both tokens in the change description, so this predicate
+    /// can recognize the intent without ever needing a whole-block anchor.
+    /// </summary>
+    public static bool IsVariableSwap(string changeLower, string? targetSymbol = null)
+    {
+        // Whole-method language is NEVER a variable swap — "replace the entire save method"
+        // must stay a ReplaceMethod even when the symbol matches ("save").
+        if (Regex.IsMatch(changeLower, @"\b(method|function|class|body|entire|whole|endpoint|handler|implementation)\b"))
+            return false;
+        // "replace/swap X with/for Y" where X is a short identifier (backticks/quotes optional)
+        if (Regex.IsMatch(changeLower,
+            @"\b(replace|swap)\b\s+[`']?[\w.$]{1,24}[`']?\s+(?:with|for)\s+[`']?[\w.$]{1,24}[`']?"))
+            return true;
+        // "swap/replace the X( ...) with/for Y" — a determiner and maybe one more word may
+        // sit between the verb and the swapped token ("swap the loop variable for a grouped one").
+        if (Regex.IsMatch(changeLower,
+            @"\b(replace|swap)\b\s+(?:the|a|an|this|that)\s+(?:[\w.$]{1,24}\s+)?[`']?[\w.$]{1,24}[`']?\s+(?:with|for)\s+[`']?[\w.$]{1,24}[`']?"))
+            return true;
+        // "change/rename X to Y"
+        if (Regex.IsMatch(changeLower,
+            @"\b(change|rename)\b\s+[`']?[\w.$]{1,24}[`']?\s+to\s+[`']?[\w.$]{1,24}[`']?"))
+            return true;
+        // "change/rename the X to Y" — determiner between verb and token.
+        if (Regex.IsMatch(changeLower,
+            @"\b(change|rename)\b\s+(?:the|a|an|this|that)\s+[`']?[\w.$]{1,24}[`']?\s+to\s+[`']?[\w.$]{1,24}[`']?"))
+            return true;
+        // "... from X to Y" (e.g. "change the loop variable from `b` to `group`")
+        if (Regex.IsMatch(changeLower,
+            @"\bfrom\s+[`']?[\w.$]{1,24}[`']?\s+to\s+[`']?[\w.$]{1,24}[`']?"))
+            return true;
+        // Named symbol + "swap/replace" phrasing when the planner set a variable targetSymbol
+        // (e.g. targetSymbol="b", change="swap the benchmark loop variable").
+        if (!string.IsNullOrWhiteSpace(targetSymbol) &&
+            Regex.IsMatch(changeLower, @"\b(swap|replace|rename)\b") &&
+            changeLower.Contains(targetSymbol.ToLowerInvariant()))
+            return true;
         return false;
     }
 

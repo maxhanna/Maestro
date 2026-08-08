@@ -135,6 +135,34 @@
   line-height: 1.4;
 }
 
+/* 'Last run' hint on the day cell — outcome icon + duration for the most
+   recent fire of any scheduled card landing that day, sat beside the ⏰
+   next-fire clock. Kept tiny so it never competes with the card count. */
+.cal-day-lastrun {
+  font-size: 9px;
+  line-height: 1;
+  margin-left: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: default;
+  opacity: 0.85;
+}
+
+.cal-day-today .cal-day-lastrun {
+  opacity: 1;
+}
+
+.cal-day-lastrun-icon {
+  flex-shrink: 0;
+}
+
+.cal-day-lastrun-dur {
+  font-family: ui-monospace, monospace;
+  font-size: 8.5px;
+  color: var(--muted);
+}
+
 .cal-day-cards {
   display: flex;
   flex-direction: column;
@@ -354,6 +382,16 @@
   flex-shrink: 0;
 }
 
+/* '↻ Requeue now' on ⏹ Stopped / ❌ Error history entries — retries a failed
+   one-shot job by firing the card immediately. Pushed to the row's right edge
+   so the icon/time/duration stay left-aligned. */
+.cal-history-requeue {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 2px 8px;
+}
+
 .cal-history-summary {
   flex-basis: 100%;
   color: var(--text);
@@ -366,6 +404,21 @@
   color: var(--muted);
   font-style: italic;
   padding: 8px 0;
+}
+
+/* Run history embedded in the calendar card edit popup — the same audit-trail
+   entries as the standalone popup, shown inline while editing the card. */
+.cal-history-inline {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 10px;
+}
+
+.cal-history-inline .cal-history-list {
+  max-height: 180px;
+}
+
+.cal-history-inline .cal-history-entry {
+  font-size: 11px;
 }
 
 /* Popup panel hosting the calendar view */

@@ -240,7 +240,21 @@
                         title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
                     </summary>
                     <div class="step-body">
-                      <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
+                      <details class="step-web-inline" ng-if="vm.isWebStep(s) && s.output"
+                        ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? ' (truncated)' : ''}}<span ng-if="s.query || s.url"> — {{(s.query || s.url) | limitTo:40}}</span></summary>
+                        <pre class="step-output">{{s.output}}</pre>
+                      </details>
+                      <pre class="step-output" ng-if="s.output && !vm.isWebStep(s) && !(s.type==='read' && s.focused)">{{s.output}}</pre>
+                      <details class="step-focused-inline" ng-if="s.type==='read' && s.focused && s.focusedOutput"
+                        ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy focused region">📋</button>🎯 read {{s.path}}<span ng-if="s.focusIds"> — focused: {{s.focusIds}}</span></summary>
+                        <pre class="step-output">{{s.focusedOutput}}</pre>
+                        <details class="focused-full-file" ng-if="s.output">
+                          <summary>📄 Full file ({{s.output.length}} chars)</summary>
+                          <pre class="step-output">{{s.output}}</pre>
+                        </details>
+                      </details>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
                       <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
@@ -329,6 +343,11 @@
                     ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
                     title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
                 </span>
+                <details class="step-web-inline" ng-if="vm.isWebStep(s) && s.output" style="flex-basis:100%;"
+                  ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                  <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? ' (truncated)' : ''}}</summary>
+                  <pre class="step-output">{{s.output}}</pre>
+                </details>
               </div>
             </div>
           </div>
@@ -565,7 +584,21 @@
                       <div class="rename-display" ng-if="s.type==='rename'">
                         <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
                       </div>
-                      <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
+                      <details class="step-web-inline" ng-if="vm.isWebStep(s) && s.output"
+                        ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? ' (truncated)' : ''}}<span ng-if="s.query || s.url"> — {{(s.query || s.url) | limitTo:40}}</span></summary>
+                        <pre class="step-output">{{s.output}}</pre>
+                      </details>
+                      <pre class="step-output" ng-if="s.output && !vm.isWebStep(s) && !(s.type==='read' && s.focused)">{{s.output}}</pre>
+                      <details class="step-focused-inline" ng-if="s.type==='read' && s.focused && s.focusedOutput"
+                        ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy focused region">📋</button>🎯 read {{s.path}}<span ng-if="s.focusIds"> — focused: {{s.focusIds}}</span></summary>
+                        <pre class="step-output">{{s.focusedOutput}}</pre>
+                        <details class="focused-full-file" ng-if="s.output">
+                          <summary>📄 Full file ({{s.output.length}} chars)</summary>
+                          <pre class="step-output">{{s.output}}</pre>
+                        </details>
+                      </details>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
                       <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
@@ -768,7 +801,7 @@
                   ng-click="vm.jumpToConnectionCard(s.connection); $event.stopPropagation()"
                   ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.jumpToConnectionCard(s.connection); $event.preventDefault(); $event.stopPropagation()"
                   title="Builds on other work — click to jump to the card this suggestion is connected to.">🔗 {{s.connection}}</div>
-                <div class="suggestion-action" ng-if="!s._queued">＋ Add to To Do</div>
+                <div class="suggestion-action" ng-if="!s._queued">＋ Queue</div>
                 <div class="suggestion-action queued" ng-if="s._queued">✓ Queued</div>
                 <div class="suggestion-files" ng-if="s.files && s.files.length">
                   <span class="file-edit-chip" ng-repeat="f in s.files" title="{{f}}">{{f}}</span>

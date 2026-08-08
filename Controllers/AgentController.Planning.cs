@@ -781,7 +781,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private static PlanStep ParseStepFromJson(string file, string change, string? targetSymbol, int line, string? oldString, string? newString, List<string> refFiles, List<EditPair> edits,
         string? targetType = null, string? targetName = null, bool? insertAfter = null, List<string>? newCode = null, string? fullFile = null)
     {
-        var normFile = file.Replace('\\', '/');
+        // Trim leading/trailing whitespace so LLM-emitted file names like " _web_search \n" still
+        // match IsWebStep/IsSpecialMarker and the web-step exclusion (a stray trailing newline
+        // used to dodge both and get bounced by the research-verb guard as "search is not an
+        // actionable edit" — the exact interleaved-loop deadlock seen in web-needing runs). Only
+        // Trim, never collapse internal whitespace: a real path like "src/My  Folder/file.cs"
+        // must stay byte-identical or edits silently land on the wrong file.
+        var normFile = file.Trim().Replace('\\', '/');
         if (normFile.StartsWith("_edit/", StringComparison.OrdinalIgnoreCase))
             normFile = normFile["_edit/".Length..];
         // FORMAT C/D steps carry targetName+newCode (no oldString): map targetName onto
@@ -918,8 +924,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // rejecting them here deadlocks web-needing tasks (the model proposes the right tool
         // and the loop bounces it, exactly like the "Search the web…" run).
         if (!step.File.Equals("_discover", StringComparison.OrdinalIgnoreCase) &&
-            !step.File.Equals("_web_search", StringComparison.OrdinalIgnoreCase) &&
-            !step.File.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) &&
+            !IsWebStep(step.File) &&
             researchVerbs.Any(v => changeLower.StartsWith(v)))
         {
             return (false, $"Research step rejected — '{changeLower.Split(' ')[0]}' is not an actionable edit. " +
@@ -940,6 +945,29 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
         var isSpecial = AgentProjectUtilities.IsSpecialMarker(step.File);
+        // TARGETED-ANCHOR GUARD: an edit step whose oldString reproduces a whole block
+        // (RULE 17 says 1-3 lines) is unreliable — the LLM drifts when re-outputting a big
+        // verbatim block, the plan edit then fails to match at apply time, and the resolver
+        // falls back to FORMAT C/D which again forces reproducing the same wall of text
+        // (the "group benchmarks" run: a 30-line oldString/newString pair that never
+        // matched, then FORMAT D demanded the full section again). Reject oversized anchors
+        // deterministically with the targeted-replace pattern so the planner emits a small
+        // unique anchor instead. Thresholds mirror GetPlanSizeViolations.
+        if (!isSpecial && !string.IsNullOrWhiteSpace(step.OldString))
+        {
+            var oldAnchorLines = step.OldString.Split('\n').Length;
+            var oldAnchorChars = step.OldString.Length;
+            if (oldAnchorLines > 10 || oldAnchorChars > 400)
+            {
+                return (false,
+                    $"oldString is {oldAnchorLines} lines/{oldAnchorChars} chars — WAY too large for a reliable targeted edit. " +
+                    "Use the TARGETED REPLACE pattern: oldString = the SINGLE most unique line in the target region " +
+                    "(1-3 lines MAX, e.g. `<div *ngFor=\"let b of benchmarks\" class=\"benchmark-item\">`), copied verbatim; " +
+                    "newString = that same line UNCHANGED followed by your new lines. Do NOT reproduce the whole enclosing " +
+                    "block/section in oldString. If you are REPLACING an ENTIRE method, use FORMAT C " +
+                    "(targetType/targetName/newCode) instead of oldString/newString.");
+            }
+        }
         if (!isSpecial && AgentProjectUtilities.IsRelativePath(step.File))
         {
             var fullPath = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
@@ -1085,6 +1113,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var totalPlanningRounds = 0;
         var stepEventIndex = 0;
         var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
+        var webNeedVerifyFailures = 0; // consecutive failed classifier calls — caps re-confirmation at 2 per run
         string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
         // OS-filesystem task guard state: pure OS tasks reject repo file edits
         // deterministically; hint-y tasks get one memoized LLM verdict per file.
@@ -1126,13 +1155,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // by claiming completion.
                 if (TaskHintsWebNeed(prompt) && !planSoFar.Any(s => IsWebStep(s.File)))
                 {
-                    if (webNeedVerified == 0)
+                    if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                     {
                         await EmitLog(emitSse, "info",
                             "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                        var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
-                        webNeedVerified = needsWeb ? 1 : -1;
-                        if (needsWeb) webInjectedQuery = query;
+                        var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        if (verified)
+                        {
+                            webNeedVerified = needsWeb ? 1 : -1;
+                            if (needsWeb) webInjectedQuery = query;
+                        }
+                        else
+                        {
+                            webNeedVerifyFailures++; // transient classifier failure — retry up to 2×, then stop calling
+                        }
                     }
                     if (webNeedVerified == 1)
                     {
@@ -1206,9 +1242,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (!isMarker)
                     {
                         var normPath = proposal.ExploreFile.Replace('\\', '/').TrimStart('/');
-                        alreadyInContext = discoveryContext.Contains($"### read {normPath}") ||
-                                           discoveryContext.Contains($"### {normPath}") ||
-                                           Regex.IsMatch(discoveryContext, $@"### (?:read )?\S*{Regex.Escape(Path.GetFileName(normPath))}\b");
+                        // A file present ONLY as a focused region is NOT fully in context —
+                        // a later re-request may legitimately need a different symbol's region.
+                        alreadyInContext = !IsFocusedSectionInContext(discoveryContext, normPath) &&
+                                           (discoveryContext.Contains($"### read {normPath}") ||
+                                            discoveryContext.Contains($"### {normPath}") ||
+                                            Regex.IsMatch(discoveryContext, $@"### (?:read )?\S*{Regex.Escape(Path.GetFileName(normPath))}\b"));
                     }
                     if (alreadyInContext)
                     {
@@ -1233,7 +1272,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await EmitLog(emitSse, "info", $"Incremental planning: exploring {proposal.ExploreFile}", ct: ct);
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
-                        discoveryContext, projectRoot, emitSse, ct);
+                        discoveryContext, projectRoot, emitSse, ct, prompt);
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
@@ -1252,25 +1291,55 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 else
                 {
-                    var exploreFb =
-                        $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full in the " +
-                        "DISCOVERY CONTEXT above. Do not re-request it. Read it carefully and propose the actual next " +
-                        "step now, using the exact symbol/method names visible there.";
-                    await EmitRejectedLog(emitSse,
-                        $"Incremental planning: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", exploreFb, ct);
-                    rejectionFeedback.Add(exploreFb);
-                    if (emitSse)
+                    // The earlier read may have been only a FOCUSED region (the file was
+                    // never shown in full) — then re-exploring is legitimate: the model
+                    // can surface a different symbol's region. Only reject when the file
+                    // is genuinely shown in full already.
+                    var normPath = proposal.ExploreFile.Replace('\\', '/').TrimStart('/');
+                    var focusedOnly = !proposal.ExploreFile.StartsWith("_") &&
+                        IsFocusedSectionInContext(discoveryContext, normPath);
+                    if (!focusedOnly)
                     {
+                        var exploreFb =
+                            $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full in the " +
+                            "DISCOVERY CONTEXT above. Do not re-request it. Read it carefully and propose the actual next " +
+                            "step now, using the exact symbol/method names visible there.";
+                        await EmitRejectedLog(emitSse,
+                            $"Incremental planning: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", exploreFb, ct);
+                        rejectionFeedback.Add(exploreFb);
+                        if (emitSse)
+                        {
+                            await SendSse(Response, "step", new
+                            {
+                                index = ++stepEventIndex,
+                                type = "explore",
+                                status = "error",
+                                path = proposal.ExploreFile,
+                                description = $"Already explored: {proposal.ExploreFile}"
+                            }, ct);
+                        }
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
+                        continue;
+                    }
+                    await EmitLog(emitSse, "info",
+                        $"Incremental planning: re-exploring {proposal.ExploreFile} for another focused region", ct: ct);
+                    discoveryContext = await ExplorationPipeline(
+                        new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
+                        discoveryContext, projectRoot, emitSse, ct, prompt);
+                    if (emitSse)
                         await SendSse(Response, "step", new
                         {
                             index = ++stepEventIndex,
                             type = "explore",
-                            status = "error",
+                            status = "done",
                             path = proposal.ExploreFile,
-                            description = $"Already explored: {proposal.ExploreFile}"
+                            description = $"Explored: {proposal.ExploreFile}"
                         }, ct);
+                    if (!string.IsNullOrWhiteSpace(cardId))
+                    {
+                        await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
                     }
-                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
+                    regenAttempts = 0;
                     continue;
                 }
             }
@@ -1297,6 +1366,39 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
+            // Web-step gate: a _web_search/_web_fetch proposal is allowed freely once the LLM
+            // has confirmed the task needs the web (webNeedVerified == 1). Otherwise the first
+            // web proposal triggers ONE confirmation round; if the verdict is that the task
+            // does NOT need current external info, the web step is rejected with feedback
+            // steering back to the repo context (no further web steps this run).
+            if (IsWebStep(proposal.Step.File) && webNeedVerified != 1)
+            {
+                if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
+                {
+                    await EmitLog(emitSse, "info",
+                        "The planner proposed a _web_search/_web_fetch step — verifying with the LLM whether the task actually needs current external info…", ct: ct);
+                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                    if (verified)
+                    {
+                        webNeedVerified = needsWeb ? 1 : -1;
+                        if (needsWeb) webInjectedQuery = query;
+                    }
+                    else
+                    {
+                        webNeedVerifyFailures++; // transient classifier failure — retry up to 2×, then fail open
+                    }
+                }
+                if (webNeedVerified == -1)
+                {
+                    await EmitRejectedLog(emitSse,
+                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — task does not need current external info",
+                        WebNotNeededFeedback, ct);
+                    rejectionFeedback.Add(WebNotNeededFeedback);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
+                // webNeedVerified == 1 after the confirmation round → allow the web step freely.
+            }
             // Missing-web-search guard (mirror of the interleaved loop): if the task
             // hints at needing CURRENT EXTERNAL information but neither the plan nor
             // this proposal carries a _web_search/_web_fetch step, confirm with the
@@ -1310,13 +1412,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 !planSoFar.Any(s => IsWebStep(s.File)) &&
                 TaskHintsWebNeed(prompt))
             {
-                if (webNeedVerified == 0)
+                if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                 {
                     await EmitLog(emitSse, "info",
                         "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                    var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
-                    webNeedVerified = needsWeb ? 1 : -1;
-                    if (needsWeb) webInjectedQuery = query;
+                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                    if (verified)
+                    {
+                        webNeedVerified = needsWeb ? 1 : -1;
+                        if (needsWeb) webInjectedQuery = query;
+                    }
+                    else
+                    {
+                        webNeedVerifyFailures++; // transient classifier failure — retry up to 2×, then fail closed
+                    }
                 }
                 if (webNeedVerified == 1)
                 {
@@ -1599,6 +1708,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "The task needs CURRENT EXTERNAL information (live data, web/API docs, latest versions) that cannot be found inside this repository. " +
         "Use a \"_web_search\" step (put the query in \"change\") or a \"_web_fetch\" step (put the URL in \"change\") — do NOT write code to fetch it.";
 
+    /// <summary>Feedback shown when a _web_search/_web_fetch step is proposed for a task that does NOT need current external info.</summary>
+    private const string WebNotNeededFeedback =
+        "The task does NOT need CURRENT EXTERNAL information — this _web_search/_web_fetch step is unnecessary and is rejected. " +
+        "Work from the DISCOVERY CONTEXT and the repo files already in context: propose a concrete repo edit, _create_file, or _command step instead. " +
+        "Only use _web_search/_web_fetch when the task genuinely requires data that cannot come from the project.";
+
     private static bool TaskHintsWebNeed(string? prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
@@ -1643,16 +1758,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
+    /// Harvests executed web results from the run's results for injection into the
+    /// edit-resolution prompt, so FORMAT C/D / oldString-newString generation can copy real
+    /// titles, URLs, and facts into newString instead of inventing them. Reuses
+    /// AppendWebResultsToDiscoveryContext's filtering (done-status only, 20k cap) and returns
+    /// "" when there are no usable web results.
+    /// </summary>
+    private static string HarvestWebResultsForEditContext(IEnumerable<Dictionary<string, object?>> results)
+    {
+        var ctx = AppendWebResultsToDiscoveryContext("", results);
+        return ctx.TrimStart('\n', ' ', '\t');
+    }
+
+    /// <summary>
     /// LLM-confirmed version of the missing-web-search gate. Regex hints alone
     /// false-positive on repo-internal "search"/"look up" phrasing, so a cheap
     /// classifier call decides whether the task genuinely needs current external
-    /// information. Fails closed (returns (false, null)) so a flaky LLM call never
-    /// blocks a step — the model just keeps its code-writing plan.
+    /// information.
+    /// Tri-state return: Verified=false when the classifier call failed (empty/parse
+    /// error) — callers decide how to fail: the missing-web-search guard fails CLOSED
+    /// (keeps the non-web plan, caches no verdict so a re-proposal retries), while the
+    /// web-step gate fails OPEN (allows the web step) so a transient LLM blip can
+    /// never block a genuinely web-needing task.
     /// When the task DOES need the web, the same single call also yields the search
     /// query used later for the auto-injected _web_search step if the planner
     /// refuses to plan one after repeated rejections.
     /// </summary>
-    private async Task<(bool NeedsWeb, string? Query)> ConfirmWebNeedAsync(string prompt, bool emitSse, CancellationToken ct)
+    private async Task<(bool NeedsWeb, string? Query, bool Verified)> ConfirmWebNeedAsync(string prompt, bool emitSse, CancellationToken ct)
     {
         try
         {
@@ -1669,8 +1801,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 sb.ToString(), ct, _infiniteTimeout, maxTokens: 120);
             if (string.IsNullOrWhiteSpace(raw))
             {
-                await EmitLog(emitSse, "warn", $"Web-need verification failed ({err}) — treating as no web need.", ct: ct);
-                return (false, null);
+                await EmitLog(emitSse, "warn", $"Web-need verification failed ({err}) — no verdict cached.", ct: ct);
+                return (false, null, false);
             }
             var cleaned = ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
@@ -1678,11 +1810,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var query = needsWeb && doc.RootElement.TryGetProperty("query", out var q) && q.ValueKind == JsonValueKind.String
                 ? q.GetString()
                 : null;
-            return (needsWeb, query);
+            return (needsWeb, query, true);
         }
         catch
         {
-            return (false, null);
+            return (false, null, false);
         }
     }
 
@@ -1794,6 +1926,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var consecutiveSlotFailures = 0;
         var totalPlanningRounds = 0;
         var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
+        var webNeedVerifyFailures = 0; // consecutive failed classifier calls — caps re-confirmation at 2 per run
         string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
         // OS-filesystem task guard state: pure OS tasks reject repo file edits
         // deterministically; hint-y tasks get one memoized LLM verdict per file.
@@ -1924,7 +2057,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    await EmitLog(emitSse, "warn", $"Pre-plan thinking skipped: {ex.Message}", ct: ct);
+                    await EmitLog(emitSse, "warn", $"Pre-plan thinking skipped: {ex.Message}",
+                        new { reason = ex.Message }, ct: ct);
                 }
             }
             else if (prePlanCfg.extendThinking && regenAttempts > 0)
@@ -1959,13 +2093,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // web-needing tasks cannot escape by claiming completion.
                 if (TaskHintsWebNeed(prompt) && !planSoFar.Any(s => IsWebStep(s.File)))
                 {
-                    if (webNeedVerified == 0)
+                    if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                     {
                         await EmitLog(emitSse, "info",
                             "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                        var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
-                        webNeedVerified = needsWeb ? 1 : -1;
-                        if (needsWeb) webInjectedQuery = query;
+                        var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        if (verified)
+                        {
+                            webNeedVerified = needsWeb ? 1 : -1;
+                            if (needsWeb) webInjectedQuery = query;
+                        }
+                        else
+                        {
+                            webNeedVerifyFailures++; // transient classifier failure — retry up to 2×, then stop calling
+                        }
                     }
                     if (webNeedVerified == 1)
                     {
@@ -2032,9 +2173,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (!isMarker)
                     {
                         var normPath = proposal.ExploreFile.Replace('\\', '/').TrimStart('/');
-                        alreadyInContext = discoveryContext.Contains($"### read {normPath}") ||
-                                           discoveryContext.Contains($"### {normPath}") ||
-                                           Regex.IsMatch(discoveryContext, $@"### (?:read )?\S*{Regex.Escape(Path.GetFileName(normPath))}\b");
+                        // A file present ONLY as a focused region is NOT fully in context —
+                        // a later re-request may legitimately need a different symbol's region.
+                        alreadyInContext = !IsFocusedSectionInContext(discoveryContext, normPath) &&
+                                           (discoveryContext.Contains($"### read {normPath}") ||
+                                            discoveryContext.Contains($"### {normPath}") ||
+                                            Regex.IsMatch(discoveryContext, $@"### (?:read )?\S*{Regex.Escape(Path.GetFileName(normPath))}\b"));
                     }
                     if (alreadyInContext)
                     {
@@ -2052,7 +2196,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         $"Exploring {proposal.ExploreFile}…", null, ct);
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
-                        discoveryContext, projectRoot, emitSse, ct);
+                        discoveryContext, projectRoot, emitSse, ct, prompt);
                     if (!string.IsNullOrWhiteSpace(cardId))
                         await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
                     regenAttempts = 0;
@@ -2060,12 +2204,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 else
                 {
-                    var exploreFb = $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full above. " +
-                        "Do not re-request it. Propose the actual next step using the exact names visible there.";
-                    await EmitRejectedLog(emitSse,
-                        $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", exploreFb, ct);
-                    rejectionFeedback.Add(exploreFb);
-                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    // The earlier read may have been only a FOCUSED region (the file was
+                    // never shown in full) — then re-exploring is legitimate: the model
+                    // can surface a different symbol's region. Only reject when the file
+                    // is genuinely shown in full already.
+                    var normPath = proposal.ExploreFile.Replace('\\', '/').TrimStart('/');
+                    var focusedOnly = !proposal.ExploreFile.StartsWith("_") &&
+                        IsFocusedSectionInContext(discoveryContext, normPath);
+                    if (!focusedOnly)
+                    {
+                        var exploreFb = $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full above. " +
+                            "Do not re-request it. Propose the actual next step using the exact names visible there.";
+                        await EmitRejectedLog(emitSse,
+                            $"Interleaved execution: rejected explore — '{proposal.ExploreFile}' already shown in full; retrying", exploreFb, ct);
+                        rejectionFeedback.Add(exploreFb);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                        continue;
+                    }
+                    await EmitLog(emitSse, "info",
+                        $"Interleaved execution: re-exploring {proposal.ExploreFile} for another focused region", ct: ct);
+                    await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
+                        "_exploring", $"Re-exploring {proposal.ExploreFile}…",
+                        $"Re-exploring {proposal.ExploreFile}…", null, ct);
+                    discoveryContext = await ExplorationPipeline(
+                        new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
+                        discoveryContext, projectRoot, emitSse, ct, prompt);
+                    if (!string.IsNullOrWhiteSpace(cardId))
+                        await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
+                    regenAttempts = 0;
                     continue;
                 }
             }
@@ -2125,6 +2291,40 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     continue;
                 }
             }
+            // Web-step gate (mirror of the incremental loop): a _web_search/_web_fetch
+            // proposal is allowed freely once the LLM has confirmed the task needs the web
+            // (webNeedVerified == 1). Otherwise the first web proposal triggers ONE
+            // confirmation round; if the verdict is that the task does NOT need current
+            // external info, the web step is rejected with feedback steering back to the
+            // repo context (no further web steps this run).
+            if (IsWebStep(proposal.Step.File) && webNeedVerified != 1)
+            {
+                if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
+                {
+                    await EmitLog(emitSse, "info",
+                        "The planner proposed a _web_search/_web_fetch step — verifying with the LLM whether the task actually needs current external info…", ct: ct);
+                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                    if (verified)
+                    {
+                        webNeedVerified = needsWeb ? 1 : -1;
+                        if (needsWeb) webInjectedQuery = query;
+                    }
+                    else
+                    {
+                        webNeedVerifyFailures++; // transient classifier failure — retry up to 2×, then fail open
+                    }
+                }
+                if (webNeedVerified == -1)
+                {
+                    await EmitRejectedLog(emitSse,
+                        $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — task does not need current external info",
+                        WebNotNeededFeedback, ct);
+                    rejectionFeedback.Add(WebNotNeededFeedback);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
+                // webNeedVerified == 1 after the confirmation round → allow the web step freely.
+            }
             // Missing-web-search guard: if the task hints at needing CURRENT
             // EXTERNAL information but neither the plan nor this proposal carries a
             // _web_search/_web_fetch step, confirm with the LLM (regex alone is too
@@ -2136,13 +2336,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 !planSoFar.Any(s => IsWebStep(s.File)) &&
                 TaskHintsWebNeed(prompt))
             {
-                if (webNeedVerified == 0)
+                if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                 {
                     await EmitLog(emitSse, "info",
                         "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                    var (needsWeb, query) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
-                    webNeedVerified = needsWeb ? 1 : -1;
-                    if (needsWeb) webInjectedQuery = query;
+                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                    if (verified)
+                    {
+                        webNeedVerified = needsWeb ? 1 : -1;
+                        if (needsWeb) webInjectedQuery = query;
+                    }
+                    else
+                    {
+                        webNeedVerifyFailures++; // transient classifier failure — retry up to 2×, then fail closed
+                    }
                 }
                 if (webNeedVerified == 1)
                 {

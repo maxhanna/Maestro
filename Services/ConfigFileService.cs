@@ -16,6 +16,13 @@ public class ProjectDto
     /// "board" (skeleton + other kanban cards, no git), or "skeleton" (layout only).
     /// </summary>
     public string SuggestionContextDepth { get; set; } = "full";
+
+    /// <summary>
+    /// Whether the idle suggestion loop runs for this project. When ON (default), the agent
+    /// automatically tops up Done-column cards to 3 suggestions each while it is idle;
+    /// turning it OFF keeps the agent from generating suggestions unless a card is completed.
+    /// </summary>
+    public bool IdleSuggestions { get; set; } = true;
 }
 
 public class EmailAccountConfig

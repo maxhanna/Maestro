@@ -18,6 +18,9 @@ public static class EditIntentClassifier
             "- insert_near_symbol: the instruction ADDS a brand-new method/function. symbol = the name of an EXISTING method to anchor near (e.g. the last method in the class), or null if unknown.\n" +
             "- add_property: the instruction adds one or more fields/properties to an existing class.\n" +
             "- targeted_edit: none of the above cleanly apply (small localized text change, config value, single line tweak).\n" +
+            "CRITICAL: a single-variable/expression swap ('replace X with Y', 'change X to Y', 'rename X to Y') is ALWAYS targeted_edit " +
+            "with symbol = the variable being replaced (e.g. `b`), NEVER replace_symbol — it is not a method/class body rewrite, " +
+            "and a whole-method oldString is never needed for it.\n" +
             "Only set preferredKind if the instruction explicitly says 'class' or 'property' rather than 'method'.";
 
         var user = $"File: {relPath}\nInstruction: {changeDescription}";

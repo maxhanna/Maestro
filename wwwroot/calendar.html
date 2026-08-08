@@ -21,6 +21,10 @@
         <span class="cal-day-nextfire" ng-if="day.nextFires.length" title="{{day.nextFiresTitle}}">
           &#9201;<span class="cal-day-nextfire-count" ng-if="day.nextFires.length > 1">{{day.nextFires.length}}</span>
         </span>
+        <span class="cal-day-lastrun" ng-if="day.lastRun" title="{{vm.calDayLastRunTitle(day.lastRun)}}">
+          <span class="cal-day-lastrun-icon">{{vm.cronRunIcon(day.lastRun.entry)}}</span>
+          <span class="cal-day-lastrun-dur" ng-if="day.lastRun.entry.durationMs">{{vm.cronRunDuration(day.lastRun.entry)}}</span>
+        </span>
       </div>
       <div class="cal-day-cards">
         <div class="cal-card" ng-repeat="card in day.cards track by card.id" ng-click="vm.calEditCard(card, $event)"
@@ -174,6 +178,26 @@
             </div>
           </div>
         </div>
+        <div class="form-row cal-history-inline" ng-if="vm.calEditCardData.id">
+          <label>Run history</label>
+          <div class="cal-history-list" ng-if="vm.cronRunLogFor(vm.calEditCardData).length">
+            <div class="cal-history-entry" ng-repeat="e in vm.cronRunLogFor(vm.calEditCardData) track by e.firedAt + '|' + $index"
+              ng-class="vm.cronRunOutcomeClass(e)">
+              <span class="cal-history-icon">{{vm.cronRunLabel(e)}}</span>
+              <span class="cal-history-when">{{e.firedAt | date:'MMM d, HH:mm'}}</span>
+              <span class="cal-history-dur" ng-if="e.durationMs">{{vm.cronRunDuration(e)}}</span>
+              <button class="danger small cal-history-requeue" ng-if="e.outcome === 'stopped' || e.outcome === 'error'"
+                ng-click="vm.calRequeueRun(e, vm.calEditCardData, $event)"
+                title="Fire this card again now — retry the failed one-shot job">&#8635; Requeue now</button>
+              <span class="cal-history-summary" ng-if="e.summary">{{e.summary}}</span>
+            </div>
+          </div>
+          <div class="cal-history-empty" ng-if="!vm.cronRunLogFor(vm.calEditCardData).length">
+            No runs recorded yet{{vm.calEditCardData.cronExpression ? ' for this schedule' : ' for this card'}}.
+          </div>
+          <button class="danger small" ng-if="vm.cronRunCount(vm.calEditCardData) > 0"
+            ng-click="vm.calClearHistory(vm.calEditCardData, $event)">Clear history</button>
+        </div>
       </div>
       <div class="popup-footer">
         <button ng-if="vm.calEditCardData.id" class="danger"
@@ -207,6 +231,9 @@
               <span class="cal-history-icon">{{vm.cronRunLabel(e)}}</span>
               <span class="cal-history-when">{{e.firedAt | date:'MMM d, HH:mm'}}</span>
               <span class="cal-history-dur" ng-if="e.durationMs">{{vm.cronRunDuration(e)}}</span>
+              <button class="danger small cal-history-requeue" ng-if="e.outcome === 'stopped' || e.outcome === 'error'"
+                ng-click="vm.calRequeueRun(e, null, $event)"
+                title="Fire this card again now — retry the failed one-shot job">&#8635; Requeue now</button>
               <span class="cal-history-summary" ng-if="e.summary">{{e.summary}}</span>
             </div>
           </div>

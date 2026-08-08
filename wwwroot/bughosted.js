@@ -39,7 +39,19 @@ angular.module('kanbanApp')
                 vm.bughostedClientId = ''; vm.bughostedStatus = 'disconnected'; vm.bughostedTesting = false;
                 vm.bughostedTestResult = ''; vm.bughostedTestError = ''; vm.remoteCommands = [];
 
+                function collectRankPayload() {
+                    var out = { userScore: 0, rankTitle: '' };
+                    try {
+                        if (typeof vm.userStats !== 'function' || typeof vm.userRankProgress !== 'function') return out;
+                        var stats = vm.userStats();
+                        var prog = vm.userRankProgress(stats);
+                        if (prog && prog.score) out.userScore = Math.round(prog.score);
+                        if (typeof vm.userRankTitle === 'function') out.rankTitle = vm.userRankTitle(stats) || '';
+                    } catch (e) { }
+                    return out;
+                }
                 function buildHeartbeatPayload() {
+                    var rank = collectRankPayload();
                     return {
                         clientId: vm.bughostedClientId,
                         kanbanData: JSON.stringify(
@@ -59,7 +71,9 @@ angular.module('kanbanApp')
                                 agentSummary: vm.streamingSummary || '', 
                                 activeCardId: vm.activeCardId || null, 
                                 activeCardText: vm.activeCardText || '', 
-                                calendarCards: vm.calCards || [] 
+                                calendarCards: vm.calCards || [],
+                                userScore: rank.userScore,
+                                rankTitle: rank.rankTitle
                             }
                         ),
                         settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, compactThinkingContext: vm.compactThinkingContext, summarizeDiffContext: vm.summarizeDiffContext, diffContextSummaryChars: vm.diffContextSummaryChars, llmTimeoutMinutes: vm.llmInfiniteTimeout ? 0 : (vm.llmTimeoutMinutes || 0), approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
@@ -195,6 +209,13 @@ angular.module('kanbanApp')
                         if (cmd.params.disallowedTerminalRoots !== undefined) vm.disallowedTerminalRoots = cmd.params.disallowedTerminalRoots;
                         if (cmd.params.buildCommands !== undefined) vm.buildCommands = cmd.params.buildCommands;
                         vm.saveSettings();
+                    } else if (cmd.command === 'startAllBenchmarks') {
+                        // Remote 'Start All Benchmarks' — same flow as the UI Run-All
+                        // button: queues every benchmark plan and runs them
+                        // back-to-back (guard inside startBenchmarkAll handles a
+                        // run already in progress / unreachable LLM).
+                        if (vm.startBenchmarkAll) vm.startBenchmarkAll();
+                        else if (vm.startBenchmarkAllNow) vm.startBenchmarkAllNow();
                     }
                     $http.post('/api/bughosted/commands/ack', { clientId: vm.bughostedClientId, commandId: cmd.id, status: 'executed', result: 'ok' });
                 };

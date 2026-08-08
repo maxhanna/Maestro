@@ -155,6 +155,46 @@ public class EditClassifierTests
         Assert.Equal(expected, result);
     }
 
+    // ── Variable/expression swap — tiny targeted edit, never method rewrite ──
+
+    [Theory]
+    [InlineData("Replace `b` with `group` in the benchmark-item ngFor", "b")]
+    [InlineData("change the loop variable from `b` to `group`", "b")]
+    [InlineData("swap the benchmark variable for a grouped one", "benchmarks")]
+    [InlineData("rename `benchmarks` to `groupedBenchmarks`", "benchmarks")]
+    public void Classify_VariableSwap_OnFormatCLanguage_ReturnsAnchoredEdit(string change, string? symbol)
+    {
+        // A single-variable swap must NEVER escalate to ReplaceMethod (FORMAT C whole-
+        // method rewrite) just because the planner named the swapped variable as
+        // targetSymbol — that was the benchmarks-ngFor wall-of-text failure.
+        var result = EditClassifier.Classify(
+            Step("src/app/foo/foo.component.ts", change, symbol),
+            fileExists: true, ext: ".ts");
+        Assert.Equal(EditStrategy.AnchoredEdit, result);
+    }
+
+    [Theory]
+    [InlineData("Replace the entire save method", "save")]
+    [InlineData("Rewrite the loadData method body", "loadData")]
+    [InlineData("Update the parse function", "parse")]
+    public void Classify_WholeMethodPhrasing_StillReturnsReplaceMethod(string change, string? symbol)
+    {
+        // "replace ... method/function" language must NOT be downgraded to a variable swap.
+        var result = EditClassifier.Classify(
+            Step("src/app/foo/foo.component.ts", change, symbol),
+            fileExists: true, ext: ".ts");
+        Assert.Equal(EditStrategy.ReplaceMethod, result);
+    }
+
+    [Fact]
+    public void ClassifyIntent_VariableSwap_ReturnsTargetedEdit()
+    {
+        var intent = EditClassifier.ClassifyIntent(
+            Step("src/app/foo.component.ts", "Replace `b` with `group` in the benchmark-item ngFor", "b"), ".ts");
+        Assert.Equal(EditIntentKind.TargetedEdit, intent.Kind);
+        Assert.Equal("b", intent.Symbol);
+    }
+
     // ── Full method rewrite (FORMAT C replace) ───────────────────────────────
 
     [Theory]
@@ -255,5 +295,36 @@ public class EditClassifierTests
     public void IsFullMethodRewrite_DetectsBodyRewrites(string change, string? symbol, bool expected)
     {
         Assert.Equal(expected, EditClassifier.IsFullMethodRewrite(change.ToLowerInvariant(), symbol));
+    }
+
+    // ── IsVariableSwap ───────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("replace `b` with `group`", true)]
+    [InlineData("swap the loop variable for a grouped one", true)]
+    [InlineData("change `benchmarks` to `groupedBenchmarks`", true)]
+    [InlineData("rename x to y", true)]
+    [InlineData("replace the entire save method", false)]
+    [InlineData("update the button text", false)]
+    [InlineData("fix the typo in the greeting message", false)]
+    [InlineData("add a new method to the class", false)]
+    public void IsVariableSwap_DetectsTokenSwaps(string change, bool expected)
+    {
+        Assert.Equal(expected, EditClassifier.IsVariableSwap(change.ToLowerInvariant()));
+    }
+
+    [Fact]
+    public void IsVariableSwap_NamedSymbolWithSwapPhrasing_Detects()
+    {
+        // Planner set targetSymbol to the variable — "swap ... benchmark" must be a swap,
+        // not a method rewrite, when no method/function language is present.
+        Assert.True(EditClassifier.IsVariableSwap("swap the benchmark loop variable", "benchmark"));
+    }
+
+    [Fact]
+    public void IsVariableSwap_WholeMethodLanguage_NotSwap()
+    {
+        // "replace the entire save method" with symbol "save" is a method rewrite, NOT a swap.
+        Assert.False(EditClassifier.IsVariableSwap("replace the entire save method", "save"));
     }
 }

@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using Weaver.Services;
 using Xunit;
@@ -241,6 +242,99 @@ internal static class FuzzHarness
             if (pos < 0) return -1;
         }
         return pos;
+    }
+
+    // ── Shared hallucination-corpus builders (DetectHallucination fuzz) ────────
+    // The wall-of-text / semantic-repetition corpora (HallucinationFuzzTests) derive
+    // every doc from a seeded RNG via SeededRng so the corpus is byte-identical across
+    // runs and machines, and the docs carry the same guard discipline as the other
+    // corpora: exact size + exact newline count (so the ratio the doc claims is the
+    // ratio the detector computes), aperiodic filler (so a wall-of-text doc can NEVER
+    // trip the semantic-repetition branch — a periodic filler would make the density
+    // assertions vacuous), and branch-hit tallies proving both detector branches fired.
+
+    /// <summary>
+    /// Builds an APERIODIC prose doc of EXACTLY <paramref name="chars"/> chars with
+    /// EXACTLY <paramref name="newlines"/> newline characters. Filler chars come from
+    /// the seeded RNG (printable ASCII, no whitespace) so the 120-char sampling windows
+    /// of the semantic-repetition detector never repeat by construction; newlines are
+    /// overwritten in at distinct RNG-chosen positions so the length stays exact. A
+    /// wall-of-text doc must therefore exercise ONLY the newline-density branch.
+    /// </summary>
+    public static string BuildHallucinationProse(Random rng, int chars, int newlines)
+    {
+        var sb = new StringBuilder(chars);
+        for (var i = 0; i < chars; i++)
+            sb.Append((char)(33 + rng.Next(90))); // printable ASCII 33..122, no whitespace
+        if (newlines <= 0) return sb.ToString();
+        // Rejection-sample distinct positions with a generous guard; fail LOUDLY if the
+        // guard ever exhausts (a caller passing newlines near chars would silently weaken
+        // the doc's ratio claim — exactly the silent-degradation the corpus discipline
+        // forbids). Callers keep newlines a small fraction of chars, so this never trips.
+        var positions = new HashSet<int>();
+        var guard = 0;
+        while (positions.Count < newlines && guard++ < newlines * 8 + 16)
+            positions.Add(rng.Next(chars));
+        Assert.True(positions.Count == newlines,
+            $"BuildHallucinationProse could not place {newlines} distinct newlines in {chars} chars — guard exhausted");
+        foreach (var p in positions)
+            sb[p] = '\n';
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Builds a semantic-repetition doc with WHITESPACE embedded every
+    /// <paramref name="spaceEvery"/> chars (0 = none). Exercising the detector's Trim()
+    /// path: the repeated block's boundary windows still align (blockLen stays a multiple
+    /// of 40) but each 120-char window trims to fewer than 120 chars before counting — so
+    /// a regression in the trimmed-length accounting (e.g. the <c>trimmed.Length &lt; 60</c>
+    /// skip or the trim itself) is caught, not just the raw no-whitespace path. Callers
+    /// must keep the block's first 120 chars trimming to &gt;= 60 chars (spaceEvery &gt; 2).
+    /// </summary>
+    public static string BuildHallucinationRepetitionWithWhitespace(
+        Random rng, int blockLen, int repeats, int spaceEvery)
+    {
+        var sb = new StringBuilder(blockLen);
+        for (var i = 0; i < blockLen; i++)
+        {
+            if (spaceEvery > 0 && i % spaceEvery == 0) sb.Append(' ');
+            else sb.Append((char)(33 + rng.Next(90)));
+        }
+        var block = sb.ToString();
+        return string.Concat(Enumerable.Repeat(block, repeats));
+    }
+
+    /// <summary>
+    /// Builds a semantic-repetition doc: a block of <paramref name="blockLen"/> RNG
+    /// printable chars repeated <paramref name="repeats"/> times. The block length is
+    /// chosen as a multiple of the detector's 40-char sampling step so every block
+    /// boundary lands on a sampling window and the same 120-char trimmed substring is
+    /// seen 3+ times (the semantic-repetition threshold) deterministically. Newlines
+    /// are deliberately NOT added: the wall-of-text check runs FIRST and would mask the
+    /// repetition branch, so repetition docs stay below the wall's 2000-char gate.
+    /// </summary>
+    public static string BuildHallucinationRepetition(Random rng, int blockLen, int repeats)
+    {
+        var sb = new StringBuilder(blockLen);
+        for (var i = 0; i < blockLen; i++)
+            sb.Append((char)(33 + rng.Next(90)));
+        var block = sb.ToString();
+        return string.Concat(Enumerable.Repeat(block, repeats));
+    }
+
+    /// <summary>
+    /// Assert the fuzz doc built from <paramref name="build"/> is byte-identical when
+    /// rebuilt from a fresh identical seed — the deterministic-corpus guard. Same
+    /// (seed, docIdx, prime) must reproduce the same doc forever, or a seed/prime typo
+    /// silently weakened the corpus.
+    /// </summary>
+    public static void AssertSeedableDeterminism(
+        Func<Random, string> build, int seed, int docIdx, int prime, string corpusName)
+    {
+        var a = build(SeededRng(seed, docIdx, prime));
+        var b = build(SeededRng(seed, docIdx, prime));
+        Assert.True(string.Equals(a, b, StringComparison.Ordinal),
+            $"{corpusName} doc #{docIdx} is not seedable — rebuilt bytes differ");
     }
 
     /// <summary>

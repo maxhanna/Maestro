@@ -1244,6 +1244,72 @@ body.dragging-active .card:hover {
     white-space: pre-wrap;
 }
 
+/* Collapsible '🌐 Web results' block on kanban step renderings — matches the agent-panel
+   block (styles.css) but sized for the compact card. */
+.step-web-inline {
+    margin-top: 3px;
+    max-width: 100%;
+}
+
+.step-focused-inline {
+    margin-top: 3px;
+    max-width: 100%;
+    border-left: 2px solid var(--accent3, #c678dd);
+    padding-left: 5px;
+}
+
+.step-focused-inline summary {
+    cursor: pointer;
+    font-size: 10px;
+    color: var(--accent3, #c678dd);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
+.step-focused-inline .web-copy-btn {
+    font-size: 9px;
+    padding: 1px 4px;
+    color: var(--accent3, #c678dd);
+    vertical-align: middle;
+}
+
+.step-focused-inline .focused-full-file {
+    margin-top: 3px;
+    border-top: 1px dashed var(--border, rgba(255, 255, 255, 0.12));
+    padding-top: 3px;
+}
+
+.step-focused-inline .focused-full-file summary {
+    color: var(--muted);
+}
+
+.step-web-inline summary {
+    cursor: pointer;
+    font-size: 10px;
+    color: var(--accent2, #61afef);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
+.step-web-inline .web-copy-btn {
+    font-size: 9px;
+    padding: 1px 4px;
+    color: var(--accent2, #61afef);
+    vertical-align: middle;
+}
+
+.step-web-inline summary:hover {
+    opacity: 0.85;
+}
+
+.step-web-inline .step-output {
+    max-height: 120px;
+}
+
 .step-err {
     color: #f87171;
     font-size: 10.5px;

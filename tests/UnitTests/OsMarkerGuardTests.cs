@@ -65,6 +65,70 @@ public class OsMarkerGuardTests
         Assert.Contains("Research step rejected", reason);
     }
 
+    [Fact]
+    public void WebSearchStep_WithWhitespaceFileVariant_IsNotRejectedByResearchGuard()
+    {
+        // End-to-end: the parser (which normalizes the file field) must produce a step the validator
+        // accepts. An LLM-emitted file name like " _web_search \n" used to dodge IsWebStep and the
+        // web-step exclusion, so the research-verb guard bounced a genuinely web-needing task right
+        // after the web-need gate approved it (the interleaved deadlock). Feeding the whitespace-y
+        // field through ParseStepFromJson then ValidateIncrementalStepAsync is the true runtime path.
+        var parseMethod = typeof(AgentController).GetMethod(
+            "ParseStepFromJson", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var parsed = (PlanStep)parseMethod.Invoke(null, new object?[]
+        {
+            /*file*/ " _web_search \n", /*change*/ "Search for recent AI articles about machine learning advancements",
+            /*targetSymbol*/ null, /*line*/ 0, /*oldString*/ null, /*newString*/ null,
+            /*refFiles*/ new List<string>(), /*edits*/ new List<EditPair>(), /*targetType*/ null,
+            /*targetName*/ null, /*insertAfter*/ null, /*newCode*/ null, /*fullFile*/ null
+        })!;
+        Assert.Equal("_web_search", parsed.File);
+        var (valid, reason) = Validate(parsed,
+            "Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.");
+        Assert.True(valid, reason);
+    }
+
+    [Fact]
+    public void WebSearchStep_AfterWebNeedGateConfirmation_IsNotRejected()
+    {
+        // The exact reported sequence: the web-need gate runs (task hints at needing current external
+        // info), the LLM confirms web is required, and THEN the model proposes the _web_search step.
+        // The validator must accept it — "Research step rejected — 'search' is not an actionable edit"
+        // must never fire for a web marker whose change field IS the query.
+        var (valid, reason) = Validate(WebSearch("Search the web for the latest AI research breakthroughs"),
+            "Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.");
+        Assert.True(valid, reason);
+    }
+
+    [Fact]
+    public void WebSearchStep_AutoInjectedAfterRefusals_IsNotRejected()
+    {
+        // Auto-inject path: the planner refused _web_search MAX_STEP_REGEN_ATTEMPTS times, so the loop
+        // injects a bare _web_search step (File + Change only, no oldString/newString/symbol). That
+        // shape must pass validation exactly like a model-proposed one.
+        var (valid, reason) = Validate(new PlanStep { File = "_web_search", Change = "latest AI research breakthroughs" },
+            "Search the web for the latest AI research breakthroughs and write them to a file.");
+        Assert.True(valid, reason);
+    }
+
+    [Fact]
+    public void ParseStepFromJson_NormalizesWhitespaceInFileField()
+    {
+        // Root cause: a stray newline/space in the LLM's "file" field used to dodge IsWebStep and
+        // the web-step exclusion, so the research-verb guard fired "'search' is not an actionable edit"
+        // on a legitimate _web_search step. ParseStepFromJson must collapse it to the clean marker.
+        var parseMethod = typeof(AgentController).GetMethod(
+            "ParseStepFromJson", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var step = (PlanStep)parseMethod.Invoke(null, new object?[]
+        {
+            /*file*/ " _web_search \n", /*change*/ "Search for AI articles", /*targetSymbol*/ null,
+            /*line*/ 0, /*oldString*/ null, /*newString*/ null, /*refFiles*/ new List<string>(),
+            /*edits*/ new List<EditPair>(), /*targetType*/ null, /*targetName*/ null, /*insertAfter*/ null,
+            /*newCode*/ null, /*fullFile*/ null
+        })!;
+        Assert.Equal("_web_search", step.File);
+    }
+
     // ── _create_directory / _create_file cannot reach the OS filesystem ─────
 
     [Fact]

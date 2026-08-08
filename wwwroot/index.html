@@ -646,9 +646,35 @@
                       <strong>Ping Analysis:</strong>
                       <pre class="step-detail-data">{{s.pingAnalysis}}</pre>
                     </div>
-                    <div class="step-detail" ng-if="s.output">
+                    <div class="step-detail" ng-if="s.output && !vm.isWebStep(s) && !(s.type==='read' && s.focused)">
                       <pre class="step-detail-data">{{s.output}}</pre>
                     </div>
+                    <details class="step-detail focused-block" ng-if="s.type==='read' && s.focused && s.focusedOutput"
+                      ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                      <summary>
+                        <span class="focused-icon">🎯</span>
+                        <span class="focused-title">read {{s.path}}</span>
+                        <span class="focused-ids" ng-if="s.focusIds">focused: {{s.focusIds}}</span>
+                        <span class="focused-full-hint" ng-if="s.output">full file {{s.output.length}} chars</span>
+                        <button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy focused region">📋</button>
+                      </summary>
+                      <pre class="step-detail-data focused-body">{{s.focusedOutput}}</pre>
+                      <details class="focused-full-file" ng-if="s.output">
+                        <summary>📄 Full file ({{s.output.length}} chars)<button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event, true)" title="Copy full file">📋 Copy</button></summary>
+                        <pre class="step-detail-data">{{s.output}}</pre>
+                      </details>
+                    </details>
+                    <details class="step-detail web-results-block" ng-if="vm.isWebStep(s) && s.output"
+                      ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                      <summary>
+                        <span class="web-results-icon">🌐</span>
+                        <span class="web-results-title">{{s.type === '_web_fetch' || s.type === 'web_fetch' ? 'Web fetch' : 'Web results'}}</span>
+                        <span class="web-results-query" ng-if="s.query || s.url">— {{(s.query || s.url) | limitTo:60}}</span>
+                        <span class="web-results-truncated" ng-if="s.truncated" title="Only the first 12,000 chars are shown here — the agent still has the full results in its context.">(truncated)</span>
+                        <button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy web results to clipboard">📋 Copy</button>
+                      </summary>
+                      <pre class="step-detail-data web-results-body">{{s.output}}</pre>
+                    </details>
                     <div class="step-detail" ng-if="s.error">
                       <span class="step-err">{{s.error}}</span>
                       <div class="path-suggestions" ng-if="s.suggestions && s.suggestions.length">
@@ -849,6 +875,14 @@
               <option value="board">Board — skeleton + board history</option>
               <option value="skeleton">Skeleton — file layout only</option>
             </select>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
+            <span class="muted" style="font-size:11px;white-space:nowrap;">🤖 Idle suggestions:</span>
+            <label style="display:flex; align-items:center; gap:6px; font-size:11px; cursor:pointer;"
+              title="When ON (default), the agent automatically tops up Done-column cards to 3 suggestions each while it is idle. Turn OFF to keep it from generating suggestions unless a card completes.">
+              <input type="checkbox" ng-model="p.IdleSuggestions" style="width:auto; margin:0;" />
+              Auto-generate suggestions for Done cards while the agent is idle
+            </label>
           </div>
         </div>
         <div style="padding:10px 0;">

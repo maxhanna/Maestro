@@ -75,6 +75,11 @@ angular.module('kanbanApp')
                     if (activeNow < wasActive) {
                         $timeout(function () { if (vm.processQueuedCards) { vm.processQueuedCards(); } }, 100);
                     }
+                    // The agent just went fully idle — give the board a moment to
+                    // settle, then start topping up Done-card suggestions.
+                    if (activeNow === 0 && wasActive > 0) {
+                        $timeout(function () { if (vm.kickIdleSuggestions) vm.kickIdleSuggestions(); }, 2500);
+                    }
                 };
                 vm.isEndpointBusy = function (endpointId) {
                     var ep = endpointId || '';
@@ -126,6 +131,46 @@ angular.module('kanbanApp')
                         try { return JSON.stringify(detail, null, 2); } catch (e) { return String(detail); }
                     }
                     return String(detail);
+                };
+                // A step whose output is web data (search results or a fetched page) renders in a
+                // dedicated collapsible '🌐 Web results' block instead of the generic output box.
+                // Matches both plan-marker types (_web_search/_web_fetch) and the command-pipeline
+                // types (web_search/web_fetch).
+                vm.isWebStep = function (s) {
+                    if (!s) return false;
+                    var t = s.type || '';
+                    return t === '_web_search' || t === '_web_fetch' || t === 'web_search' || t === 'web_fetch';
+                };
+                // Copies a step's web results (output, else query/url) to the clipboard,
+                // flashing '✓' on the button. Stops propagation so the parent <details>
+                // summary toggle and card click don't fire.
+                vm.copyStepOutput = function (s, evt, preferFull) {
+                    if (evt && evt.stopPropagation) evt.stopPropagation();
+                    if (evt && evt.preventDefault) evt.preventDefault();
+                    var text = (s && (preferFull ? (s.output || s.focusedOutput || s.query || s.url) : (s.focusedOutput || s.output || s.query || s.url))) || '';
+                    var btn = evt && evt.currentTarget;
+                    var done = function () {
+                        if (!btn) return;
+                        btn.classList.add('copied');
+                        setTimeout(function () { btn.classList.remove('copied'); }, 1200);
+                    };
+                    var legacy = function () {
+                        try {
+                            var ta = document.createElement('textarea');
+                            ta.value = text;
+                            ta.style.position = 'fixed';
+                            ta.style.opacity = '0';
+                            document.body.appendChild(ta);
+                            ta.select();
+                            document.execCommand('copy');
+                            document.body.removeChild(ta);
+                        } catch (e) { }
+                    };
+                    try {
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(text).then(done, function () { legacy(); done(); });
+                        } else { legacy(); done(); }
+                    } catch (e) { legacy(); done(); }
                 };
                 vm.buildTools = [
                     { name: 'Ping', icon: '📡', desc: 'Check host connectivity (TCP/ping/HTTP)', hint: 'ping google.com -n 4' },
@@ -788,15 +833,15 @@ angular.module('kanbanApp')
                 };
 
                 vm.suggestImprovements = function (card, summary, project, opts) {
-                    if (!card) return;
+                    if (!card) return false;
                     var topup = !!(opts && opts.topup);
                     if (topup) {
-                        if (!Array.isArray(card._suggestions) || card._suggestions.length >= 3 || card._suggestionsGenerating) return;
+                        if (!Array.isArray(card._suggestions) || card._suggestions.length >= 3 || card._suggestionsGenerating) return false;
                     } else if (card._suggestions || card._suggestionsRequested) {
-                        return;
+                        return false;
                     }
                     var proj = project || card.filePath || vm.selectedProject;
-                    if (!proj) return;
+                    if (!proj) return false;
                     card._suggestionsRequested = true;
                     card._suggestionsGenerating = true;
                     card._suggestionsError = null;
@@ -833,22 +878,132 @@ angular.module('kanbanApp')
                         vm.saveCards();
                         if (suggestions.length) {
                             pushAgentLog(vm, 'success', topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card.' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card.');
-                            if (vm.showSideToast) vm.showSideToast(topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card');
+                            // Background (idle-loop) runs skip the toast — they'd spam
+                            // the screen while filling a whole board of Done cards.
+                            if (!(opts && opts.idle) && vm.showSideToast) vm.showSideToast(topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card');
                         } else {
                             pushAgentLog(vm, 'info', '💡 No improvement suggestions generated for this card.');
                         }
+                        if (opts && opts.onDone) opts.onDone(true);
                     }, function (err) {
                         card._suggestionsGenerating = false;
                         card._suggestionsError = (err && (err.data && err.data.error || err.statusText)) || 'Suggestion generation failed';
                         card._suggestions = card._suggestions || [];
                         vm.saveCards();
                         pushAgentLog(vm, 'warn', '💡 Suggestion generation failed: ' + card._suggestionsError);
+                        if (opts && opts.onDone) opts.onDone(false);
                     });
+                    return true;
                 };
                 vm.moreLikeThis = function (card) {
                     if (!card) return;
                     vm.suggestImprovements(card, null, card.filePath || vm.selectedProject, { topup: true });
                 };
+                // ── Idle suggestion loop ──────────────────────────────────────
+                // When the agent is completely free (no run active, no benchmark,
+                // no self-improving cycle), quietly top up Done-column cards that
+                // don't yet carry 3 suggestions. It works through the cards one at
+                // a time and keeps going until every Done card is saturated or the
+                // user starts the agent again — the armed() check stops the loop
+                // the moment anything starts, and it resumes on the next idle spell.
+                vm._suggestionIdleTimer = null;
+                vm._suggestionIdleBusy = false;
+                vm._suggestionIdleChainActive = false;
+
+                vm.suggestionIdleArmed = function () {
+                    return !vm.streamingActive
+                        && !vm.benchmarkRunning
+                        && !vm.benchmarkAllActive
+                        && vm.selfImprovingAgentActive !== true;
+                };
+
+                vm._doneCardsNeedingSuggestions = function () {
+                    var need = [];
+                    (vm.state.done || []).forEach(function (c) {
+                        if (!c) return;
+                        if (c._suggestionsSaturated) return;
+                        if (c._suggestionsGenerating) return;
+                        if (Array.isArray(c._suggestions) && c._suggestions.length >= 3) return;
+                        need.push(c);
+                    });
+                    return need;
+                };
+
+                vm._nextIdleSuggestionCard = function () {
+                    var cards = vm._doneCardsNeedingSuggestions();
+                    for (var i = 0; i < cards.length; i++) {
+                        var c = cards[i];
+                        // Skip cards that would bail out of suggestImprovements
+                        // (requested but never resolved) so we can't spin on them.
+                        if (c._suggestionsRequested && !Array.isArray(c._suggestions)) continue;
+                        if (!(c.filePath || vm.selectedProject)) continue;
+                        return c;
+                    }
+                    return null;
+                };
+
+                vm._runIdleSuggestions = function () {
+                    if (vm._suggestionIdleBusy) return;
+                    if (!vm.suggestionIdleArmed()) return;
+                    var card = vm._nextIdleSuggestionCard();
+                    if (!card) {
+                        if (vm._suggestionIdleChainActive) {
+                            vm._suggestionIdleChainActive = false;
+                            pushAgentLog(vm, 'info', '💡 Done-card suggestions filled — idle loop complete.');
+                        }
+                        return;
+                    }
+                    if (!vm._suggestionIdleChainActive) {
+                        vm._suggestionIdleChainActive = true;
+                        pushAgentLog(vm, 'info', '💡 Agent idle — topping up Done-card suggestions…');
+                    }
+                    vm._suggestionIdleBusy = true;
+                    var isTopup = Array.isArray(card._suggestions);
+                    var beforeCount = Array.isArray(card._suggestions) ? card._suggestions.length : 0;
+                    card._suggestionIdleAttempts = (card._suggestionIdleAttempts || 0) + 1;
+                    if (vm.saveCards) vm.saveCards();
+                    var fired = vm.suggestImprovements(card, null, card.filePath || vm.selectedProject, {
+                        topup: isTopup,
+                        idle: true,
+                        onDone: function (ok) {
+                            vm._suggestionIdleBusy = false;
+                            var n = Array.isArray(card._suggestions) ? card._suggestions.length : 0;
+                            if (n >= 3) {
+                                card._suggestionsSaturated = true;
+                            } else if (ok && beforeCount > 0 && n <= beforeCount) {
+                                // A top-up that added nothing new — the LLM couldn't
+                                // extend the set, so stop asking for this card.
+                                card._suggestionsSaturated = true;
+                            } else if (card._suggestionIdleAttempts >= 3) {
+                                // Give the LLM a few chances, then move on so the
+                                // loop never hammers the endpoint for one card.
+                                card._suggestionsSaturated = true;
+                            }
+                            if (vm.saveCards) vm.saveCards();
+                            $timeout(function () { vm._runIdleSuggestions(); }, 1500);
+                        }
+                    });
+                    if (!fired) {
+                        // Unexpected bail (e.g. a race with manual generation) —
+                        // treat as saturated so the loop can't spin on this card.
+                        card._suggestionsSaturated = true;
+                        vm._suggestionIdleBusy = false;
+                        if (vm.saveCards) vm.saveCards();
+                        $timeout(function () { vm._runIdleSuggestions(); }, 800);
+                    }
+                };
+
+                vm.kickIdleSuggestions = function () {
+                    if (!vm.suggestionIdleArmed()) return;
+                    $timeout(function () { vm._runIdleSuggestions(); }, 500);
+                };
+
+                // Safety-net poller: catches app-start, missed transitions and
+                // any card that lands in Done while the agent is already idle.
+                if (vm._suggestionIdleTimer) $interval.cancel(vm._suggestionIdleTimer);
+                vm._suggestionIdleTimer = $interval(function () {
+                    if (!vm._suggestionIdleBusy) vm._runIdleSuggestions();
+                }, 10000);
                 // ── Suggestion → To-Do card ───────────────────────────────────
                 // Clicking a suggestion in the Done column creates a new card in the To Do
                 // column pre-filled with the suggestion text and its file attachments (a

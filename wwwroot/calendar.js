@@ -337,6 +337,28 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         if (e.outcome === 'skipped') return '⏭ Skipped (already running)';
         return '▶ Fired';
       };
+      // Compact outcome icon (emoji only) for tight spaces like the day-cell
+      // last-run hint, where the full '✅ Done' label would overflow.
+      vm.cronRunIcon = function (e) {
+        if (!e) return '▶';
+        if (e.outcome === 'success') return '✅';
+        if (e.outcome === 'error') return '❌';
+        if (e.outcome === 'stopped') return '⏹';
+        if (e.outcome === 'skipped') return '⏭';
+        return '▶';
+      };
+      // Tooltip for the day-cell last-run hint: outcome, when it fired, how
+      // long it took, and which task it belongs to.
+      vm.calDayLastRunTitle = function (lr) {
+        if (!lr || !lr.entry) return '';
+        var parts = [vm.cronRunLabel(lr.entry)];
+        if (lr.entry.firedAt) {
+          try { parts.push(new Date(lr.entry.firedAt).toLocaleString()); } catch (e) {}
+        }
+        if (lr.entry.durationMs) parts.push(vm.cronRunDuration(lr.entry));
+        if (lr.card && lr.card.text) parts.push('— ' + String(lr.card.text).slice(0, 40));
+        return 'Last run: ' + parts.join(' · ');
+      };
       vm.calOpenHistory = function (card, $event) {
         if ($event) $event.stopPropagation();
         vm.calShowHistory = card ? card.id : null;
@@ -528,9 +550,25 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           }
           return lines.join('\n');
         }
+        // Newest run entry across a day's cards (each card's run log lives in
+        // board data), or null when none have fired yet. Computed once per day
+        // when the grid is built so the day-cell hint costs nothing per digest.
+        function dayLastRun(dayCards) {
+          var best = null;
+          for (var i = 0; i < dayCards.length; i++) {
+            var log = vm.cronRunLogFor(dayCards[i]);
+            if (!log || !log.length) continue;
+            var top = log[0]; // log is newest-first
+            if (!best || new Date(top.firedAt).getTime() > new Date(best.entry.firedAt).getTime()) {
+              best = { entry: top, card: dayCards[i] };
+            }
+          }
+          return best;
+        }
         function makeDay(num, dateStr, inMonth, dt) {
+          var dayCards = cardsForDate(dateStr);
           var nfList = firesByDate[dateStr] || [];
-          return { num: num, date: dateStr, inMonth: inMonth, isToday: dateStr === todayStr, isWeekend: isWeekend(dt), cards: cardsForDate(dateStr), nextFires: nfList, nextFiresTitle: nextFiresTitle(nfList) };
+          return { num: num, date: dateStr, inMonth: inMonth, isToday: dateStr === todayStr, isWeekend: isWeekend(dt), cards: dayCards, nextFires: nfList, nextFiresTitle: nextFiresTitle(nfList), lastRun: dayLastRun(dayCards) };
         }
 
         var prevMonthLast = new Date(year, month, 0).getDate();
@@ -818,6 +856,53 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         } catch (e) {
           console.error('Error running calendar card now:', e);
         }
+      };
+
+      // ── "Requeue now" — retry a failed/stopped run ──────────────────────
+      // Shown on ⏹ Stopped / ❌ Error entries in the run history. Fires the
+      // calendar card immediately (same mechanics as Run now) so a failed
+      // one-shot job can be retried in one click. `card` resolves from the
+      // caller: the edit popup passes calEditCardData, the run-history popup
+      // falls back to calHistoryCard().
+      vm.calRequeueRun = function (entry, card, $event) {
+        if ($event) $event.stopPropagation();
+        var calCard = card || vm.calHistoryCard() || vm.calEditCardData;
+        if (!calCard) return;
+        if (!calCard.text) return $window.alert('This card has no task text — add one before requeuing.');
+        // Don't create a duplicate while a live board card for this schedule
+        // is still on the board (same guard the cron processor uses).
+        if (hasLiveCalendarInstance(_vm.state, calCard)) {
+          if (_vm.showSideToast) _vm.showSideToast('⏰ This schedule already has a live card on the board — no duplicate created.');
+          return;
+        }
+        var now = new Date();
+        var newCard = {
+          id: uid(),
+          text: calCard.text,
+          filePath: calCard.filePath || calCard.project || _vm.selectedProject,
+          createdAt: now.toISOString(),
+          priority: calCard.priority || 'medium',
+          ready: true,
+          attached: [],
+          selfImproving: false,
+          isDecomposing: false,
+          _fromCron: true,
+          _cronExpression: calCard.cronExpression || (calCard.time ? calCard.date + ' ' + calCard.time : ''),
+          _cronLabel: calCard.label || '',
+          _cronSourceId: calCard.id
+        };
+        if (!_vm.state.todo) _vm.state.todo = [];
+        _vm.state.todo.push(newCard);
+        _vm.saveCards();
+        // Audit trail: a manual retry — record it like a manual fire so the
+        // history shows the retry right after the failed entry.
+        cronRunLogAdd(_vm, cronRunLogKey(calCard), { outcome: 'ran', cardId: newCard.id, summary: 'Requeued after ' + (entry && entry.outcome === 'error' ? 'error' : 'stop') + ' — card pushed to To Do.' });
+        // The interval runs outside a digest — apply so the card shows immediately.
+        try { if (_scope && !_scope.$$phase) _scope.$applyAsync(); } catch (e) {}
+        if (_vm.showSideToast) _vm.showSideToast('⏰ Requeued — added to To Do' + (_vm.streamingActive ? ' (queued)' : ' and started'));
+        if (!_vm.streamingActive && _vm.executeAgent) _vm.executeAgent(newCard);
+        // Keep the popup open so the fresh '▶ Fired' entry is visible.
+        scheduleUpdate();
       };
 
       vm.calDeleteCard = function (card, $event) {

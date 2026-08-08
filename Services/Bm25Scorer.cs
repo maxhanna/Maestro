@@ -51,11 +51,27 @@ public static class Bm25Scorer
         return $"{file} ← {string.Join(", ", tokenHits.Select(h => $"{h.token}({h.contribution:0.0})"))}";
     }
 
+    /// <summary>Bonus a file gets when an identifier token from the task prompt appears
+    /// in the file's PATH (strongest signal — the identifier names the file/folder).</summary>
+    public const double IdentifierPathBonus = 25.0;
+    /// <summary>Bonus for an EXACT case-sensitive content hit of an identifier token —
+    /// the real symbol (method/variable name) is present in this file.</summary>
+    public const double IdentifierExactContentBonus = 12.0;
+    /// <summary>Bonus for a case-insensitive content hit (prompt casing differs, e.g. the
+    /// user typed or_this while the code uses OrThis).</summary>
+    public const double IdentifierLooseContentBonus = 6.0;
+
     /// <summary>Rank project files against the prompt using BM25 lexical scoring, returning the
-    /// top 10 with per-token contribution attribution.</summary>
+    /// top 10 with per-token contribution attribution. When <paramref name="identifierTokens"/>
+    /// is supplied (identifier-shaped tokens extracted from the prompt — snake/kebab/camelCase,
+    /// dotted file names), files whose path or content contains one get a large deterministic
+    /// bonus: word-splitting BM25 would shatter e.g. "or_this" into generic parts and match
+    /// nothing, but the identifier is usually the key file/method/variable the task targets.</summary>
     public static List<(string file, double score, List<(string token, double contribution)> tokenHits)> ScoreProjectFiles(
-        string prompt, string projectRoot, List<string> allFiles, CancellationToken ct)
+        string prompt, string projectRoot, List<string> allFiles, CancellationToken ct,
+        List<string>? identifierTokens = null)
     {
+        var ids = identifierTokens ?? new List<string>();
         var queryTokens = AgentDiscovery.ExtractMeaningfulKeywords(prompt.ToLowerInvariant())
             .Where(t => t.Length >= 2 && !StopWords.Contains(t))
             .ToList();
@@ -64,8 +80,10 @@ public static class Bm25Scorer
                 .Select(m => m.Value)
                 .Where(t => !StopWords.Contains(t))
                 .ToList();
-        if (queryTokens.Count == 0) return new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
+        if (queryTokens.Count == 0 && ids.Count == 0)
+            return new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
         var fileTokens = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var fileIdHits = new Dictionary<string, List<(string id, bool pathHit, bool exactHit)>>(StringComparer.OrdinalIgnoreCase);
         long totalTokens = 0;
         foreach (var rel in allFiles)
         {
@@ -88,13 +106,36 @@ public static class Bm25Scorer
                 text = System.IO.File.ReadAllText(full);
             }
             catch { continue; }
+            // Identifier pre-scan: an exact path/content hit marks the file as highly
+            // relevant even when its token count is below the 20-token floor (a small
+            // helper defining the very symbol the task names must not be skipped).
+            // Per-file hits are capped to the 3 strongest so a file that happens to
+            // mention many prompt identifiers can't stack unbounded bonuses (6×12 = 72).
+            var idHits = new List<(string id, bool pathHit, bool exactHit)>();
+            if (ids.Count > 0)
+            {
+                foreach (var id in ids)
+                {
+                    if (ct.IsCancellationRequested) break;
+                    var pathHit = rel.Contains(id, StringComparison.OrdinalIgnoreCase);
+                    if (pathHit) { idHits.Add((id, true, false)); continue; }
+                    if (text.Contains(id, StringComparison.Ordinal)) { idHits.Add((id, false, true)); }
+                    else if (text.Contains(id, StringComparison.OrdinalIgnoreCase)) { idHits.Add((id, false, false)); }
+                }
+                idHits = idHits
+                    .OrderByDescending(h => h.pathHit)
+                    .ThenByDescending(h => h.exactHit)
+                    .Take(3)
+                    .ToList();
+            }
             var toks = Regex.Matches(text.ToLowerInvariant(), @"[a-z0-9_]{2,}")
                 .Select(m => m.Value)
                 .Where(t => !StopWords.Contains(t))
                 .ToList();
-            if (toks.Count < 20) continue;
+            if (toks.Count < 20 && idHits.Count == 0) continue;
             fileTokens[rel] = toks;
             totalTokens += toks.Count;
+            if (idHits.Count > 0) fileIdHits[rel] = idHits;
         }
         if (fileTokens.Count == 0) return new List<(string file, double score, List<(string token, double contribution)> tokenHits)>();
         var n = fileTokens.Count;
@@ -137,6 +178,20 @@ public static class Bm25Scorer
                 var hitIdx = hits.FindIndex(h => h.token.Equals(q, StringComparison.OrdinalIgnoreCase));
                 if (hitIdx >= 0) hits[hitIdx] = (q, hits[hitIdx].contribution + bonus);
                 else hits.Add((q, bonus));
+            }
+            // Identifier bonuses: path hit is the strongest signal, then exact content,
+            // then case-insensitive content. Each is attributed to the identifier token
+            // so the ranked log shows WHY ("benchmark_test_6/readme.md ← benchmark_test_6(25.0)").
+            if (fileIdHits.TryGetValue(kv.Key, out var idHitsForFile))
+            {
+                foreach (var (id, pathHit, exactHit) in idHitsForFile)
+                {
+                    var bonus = pathHit ? IdentifierPathBonus : exactHit ? IdentifierExactContentBonus : IdentifierLooseContentBonus;
+                    s += bonus;
+                    var hitIdx = hits.FindIndex(h => h.token.Equals(id, StringComparison.OrdinalIgnoreCase));
+                    if (hitIdx >= 0) hits[hitIdx] = (id, hits[hitIdx].contribution + bonus);
+                    else hits.Add((id, bonus));
+                }
             }
             if (s > 0)
                 scores.Add((kv.Key, s, hits.OrderByDescending(h => h.contribution).Take(5).ToList()));

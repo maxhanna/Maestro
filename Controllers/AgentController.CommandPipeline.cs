@@ -338,7 +338,12 @@ partial class AgentController
                 if (!usedSearchQueries.Add(query)) { conversation.AppendLine("Already searched for \"" + query + "\". Use the results above."); continue; }
                 var (searchOut, _) = await WebSearchAsync(query, ct);
                 var wr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_search", ["query"] = query, ["status"] = "done", ["output"] = searchOut };
-                steps.Add(wr); if (emitSse) await SendSse(Response, "step", wr, ct);
+                steps.Add(wr);
+                if (emitSse)
+                {
+                    var (searchCapped, searchTrunc) = CapWebStepOutputForClient(searchOut);
+                    await SendSse(Response, "step", new Dictionary<string, object?>(wr) { ["output"] = searchCapped, ["truncated"] = searchTrunc }, ct);
+                }
                 conversation.AppendLine("Web search [" + (i + 1) + "]: " + query + "\nResults:\n" + searchOut);
                 continue;
             }
@@ -357,7 +362,12 @@ partial class AgentController
                 var isFetchError = fetchOut.StartsWith("HTTP 4") || fetchOut.StartsWith("HTTP 5") ||
                     (!string.IsNullOrWhiteSpace(fetchErr) && (fetchErr.Contains("404") || fetchErr.Contains("500")));
                 var fr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_fetch", ["url"] = url, ["status"] = isFetchError ? "error" : "done", ["output"] = fetchOut };
-                steps.Add(fr); if (emitSse) await SendSse(Response, "step", fr, ct);
+                steps.Add(fr);
+                if (emitSse)
+                {
+                    var (fetchCapped, fetchTrunc) = CapWebStepOutputForClient(fetchOut);
+                    await SendSse(Response, "step", new Dictionary<string, object?>(fr) { ["output"] = fetchCapped, ["truncated"] = fetchTrunc }, ct);
+                }
                 if (isFetchError)
                 {
                     conversation.AppendLine("Fetch error [" + (i + 1) + "]: " + url + "\n" + fetchOut);

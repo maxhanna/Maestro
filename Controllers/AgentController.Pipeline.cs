@@ -950,10 +950,19 @@ partial class AgentController
     }
     private async Task<string> ExplorationPipeline(
         List<PlanStep> exploreSteps, string discoveryContext,
-        string projectRoot, bool emitSse, CancellationToken ct)
+        string projectRoot, bool emitSse, CancellationToken ct, string prompt = "")
     {
         var enriched = new StringBuilder(discoveryContext);
         enriched.AppendLine();
+        // A symbol-targeted _explore of a specific file gets the same focused-read rule
+        // as the discovery auto-read: a large file with a prompt identifier matched
+        // INSIDE contributes only the enclosing method/class/block around each match,
+        // so the model sees the region it asked about, not an unrelated 50KB component.
+        var identifierTokens = string.IsNullOrWhiteSpace(prompt)
+            ? new List<string>()
+            : AgentDiscovery.ExtractIdentifierTokens(prompt);
+        var focusedCount = 0;
+        var focusedCharsSaved = 0L;
         foreach (var step in exploreSteps)
         {
             var target = step.Change?.Trim() ?? "";
@@ -981,9 +990,26 @@ partial class AgentController
                 if (System.IO.File.Exists(fp) && AgentProjectUtilities.IsPathUnderRoot(fp, projectRoot))
                 {
                     var content = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
-                    enriched.AppendLine($"### {target}\n```\n{content}\n```\n");
+                    var (snippet, focusIds) = AgentDiscovery.FocusLargeFileRead(content, identifierTokens, target);
+                    if (focusIds != null)
+                    {
+                        focusedCount++;
+                        focusedCharsSaved += content.Length - snippet.Length;
+                        await EmitLog(emitSse, "info",
+                            $"Exploring {target}: matched identifier(s) \"{focusIds}\" — reading focused regions instead of the full file", ct: ct);
+                    }
+                    enriched.AppendLine($"### {target}" + (focusIds != null ? $" (focused: {focusIds}; full file via _explore)" : ""));
+                    enriched.AppendLine("```");
+                    enriched.AppendLine(snippet);
+                    enriched.AppendLine("```");
+                    enriched.AppendLine();
                 }
             }
+        }
+        if (focusedCount > 0)
+        {
+            await EmitLog(emitSse, "metric",
+                $"🎯 Explore focus: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars", ct: ct);
         }
         return enriched.ToString();
     }

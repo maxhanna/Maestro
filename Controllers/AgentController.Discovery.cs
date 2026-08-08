@@ -556,7 +556,17 @@ partial class AgentController
         // NEW: BM25-first auto-read — rank the whole project against the task lexically and
         // auto-read the top files so the planner starts with the right context instead of
         // flailing with _explore/_discover one file at a time.
-        var bm25Top = Bm25Scorer.ScoreProjectFiles(prompt, projectRoot, allFiles, ct);
+        // Identifier-aware pass: snake/kebab/camelCase tokens in the prompt (or_this,
+        // things-like-this, CreateDirectory, web_searcher.py) are usually the key file,
+        // method or variable the task targets — BM25 would shatter them into generic
+        // parts, so they get an exact-match bonus against paths and content instead.
+        var identifierTokens = AgentDiscovery.ExtractIdentifierTokens(prompt);
+        if (identifierTokens.Count > 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"Phase 1 — prompt identifiers {string.Join(", ", identifierTokens)} — searching the repo for exact matches (likely the key files/methods/variables for this task)", ct: ct);
+        }
+        var bm25Top = Bm25Scorer.ScoreProjectFiles(prompt, projectRoot, allFiles, ct, identifierTokens);
         var toRead = bm25Top.Select(x => x.file).Take(6).ToList();
         toRead = AddTemplateStyleSiblings(toRead, projectRoot);
         toRead = toRead
@@ -602,13 +612,18 @@ partial class AgentController
                 Description = $"Bootstrap: read {f}",
                 Prompt = prompt
             }).ToList();
-            var readResults = await ExecuteDiscoveryStepsConcurrent(readPlan, projectRoot, allSteps.Count, emitSse);
+            var readResults = await ExecuteDiscoveryStepsConcurrent(
+                readPlan, projectRoot, allSteps.Count, emitSse, FocusLargeFileRead, identifierTokens);
             var fileCharBudget = (await LoadConfigAsync()).maxFullFileTokens * 4;
             // Aggregate budget: stop pulling files once the auto-read section approaches the
             // overall context target so a big repo can't flood the prompt with top-ranked files.
             var totalBudget = Math.Max(40000, fileCharBudget * 3);
             var usedChars = 0;
             var mergedCount = 0;
+            var focusedCount = 0;
+            var focusedCharsSaved = 0L;
+            var effectiveThreshold = AgentDiscovery.LargeFileFocusThresholdChars;
+            var thresholdTuned = false;
             foreach (var r in readResults)
             {
                 if (r is not Dictionary<string, object?> d) continue;
@@ -620,10 +635,47 @@ partial class AgentController
                 // The per-file cap below silently clipped large components (e.g. a globe
                 // component) so the planner could not see the method it had to edit. Rely on
                 // the aggregate budget to drop whole files instead of slicing them.
-                var snippet = output;
-                if (usedChars + snippet.Length > totalBudget) break;
+                // EXCEPTION: a LARGE file (≥ LargeFileFocusThresholdChars) that an identifier
+                // from the prompt matched INSIDE gets a focused read — just the enclosing
+                // method/class/block around each match, with line numbers — so one stray
+                // symbol hit can't flood the prompt with an unrelated 50KB component. Small
+                // files and identifier-in-path matches stay whole. The focus fields were
+                // computed in ExecuteDiscoveryStepsConcurrent (same reader) so the SSE step
+                // event carries them for the UI; here we just reuse them for the context.
+                var focusIds = d.GetValueOrDefault("focusIds")?.ToString();
+                var snippet = focusIds != null
+                    ? (d.GetValueOrDefault("focusedOutput")?.ToString() ?? output)
+                    : output;
+                // Running hot on context: the file (or its region) won't fit the aggregate
+                // budget. Instead of dropping it, shrink the focus threshold so this large
+                // file still contributes its key regions — auto-tuned per run, never mutating
+                // shared state (concurrent agent streams can't interfere).
+                if (usedChars + snippet.Length > totalBudget)
+                {
+                    if (!AgentDiscovery.TryRefocusHotFile(
+                            output, identifierTokens, path, focusIds != null, snippet.Length,
+                            usedChars, totalBudget, effectiveThreshold,
+                            out var refocusSnippet, out var refocusIds, out var refocusThreshold))
+                        break;
+                    effectiveThreshold = refocusThreshold;
+                    thresholdTuned = true;
+                    focusIds = refocusIds;
+                    snippet = refocusSnippet;
+                    d["focused"] = true;
+                    d["focusIds"] = focusIds;
+                    d["focusedOutput"] = snippet;
+                    await EmitLog(emitSse, "info",
+                        $"Phase 1 — context running hot ({usedChars:N0}/{totalBudget:N0} chars) — lowered focus threshold to {effectiveThreshold:N0} so {path} contributes its key regions instead of being dropped", ct: ct);
+                }
+                if (focusIds != null)
+                {
+                    focusedCount++;
+                    focusedCharsSaved += output.Length - snippet.Length;
+                    await EmitLog(emitSse, "info",
+                        $"Phase 1 — {path} ({output.Length:N0} chars) matched identifier(s) \"{focusIds}\" — reading focused regions instead of the full file", ct: ct);
+                }
                 usedChars += snippet.Length;
-                sb.AppendLine($"### read {path}");
+                sb.AppendLine($"### read {path}" + (focusIds != null ? $" (focused: {focusIds}; full file via _explore)" : ""));
                 sb.AppendLine("```");
                 sb.AppendLine(snippet);
                 sb.AppendLine("```");
@@ -633,7 +685,16 @@ partial class AgentController
                 _fileHints.LearnFromGrepOutput(prompt, path, projectRoot);
             }
             await EmitLog(emitSse, "info",
-                $"Phase 1 complete — {allSteps.Count} step(s), BM25 auto-read {mergedCount} task-relevant file(s) into context", ct: ct);
+                $"Phase 1 complete — {allSteps.Count} step(s), BM25 auto-read {mergedCount} task-relevant file(s) into context" +
+                (focusedCount > 0 ? $" ({focusedCount} focused on identifier regions, saving ~{focusedCharsSaved:N0} chars)" : ""), ct: ct);
+            if (focusedCount > 0)
+            {
+                // A re-focus also increments focusedCount in its iteration, so thresholdTuned
+                // implies focusedCount >= 1 — this metric always fires when tuning happened.
+                await EmitLog(emitSse, "metric",
+                    $"📊 Discovery focus: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars" +
+                    (thresholdTuned ? $" — threshold auto-lowered to {effectiveThreshold:N0} under context pressure" : ""), ct: ct);
+            }
         }
         else
         {
@@ -667,7 +728,11 @@ partial class AgentController
     {
         if (allFiles.Count == 0) return toRead;
         await SendSse(Response, "phase", new { phase = "discover", message = "BM25 scanning project files...", contextSize = 0 }, ct);
-        var bm25Top = Bm25Scorer.ScoreProjectFiles(prompt, projectRoot, allFiles, ct);
+        // Same identifier-aware scoring as the bootstrap path: identifier tokens from the
+        // prompt get exact path/content match bonuses so the cross-check can't drop the
+        // file that defines the exact symbol the task names.
+        var identifierTokens = AgentDiscovery.ExtractIdentifierTokens(prompt);
+        var bm25Top = Bm25Scorer.ScoreProjectFiles(prompt, projectRoot, allFiles, ct, identifierTokens);
         if (bm25Top.Count > 0)
         {
             var ranked = bm25Top.Select((x, i) => $"[{i + 1}] {Bm25Scorer.FormatHits(x.file, x.score, x.tokenHits)} (score {x.score:0.0})");
@@ -705,6 +770,28 @@ partial class AgentController
             await EmitLog(emitSse, "info", "🔎 BM25 cross-check: all top lexical matches already in the read list", ct: ct);
         }
         return toRead;
+    }
+
+    /// <summary>
+    /// Thin wrapper over AgentDiscovery.FocusLargeFileRead (shared by the bootstrap
+    /// auto-read, the _discover tool, and the _explore pipeline) so the delegate
+    /// call sites keep their method-group reference.
+    /// </summary>
+    private (string snippet, string? focusIds) FocusLargeFileRead(
+        string output, List<string> identifierTokens, string path)
+        => AgentDiscovery.FocusLargeFileRead(output, identifierTokens, path);
+
+    /// <summary>
+    /// True when the discovery context contains ONLY a focused region of the file
+    /// ("### [read ]path (focused: ...)") — the file is NOT shown in full, so a
+    /// re-explore can legitimately surface a different symbol's region.
+    /// </summary>
+    private static bool IsFocusedSectionInContext(string discoveryContext, string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(discoveryContext) || string.IsNullOrWhiteSpace(filePath)) return false;
+        var normPath = filePath.Replace('\\', '/').TrimStart('/');
+        return Regex.IsMatch(discoveryContext,
+            $@"### (?:read )?{Regex.Escape(normPath)} \(focused:", RegexOptions.IgnoreCase);
     }
 
     /// <summary>
@@ -794,7 +881,15 @@ partial class AgentController
                 ct: ct);
         }
         toRead = toRead
-            .Where(f => !discoveryContext.Contains($"### read {f.Replace('\\', '/')}"))
+            .Where(f =>
+            {
+                var norm = f.Replace('\\', '/');
+                // Skip files already in context — whether read in full or present only
+                // as a focused region (a duplicate whole read next to a focused section
+                // would just waste context).
+                return !discoveryContext.Contains($"### read {norm}") &&
+                       !IsFocusedSectionInContext(discoveryContext, norm);
+            })
             .ToList();
         if (toRead.Count == 0)
         {
@@ -810,8 +905,12 @@ partial class AgentController
             Description = $"Discover: read {f}",
             Prompt = prompt
         }).ToList();
-        var readResults = await ExecuteDiscoveryStepsConcurrent(readPlan, projectRoot, 0, emitSse);
+        var identifierTokens = AgentDiscovery.ExtractIdentifierTokens(prompt);
+        var readResults = await ExecuteDiscoveryStepsConcurrent(
+            readPlan, projectRoot, 0, emitSse, FocusLargeFileRead, identifierTokens);
         var merged = new StringBuilder(discoveryContext);
+        var focusedCount = 0;
+        var focusedCharsSaved = 0L;
         foreach (var r in readResults)
         {
             if (r is not Dictionary<string, object?> d) continue;
@@ -819,12 +918,30 @@ partial class AgentController
             var output = d.GetValueOrDefault("output")?.ToString();
             if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(output)) continue;
             if (d.GetValueOrDefault("status")?.ToString() != "done") continue;
-            merged.AppendLine($"### read {path}");
+            // Same focused-read rule as the bootstrap path: large files with identifier
+            // content hits contribute only the enclosing regions, not the whole file.
+            var focusIds = d.GetValueOrDefault("focusIds")?.ToString();
+            var snippet = focusIds != null
+                ? (d.GetValueOrDefault("focusedOutput")?.ToString() ?? output)
+                : output;
+            if (focusIds != null)
+            {
+                focusedCount++;
+                focusedCharsSaved += output.Length - snippet.Length;
+                await EmitLog(emitSse, "info",
+                    $"🔎 Discovery tool: {path} ({output.Length:N0} chars) matched identifier(s) \"{focusIds}\" — reading focused regions instead of the full file", ct: ct);
+            }
+            merged.AppendLine($"### read {path}" + (focusIds != null ? $" (focused: {focusIds}; full file via _explore)" : ""));
             merged.AppendLine("```");
-            merged.AppendLine(output);
+            merged.AppendLine(snippet);
             merged.AppendLine("```");
             merged.AppendLine();
             _fileHints.LearnFromGrepOutput(prompt, path, projectRoot);
+        }
+        if (focusedCount > 0)
+        {
+            await EmitLog(emitSse, "metric",
+                $"🔎 Discovery tool: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars", ct: ct);
         }
         return merged.ToString();
     }
@@ -1566,7 +1683,7 @@ partial class AgentController
             {
                 await EmitLog(emitSse, "info",
                     $"Planning {iter}/{MAX_PLANNING_ITERATIONS}: planner requested {newExploreSteps.Count} new exploration target(s) — gathering context…", ct: ct);
-                discoveryContext = await ExplorationPipeline(newExploreSteps, discoveryContext, projectRoot, emitSse, ct);
+                discoveryContext = await ExplorationPipeline(newExploreSteps, discoveryContext, projectRoot, emitSse, ct, prompt);
                 if (iter == MAX_PLANNING_ITERATIONS)
                     steering = AppendExploreSteering(steeringContext);
                 continue;

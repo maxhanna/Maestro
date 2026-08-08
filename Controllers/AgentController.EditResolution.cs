@@ -422,7 +422,8 @@ partial class AgentController
         int planItemIndex = -1,
         string? filteredEditKnowledge = null,
         string? causalContext = null,
-        string? forcedOldString = null)
+        string? forcedOldString = null,
+        string? webResultsContext = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -452,6 +453,15 @@ partial class AgentController
         if (!string.IsNullOrWhiteSpace(filteredEditKnowledge))
         {
             sb.AppendLine(filteredEditKnowledge);
+        }
+        if (!string.IsNullOrWhiteSpace(webResultsContext))
+        {
+            sb.AppendLine("### WEB RESULTS (fetched earlier in this run) ###");
+            sb.AppendLine(webResultsContext);
+            sb.AppendLine("⚠ RULE: The sections above are REAL fetched results. When newString needs titles, URLs, facts, " +
+                          "dates, or data that come from the web, copy them EXACTLY from the WEB RESULTS above " +
+                          "(verbatim titles and URLs). NEVER invent article titles, URLs, or facts that are not present here.");
+            sb.AppendLine();
         }
         if (fullPlan?.Plan?.Count > 0 && planItemIndex >= 0)
         {
@@ -737,8 +747,27 @@ partial class AgentController
             sb.AppendLine("  Do NOT bundle multiple changes (wrapping sections, removing ngIf, adding wrappers, etc.) into one edit.");
             sb.AppendLine("  If multiple changes are needed, you MUST output them as separate edits in separate LLM responses.");
             sb.AppendLine("  Three modes:");
+            if (EditClassifier.IsVariableSwap((step.Change ?? "").ToLowerInvariant(), step.TargetSymbol))
+            {
+                sb.AppendLine("  ⚠ SMALL VARIABLE/EXPRESSION SWAP DETECTED — this step replaces ONE token (e.g. `b` → `group`). " +
+                              "Use TARGETED REPLACE below: targetName = the single line containing the token (verbatim), " +
+                              "newCode = that line with ONLY the token swapped (plus any new lines). Do NOT reproduce " +
+                              "the enclosing block/section.");
+            }
+            sb.AppendLine("  ⚠ TARGETED REPLACE (PREFERRED — the default): when the change is small (wrap one element, " +
+                            "swap one line, tweak a single attribute), do NOT reproduce the whole enclosing section. " +
+                            "Emit a REPLACE edit whose targetName is the ONE unique line you are changing and whose " +
+                            "newCode is ONLY the replacement for that line (may be several lines):");
+            sb.AppendLine("     {\"targetType\": \"html\", \"targetName\": \"<THE single line being replaced, verbatim>\", \"replace\": true, " +
+                            "\"newCode\": [\"<replacement line 1>\", \"<replacement line 2>\"]}");
+            sb.AppendLine("     Example: to wrap an ngFor item in a group header, targetName = the one line " +
+                            "`<div *ngFor=\"let b of benchmarks\" class=\"benchmark-item\">` and newCode = the new " +
+                            "wrapper opening + that same line. The rest of the section stays untouched — never " +
+                            "re-emit it in newCode.");
             sb.AppendLine("  1. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
-            sb.AppendLine("     REPLACE mode: newCode must be the FULL replacement HTML (including any parent tags and closing tags that should remain).");
+            sb.AppendLine("     REPLACE mode: newCode replaces ONLY the targetName block — do NOT include the parent " +
+                            "tags or closing tags that remain unchanged (the system keeps them). Keep newCode as " +
+                            "small as the change allows; a 1-line targetName + a few newCode lines is ideal.");
             sb.AppendLine("     REPLACE mode: targetName must be UNIQUE — it should be a single line that appears ONCE in the file.");
             sb.AppendLine("     REPLACE mode: do NOT include surrounding content in targetName — only the specific element or line to replace.");
             sb.AppendLine("  2. {\"targetType\": \"html\", \"targetName\": \"...\", \"insertAfter\": true, \"newCode\": [...]} — INSERT newCode AFTER the matched code block.");
@@ -747,10 +776,12 @@ partial class AgentController
             sb.AppendLine("  3. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
             sb.AppendLine("     Semantics: insertAfter:false → replace (when replace is absent); replace:false → insertAfter (when insertAfter is absent); no fields → insertBefore.");
             sb.AppendLine("  targetName is a CODE BLOCK — copy it VERBATIM from the file. " +
-                             "Multi-line is OK for replace mode. The system finds this block then inserts/replaces relative to it.");
+                             "Multi-line is OK ONLY when the change genuinely rewrites a whole block; for small " +
+                             "changes use the single-line TARGETED REPLACE above. The system finds this block then " +
+                             "inserts/replaces relative to it.");
             sb.AppendLine("  CRITICAL: newCode MUST NOT be empty when replace:true. " +
-                            "With replace:true, newCode must contain the FULL replacement HTML " +
-                            "including all content from targetName that should remain.");
+                            "With replace:true, newCode must contain the replacement for the targetName block only " +
+                            "— do NOT re-emit unchanged sibling/parent content.");
             sb.AppendLine("  DO NOT output oldString, newString, or fullFile fields. DO NOT use oldString/newstring format.");
             sb.AppendLine("  ANCHOR SELECTION: prefer the SHORTEST unique line as targetName — a heading, " +
                             "a plain-text label (e.g. '<div class=\"groupDomainTitle\">YouTube Results</div>'), " +
@@ -774,6 +805,13 @@ partial class AgentController
         else
         {
             sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
+            if (EditClassifier.IsVariableSwap((step.Change ?? "").ToLowerInvariant(), step.TargetSymbol))
+            {
+                sb.AppendLine("⚠ SMALL VARIABLE/EXPRESSION SWAP DETECTED — this step replaces ONE token (e.g. `b` → `group`). " +
+                              "oldString MUST be the single unique line containing that token, copied verbatim. " +
+                              "newString = that same line with ONLY the token swapped (plus any new lines after it). " +
+                              "Do NOT reproduce the enclosing block/section — a tiny anchor is all that is needed.");
+            }
             sb.AppendLine("SMALL targeted edits (1-5 lines, e.g. add a column to SQL, add one property): PREFER oldString/newString. " +
                           "Include the line above/below for anchor context, repeat them unchanged in newString.");
             sb.AppendLine("For FULL method/class replacements (entire method body rewrite): use FORMAT C (targetType/targetName/newCode) " +
@@ -1006,15 +1044,18 @@ partial class AgentController
                           "insertAfter=true/false, newCode=[your HTML lines]. " +
                           "⚠ ONE THING PER EDIT — do NOT bundle multiple changes into one edit. " +
                           "Each edit does ONE replacement OR ONE insertion. " +
+                          "⚠ TARGETED REPLACE (default for small changes): targetName = the ONE unique line being " +
+                          "changed, newCode = ONLY the replacement for that line (may be several lines). Do NOT " +
+                          "reproduce the whole enclosing section — the unchanged lines stay put automatically. " +
                           "CRITICAL: targetName is a CODE BLOCK copied verbatim from the file. " +
                           "For insertAfter: use a SINGLE LINE as targetName. " +
-                          "For replace: targetName CAN be multi-line but must be UNIQUE in the file. " +
+                          "For replace: prefer a SINGLE unique line as targetName; multi-line is OK ONLY when the " +
+                          "change rewrites a whole block. " +
                           "Copy the exact lines you want to replace or insert after. " +
                           "For insertAfter: the targetName block is found, and newCode is inserted AFTER that block. " +
                           "newCode in insertAfter mode should contain ONLY the new HTML. " +
-                          "For replace: the targetName block is replaced entirely with newCode. " +
-                          "newCode in replace mode MUST contain the FULL replacement HTML and MUST NOT be empty. " +
-                          "Do NOT use oldString/newString for HTML insertion — use FORMAT D.");
+                          "For replace: ONLY the targetName block is replaced with newCode (unchanged siblings/parents " +
+                          "stay); newCode MUST NOT be empty.");
         }
         sb.AppendLine();
         // ── Pattern reference files: load the content the step says to mirror ──
@@ -1310,7 +1351,7 @@ partial class AgentController
                             }
                             if (string.IsNullOrWhiteSpace(candNewCodeStr))
                             {
-                                lastErr = "FORMAT D failed: newCode is empty. You MUST provide the full replacement HTML in newCode, not an empty array.";
+                                lastErr = "FORMAT D failed: newCode is empty. You MUST provide the replacement HTML for the targetName block in newCode, not an empty array.";
                                 continue;
                             }
                             var candRawNewCode = candNewCodeStr;
@@ -1322,7 +1363,7 @@ partial class AgentController
                             }
                             if (string.IsNullOrWhiteSpace(candNewCodeStr))
                             {
-                                lastErr = "FORMAT D failed: newCode is empty. You MUST provide the full replacement HTML in newCode, not an empty array.";
+                                lastErr = "FORMAT D failed: newCode is empty. You MUST provide the replacement HTML for the targetName block in newCode, not an empty array.";
                                 continue;
                             }
                             if (!candNewCodeStr.Contains('<', StringComparison.Ordinal))
@@ -1358,7 +1399,10 @@ partial class AgentController
                             $"FORMAT D: targetName block not found — {lastErr ?? "no candidates"}", ct: ct);
                         return (null, null, false, null, false,
                             $"FORMAT D failed: targetName block not found in {relPath}. " +
-                            $"Copy the exact code block from the file as targetName.", false);
+                            $"Copy the exact code block from the file as targetName. " +
+                            "For a small change, use TARGETED REPLACE: targetName = the SINGLE unique line being " +
+                            "changed (verbatim), newCode = only the replacement for that line — do NOT reproduce " +
+                            "the whole section.", false);
                     }
                     if (insertAfter && System.IO.File.Exists(fullPath))
                     {
@@ -1951,7 +1995,10 @@ partial class AgentController
                                     }
                                     return (null, null, false, null, false,
                                         $"FORMAT D failed: targetName block not found in {relPath}. " +
-                                        $"Copy the exact code block from the file as targetName.", false);
+                                        $"Copy the exact code block from the file as targetName. " +
+                                        "For a small change, use TARGETED REPLACE: targetName = the SINGLE unique line " +
+                                        "being changed (verbatim), newCode = only the replacement for that line — do NOT " +
+                                        "reproduce the whole section.", false);
                                 }
                                 return (delBlock, "", false, null, false, null, true);
                             }
@@ -1959,7 +2006,7 @@ partial class AgentController
                             if (string.IsNullOrWhiteSpace(newCodeStr))
                             {
                                 return (null, null, false, null, false,
-                                    $"FORMAT D failed: newCode is empty — when replace:true, newCode MUST contain the full replacement HTML.", false);
+                                    $"FORMAT D failed: newCode is empty — when replace:true, newCode MUST contain the replacement HTML for the targetName block.", false);
                             }
                             if (!newCodeStr.Contains('<', StringComparison.Ordinal))
                             {
@@ -1977,7 +2024,10 @@ partial class AgentController
                             {
                                 return (null, null, false, null, false,
                                     $"FORMAT D failed: targetName block not found in {relPath}. " +
-                                    $"Copy the exact code block from the file as targetName.", false);
+                                    $"Copy the exact code block from the file as targetName. " +
+                                    "For a small change, use TARGETED REPLACE: targetName = the SINGLE unique line " +
+                                    "being changed (verbatim), newCode = only the replacement for that line — do NOT " +
+                                    "reproduce the whole section.", false);
                             }
                             if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                             {

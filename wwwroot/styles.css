@@ -3946,6 +3946,148 @@ h3 .small.ghost:hover {
 	overflow: auto;
 }
 
+/* Collapsible '🌐 Web results' block on step cards (agent panel) — shown when a
+   _web_search/_web_fetch step completes so the user can see what the agent fetched
+   without digging into the thinking prompt. */
+.web-results-block {
+	margin-top: 4px;
+	border-left: 2px solid var(--accent2, #61afef);
+	padding-left: 8px;
+}
+
+.web-results-block summary {
+	cursor: pointer;
+	font-size: 0.95em;
+	color: var(--accent2, #61afef);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.web-results-block summary:hover {
+	opacity: 0.85;
+}
+
+.web-results-block .web-results-title {
+	font-weight: 600;
+}
+
+.web-results-block .web-results-query {
+	font-family: monospace;
+	font-size: 0.9em;
+	color: var(--muted);
+	max-width: 320px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.web-results-block .web-results-truncated {
+	font-size: 0.85em;
+	color: #e5c07b;
+	font-style: italic;
+}
+
+.web-results-block .step-detail-data {
+	max-height: 200px;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-size: 0.95em;
+}
+
+.web-results-block .web-copy-btn {
+	margin-left: auto;
+}
+
+.focused-block {
+	margin-top: 4px;
+	border-left: 2px solid var(--accent3, #c678dd);
+	padding-left: 8px;
+}
+
+.focused-block summary {
+	cursor: pointer;
+	font-size: 0.95em;
+	color: var(--accent3, #c678dd);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.focused-block summary:hover {
+	opacity: 0.85;
+}
+
+.focused-block .focused-icon {
+	font-size: 0.9em;
+}
+
+.focused-block .focused-title {
+	font-family: monospace;
+	font-weight: 600;
+}
+
+.focused-block .focused-ids {
+	font-family: monospace;
+	font-size: 0.85em;
+	color: var(--muted);
+	max-width: 320px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.focused-block .focused-full-hint {
+	font-size: 0.8em;
+	color: var(--muted);
+	font-style: italic;
+}
+
+.focused-block .focused-body {
+	max-height: 240px;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-size: 0.9em;
+}
+
+.focused-block .focused-full-file {
+	margin-top: 6px;
+	border-top: 1px dashed var(--border, rgba(255, 255, 255, 0.12));
+	padding-top: 6px;
+}
+
+.focused-block .focused-full-file summary {
+	font-size: 0.85em;
+	color: var(--muted);
+}
+
+.web-copy-btn {
+	background: transparent;
+	border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+	border-radius: 4px;
+	color: inherit;
+	font-size: 0.8em;
+	line-height: 1;
+	padding: 2px 6px;
+	cursor: pointer;
+	opacity: 0.7;
+	flex-shrink: 0;
+	transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.web-copy-btn:hover {
+	opacity: 1;
+	border-color: var(--accent2, #61afef);
+}
+
+.web-copy-btn.copied {
+	color: #98c379;
+	border-color: #98c379;
+	opacity: 1;
+}
+
 .agent-steps .step .step-detail pre {
 	margin: 4px 0;
 	padding: 4px;

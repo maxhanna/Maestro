@@ -81,6 +81,35 @@ public class WebNeedGuardTests
         Assert.Equal(expected, IsWeb(file));
     }
 
+    // ── WebNotNeededFeedback (rejection feedback for web steps on non-web tasks) ──
+
+    private static string Constant(string name)
+    {
+        var field = typeof(Weaver.Controllers.AgentController)
+            .GetField(name, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+            ?? throw new InvalidOperationException(name + " constant not found.");
+        return (string)(field.GetRawConstantValue() ?? "");
+    }
+
+    [Fact]
+    public void WebNotNeededFeedback_ExistsAndIsDistinctFromWebNeedFeedback()
+    {
+        var notNeeded = Constant("WebNotNeededFeedback");
+        var needed = Constant("WebNeedFeedback");
+        Assert.False(string.IsNullOrWhiteSpace(notNeeded));
+        Assert.NotEqual(needed, notNeeded);
+    }
+
+    [Fact]
+    public void WebNotNeededFeedback_SteersAwayFromWebTools()
+    {
+        var fb = Constant("WebNotNeededFeedback");
+        // The feedback must tell the model to drop the web step and work from repo context.
+        Assert.Contains("does NOT need CURRENT EXTERNAL information", fb);
+        Assert.Contains("_web_search/_web_fetch step is unnecessary", fb);
+        Assert.Contains("DISCOVERY CONTEXT", fb);
+    }
+
     // ── BuildFallbackWebQuery (query used by the auto-injected _web_search step) ──
 
     private static readonly MethodInfo FallbackQueryMethod = typeof(Weaver.Controllers.AgentController)

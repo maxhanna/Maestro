@@ -182,7 +182,10 @@ using static Weaver.Services.AgentJsonUtilities;    /// <summary>Part of the spl
         var startLine = -1;
         for (var i = 0; i < lines.Length; i++)
         {
-            var trimmed = lines[i].TrimStart();
+            // Focused reads render as "### read path (focused: ...; full file via _explore)" —
+            // strip the suffix so section lookups still match the plain path.
+            var trimmed = Regex.Replace(lines[i].TrimStart(),
+                @"\s+\(focused:[^)]*\)\s*$", "", RegexOptions.IgnoreCase);
             if ((trimmed.StartsWith("### read ") || trimmed.StartsWith("### list ")) &&
                 trimmed.EndsWith(normPath, StringComparison.OrdinalIgnoreCase))
             { startLine = i; break; }
@@ -193,7 +196,8 @@ using static Weaver.Services.AgentJsonUtilities;    /// <summary>Part of the spl
         {
             for (var i = 0; i < lines.Length; i++)
             {
-                var trimmed = lines[i].TrimStart();
+                var trimmed = Regex.Replace(lines[i].TrimStart(),
+                    @"\s+\(focused:[^)]*\)\s*$", "", RegexOptions.IgnoreCase);
                 if ((trimmed.StartsWith("### read ") || trimmed.StartsWith("### list ") || trimmed.StartsWith("### ")) &&
                     trimmed.EndsWith(fileName, StringComparison.OrdinalIgnoreCase) &&
                     trimmed.IndexOfAny(new[] { ' ', '\t' }) > 3)
@@ -284,6 +288,271 @@ using static Weaver.Services.AgentJsonUtilities;    /// <summary>Part of the spl
             sb.AppendLine();
         }
         return sb.ToString();
+    }
+
+    /// <summary>Words that never make a symbol even when joined with hyphens
+    /// ("create-a-folder" is prose-with-hyphens, not a key file/method). Applies ONLY to
+    /// kebab-case tokens — snake_case/camelCase/dotted tokens are code conventions and
+    /// are always kept ("or_this" is a variable even though "or" + "this" are words).</summary>
+    private static readonly HashSet<string> IdentifierStopwordParts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "a","an","the","and","or","but","in","on","at","to","for","of","with","from",
+        "into","onto","upon","this","that","it","its","my","your","our","their","his","her",
+        "is","are","was","were","be","been","being","have","has","had","do","does","did",
+        "will","would","should","could","may","might","shall","can","let","not","no","any","all",
+        "create","creates","creating","created","add","adding","adds","added","make","making","makes","made",
+        "fix","fixes","fixed","new","old","more","less","some","just","very","really",
+        "set","get","put","use","using","used","show","hide","please","need","want",
+        "try","look","see","then","when","where","how","why","what","which","who",
+        "out","up","down","over","under","so","if","else",
+        "folder","folders","file","files","directory","directories","desktop","project",
+        "root","path","page","name","thing","things","element","button","panel","section"
+    };
+
+    /// <summary>
+    /// Extracts identifier-shaped tokens from a task prompt — snake_case (or_this),
+    /// kebab-case (things-like-this), camelCase/PascalCase (CreateDirectory) and dotted
+    /// file names (web_searcher.py). Such tokens are usually the KEY file, method, or
+    /// variable the task is about, so discovery searches the repo for them EXACTLY
+    /// instead of relying on word-splitting BM25 (which shatters them into generic
+    /// parts like "or" + "this" and matches nothing). Returns up to 12 deduped tokens.
+    /// </summary>
+    public static List<string> ExtractIdentifierTokens(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return new List<string>();
+        var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string tok, bool dropIfProse = false)
+        {
+            if (tok.Length < 4 || tok.All(char.IsDigit)) return;
+            // Prose filter applies only to hyphenated tokens — "create-a-folder" is
+            // prose-with-hyphens, not a symbol. Underscore/case/dot tokens are code
+            // conventions and are never dropped here ("or_this" stays).
+            if (dropIfProse)
+            {
+                var parts = Regex.Split(tok, @"[_\-\.]").Where(p => p.Length > 0).ToList();
+                if (parts.Count > 1 && parts.All(p => IdentifierStopwordParts.Contains(p))) return;
+            }
+            found.Add(tok);
+        }
+        // snake_case, incl. leading-underscore privates like _create_directory
+        foreach (Match m in Regex.Matches(prompt, @"\b_?[a-z][a-z0-9]*(?:_[a-z0-9]+){1,}\b"))
+            Add(m.Value);
+        // kebab-case — also matches CSS class names (prose-with-hyphens is filtered out)
+        foreach (Match m in Regex.Matches(prompt, @"\b[a-z][a-z0-9]*(?:-[a-z0-9]+){1,}\b"))
+            Add(m.Value, dropIfProse: true);
+        // camelCase / PascalCase with an internal case boundary
+        foreach (Match m in Regex.Matches(prompt, @"\b[A-Za-z][A-Za-z0-9]*(?:[A-Z][a-z0-9]+){1,}\b"))
+            Add(m.Value);
+        // dotted file-ish tokens (web_searcher.py, index.html) — skip version-like
+        // (v1.2.3, 8.0, 1.x: either the extension or the stem is purely numeric)
+        foreach (Match m in Regex.Matches(prompt, @"\b[A-Za-z0-9_][A-Za-z0-9_.-]*\.[a-z0-9]{1,8}\b"))
+        {
+            var tok = m.Value;
+            var ext = Path.GetExtension(tok);
+            var stem = tok[..^ext.Length];
+            if (!string.IsNullOrEmpty(ext) && ext.TrimStart('.').All(char.IsDigit)) continue;
+            if (stem.All(char.IsDigit)) continue;
+            Add(tok);
+        }
+        return found.OrderByDescending(t => t.Length).Take(12).ToList();
+    }
+
+    /// <summary>Files at or above this many characters get focused region extraction for
+    /// identifier matches instead of a full read into the discovery context (a 50KB
+    /// component shouldn't flood the prompt just because one symbol matched).</summary>
+    public const int LargeFileFocusThresholdChars = 20_000;
+
+    /// <summary>The focus threshold never drops below this, even under extreme context
+    /// pressure — below it, even a hot run keeps files whole rather than over-slicing.</summary>
+    public const int LargeFileFocusThresholdFloor = 4_000;
+
+    private static readonly HashSet<string> BraceLanguages = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".cs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".c", ".h", ".cpp", ".hpp",
+        ".java", ".go", ".rs", ".php", ".kt", ".kts", ".swift", ".scala", ".fs", ".fsx"
+    };
+    private static readonly HashSet<string> IndentLanguages = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".py", ".pyw", ".rb", ".sh", ".ps1", ".bat", ".cmd", ".yml", ".yaml"
+    };
+
+    /// <summary>
+    /// When an identifier from the task prompt matches inside a LARGE file, extract just the
+    /// enclosing method/class/block around each match instead of dumping the whole file into
+    /// the discovery context — like GrepProjectForDefinitionAsync, but batched for all
+    /// identifiers at once. Brace languages (.cs/.ts/.js/…) get brace-balanced method/class
+    /// regions, indentation languages (.py/.sh/…) get their def/block scope, everything else
+    /// (.html/.css/.json/…) gets a window around the match. Returns "" when nothing matched.
+    /// </summary>
+    public static string ExtractIdentifierRegions(
+        string fileContent, List<string> identifiers, string? fileExt,
+        int maxRegions = 3, int maxCharsPerRegion = 3500)
+    {
+        if (string.IsNullOrWhiteSpace(fileContent) || identifiers == null || identifiers.Count == 0)
+            return "";
+        var lines = fileContent.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        var ext = (fileExt ?? "").ToLowerInvariant();
+        var isBrace = BraceLanguages.Contains(ext);
+        var isIndent = IndentLanguages.Contains(ext);
+        var afterDepth = new int[lines.Length];
+        if (isBrace)
+        {
+            var depth = 0;
+            for (var i = 0; i < lines.Length; i++)
+            {
+                depth += CountBraces(lines[i]);
+                afterDepth[i] = depth;
+            }
+        }
+        var regions = new List<(int start, int end, string id)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var id in identifiers)
+        {
+            if (string.IsNullOrWhiteSpace(id) || !seen.Add(id)) continue;
+            var matchLine = FindIdentifierLine(lines, id);
+            if (matchLine < 0) continue;
+            if (regions.Any(r => matchLine >= r.start && matchLine <= r.end)) continue;
+            var (start, end) = isBrace ? ExpandBraceBlock(lines, matchLine, afterDepth)
+                           : isIndent ? ExpandIndentBlock(lines, matchLine)
+                           : (Math.Max(0, matchLine - 10), Math.Min(lines.Length - 1, matchLine + 24));
+            regions.Add((start, end, id));
+            if (regions.Count >= maxRegions) break;
+        }
+        if (regions.Count == 0) return "";
+        var sb = new StringBuilder();
+        foreach (var (start, end, id) in regions.OrderBy(r => r.start))
+        {
+            var text = string.Join("\n", lines.Skip(start).Take(end - start + 1));
+            if (text.Length > maxCharsPerRegion)
+                text = text[..maxCharsPerRegion] + "\n// ... (region truncated)";
+            sb.AppendLine($"// ▼ '{id}' — lines {start + 1}–{end + 1}");
+            sb.AppendLine(text);
+            sb.AppendLine();
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+private static int CountBraces(string line)
+    {
+        // Skip quoted spans ("...", '...', `...`) so a brace inside a string or
+        // template literal can't fake-close the region (e.g. C# string.Format("{0}")).
+        var open = 0; var close = 0;
+        char? quote = null;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (quote != null)
+            {
+                if (c == '\\') { i++; continue; }
+                if (c == quote) quote = null;
+                continue;
+            }
+            if (c is '"' or '\'' or '`') { quote = c; continue; }
+            if (c == '{') open++;
+            else if (c == '}') close++;
+        }
+        return open - close;
+    }
+
+    private static int FindIdentifierLine(string[] lines, string id)
+    {
+        for (var i = 0; i < lines.Length; i++)
+            if (lines[i].Contains(id, StringComparison.Ordinal)) return i;
+        for (var i = 0; i < lines.Length; i++)
+            if (lines[i].Contains(id, StringComparison.OrdinalIgnoreCase)) return i;
+        return -1;
+    }
+
+    private static (int start, int end) ExpandBraceBlock(string[] lines, int matchLine, int[] afterDepth)
+    {
+        // Start at the nearest '{' at-or-before the match line (the enclosing block's opener).
+        var start = -1;
+        for (var i = matchLine; i >= 0; i--)
+            if (lines[i].Contains('{')) { start = i; break; }
+        if (start < 0 || afterDepth[start] <= 0)
+            return (Math.Max(0, matchLine - 10), Math.Min(lines.Length - 1, matchLine + 24));
+        // Climb to the defining method/class: when the identifier sits inside a mere
+        // if/loop/object-literal, prefer the enclosing method/class region the task
+        // actually cares about, not the innermost block. Stops at the first block whose
+        // opener is a declaration (or whose line above it is one).
+        for (var climb = 0; climb < 6 && start > 0 && !IsBlockDefiningRegion(lines, start, afterDepth); climb++)
+        {
+            var targetDepth = afterDepth[start] - 1;
+            var nextStart = -1;
+            for (var i = start - 1; i >= 0; i--)
+            {
+                if (lines[i].Contains('{') && afterDepth[i] <= targetDepth) { nextStart = i; break; }
+            }
+            if (nextStart < 0) break;
+            start = nextStart;
+        }
+        // Include the declaration line that owns the '{' ("public void Foo(...)" above "{").
+        if (start > 0 && IsDeclarationLine(lines[start - 1])) start--;
+        var outerDepth = start > 0 ? afterDepth[start - 1] : 0;
+        var end = matchLine;
+        for (var i = start + 1; i < lines.Length; i++)
+        {
+            end = i;
+            if (afterDepth[i] <= outerDepth && lines[i].Contains('}')) break;
+        }
+        if (end - start > 160) end = Math.Min(lines.Length - 1, start + 160);
+        return (start, end);
+    }
+
+    /// <summary>True when the block opened at <paramref name="braceLine"/> is a method/class/
+    /// function definition (its opener line is a declaration, or the line above it is) —
+    /// as opposed to a control-flow or object-literal block the region should climb past.</summary>
+    private static bool IsBlockDefiningRegion(string[] lines, int braceLine, int[] afterDepth)
+    {
+        if (braceLine > 0 && IsDeclarationLine(lines[braceLine - 1])) return true;
+        var t = lines[braceLine].Trim();
+        if (Regex.IsMatch(t, @"^(if|for|while|foreach|switch|catch|using|lock|try|do|else|finally)\b", RegexOptions.IgnoreCase))
+            return false;
+        return Regex.IsMatch(t, @"\b(class|interface|struct|enum|record|function|void|namespace)\b", RegexOptions.IgnoreCase)
+            || t.Contains("=>")
+            || (t.EndsWith("{") && Regex.IsMatch(t, @"\)\s*\{\s*$"));
+    }
+
+    private static bool IsDeclarationLine(string line)
+    {
+        var t = line.Trim();
+        if (string.IsNullOrWhiteSpace(t) || t.EndsWith("{") || t.EndsWith(";")) return false;
+        if (t.StartsWith("//") || t.StartsWith("/*") || t.StartsWith("*") || t.StartsWith("#")) return false;
+        return Regex.IsMatch(t, @"^(public|private|protected|internal|static|readonly|async|function|class|interface|record|struct|enum|namespace|export|const|let|var)\b", RegexOptions.IgnoreCase)
+            || t.EndsWith(":") || t.EndsWith("=>");
+    }
+
+    private static (int start, int end) ExpandIndentBlock(string[] lines, int matchLine)
+    {
+        var indent = IndentOf(lines[matchLine]);
+        var start = matchLine;
+        while (start > 0)
+        {
+            var prev = lines[start - 1];
+            var prevTrimmed = prev.TrimStart();
+            if (string.IsNullOrWhiteSpace(prevTrimmed)) break;
+            var prevIndent = IndentOf(prev);
+            if (prevIndent < indent && prevTrimmed.EndsWith(":")) { start--; break; }
+            if (prevIndent < indent) break; // dedent without ':' — the match isn't inside a block
+            start--;
+        }
+        var end = matchLine;
+        while (end + 1 < lines.Length)
+        {
+            var next = lines[end + 1];
+            if (string.IsNullOrWhiteSpace(next.Trim())) break; // blank line ends the block view
+            if (IndentOf(next) < indent) break;
+            end++;
+        }
+        if (end - start > 160) end = Math.Min(lines.Length - 1, start + 160);
+        return (start, end);
+    }
+
+    private static int IndentOf(string line)
+    {
+        var n = 0;
+        while (n < line.Length && (line[n] == ' ' || line[n] == '\t')) n++;
+        return n;
     }
 
     public static List<string> ExtractMeaningfulKeywords(string lower)
@@ -395,6 +664,113 @@ using static Weaver.Services.AgentJsonUtilities;    /// <summary>Part of the spl
                 .ToList();
         }
         return scored;
+    }
+
+    /// <summary>
+    /// Large files (≥ LargeFileFocusThresholdChars) that an identifier from the task
+    /// prompt matched INSIDE get a focused read — just the enclosing method/class/block
+    /// around each match, with line numbers — so one stray symbol hit can't flood the
+    /// prompt with an unrelated 50KB component. Small files and identifier-in-path
+    /// matches stay whole. Shared by the bootstrap auto-read, the _discover tool, and
+    /// the _explore pipeline.
+    /// Returns the snippet to surface and the identifier list for the "(focused: ...)"
+    /// header (null when the full read stays).
+    /// </summary>
+    public static (string snippet, string? focusIds) FocusLargeFileRead(
+        string output, List<string> identifierTokens, string path, int? thresholdChars = null)
+    {
+        var threshold = thresholdChars ?? LargeFileFocusThresholdChars;
+        if (output.Length >= threshold && identifierTokens.Count > 0)
+        {
+            var regionText = ExtractIdentifierRegions(output, identifierTokens, Path.GetExtension(path));
+            if (!string.IsNullOrWhiteSpace(regionText))
+            {
+                var focusIds = string.Join(", ", identifierTokens
+                    .Where(id => output.Contains(id, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(4));
+                // Defensive: a non-empty region with zero matched identifiers would render
+                // a broken "(focused: ; ...)" header — never claim a focus without ids.
+                if (focusIds.Length > 0) return (regionText, focusIds);
+            }
+        }
+        return (output, null);
+    }
+
+    /// <summary>
+    /// Effective focus threshold when the discovery context is running hot on chars.
+    /// Pressure is the fraction of the auto-read context budget already consumed (0 = plenty
+    /// of room, 1 = at the edge). High pressure shrinks the threshold so more large files
+    /// contribute focused regions instead of being dropped whole. Pure — never mutates
+    /// shared state, so concurrent agent runs can't interfere (a mutable static threshold
+    /// would race across SSE streams). Tuning is applied in the bootstrap auto-read only:
+    /// it is the one read phase with an aggregate budget that drops files, so a lower
+    /// threshold elsewhere (_discover/_explore never drop files) would change nothing.
+    /// </summary>
+    public static int FocusThresholdForPressure(double pressure)
+    {
+        if (pressure <= 0) return LargeFileFocusThresholdChars;
+        var scaled = (int)(LargeFileFocusThresholdChars * (1 - Math.Min(pressure, 1.0) * 0.8));
+        return Math.Max(LargeFileFocusThresholdFloor, scaled);
+    }
+
+    /// <summary>
+    /// Hot-context re-focus decision for the bootstrap auto-read: when a file's full read
+    /// (or its already-focused region) won't fit the remaining aggregate budget, try
+    /// shrinking the focus threshold so the file still contributes its key regions instead
+    /// of being dropped. Returns true only when a fitting re-focus happened (the caller
+    /// should then use the out values and continue the loop); false means drop/stop.
+    /// Pure — safe across concurrent agent runs.
+    /// </summary>
+    public static bool TryRefocusHotFile(
+        string output, List<string> identifierTokens, string path,
+        bool alreadyFocused, int currentSnippetLength, long usedChars, long totalBudget,
+        int effectiveThreshold,
+        out string newSnippet, out string? newFocusIds, out int newThreshold)
+    {
+        newSnippet = "";
+        newFocusIds = null;
+        newThreshold = effectiveThreshold;
+        if (alreadyFocused) return false; // already a region — can't shrink further
+        var pressure = totalBudget > 0 ? (double)usedChars / totalBudget : 0;
+        var candidate = FocusThresholdForPressure(pressure);
+        if (output.Length < candidate || candidate > effectiveThreshold) return false;
+        var refocus = FocusLargeFileRead(output, identifierTokens, path, candidate);
+        if (refocus.focusIds == null || usedChars + refocus.snippet.Length > totalBudget) return false;
+        newSnippet = refocus.snippet;
+        newFocusIds = refocus.focusIds;
+        newThreshold = candidate;
+        return true;
+    }
+
+    /// <summary>
+    /// Attaches focused-region metadata (focused/focusIds/focusedOutput) to completed
+    /// "read" step results, using the same reader the context-building call sites use,
+    /// so the SSE step events surface the region to the UI. Pure mutation over the
+    /// results array — unit-testable without SSE/Response plumbing.
+    /// </summary>
+    public static void AttachFocusedRegions(
+        Dictionary<string, object?>[] results,
+        IReadOnlyList<AgentStep> steps,
+        Func<string, List<string>, string, (string snippet, string? focusIds)>? focusReader,
+        List<string>? focusTokens)
+    {
+        if (focusReader == null) return;
+        var tokens = focusTokens ?? new List<string>();
+        for (var i = 0; i < results.Length && i < steps.Count; i++)
+        {
+            if (!steps[i].Type.Equals("read", StringComparison.OrdinalIgnoreCase)) continue;
+            var output = results[i].GetValueOrDefault("output")?.ToString();
+            var path = results[i].GetValueOrDefault("path")?.ToString();
+            if (string.IsNullOrWhiteSpace(output) || string.IsNullOrWhiteSpace(path)) continue;
+            var (snippet, focusIds) = focusReader(output, tokens, path);
+            if (focusIds != null)
+            {
+                results[i]["focused"] = true;
+                results[i]["focusIds"] = focusIds;
+                results[i]["focusedOutput"] = snippet;
+            }
+        }
     }
 
     public static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString, int fileBodyTruncation = 8000, string? fileExt = null)

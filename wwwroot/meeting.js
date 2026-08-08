@@ -3872,11 +3872,17 @@ angular.module('kanbanApp')
             .replace(/^[\s▶✕✗✓⏳💡📋🔍🧠⏭⚡📄❓💬🔨📊🛠✏️✅🏁\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{2BFF}]+/u, '')
             .trim();
         }
+        // Pre-plan reasoning skips (hallucination flag OR empty output) are the editor's
+        // own doing too — his proposal got cut off before it existed, so he owns the
+        // incident on the board and writes it drunk, same as a hallucination abort.
+        // The colon-bounded 'skipped:'/'error:' forms exclude the benign retry bypass
+        // ('Pre-plan thinking skipped (retry N)'), which is a deliberate re-proposal.
+        var PREPLAN_SKIP_RE = /pre-plan reasoning skipped|pre-plan thinking error|pre-plan thinking skipped:/i;
         function roleForEntry(level, message) {
           var m = (message || '').toLowerCase();
           // Hallucination aborts are the editor's own doing — he proposed the rambling
           // that got cut off, so he owns the incident on the board (and writes it drunk).
-          if (/hallucination|wall of text|aborted early/.test(m)) return 'editor';
+          if (/hallucination|wall of text|aborted early/.test(m) || PREPLAN_SKIP_RE.test(m)) return 'editor';
           if (level === 'phase') {
             if (/plan/.test(m)) return 'planner';
             if (/explor/.test(m)) return 'explorer';
@@ -3961,8 +3967,16 @@ angular.module('kanbanApp')
               var trimmed = String(deep).trim();
               if (trimmed.length > 2) text = trimmed;
             }
+            // Pre-plan skips carry the actual reason in detail (hallucination stats, empty
+            // response, exception message) — surface it so false-positive skips are visible
+            // instead of a bare warn line. Scoped to skip messages only so a stray 'reason'
+            // field on an unrelated entry can't hijack the bubble.
+            if (PREPLAN_SKIP_RE.test(msg) && d && d.reason) {
+              var trimmedReason = String(d.reason).trim();
+              if (trimmedReason.length > 2) text = trimmedReason;
+            }
           }
-          if (/hallucination|wall of text|aborted early/.test(msg)) text = drunkText(text, { hicEvery: 9 });
+          if (/hallucination|wall of text|aborted early/.test(msg) || PREPLAN_SKIP_RE.test(msg)) text = drunkText(text, { hicEvery: 9 });
           if (text.length > 180) text = text.slice(0, 180) + '…';
           return { role: role, text: text };
         }
@@ -4753,7 +4767,7 @@ angular.module('kanbanApp')
             if (!fromReplay) finishMeeting();
             return;
           }
-          if (/hallucination|wall of text|repetition loop|aborted early/.test(low)) {
+          if (/hallucination|wall of text|repetition loop|aborted early/.test(low) || PREPLAN_SKIP_RE.test(low)) {
             editorHallucinateReact(entry, fromReplay);
           }
           var parsed = logBoardText(entry);
