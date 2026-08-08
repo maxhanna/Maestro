@@ -910,11 +910,30 @@ angular.module('kanbanApp')
                 vm._suggestionIdleBusy = false;
                 vm._suggestionIdleChainActive = false;
 
+                // Per-project control over the idle suggestion loop. Defaults to ON; a
+                // project can disable it so the agent never auto-generates Done-card
+                // suggestions while you're working in that project. Resolved by path
+                // against vm.projects with the same normalization the backend uses;
+                // unknown/unselected projects default to enabled.
+                vm.projectIdleSuggestionsEnabled = function () {
+                    var proj = vm.selectedProject || '';
+                    if (!proj || !Array.isArray(vm.projects)) return true;
+                    var norm = function (s) { return String(s || '').replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase(); };
+                    var target = norm(proj);
+                    for (var i = 0; i < vm.projects.length; i++) {
+                        var p = vm.projects[i];
+                        if (!p) continue;
+                        if (norm(p.Path || p.path) === target) return p.IdleSuggestions !== false;
+                    }
+                    return true;
+                };
+
                 vm.suggestionIdleArmed = function () {
                     return !vm.streamingActive
                         && !vm.benchmarkRunning
                         && !vm.benchmarkAllActive
-                        && vm.selfImprovingAgentActive !== true;
+                        && vm.selfImprovingAgentActive !== true
+                        && vm.projectIdleSuggestionsEnabled();
                 };
 
                 vm._doneCardsNeedingSuggestions = function () {

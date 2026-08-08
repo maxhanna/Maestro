@@ -161,7 +161,7 @@ angular.module('kanbanApp')
 
         function normalizeProjects(raw) {
             return raw.map(function (p) {
-                return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '', SuggestionContextDepth: p.SuggestionContextDepth || p.suggestionContextDepth || 'full' };
+                return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '', SuggestionContextDepth: p.SuggestionContextDepth || p.suggestionContextDepth || 'full', IdleSuggestions: p.IdleSuggestions !== false };
             });
         }
 
@@ -762,7 +762,7 @@ angular.module('kanbanApp')
                         if (idx === -1) return $window.alert('Project not found in config');
                         var newPath = p.Path.replace(/\\/g, '/');
                         if (newPath !== originalPath && cfg.projects.some(function (cp) { return (cp.Path || cp.path) === newPath; })) return $window.alert('A project with that path already exists');
-                        cfg.projects[idx].Name = p.Name; cfg.projects[idx].Path = newPath; cfg.projects[idx].Description = p.Description || ''; cfg.projects[idx].BuildCommands = p.BuildCommands || ''; cfg.projects[idx].SuggestionContextDepth = p.SuggestionContextDepth || 'full';
+                        cfg.projects[idx].Name = p.Name; cfg.projects[idx].Path = newPath; cfg.projects[idx].Description = p.Description || ''; cfg.projects[idx].BuildCommands = p.BuildCommands || ''; cfg.projects[idx].SuggestionContextDepth = p.SuggestionContextDepth || 'full'; cfg.projects[idx].IdleSuggestions = p.IdleSuggestions !== false;
                         $http.post('/api/config/save', cfg).then(function () { vm.loadConfig(); }, function (err) { $window.alert('Failed to save: ' + (err.data || err.statusText)); });
                     });
                 };
