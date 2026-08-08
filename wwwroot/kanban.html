@@ -19,6 +19,15 @@
     <button ng-click="vm.toggleColumn('archived')" class="{{vm.showArchived ? 'active' : 'ghost'}}" title="Toggle Archived view">
       🗄 Archived ({{vm.cardsForProject('archived').length}})
     </button>
+    <span class="idle-suggest-chip" ng-if="vm._idleSuggestionPending > 0 || vm._suggestionIdleChainActive"
+      ng-class="{running: vm._suggestionIdleChainActive, paused: vm._suggestionIdlePaused}"
+      ng-click="vm.toggleIdleSuggestions()" ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleIdleSuggestions()"
+      role="button" tabindex="0"
+      title="{{vm._suggestionIdleChainActive ? 'Idle suggestion loop running — click to pause' : (vm._suggestionIdlePaused ? 'Idle suggestions paused — click to resume' : 'Idle suggestion loop paused (agent busy) — resumes when idle. Click to pause until you resume it.')}}: {{vm._idleSuggestionPending}} Done card(s) still need suggestion(s)">
+      <span class="idle-suggest-spin" ng-if="vm._suggestionIdleChainActive">⟳</span>
+      {{vm._suggestionIdleChainActive ? '⏸' : (vm._suggestionIdlePaused ? '▶' : '⏸')}}
+      💡 {{vm._idleSuggestionPending}} Done card{{vm._idleSuggestionPending === 1 ? '' : 's'}} need suggestion{{vm._idleSuggestionPending === 1 ? '' : 's'}}
+    </span>
     <button class="close-button" ng-click="vm.showKanban = false; vm.saveSettings()" title="Close board">✕</button>
   </div>
 
@@ -46,7 +55,7 @@
           <div class="card-text">
             <textarea ng-model="card.text" ng-change="vm.saveCardText(card)" rows="2"
               ng-click="vm.todoTextAreaClicked($event)"
-              placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
+              placeholder="Spin a thread with Weaver."></textarea>
           </div>
           <div class="card-text-tools">
             <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
@@ -66,7 +75,7 @@
               <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
               <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
               <label class="pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create a branch then PR on completion">
-                <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
+                <input type="checkbox" ng-model="card.autoPr" ng-change="vm.onAutoPrToggle(card)" /> BRANCH
               </label>
               <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()" title="Self-improving card — queued when agent is idle">
                 <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
@@ -322,7 +331,7 @@
                 title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
               <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
                 SELF-IMPROVING</span>
-              <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch"
+              <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
                 title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             </div>
           </div>
@@ -330,7 +339,18 @@
           <!-- Live agent status -->
           <div class="card-section card-section-live" ng-if="vm.isCardActive(card.id)">
             <div class="section-live-row">🤖 <strong>{{vm.streamingPhase || 'Working…'}}</strong>
-              <span ng-if="vm.streamingContextSize" class="section-live-context">{{vm.streamingContextSize}} tokens</span>
+              <span ng-if="vm.streamingContextSize" class="section-live-context context-tag"
+                ng-mouseenter="vm.showContextBreakdown = true" ng-mouseleave="vm.showContextBreakdown = false">{{vm.streamingContextSize}} tokens
+                <span class="context-breakdown-pop" ng-if="vm.showContextBreakdown && vm.streamingContextBreakdown.length">
+                  <span class="ctxb-title">Context — {{vm.streamingContextSize}} tokens (~{{vm.streamingContextChars}} chars)</span>
+                  <span class="ctxb-row" ng-repeat="b in vm.streamingContextBreakdown">
+                    <span class="ctxb-name" title="{{b.name}}">{{b.name}}</span>
+                    <span class="ctxb-num">{{b.tokens}} tk</span>
+                  </span>
+                </span>
+              </span>
+              <span ng-if="vm.focusStats && vm.focusStats.files > 0" class="section-live-context focus-stat-tag"
+                title="Discovery focus: {{vm.focusStats.files}} file(s) read as focused regions, saved ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ', effective focus threshold ' + (vm.focusStats.threshold) + ' chars' : ''}}">📊 {{vm.focusStats.files}} · ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ' · thr ' + (vm.focusStats.threshold) : ''}}</span>
             </div>
             <div class="section-body" ng-if="vm.streamingSteps.length">
               <div class="analysis-step" ng-repeat="s in vm.streamingSteps track by s.index" ng-class="s.status">
@@ -778,18 +798,19 @@
             </span>
           </div>
 
-          <!-- Suggestions (generated when the card finished; cap of 3) -->
+          <!-- Suggestions (generated when the card finished; cap is per-project, 0-4) -->
           <div class="suggest-generating" ng-if="card._suggestionsGenerating">
             <span class="suggest-spinner"></span> 💡 Suggesting improvements…
           </div>
           <div class="suggest-error" ng-if="card._suggestionsError">💡 {{card._suggestionsError}}</div>
           <div class="card-section card-section-suggestions" ng-if="card._suggestions && (card._suggestions.length || card._suggestionsRequested)">
             <div class="section-suggest-title">💡 Suggestions ({{card._suggestions.length}})
-              <a class="suggest-more" ng-if="card._suggestions.length < 3 && !card._suggestionsGenerating" href="javascript:void(0)" ng-click="vm.moreLikeThis(card); $event.stopPropagation()" title="Generate more suggestions in the same vein — topped up to 3">More like this…</a>
+              <a class="suggest-more" ng-if="card._suggestions.length < vm.projectMaxSuggestions(card.filePath) && !card._suggestionsGenerating && !card._suggestionsNone" href="javascript:void(0)" ng-click="vm.moreLikeThis(card); $event.stopPropagation()" title="Generate more suggestions in the same vein — topped up to the project's suggestion cap">More like this…</a>
               <a class="suggest-why" ng-if="vm.suggestionContext(card)" ng-click="vm.toggleSuggestionContext(card); $event.stopPropagation()" title="Why were these proposed?">ℹ</a>
             </div>
             <div class="section-body">
-              <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length">No suggestions yet — try <b>More like this</b> above to have the model dig deeper.</div>
+              <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length && card._suggestionsNone" title="The model found no relevant follow-up work for this card — it will not be re-asked.">No relevant suggestions possible for this card.</div>
+              <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length && !card._suggestionsNone">No suggestions yet — try <b>More like this</b> above to have the model dig deeper.</div>
               <div class="suggestion" ng-repeat="s in card._suggestions track by s.id"
                 ng-class="{queued: s._queued}"
                 ng-click="vm.suggestionToCard(card, s); $event.stopPropagation()"

@@ -78,12 +78,12 @@
       <button type="button" class="header-stat header-stat-rank rank-trigger" ng-if="vm.showKanban"
         ng-click="vm.toggleUserStats()" ng-blur="vm.closeUserStatsOnBlur($event)"
         ng-class="{active: vm.showUserStats, 'rank-shine': vm.rankShine}"
-        title="Rank — points from cards, benchmarks, projects & archived">
+        title="{{vm.bughostedStatus === 'connected' ? 'BugHosted — ' + vm.bughostedUsername + ' · ' + vm.userRankTitle(vm.userStats()) : 'Rank — points from cards, benchmarks, projects & archived'}}">
         <span class="rank-insignia rank-grade-{{vm.userRank(vm.userStats()).grade}}" aria-hidden="true">
           <span class="rank-chevrons"><i ng-repeat="c in vm.chevronArray(vm.userRank(vm.userStats()).chevrons) track by $index" class="rank-chevron"></i></span>
           <span class="rank-stars"><i ng-repeat="s in vm.chevronArray(vm.userRank(vm.userStats()).stars) track by $index" class="rank-star">★</i></span>
         </span>
-        {{vm.userRankTitle(vm.userStats())}} ▾</button>
+        {{vm.bughostedStatus === 'connected' ? vm.bughostedUsername : vm.userRankTitle(vm.userStats())}} ▾</button>
       <div class="user-stats-popup" ng-if="vm.showUserStats" ng-blur="vm.closeUserStatsOnBlur($event)" tabindex="0"
         ng-init="rp = vm.userRankProgress(vm.userStats()); rl = vm.userRankLadder(vm.userStats())">
         <div class="user-stats-popup-title">
@@ -144,6 +144,24 @@
         <span class="header-stat" title="Daily streak">🔥 {{vm.userStats().streak}} day streak</span>
         <span class="header-stat" title="Best benchmark score">📊 {{vm.userStats().bestScore}}% best score</span>
         <span class="header-stat" title="Total archived cards">🗄 {{vm.userStats().archived}} archived</span>
+        <!-- BugHosted — clicking the rank chip offers the chance to log in (or log out
+             when connected), reusing the same credentials the Settings panel uses. -->
+        <div class="user-stats-bughosted" ng-if="vm.bughostedStatus === 'connected'">
+          <span class="user-stats-bughosted-title">🌐 BugHosted — <b>{{vm.bughostedUsername}}</b></span>
+          <button type="button" class="user-stats-popup-close" ng-click="vm.bughostedLogout()" title="Log out of BugHosted">Log out</button>
+        </div>
+        <div class="user-stats-bughosted" ng-if="vm.bughostedStatus !== 'connected'">
+          <span class="user-stats-bughosted-title">🌐 Log into BugHosted.com</span>
+          <span ng-if="vm.bughostedStatus === 'connecting'" class="user-stats-bughosted-status">Connecting…</span>
+          <span ng-if="vm.bughostedStatus === 'error'" class="user-stats-bughosted-status user-stats-bughosted-status--error">Connection failed</span>
+          <div class="user-stats-bughosted-form">
+            <input ng-model="vm.bughostedUsername" ng-change="vm.markBughostedCredsEdited()" placeholder="Username" />
+            <input ng-model="vm.bughostedPassword" type="password" ng-change="vm.markBughostedCredsEdited()" placeholder="Password"
+              ng-keydown="$event.key === 'Enter' && vm.bughostedLogin()" />
+            <button type="button" ng-click="vm.bughostedLogin()"
+              ng-disabled="!vm.bughostedUsername || !vm.bughostedPassword || vm.bughostedStatus === 'connecting'">Log In</button>
+          </div>
+        </div>
       </div> 
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as vm.projectLabel(p) for p in vm.projects"
         ng-change="vm.changeProject()" ng-class="{'benchmark-project-selected': vm.isBenchmarkProject(vm.selectedProject)}"></select>
@@ -252,8 +270,22 @@
             <span class="status-text" title="{{vm.activeCardText | limitTo:4000}}">
               Agent: "{{vm.activeCardText | limitTo:40}}"
               <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span>
-              <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize | formatNumber}}
-                tokens</span>
+              <span ng-if="vm.streamingContextSize" class="phase-tag context-tag"
+                ng-mouseenter="vm.showContextBreakdown = true" ng-mouseleave="vm.showContextBreakdown = false"
+                title="{{vm.streamingContextChars ? 'Characters: ' + (vm.streamingContextChars | formatNumber) : ''}} (tokens are an estimate of chars/4)">{{vm.streamingContextSize | formatNumber}}
+                tokens
+                <span class="context-breakdown-pop" ng-if="vm.showContextBreakdown && vm.streamingContextBreakdown.length">
+                  <span class="ctxb-title">Context — {{vm.streamingContextSize | formatNumber}} tokens (~{{vm.streamingContextChars | formatNumber}} chars)</span>
+                  <span class="ctxb-row" ng-repeat="b in vm.streamingContextBreakdown">
+                    <span class="ctxb-name" title="{{b.name}}">{{b.name}}</span>
+                    <span class="ctxb-num">{{b.tokens | formatNumber}} tk</span>
+                  </span>
+                </span>
+              </span>
+              <span ng-if="vm.focusStats && vm.focusStats.files > 0" class="phase-tag focus-stat-tag"
+                title="Discovery focus: {{vm.focusStats.files}} file(s) read as focused regions, saved ~{{vm.focusStats.chars | formatNumber}} chars{{vm.focusStats.threshold ? ', effective focus threshold ' + (vm.focusStats.threshold | formatNumber) + ' chars' : ''}}">
+                📊 {{vm.focusStats.files}} focused · ~{{vm.focusStats.chars | formatNumber}} chars{{vm.focusStats.threshold ? ' · thr ' + (vm.focusStats.threshold | formatNumber) : ''}}
+              </span>
               <span ng-if="vm.complexityScore != null" class="complexity-tag"
                 title="Complexity: {{vm.complexityScore}}/100 ({{vm.complexityLabel}}). Thinking capped at {{vm.complexityTokenCap}} of {{vm.complexityMaxTokens}} max tokens.{{vm.complexityAtomicSteps ? ' ~' + vm.complexityAtomicSteps + ' atomic step(s) estimated.' : ''}}">
                 🧠 {{vm.complexityLabel}}<span ng-if="vm.complexityAtomicSteps">&nbsp;·&nbsp;~{{vm.complexityAtomicSteps}} steps</span>
@@ -867,23 +899,6 @@
             <input ng-model="p.BuildCommands" placeholder="e.g. dotnet clean & dotnet build"
               style="flex:1; min-width:0; font-size:11px;" />
           </div>
-          <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
-            <span class="muted" style="font-size:11px;white-space:nowrap;">💡 Suggestion context:</span>
-            <select ng-model="p.SuggestionContextDepth" style="flex:1; min-width:0; font-size:11px;"
-              title="How much whole-app context the improvement-suggestion algorithm sends for this project">
-              <option value="full">Full — skeleton + board history + git</option>
-              <option value="board">Board — skeleton + board history</option>
-              <option value="skeleton">Skeleton — file layout only</option>
-            </select>
-          </div>
-          <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
-            <span class="muted" style="font-size:11px;white-space:nowrap;">🤖 Idle suggestions:</span>
-            <label style="display:flex; align-items:center; gap:6px; font-size:11px; cursor:pointer;"
-              title="When ON (default), the agent automatically tops up Done-column cards to 3 suggestions each while it is idle. Turn OFF to keep it from generating suggestions unless a card completes.">
-              <input type="checkbox" ng-model="p.IdleSuggestions" style="width:auto; margin:0;" />
-              Auto-generate suggestions for Done cards while the agent is idle
-            </label>
-          </div>
         </div>
         <div style="padding:10px 0;">
           <strong>Add New Project</strong>
@@ -1057,7 +1072,7 @@
 
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()">
-    <div class="popup-panel settings-panel" style="max-width:580px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel settings-panel" style="max-width:680px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>⚙ Settings</strong>
         <button ng-click="vm.closeSettingsPanel()">✕</button>
@@ -1441,6 +1456,42 @@
                 <input type="range" id="ctx-llmTimeoutMinutes" ng-model="vm.llmTimeoutMinutes" min="5" max="240" step="5" style="width:100%;" />
               </div>
               <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the agent to handle larger files but consume more tokens.</span>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="ctx-suggestionContextDepth">💡 Suggestion Context</label>
+                </div>
+                <select id="ctx-suggestionContextDepth" ng-model="vm.settingsSuggestionContextDepth" style="width:100%;margin-top:2px;"
+                  title="How much whole-app context the improvement-suggestion algorithm sends for the selected project">
+                  <option value="full">Full — skeleton + board history + git</option>
+                  <option value="board">Board — skeleton + board history</option>
+                  <option value="skeleton">Skeleton — file layout only</option>
+                </select>
+                <span class="settings-note">How much whole-app context the improvement-suggestion algorithm sends for the selected project.</span>
+              </div>
+            </div>
+          </details>
+          <details>
+            <summary class="settings-header">Suggestions</summary>
+            <div style="padding:8px 0;display:flex;flex-direction:column;gap:8px;">
+              <span class="settings-note">Per-project options for the selected project (<b>{{vm.selectedProject || 'no project selected'}}</b>).</span>
+              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                <input type="checkbox" id="sug-idleSuggestions" ng-model="vm.settingsIdleSuggestions" />
+                <label for="sug-idleSuggestions" style="flex:1;">🤖 Idle suggestions</label>
+                <span class="settings-help" style="font-size:11px;">auto-generate suggestions for Done cards while the agent is idle</span>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;">
+                  <label for="sug-maxSuggestions">🎯 Max suggestions</label>
+                </div>
+                <select id="sug-maxSuggestions" ng-model="vm.settingsMaxSuggestionsPerCard" style="width:100%;margin-top:2px;"
+                  title="How many improvement suggestions each completed card can get (0-4). 0 disables suggestions for this project.">
+                  <option ng-value="0">0 — none</option>
+                  <option ng-value="1">1</option>
+                  <option ng-value="2">2</option>
+                  <option ng-value="3">3 (default)</option>
+                  <option ng-value="4">4</option>
+                </select>
+              </div>
             </div>
           </details>
           <details>
@@ -1474,6 +1525,7 @@
               <span>📋 Kanban Board</span>
             </label>
             <button class="brand-link" style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;background:transparent;color:var(--text);text-align:left;" ng-click="vm.openCalendarPanel()">
+              <input type="checkbox" ng-model="vm.showCalendar" /> 
               <span>📅 Calendar</span>
             </button>
             <label style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;">
@@ -1559,8 +1611,8 @@
             <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
             <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;">
-                <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
-                <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
+                <input ng-model="vm.bughostedUsername" ng-change="vm.markBughostedCredsEdited()" placeholder="Username" style="flex:1;" />
+                <input ng-model="vm.bughostedPassword" type="password" ng-change="vm.markBughostedCredsEdited()" placeholder="Password" style="flex:1;" />
               </div>
               <label style="font-size:12px;display:flex;align-items:center;gap:8px;">
                 <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" />

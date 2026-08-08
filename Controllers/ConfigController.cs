@@ -88,10 +88,24 @@ public class ConfigController : ControllerBase
                 incoming.emailUsername = existing.emailUsername;
             if (string.IsNullOrWhiteSpace(incoming.emailImapServer) && !string.IsNullOrWhiteSpace(existing.emailImapServer))
                 incoming.emailImapServer = existing.emailImapServer;
-            if (string.IsNullOrWhiteSpace(incoming.bughostedPassword) && !string.IsNullOrWhiteSpace(existing.bughostedPassword))
-                incoming.bughostedPassword = existing.bughostedPassword;
-            if (string.IsNullOrWhiteSpace(incoming.bughostedUsername) && !string.IsNullOrWhiteSpace(existing.bughostedUsername))
-                incoming.bughostedUsername = existing.bughostedUsername;
+            // Explicit delete: the user cleared the BugHosted credential fields and saved —
+            // empty values are authoritative, so skip the preserve-if-omitted merge below
+            // (without this, emptying the fields would resurrect the old credentials on the
+            // next config load because the merge treats empty as 'client omitted the field').
+            var clearBughosted = body.TryGetProperty("clearBughostedCredentials", out var clrEl)
+                && clrEl.ValueKind == JsonValueKind.True;
+            if (clearBughosted)
+            {
+                incoming.bughostedUsername = "";
+                incoming.bughostedPassword = "";
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(incoming.bughostedPassword) && !string.IsNullOrWhiteSpace(existing.bughostedPassword))
+                    incoming.bughostedPassword = existing.bughostedPassword;
+                if (string.IsNullOrWhiteSpace(incoming.bughostedUsername) && !string.IsNullOrWhiteSpace(existing.bughostedUsername))
+                    incoming.bughostedUsername = existing.bughostedUsername;
+            }
             if (string.IsNullOrWhiteSpace(incoming.bughostedUrl) && !string.IsNullOrWhiteSpace(existing.bughostedUrl))
                 incoming.bughostedUrl = existing.bughostedUrl;
             await _configFile.WriteConfigAsync(incoming);

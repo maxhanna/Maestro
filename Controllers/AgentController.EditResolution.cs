@@ -764,6 +764,8 @@ partial class AgentController
                             "`<div *ngFor=\"let b of benchmarks\" class=\"benchmark-item\">` and newCode = the new " +
                             "wrapper opening + that same line. The rest of the section stays untouched — never " +
                             "re-emit it in newCode.");
+            sb.AppendLine(BuildTargetedReplaceWorkedExample());
+            sb.AppendLine();
             sb.AppendLine("  1. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
             sb.AppendLine("     REPLACE mode: newCode replaces ONLY the targetName block — do NOT include the parent " +
                             "tags or closing tags that remain unchanged (the system keeps them). Keep newCode as " +
@@ -812,6 +814,8 @@ partial class AgentController
                               "newString = that same line with ONLY the token swapped (plus any new lines after it). " +
                               "Do NOT reproduce the enclosing block/section — a tiny anchor is all that is needed.");
             }
+            sb.AppendLine(BuildTargetedReplaceWorkedExample());
+            sb.AppendLine();
             sb.AppendLine("SMALL targeted edits (1-5 lines, e.g. add a column to SQL, add one property): PREFER oldString/newString. " +
                           "Include the line above/below for anchor context, repeat them unchanged in newString.");
             sb.AppendLine("For FULL method/class replacements (entire method body rewrite): use FORMAT C (targetType/targetName/newCode) " +

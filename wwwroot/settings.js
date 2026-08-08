@@ -161,7 +161,8 @@ angular.module('kanbanApp')
 
         function normalizeProjects(raw) {
             return raw.map(function (p) {
-                return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '', SuggestionContextDepth: p.SuggestionContextDepth || p.suggestionContextDepth || 'full', IdleSuggestions: p.IdleSuggestions !== false };
+                var maxSug = p.MaxSuggestionsPerCard;
+                return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '', SuggestionContextDepth: p.SuggestionContextDepth || p.suggestionContextDepth || 'full', IdleSuggestions: p.IdleSuggestions !== false, MaxSuggestionsPerCard: (typeof maxSug === 'number' && maxSug >= 0 && maxSug <= 4) ? Math.round(maxSug) : 3 };
             });
         }
 
@@ -174,6 +175,11 @@ angular.module('kanbanApp')
                 vm.projects = [];
                 vm.defaultProject = '';
                 vm.settingsDefaultProject = '';
+                // Mirror of the SELECTED project's per-project suggestion settings, edited from
+                // the Settings panel (these apply to the currently selected project, not globally).
+                vm.settingsSuggestionContextDepth = 'full';
+                vm.settingsIdleSuggestions = true;
+                vm.settingsMaxSuggestionsPerCard = 3;
                 vm.autoQueue = true;
                 // The "Weaver Benchmarks" project (auto-created by /api/benchmark/ensure-project)
                 // gets a 🎯 badge in the header project picker chip + dropdown so it stands out
@@ -297,6 +303,9 @@ angular.module('kanbanApp')
                 vm.showProjectOptions = false;
                 vm.showEditProjectsPanel = false;
                 vm.showSettingsPanel = false;
+                // Set when the user edits the BugHosted credential fields this session —
+                // lets saveSettings tell the server "empty means delete", not "field omitted".
+                vm._bughostedCredsEdited = false;
                 vm.showDiscordPanel = false;
                 vm.newProjectName = '';
                 vm.newProjectPath = '';
@@ -526,6 +535,8 @@ angular.module('kanbanApp')
                     });
                 };
 
+                vm.markBughostedCredsEdited = function () { vm._bughostedCredsEdited = true; };
+
                 vm.saveSettings = function (skipCloseSettingsPanel = false) {
                     saveLocalSettings();
                     $http.get('/api/config').then(function (resp) {
@@ -567,11 +578,38 @@ angular.module('kanbanApp')
                         cfg.bughostedUsername = vm.bughostedUsername || '';
                         cfg.bughostedPassword = vm.bughostedPassword || '';
                         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
+                        // The user edited the credential fields to empty this session — empty is
+                        // authoritative, so tell the server not to restore the old credentials.
+                        cfg.clearBughostedCredentials = !!(vm._bughostedCredsEdited && !vm.bughostedUsername && !vm.bughostedPassword);
                         cfg.themeColors = vm.themeColors;
                         cfg.savedThemes = vm.savedThemes.map(function (t) { return { name: t.name || 'Untitled', colors: t.colors || {} }; });
                         cfg.enabledTools = vm.toolList.filter(function (t) { return t.enabled; }).map(function (t) { return t.key; });
+                        // Persist the Settings panel's suggestion controls onto the selected project
+                        // (they edit the per-project DTO, so live consumers pick them up immediately).
+                        var suggProj = vm.selectedProjectSuggestionDto();
+                        if (suggProj) {
+                            suggProj.SuggestionContextDepth = vm.settingsSuggestionContextDepth || 'full';
+                            suggProj.IdleSuggestions = vm.settingsIdleSuggestions !== false;
+                            var ms = vm.settingsMaxSuggestionsPerCard;
+                            suggProj.MaxSuggestionsPerCard = (typeof ms === 'number' && ms >= 0 && ms <= 4) ? Math.round(ms) : 3;
+                            if (Array.isArray(cfg.projects)) {
+                                var normP = function (s) { return String(s || '').replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase(); };
+                                var idxP = cfg.projects.findIndex(function (cp) { return normP(cp.Path || cp.path) === normP(suggProj.Path); });
+                                if (idxP !== -1) {
+                                    cfg.projects[idxP].SuggestionContextDepth = suggProj.SuggestionContextDepth;
+                                    cfg.projects[idxP].IdleSuggestions = suggProj.IdleSuggestions;
+                                    cfg.projects[idxP].MaxSuggestionsPerCard = suggProj.MaxSuggestionsPerCard;
+                                }
+                            }
+                        }
                         return $http.post('/api/config/save', cfg);
                     }).then(function () {
+                        if (vm._bughostedCredsEdited && !vm.bughostedUsername && !vm.bughostedPassword) {
+                            // Credentials were deleted — also drop any live BugHosted session so
+                            // nothing keeps running under the removed account.
+                            if (vm.bughostedStatus === 'connected' && vm.bughostedLogout) vm.bughostedLogout();
+                        }
+                        vm._bughostedCredsEdited = false;
                         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
                         if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
                         if (!skipCloseSettingsPanel) vm.closeSettingsPanel();
@@ -744,7 +782,7 @@ angular.module('kanbanApp')
                         vm.showUserStats = false;
                     }, 200);
                 };
-                vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); };
+                vm.changeProject = function () { vm.loadConfig(vm.selectedProject).then(function () { vm.refreshSuggestionSettings(); $timeout(function () { vm.countArchivedCards(); vm.loadFilePickerEntries(); }, 100); }); };
                 vm.openEditProjectsPanel = function () { vm.newProjectName = ''; vm.newProjectPath = ''; vm.newProjectDescription = ''; vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.projects.forEach(function (p) { p._origPath = p.Path; }); vm.showEditProjectsPanel = true; };
                 vm.closeEditProjectsPanel = function () { vm.saveSettings(true); vm.showEditProjectsPanel = false; };
                 vm.addProjectFromPanel = function () {
@@ -762,7 +800,7 @@ angular.module('kanbanApp')
                         if (idx === -1) return $window.alert('Project not found in config');
                         var newPath = p.Path.replace(/\\/g, '/');
                         if (newPath !== originalPath && cfg.projects.some(function (cp) { return (cp.Path || cp.path) === newPath; })) return $window.alert('A project with that path already exists');
-                        cfg.projects[idx].Name = p.Name; cfg.projects[idx].Path = newPath; cfg.projects[idx].Description = p.Description || ''; cfg.projects[idx].BuildCommands = p.BuildCommands || ''; cfg.projects[idx].SuggestionContextDepth = p.SuggestionContextDepth || 'full'; cfg.projects[idx].IdleSuggestions = p.IdleSuggestions !== false;
+                        cfg.projects[idx].Name = p.Name; cfg.projects[idx].Path = newPath; cfg.projects[idx].Description = p.Description || ''; cfg.projects[idx].BuildCommands = p.BuildCommands || ''; cfg.projects[idx].SuggestionContextDepth = p.SuggestionContextDepth || 'full'; cfg.projects[idx].IdleSuggestions = p.IdleSuggestions !== false; var ms = p.MaxSuggestionsPerCard; cfg.projects[idx].MaxSuggestionsPerCard = (typeof ms === 'number' && ms >= 0 && ms <= 4) ? Math.round(ms) : 3;
                         $http.post('/api/config/save', cfg).then(function () { vm.loadConfig(); }, function (err) { $window.alert('Failed to save: ' + (err.data || err.statusText)); });
                     });
                 };
@@ -831,8 +869,30 @@ angular.module('kanbanApp')
                 }
                 vm.reloadNow = function () { waitForServer(true); };
 
+                // The selected project's live DTO in vm.projects (path-normalized match), or
+                // null — the Settings panel's suggestion controls edit THIS project's per-project
+                // settings (SuggestionContextDepth / IdleSuggestions / MaxSuggestionsPerCard).
+                vm.selectedProjectSuggestionDto = function () {
+                    if (!vm.selectedProject || !Array.isArray(vm.projects)) return null;
+                    var norm = function (s) { return String(s || '').replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase(); };
+                    var target = norm(vm.selectedProject);
+                    for (var i = 0; i < vm.projects.length; i++) {
+                        var p = vm.projects[i];
+                        if (p && norm(p.Path || p.path) === target) return p;
+                    }
+                    return null;
+                };
+                vm.refreshSuggestionSettings = function () {
+                    var p = vm.selectedProjectSuggestionDto();
+                    vm.settingsSuggestionContextDepth = p ? (p.SuggestionContextDepth || 'full') : 'full';
+                    vm.settingsIdleSuggestions = p ? p.IdleSuggestions !== false : true;
+                    var ms = p ? p.MaxSuggestionsPerCard : undefined;
+                    vm.settingsMaxSuggestionsPerCard = (typeof ms === 'number' && ms >= 0 && ms <= 4) ? Math.round(ms) : 3;
+                };
+
                 vm.openSettingsPanel = function () {
                     vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.showSettingsPanel = true;
+                    vm.refreshSuggestionSettings();
                     vm.loadIdeThemeStylesheets();
                     $timeout(function () { vm.renderThemePreviews(); }, 150);
                     vm.fileHintsData = (vm.projects || []).map(function (p) { return { projectPath: p.Path, hints: [] }; });

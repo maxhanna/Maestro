@@ -209,6 +209,53 @@ public class PostExecuteVerifyTests
         Assert.Contains("phantom", reason);
     }
 
+    // ── Triage: checklist-echo substitution preferences ────────────────────
+
+    [Fact]
+    public void Triage_ChecklistEchoPreference_PresentSymbol_Drops()
+    {
+        // The user's exact flex-wrap case: the verifier claimed "'.notificationContainer' uses
+        // 'justify-content: center', while requirement is to use proper horizontal alignment" —
+        // quoting its own invented requirement checklist to flag a present, valid CSS value the
+        // task ("display flex and allow wrap") never asked to change. The named symbol exists in
+        // the file and there is no absence claim, so it is a preference, not a defect.
+        var files = new Dictionary<string, string>
+        {
+            ["crawler/crawler.component.css"] =
+                ".notificationContainer { display: flex; justify-content: center; align-items: center; gap: 20px; flex-wrap: wrap; }"
+        };
+        var (keep, reason) = InvokeTriageVerifierIssue(
+            "'notificationContainer' uses 'justify-content: center', while requirement is to use proper horizontal alignment via flexbox layout without explicit justification like 'center'.",
+            files);
+        Assert.False(keep);
+        Assert.Contains("requirement", reason);
+    }
+
+    [Fact]
+    public void Triage_ChecklistEchoPreference_NoFileEvidence_Keeps()
+    {
+        // No files were loaded for triage — we cannot verify the preference is about present
+        // code, so the safe default is to keep the issue actionable rather than guess.
+        var (keep, _) = InvokeTriageVerifierIssue(
+            "'notificationContainer' uses 'justify-content: center', while requirement is to use proper horizontal alignment",
+            new Dictionary<string, string>());
+        Assert.True(keep);
+    }
+
+    [Fact]
+    public void Triage_ChecklistEchoPreference_WithAbsenceClaim_Keeps()
+    {
+        // A concrete absence claim ('saveAll is missing') suppresses the preference rule — the
+        // missing feature must stay actionable even when the wording echoes the checklist.
+        var files = new Dictionary<string, string>
+        {
+            ["app.ts"] = "function loadCards() {}\n"
+        };
+        var (keep, _) = InvokeTriageVerifierIssue(
+            "`saveAll` is missing from the controller; it uses sort() while requirement is to use stableSort()", files);
+        Assert.True(keep);
+    }
+
     // ── Triage: 'X should be Y' already-resolved renames ────────────────────
 
     [Fact]

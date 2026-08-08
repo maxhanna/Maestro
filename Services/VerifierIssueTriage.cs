@@ -30,6 +30,15 @@ public static class VerifierIssueTriage
         @"[a-z][a-zA-Z0-9]{2,}|[A-Z][a-zA-Z0-9]*|_[a-z][a-zA-Z0-9_]*",
         RegexOptions.IgnoreCase);
 
+    /// <summary>Checklist-echo substitution claims: the verifier asserts the code "uses X, while
+    /// requirement is to use Y" — quoting its own invented requirement checklist rather than the
+    /// ORIGINAL TASK, and flagging a present, valid value as wrong (e.g. "'.notificationContainer'
+    /// uses 'justify-content: center', while requirement is to use proper horizontal alignment").
+    /// The phrase "while (the) requirement is to use" is verifier-checklist-ese, not task language.</summary>
+    public static readonly Regex ChecklistEchoPreferenceRegex = new(
+        @"\bwhile\s+(?:the\s+)?requirement\s+is\s+to\s+use\b",
+        RegexOptions.IgnoreCase);
+
     /// <summary>Matches "X should be Y" / "X must be Y" rename claims where the verifier asserts a
     /// symbol was supposed to be named something else (e.g. "'do_get' should be 'do_GET'").
     /// Captures group 1 = the symbol the verifier claims is wrong, group 2 = the corrected name.</summary>
@@ -136,6 +145,31 @@ public static class VerifierIssueTriage
             }
         }
 
+        // 1c) CHECKLIST-ECHO SUBSTITUTION: the verifier claims the code "uses X, while
+        //     requirement is to use Y" — echoing its own invented requirement checklist rather
+        //     than the original task, and flagging a present, valid value as wrong (the
+        //     flex-wrap CSS case: "'.notificationContainer' uses 'justify-content: center',
+        //     while requirement is to use proper horizontal alignment"). Requires (a) at least
+        //     one named code symbol that EXISTS in the files (so the preference is about real
+        //     code we can see) and (b) no concrete absence claim — a genuinely missing feature
+        //     must stay actionable even when the wording happens to echo the checklist.
+        if (ChecklistEchoPreferenceRegex.IsMatch(issue) && !PhantomClaimRegex.IsMatch(issue))
+        {
+            // The verifier quotes symbols AND CSS values with single quotes ("'notificationContainer'
+            // uses 'justify-content: center'"), so augment the shared extractor (backticks/qualifiers/
+            // method calls only) with quoted identifiers — dashes allowed for CSS property names.
+            var namedSymbols = ExtractCodeSymbols(issue, includeBareTokens: false)
+                .Concat(ExtractQuotedIdentifiers(issue))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (namedSymbols.Count > 0 && namedSymbols.Any(symbol =>
+                    filesByPath.Values.Any(content =>
+                        Regex.IsMatch(content, @"\b" + Regex.Escape(symbol) + @"\b"))))
+            {
+                return (false, "checklist-echo substitution ('uses X, while requirement is to use Y') — preference about present code, not a concrete defect");
+            }
+        }
+
         // 2) EVENT-GATED: timing concern about a symbol only referenced from event handlers.
         if (TimingConcernRegex.IsMatch(issue))
         {
@@ -158,6 +192,19 @@ public static class VerifierIssueTriage
             return (false, "speculative wording (might/could/maybe) with no concrete defect");
 
         return (true, "");
+    }
+
+    /// <summary>Extracts single/backtick-quoted identifiers from an issue, allowing dashes so
+    /// CSS property names ('justify-content') survive. The verifier quotes symbols with single
+    /// quotes just as often as backticks, and the shared extractor deliberately ignores quotes.
+    /// A trailing colon is trimmed so 'justify-content:' still resolves against the stylesheet.</summary>
+    public static IEnumerable<string> ExtractQuotedIdentifiers(string issue)
+    {
+        foreach (Match m in Regex.Matches(issue, @"['""`]([A-Za-z_$][\w$:-]*)['""`]"))
+        {
+            var value = m.Groups[1].Value.TrimEnd(':');
+            if (value.Length > 0) yield return value;
+        }
     }
 
     /// <summary>Extracts code-shaped identifiers from an issue (backticked, vm./this.-qualified,

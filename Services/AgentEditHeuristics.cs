@@ -435,6 +435,182 @@ public static class AgentEditHeuristics
         return null;
     }
 
+    /// <summary>
+    /// Small-anchor "surrounding line" re-anchor. When a small plan oldString (2-3 lines)
+    /// fails to match verbatim at apply time, try re-anchoring it against each surrounding
+    /// line of the file: shift the anchor up/down by a line, extend it by the line above or
+    /// below (the file gained a line the plan missed), or trim its first/last line (the plan
+    /// included a stale line that no longer exists). Returns the file-EXACT replacement block
+    /// plus its 0-based start line when exactly ONE surrounding alignment is confident — the
+    /// caller applies it deterministically instead of escalating to the LLM resolver.
+    /// Returns null when the anchor is not small, nothing aligns confidently, or the best
+    /// alignment is ambiguous (a tie means the re-anchor would be guesswork).
+    /// </summary>
+    public static (string correctedBlock, int startLineIdx, int score)? TrySurroundingLineReanchor(
+        string fileContent, string oldStr, int targetLine = 0, string? changeDesc = null,
+        int maxAnchorLines = 3)
+    {
+        if (string.IsNullOrWhiteSpace(oldStr)) return null;
+        var normFile = NormalizeLineEndings(fileContent);
+        var normOld = NormalizeLineEndings(oldStr);
+        var oldLines = normOld.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        // Only SMALL anchors get the surrounding-line retry: 2-3 lines (the planner's RULE 17
+        // shape). A 1-line anchor has no surrounding-line structure to exploit — the apply
+        // loop's whole-file tolerant matcher plus BuildExactMatchBlock already cover its drift.
+        if (oldLines.Count < 2 || oldLines.Count > maxAnchorLines) return null;
+        var fileLines = normFile.Split('\n');
+        // NOTE: no file-length guard against the anchor length here — a trim shape (plan has
+        // a stale line) legitimately makes the file SHORTER than the plan. The per-shape
+        // bounds checks below keep every window inside the file; a file too small for every
+        // shape simply yields no candidates.
+        if (fileLines.Length < 2) return null;
+        var n = oldLines.Count;
+
+        // Anchor position: the planner's stated line when given (0-indexed), else the best
+        // global scan. The surrounding search stays near it — big drift is BuildExactMatchBlock's
+        // (whole-file) job, or the LLM resolver's.
+        var baseIdx = targetLine > 0
+            ? Math.Clamp(targetLine - 1, 0, Math.Max(0, fileLines.Length - 1))
+            : FindBestAnchorPosition(fileLines, oldLines);
+        if (baseIdx < 0) return null;
+
+        var window = maxAnchorLines;
+        // Dedupe by block text: the same file window can be reached by multiple (delta, shape)
+        // combos (e.g. extend-above at delta 0 == extend-below at delta -1) with identical
+        // scores — those are ONE candidate, not ambiguity.
+        var byBlock = new Dictionary<string, (int start, int score)>(StringComparer.Ordinal);
+        for (var delta = -window; delta <= window; delta++)
+        {
+            foreach (var (start, len) in EnumerateAnchorShapes(baseIdx + delta, n))
+            {
+                if (len < 1 || start < 0 || start + len > fileLines.Length) continue;
+                var score = ScoreAnchorWindowAlignment(oldLines, fileLines, start, len);
+                if (score < 0) continue;
+                var block = string.Join("\n", fileLines.Skip(start).Take(len));
+                if (!byBlock.TryGetValue(block, out var existing) || score > existing.score)
+                    byBlock[block] = (start, score);
+            }
+        }
+        if (byBlock.Count == 0) return null;
+        var ranked = byBlock
+            .Select(kv => (block: kv.Key, start: kv.Value.start, score: kv.Value.score))
+            .OrderByDescending(c => c.score)
+            .ThenBy(c => Math.Abs(c.start - baseIdx))
+            .ToList();
+        var best = ranked[0];
+        // Ambiguity guard: a second alignment with the SAME score means the re-anchor is
+        // guesswork — escalate instead of applying at a coin-flip location.
+        if (ranked.Count > 1 && ranked[1].score == best.score) return null;
+        if (string.Equals(best.block, normOld, StringComparison.Ordinal)) return null;
+        return (best.block, best.start, best.score);
+    }
+
+    /// <summary>Anchor shapes tried at each surrounding offset: same length, extended above,
+    /// extended below, trimmed first line, trimmed last line. Trim shapes only fire for
+    /// n ≥ 3 anchors: trimming a 2-line plan leaves just ONE verified line (as weak as a
+    /// 1-line anchor, which is deliberately excluded) and ties with the same-length drift
+    /// case, manufacturing ambiguity.
+    /// </summary>
+    private static IEnumerable<(int start, int len)> EnumerateAnchorShapes(int basePos, int n)
+    {
+        yield return (basePos, n);          // same length, shifted by delta
+        yield return (basePos - 1, n + 1);  // extended above — file gained a line before the anchor
+        yield return (basePos, n + 1);      // extended below — file gained a line after the anchor
+        if (n >= 3)
+        {
+            yield return (basePos + 1, n - 1);  // trimmed first — plan included a stale first line
+            yield return (basePos, n - 1);      // trimmed last — plan included a stale last line
+        }
+    }
+
+    /// <summary>
+    /// Scores a candidate window against the plan anchor. Returns -1 when the alignment is
+    /// not confident: same-length allows ONE drifted line (≥ n-1 matches); extend/trim shapes
+    /// require FULL alignment (every line matched, with the extra line dropped from one side).
+    /// The strict full-alignment bar for extend/trim is what makes those shapes safe — a plan
+    /// line that drifted outright (not just an extra/missing line) escalates instead.
+    /// </summary>
+    private static int ScoreAnchorWindowAlignment(List<string> plan, string[] fileLines, int start, int len)
+    {
+        var n = plan.Count;
+        if (len == n)
+        {
+            var score = 0;
+            for (var i = 0; i < n; i++)
+                if (LinesTolerantlyMatch(plan[i], fileLines[start + i])) score++;
+            return score >= Math.Max(1, n - 1) ? score : -1;
+        }
+        if (len == n + 1)
+        {
+            // File gained a line: the plan must align with the window minus ONE line (the
+            // dropped line is the extra one the plan never saw) — every plan line must match.
+            for (var drop = 0; drop <= n; drop++)
+            {
+                var score = 0;
+                var wi = 0;
+                for (var pi = 0; pi < n; pi++)
+                {
+                    if (wi == drop) wi++; // skip the dropped window line
+                    if (wi >= len) break;
+                    if (LinesTolerantlyMatch(plan[pi], fileLines[start + wi])) score++;
+                    wi++;
+                }
+                if (score == n) return n;
+            }
+            return -1;
+        }
+        if (len == n - 1)
+        {
+            // Plan included a stale line: the window must align with the plan minus ONE line
+            // — every window line must match.
+            for (var drop = 0; drop < n; drop++)
+            {
+                var score = 0;
+                var wi = 0;
+                for (var pi = 0; pi < n; pi++)
+                {
+                    if (pi == drop) continue;
+                    if (wi >= len) break;
+                    if (LinesTolerantlyMatch(plan[pi], fileLines[start + wi])) score++;
+                    wi++;
+                }
+                if (score == n - 1) return n - 1;
+            }
+            return -1;
+        }
+        return -1;
+    }
+
+    /// <summary>Best whole-file position for a small anchor (used when the planner gave no
+    /// line number): the offset where the most plan lines match in sequence.</summary>
+    private static int FindBestAnchorPosition(string[] fileLines, List<string> plan)
+    {
+        var bestIdx = -1;
+        var bestScore = -1;
+        for (var i = 0; i < fileLines.Length; i++)
+        {
+            var score = 0;
+            for (var j = 0; j < plan.Count && i + j < fileLines.Length; j++)
+                if (LinesTolerantlyMatch(plan[j], fileLines[i + j])) score++;
+            if (score > bestScore) { bestScore = score; bestIdx = i; }
+        }
+        return bestScore > 0 ? bestIdx : 0;
+    }
+
+    /// <summary>Tolerant per-line comparison for the surrounding-line re-anchor: trimmed
+    /// equality, whitespace-stripped equality, case-insensitive equality, or a prefix match
+    /// of a ≥4-char token (short prefixes like "b" over-match "button" and are excluded).</summary>
+    private static bool LinesTolerantlyMatch(string a, string b)
+    {
+        var at = a.Trim();
+        var bt = b.Trim();
+        if (at == bt) return true;
+        if (Regex.Replace(at, @"\s+", "") == Regex.Replace(bt, @"\s+", "")) return true;
+        if (string.Equals(at, bt, StringComparison.OrdinalIgnoreCase)) return true;
+        return at.Length >= 4 && bt.Length >= 4 &&
+               (at.StartsWith(bt, StringComparison.Ordinal) || bt.StartsWith(at, StringComparison.Ordinal));
+    }
+
     public static string? GetUnsafeEditPayloadReason(string oldString, string newString)
     {
         foreach (var marker in UnsafeEditMarkers)

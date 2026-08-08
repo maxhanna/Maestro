@@ -22,13 +22,13 @@ public class TargetedAnchorGuardTests
 
     /// <summary>Runs the REAL private validator on an uninitialized controller — the early
     /// guard paths are pure (static helpers only), so no DI/state is needed.</summary>
-    private static (bool valid, string? reason) Validate(PlanStep step, string prompt, bool skipLlm = false)
+    private static (bool valid, string? reason) Validate(PlanStep step, string prompt, bool skipLlm = false, List<string>? attachedFiles = null)
     {
         var controller = RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
         var task = (Task<(bool valid, string? reason)>)ValidateMethod.Invoke(controller, new object?[]
         {
             step, prompt, /*discoveryContext*/ "", /*planSoFar*/ new List<PlanStep>(),
-            /*projectRoot*/ ".", /*emitSse*/ false, CancellationToken.None, /*skipLlm*/ skipLlm, /*lastStepCompletionNote*/ null
+            /*projectRoot*/ ".", /*emitSse*/ false, CancellationToken.None, /*skipLlm*/ skipLlm, /*lastStepCompletionNote*/ null, /*attachedFiles*/ attachedFiles
         })!;
         var result = task.GetAwaiter().GetResult();
         return (result.valid, result.reason);

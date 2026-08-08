@@ -28,7 +28,7 @@ public class OsMarkerGuardTests
         var task = (Task<(bool valid, string? reason)>)ValidateMethod.Invoke(controller, new object?[]
         {
             step, prompt, /*discoveryContext*/ "", /*planSoFar*/ new List<PlanStep>(),
-            /*projectRoot*/ ".", /*emitSse*/ false, CancellationToken.None, /*skipLlm*/ false, /*lastStepCompletionNote*/ null
+            /*projectRoot*/ ".", /*emitSse*/ false, CancellationToken.None, /*skipLlm*/ false, /*lastStepCompletionNote*/ null, /*attachedFiles*/ null
         })!;
         var result = task.GetAwaiter().GetResult();
         return (result.valid, result.reason);

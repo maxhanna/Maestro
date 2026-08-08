@@ -657,7 +657,9 @@ angular.module('kanbanApp', [])
       // === Global Init Calls ===
       if (vm.emailAccounts.length === 0) vm.addEmailAccount();
       vm.loadConfig().then(function () {
-        if (vm.bughostedUsername && vm.bughostedPassword && vm.bughostedHeartbeatEnabled) {
+        // Restore a remembered BugHosted login on reload (set by a successful
+        // bughostedLogin and cleared by logout), or the legacy heartbeat checkbox.
+        if (vm.bughostedUsername && vm.bughostedPassword && (vm.bughostedHeartbeatEnabled || vm.bughostedAutoLogin)) {
           vm.bughostedLogin();
         }
       });

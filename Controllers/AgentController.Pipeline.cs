@@ -314,7 +314,8 @@ partial class AgentController
                     // prematurely truncate a valid multi-step stage. The budget is enforced in
                     // the top-level interleaved loop, which is the actual execution path.
                     var (incSubPlan, updatedCtx) = await RunIncrementalPlanningLoop(
-                        subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId);
+                        subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId,
+                        atomicStepEstimate: null, attachedFiles: attachedFiles);
                     subPlanResult = incSubPlan;
                     discoveryContext = updatedCtx;
                 }
@@ -416,7 +417,8 @@ partial class AgentController
             await EmitLog(emitSse, "info", "Phase 2 — PLAN & EXECUTE (interleaved, one atomic step at a time)", ct: ct);
             if (emitSse)
             {
-                await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = discoveryContext.Length, prompt }, ct);
+                var ctxBreakdown = BuildContextBreakdown(ds, discoveryContext);
+                await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext), contextChars = discoveryContext.Length, contextBreakdown = ctxBreakdown, prompt }, ct);
             }
             var (interleavedPlan, interleavedResults, updatedContext, interleavedComplete) = await RunInterleavedPlanExecutionLoop(
                 prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles, atomicStepEstimate);
@@ -901,6 +903,51 @@ partial class AgentController
         catch (OperationCanceledException) { return new Dictionary<string, string>(); }
         finally { _pendingQuestions.TryRemove(qId, out _); }
     }
+    /// <summary>
+    /// Builds a per-file breakdown of the discovery context for the agent-panel token
+    /// counter: each discovery read step contributes its file size (chars + estimated
+    /// tokens), and everything else (headers, skeleton note, edit-knowledge header,
+    /// web results, steering) is rolled up as "scaffolding". Lets users see WHY the
+    /// counter is N tokens instead of guessing — e.g. two 31k-token attached files
+    /// showing as ~130k because the old counter sent character counts labeled tokens.
+    /// </summary>
+    private static List<object> BuildContextBreakdown(List<object> ds, string discoveryContext)
+    {
+        var rows = new List<object>();
+        var accountedChars = 0;
+        var accountedTokens = 0;
+        foreach (var item in ds.OfType<Dictionary<string, object?>>())
+        {
+            if (item.GetValueOrDefault("type")?.ToString() != "read") continue;
+            var path = item.GetValueOrDefault("path")?.ToString();
+            var output = item.GetValueOrDefault("output")?.ToString();
+            if (string.IsNullOrEmpty(path) || output == null) continue;
+            var fileTokens = AgentTokenMetrics.EstimateTokens(output);
+            rows.Add(new
+            {
+                name = path,
+                kind = "file",
+                chars = output.Length,
+                tokens = fileTokens
+            });
+            accountedChars += output.Length;
+            accountedTokens += fileTokens;
+        }
+        var scaffoldingChars = Math.Max(0, discoveryContext.Length - accountedChars);
+        if (scaffoldingChars > 0)
+        {
+            rows.Add(new
+            {
+                name = "headers / skeleton / steering",
+                kind = "scaffolding",
+                chars = scaffoldingChars,
+                // Same estimator as the file rows — derived as the residual so the rows
+                // always sum to the reported contextSize.
+                tokens = Math.Max(0, AgentTokenMetrics.EstimateTokens(discoveryContext) - accountedTokens)
+            });
+        }
+        return rows;
+    }
     private async Task<string> RunContextReview(
         List<object> ds, string discoveryContext, List<object> allSteps, CancellationToken ct)
     {
@@ -923,7 +970,9 @@ partial class AgentController
         {
             id = reviewId,
             files = readFiles.Select(f => new { path = f }).ToList(),
-            contextSize = discoveryContext.Length
+            contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext),
+            contextChars = discoveryContext.Length,
+            contextBreakdown = BuildContextBreakdown(ds, discoveryContext)
         }, ct);
         try
         {
@@ -1009,7 +1058,9 @@ partial class AgentController
         if (focusedCount > 0)
         {
             await EmitLog(emitSse, "metric",
-                $"🎯 Explore focus: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars", ct: ct);
+                $"🎯 Explore focus: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars",
+                new { kind = "focusStats", filesFocused = focusedCount, charsSaved = focusedCharsSaved },
+                ct);
         }
         return enriched.ToString();
     }
@@ -1260,6 +1311,22 @@ partial class AgentController
             }
             modifiedPaths = exploredPaths;
         }
+        // Deterministic template-binding validation (independent of the LLM verifier): an
+        // edited/new template must reference symbols the sibling component actually exposes,
+        // and component logic wired under a UI task whose template was in scope but never
+        // edited is flagged as unrendered. These checks are regex-based and cannot
+        // hallucinate, so their findings are always CONFIRMED when they fire.
+        var bindingIssues = TemplateBindingValidator.CheckModifiedTemplates(projectRoot, modifiedPaths);
+        var unrenderedIssues = TemplateBindingValidator.CheckUnrenderedComponentLogic(
+            originalPrompt, projectRoot, modifiedPaths, allResults);
+        var deterministicIssues = new List<string>();
+        deterministicIssues.AddRange(bindingIssues);
+        deterministicIssues.AddRange(unrenderedIssues);
+        if (deterministicIssues.Count > 0)
+        {
+            await EmitLog(emitSse, "warn",
+                $"🔧 Deterministic template-binding check: {deterministicIssues.Count} CONFIRMED issue(s): {string.Join("; ", deterministicIssues)}", ct: ct);
+        }
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
         sb.AppendLine(originalPrompt);
@@ -1413,6 +1480,11 @@ partial class AgentController
         sb.AppendLine("   is correctly solved by modifying the CSS class (.toolBtn) that those buttons use. Do NOT require inline style attributes");
         sb.AppendLine("   on HTML elements when the styling is already controlled through CSS classes. Modifying the .css file IS sufficient —");
         sb.AppendLine("   the HTML file does NOT need to be edited. CSS-only changes are 100% valid for styling tasks, even when the task mentions the .html file name.");
+        sb.AppendLine("   CSS/HTML styling OPINIONS are NOT CONFIRMED defects. Do NOT flag an existing, valid CSS value (e.g. 'justify-content: center',");
+        sb.AppendLine("   'gap: 20px') or demand a different property (e.g. 'flex-direction', 'align-items') unless the ORIGINAL TASK explicitly asked to");
+        sb.AppendLine("   change it. A styling task is complete once the requested property is present in the stylesheet — it does NOT implicitly require");
+        sb.AppendLine("   removing or reworking unrelated pre-existing styles. 'uses X, while requirement is to use Y' / 'should use Z instead' claims are");
+        sb.AppendLine("   SPECULATIVE at best and must never set complete=false or drive a repair.");
         sb.AppendLine("   Example: if the task says 'wrap in details/summary' but the file already has per-column");
         sb.AppendLine("   collapse buttons, report that details/summary is missing — do NOT report that");
         sb.AppendLine("   toggleColumnCollapse is unimplemented, because the task has nothing to do with that.");
@@ -1439,6 +1511,7 @@ partial class AgentController
        "Do NOT invent new requirements or check for things not explicitly mentioned in the task. " +
        "If the original task asked to modify a specific method, and that method was modified, the task is complete. " +
        "Check if the code would compile (no syntax errors, missing brackets, or undefined variables). " +
+       "Styling preferences are never CONFIRMED: do not flag an existing CSS value or demand a different property unless the task explicitly asked for it. " +
        "Distinguish CONFIRMED issues (objectively unmet requirements you can see broken in the code above) from SPECULATIVE ones " +
        "(hypothetical risks like 'might not be initialized' with no evidence of an actual bug). ONLY CONFIRMED issues cause a repair. " +
        "Output ONLY a JSON object: {\"complete\": true/false, \"reason\": \"...\", \"issues\": [{\"type\": \"CONFIRMED\" | \"SPECULATIVE\", \"text\": \"...\"}]}.";
@@ -1448,6 +1521,12 @@ partial class AgentController
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Verification LLM returned empty: {error}", ct: ct);
+            if (deterministicIssues.Count > 0)
+            {
+                return (false,
+                    $"Verification LLM call failed: {error}. Deterministic template-binding check found: {string.Join("; ", deterministicIssues)}",
+                    deterministicIssues, new List<string>());
+            }
             return (false, $"Verification LLM call failed: {error}", new List<string>(), new List<string>());
         }
         try
@@ -1465,6 +1544,14 @@ partial class AgentController
                 var isComplete = completeEl.GetBoolean();
                 var reason = doc.RootElement.TryGetProperty("reason", out var rEl) ? rEl.GetString() : "";
                 var (confirmedIssues, speculativeIssues) = ParseVerifyIssues(doc.RootElement);
+                if (deterministicIssues.Count > 0)
+                {
+                    // Deterministic findings always fail verification and are never triaged away.
+                    isComplete = false;
+                    confirmedIssues.AddRange(deterministicIssues);
+                    if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
+                    reason += "Deterministic template-binding check: " + string.Join("; ", deterministicIssues);
+                }
                 var issuesJoined = string.Join("; ", confirmedIssues);
                 var details = reason + (string.IsNullOrWhiteSpace(issuesJoined) ? "" : $"\nIssues: {issuesJoined}");
                 await EmitLog(emitSse, isComplete ? "info" : "warn",
@@ -1478,6 +1565,13 @@ partial class AgentController
             }
         }
         catch { }
+        // LLM output unparseable — deterministic findings still fail the run.
+        if (deterministicIssues.Count > 0)
+        {
+            return (false,
+                "Verification LLM output unparseable. Deterministic template-binding check found: " + string.Join("; ", deterministicIssues),
+                deterministicIssues, new List<string>());
+        }
         return (true, "", new List<string>(), new List<string>());
     }
     private async Task<List<PlanStep>> TryReplanAfterStep(

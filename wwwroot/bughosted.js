@@ -1,7 +1,24 @@
 // bughosted.mixin.js
 angular.module('kanbanApp')
-    .factory('BugHostedMixin', ['$http', '$interval', '$timeout', function ($http, $interval, $timeout) {
+    .factory('BugHostedMixin', ['$http', '$interval', '$timeout', '$window', function ($http, $interval, $timeout, $window) {
         var _bhHeartbeatFailCount = 0, _bhHeartbeatTimer = null, _bhEditorSyncTimer = null, _bhEventSource = null, _bhCommandTimer = null, _bhTimerRunning = false, _lastSyncedEditorState = null, _isSyncingData = false;
+        var BH_AUTOLOGIN_KEY = 'weaver.bughosted.autoLogin';
+
+        // "Remember me" marker: set when a login succeeds, cleared on logout. It lives in
+        // localStorage so a page reload restores the session automatically (the app
+        // auto-logs-in with the saved credentials instead of showing the rank name until
+        // the user re-enters them).
+        function readAutoLoginFlag() {
+            try {
+                var raw = $window.localStorage.getItem(BH_AUTOLOGIN_KEY);
+                if (!raw) return false;
+                var s = JSON.parse(raw);
+                return !!(s && s.enabled);
+            } catch (e) { return false; }
+        }
+        function writeAutoLoginFlag(enabled) {
+            try { $window.localStorage.setItem(BH_AUTOLOGIN_KEY, JSON.stringify({ enabled: enabled ? true : false, savedAt: Date.now() })); } catch (e) { }
+        }
 
         function uid() { return Math.random().toString(36).slice(2, 9); }
         // Idempotent remote card delivery: a command can arrive twice (SSE + polling
@@ -38,6 +55,7 @@ angular.module('kanbanApp')
                 vm.bughostedUsername = ''; vm.bughostedPassword = ''; vm.bughostedHeartbeatEnabled = false;
                 vm.bughostedClientId = ''; vm.bughostedStatus = 'disconnected'; vm.bughostedTesting = false;
                 vm.bughostedTestResult = ''; vm.bughostedTestError = ''; vm.remoteCommands = [];
+                vm.bughostedAutoLogin = readAutoLoginFlag();
 
                 function collectRankPayload() {
                     var out = { userScore: 0, rankTitle: '' };
@@ -84,12 +102,29 @@ angular.module('kanbanApp')
                     if (!vm.bughostedUsername || !vm.bughostedPassword) return;
                     vm.bughostedStatus = 'connecting';
                     $http.post('/api/bughosted/login', { Username: vm.bughostedUsername, Password: vm.bughostedPassword }).then(function (resp) {
-                        vm.bughostedClientId = resp.data.clientId; vm.bughostedStatus = 'connected'; startBughostedHeartbeat(); startBughostedCommandPolling();
+                        // Use the server's canonical username (the login response carries the
+                        // remote account as `user` — a plain string or an object with
+                        // username/name — with `username` as a forward-compat fallback) so
+                        // the header rank chip shows the real casing, not whatever was typed.
+                        var d = resp.data || {};
+                        var canonical = (typeof d.user === 'string') ? d.user
+                            : (d.user && (d.user.username || d.user.name)) || d.username || '';
+                        if (canonical) vm.bughostedUsername = canonical;
+                        vm.bughostedClientId = d.clientId; vm.bughostedStatus = 'connected'; startBughostedHeartbeat(); startBughostedCommandPolling();
+                        // Remember the login so a page reload restores the session without
+                        // re-entering credentials. saveSettings(true) persists the canonical
+                        // username + password to the server config (and never closes an open
+                        // settings panel).
+                        vm.bughostedAutoLogin = true; writeAutoLoginFlag(true);
+                        if (typeof vm.saveSettings === 'function') vm.saveSettings(true);
                     }, function () { vm.bughostedStatus = 'error'; vm.bughostedClientId = ''; });
                 };
 
                 vm.bughostedLogout = function () {
                     if (vm.bughostedClientId) $http.post('/api/bughosted/logout', { clientId: vm.bughostedClientId });
+                    // Explicit logout means "don't auto-connect next load" — the saved
+                    // credentials stay prefilled, but the session is not restored.
+                    vm.bughostedAutoLogin = false; writeAutoLoginFlag(false);
                     vm.bughostedClientId = ''; vm.bughostedStatus = 'disconnected'; stopBughostedHeartbeat(); stopBughostedCommandPolling();
                 };
 
@@ -109,14 +144,16 @@ angular.module('kanbanApp')
                     var data = buildHeartbeatPayload();
                     $http.post('/api/bughosted/heartbeat', data).then(function () { _bhHeartbeatFailCount = 0; vm.bughostedStatus = 'connected'; _isSyncingData = false; }, function () { _bhHeartbeatFailCount++; if (_bhHeartbeatFailCount >= 3) vm.bughostedStatus = 'error'; _isSyncingData = false; });
                 }; 
-                
+
                 function startBughostedHeartbeat() {
-                    stopBughostedHeartbeat();
+                    if (vm.destroyed) return; stopBughostedHeartbeat();
                     _bhHeartbeatTimer = $interval(function () {
-                        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected' || vm.shuttingDown) return;
-                        _lastSyncedEditorState = null; var data = buildHeartbeatPayload();
-                        $http.post('/api/bughosted/heartbeat', data).then(function () { if (vm.shuttingDown) return; _bhHeartbeatFailCount = 0; vm.bughostedStatus = 'connected'; }, function () { if (vm.shuttingDown) return; _bhHeartbeatFailCount++; if (_bhHeartbeatFailCount >= 3) vm.bughostedStatus = 'error'; });
-                    }, 30000, 0, false);
+                        if (vm.destroyed || !vm.bughostedClientId || vm.bughostedStatus !== 'connected' || vm.shuttingDown) return;
+                        vm.syncEditorState();
+                    }, 15000, 0, false);
+                    // Keep the editor state fresher than the heartbeat alone: sync
+                    // every few seconds while connected so the web dashboard mirrors
+                    // the local board without waiting for the 15s heartbeat.
                     _bhEditorSyncTimer = $interval(function () { if (vm.bughostedClientId && vm.bughostedStatus === 'connected' && !vm.shuttingDown) vm.syncEditorState(); }, 3000, 0, false);
                 }
                 function stopBughostedHeartbeat() {
@@ -167,6 +204,18 @@ angular.module('kanbanApp')
                         var card = { id: cmd.params.cardId || uid(), text: cmd.params.text || cmd.params.title || '', filePath: cmd.params.project || vm.selectedProject, createdAt: new Date().toISOString(), priority: cmd.params.priority || 'medium', attached: [], selfImproving: false, isDecomposing: false };
                         upsertRemoteCard(vm, card);
                         vm.saveCards();
+                    } else if (cmd.command === 'changeCardText' && cmd.params && cmd.params.cardId) {
+                        // Card text edited on the web dashboard after the card was
+                        // created (addCard carries the initial text; later edits come
+                        // as changeCardText so the text lands even if the agent had
+                        // already fetched the addCard with its original params).
+                        var tc = cmd.params.text || '';
+                        var c = vm.findCardById ? vm.findCardById(cmd.params.cardId) : null;
+                        if (c) { c.text = tc; if (vm.invalidateCardSuggestions) vm.invalidateCardSuggestions(c); vm.saveCards(); }
+                        else {
+                            upsertRemoteCard(vm, { id: cmd.params.cardId, text: tc, filePath: cmd.params.project || vm.selectedProject, createdAt: new Date().toISOString(), priority: 'medium', attached: [], selfImproving: false, isDecomposing: false });
+                            vm.saveCards();
+                        }
                     } else if (cmd.command === 'moveCard' && cmd.params) {
                         var fromCol = findCardColumn(vm, cmd.params.cardId); if (fromCol && cmd.params.status && fromCol !== cmd.params.status) vm.moveCard(cmd.params.cardId, fromCol, cmd.params.status);
                     } else if (cmd.command === 'updateCard' && cmd.params) {

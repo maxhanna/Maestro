@@ -19,10 +19,16 @@ public class ProjectDto
 
     /// <summary>
     /// Whether the idle suggestion loop runs for this project. When ON (default), the agent
-    /// automatically tops up Done-column cards to 3 suggestions each while it is idle;
+    /// automatically tops up Done-column cards to the project's suggestion cap while it is idle;
     /// turning it OFF keeps the agent from generating suggestions unless a card is completed.
     /// </summary>
     public bool IdleSuggestions { get; set; } = true;
+
+    /// <summary>
+    /// Maximum number of improvement suggestions generated per completed card for this
+    /// project (0-4; default 3). 0 disables suggestion generation entirely for the project.
+    /// </summary>
+    public int MaxSuggestionsPerCard { get; set; } = 3;
 }
 
 public class EmailAccountConfig
@@ -84,6 +90,15 @@ public class FrontendConfig
     public int fileBodyTruncationChars { get; set; } = 8000;
     public int buildOutputTailChars { get; set; } = 8000;
     public int defaultMaxTokens { get; set; } = 2048;
+    /// <summary>
+    /// Total context window of the configured LLM endpoint (input + output tokens).
+    /// Used to derive the terminal-agent conversation compaction threshold: once the
+    /// accumulated conversation reaches ~60% of this window it is rolled up, keeping
+    /// the last turns in full. Default 8192 is a safe floor for locally-served models;
+    /// raise it if your endpoint serves a larger n_ctx and you want the agent to retain
+    /// more command history before compaction.
+    /// </summary>
+    public int contextWindowTokens { get; set; } = 8192;
     public List<EmailAccountConfig> emailAccounts { get; set; } = new();
     public string? emailImapServer { get; set; }
     public int emailImapPort { get; set; } = 993;

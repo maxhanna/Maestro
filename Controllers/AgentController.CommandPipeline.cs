@@ -98,10 +98,13 @@ partial class AgentController
         conversation.AppendLine("  {\"done\": true, \"summary\": \"...\"}  # finish");
         conversation.AppendLine("After each action, verify if the step\'s objective was met using concrete output, file existence, or a bounded read. If a step errors, change approach or mark it done before trying a different route.");
         conversation.AppendLine("IMPORTANT: Check the PLAN section above before adding new steps. If a step is already in the plan, DO NOT add it again.");
+        // The conversation-compaction threshold derives from the endpoint's context window
+        // (config: contextWindowTokens) — load it once for the whole run instead of per-turn.
+        var pipelineCfg = await LoadConfigAsync();
         for (var i = 0; i < MAX_COMMAND_ITERATIONS; i++)
         {
             ct.ThrowIfCancellationRequested();
-            AgentTokenMetrics.CompactConversation(conversation);
+            AgentTokenMetrics.CompactConversation(conversation, pipelineCfg.contextWindowTokens);
             var (raw, _, err) = await CallLlmRaw(
                 "You are a terminal agent. Output only JSON.",
                 conversation.ToString(), ct, _infiniteTimeout);

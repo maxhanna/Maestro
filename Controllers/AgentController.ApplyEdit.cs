@@ -1013,9 +1013,25 @@ partial class AgentController
                 await EmitLog(emitSse, "warn",
                     $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}",
                     new { step }, ct: ct);
-                var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
+                // SURROUNDING-LINE RE-ANCHOR (deterministic, zero-LLM): a small plan oldString
+                // (2-3 lines) that failed verbatim is first retried against each surrounding
+                // line — shifted up/down, extended by the line above/below (the file gained a
+                // line the plan missed), or trimmed of a stale first/last line. Only a unique,
+                // confident alignment is applied, so tiny anchors get re-anchored cheaply
+                // instead of escalating to a full LLM re-resolve (which risks the whole-section
+                // rewrite failure mode). Falls through to the whole-file fuzzy match below when
+                // no surrounding alignment is confident enough.
+                var surroundingReanchor = AgentEditHeuristics.TrySurroundingLineReanchor(
+                    fileContent, oldStr!, step.LineNumber, step.Change);
+                var correctedBlock = surroundingReanchor?.correctedBlock
+                    ?? BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
+                    if (surroundingReanchor != null)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"↔ Surrounding-line re-anchor for {relPath}: matched {surroundingReanchor.Value.score} of {oldStr!.Split('\n').Length} anchor line(s) at file line {surroundingReanchor.Value.startLineIdx + 1} — applying file-exact block instead of escalating", ct: ct);
+                    }
                     var relevanceKeywords = AgentDiscovery.ExtractDisambiguationKeywords(step.Change);
                     var isRelevant = relevanceKeywords.Count == 0 ||
                         relevanceKeywords.Any(k => correctedBlock.Contains(k, StringComparison.OrdinalIgnoreCase));

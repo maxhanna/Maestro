@@ -64,6 +64,16 @@ public partial class AgentController : ControllerBase
     private static readonly ConcurrentDictionary<string, StringBuilder> _stepThinkingStore = new();
     private static readonly ConcurrentDictionary<string, int> _complexityScores = new();
     private static readonly ConcurrentDictionary<string, int> _atomicStepEstimates = new();
+    // Server-side abort handles for in-flight suggestion generations, keyed by cardId.
+    // The front end POSTs suggest-improvements/cancel when a card stops being a completed
+    // card (moved back to To Do, text edited, another card started) so the running LLM
+    // call is cancelled and stops burning tokens. _suggestionCancelled is a tombstone set
+    // for cancels that arrive BEFORE the generation request registers its handle (the
+    // request is still building its prompt/context) — the registration consumes it and
+    // skips the LLM call entirely.
+    private static readonly object SuggestionGateLock = new();
+    private static readonly Dictionary<string, CancellationTokenSource> _suggestionCts = new();
+    private static readonly HashSet<string> _suggestionCancelled = new();
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
@@ -527,8 +537,9 @@ public partial class AgentController : ControllerBase
 
     // ── Improvement suggestions for a completed card ──────────────────────
     // When a card finishes successfully, the front end calls this endpoint to
-    // generate 0-3 LLM suggestions (each with file attachments for discovery
-    // context). Suggestions are persisted onto the card in board data
+    // generate up to the project's suggestion cap (0-4, default 3) LLM
+    // suggestions (each with file attachments for discovery context).
+    // Suggestions are persisted onto the card in board data
     // (_suggestions) so they survive reloads and render as a "Suggestions"
     // section on the finished card. Never creates new kanban cards itself.
     [HttpPost("suggest-improvements")]
@@ -561,6 +572,12 @@ public partial class AgentController : ControllerBase
         bool topup = false;
         var existingDescs = new List<string>();
         if (payload.TryGetProperty("topup", out var topEl)) topup = topEl.ValueKind == JsonValueKind.True;
+        // Per-project cap on how many suggestions a card can get (0-4, default 3).
+        // Sent by the front end; 0 means "no suggestions" for this project.
+        int maxSuggestions = 3;
+        if (payload.TryGetProperty("maxSuggestions", out var maxEl) && maxEl.ValueKind == JsonValueKind.Number
+            && maxEl.TryGetInt32(out var maxVal))
+            maxSuggestions = Math.Clamp(maxVal, 0, 4);
         if (payload.TryGetProperty("existing", out var exEl) && exEl.ValueKind == JsonValueKind.Array)
             foreach (var e in exEl.EnumerateArray())
             {
@@ -571,14 +588,32 @@ public partial class AgentController : ControllerBase
         if (string.IsNullOrWhiteSpace(cardId) || string.IsNullOrWhiteSpace(project))
             return BadRequest(new { error = "cardId and project are required" });
 
+        // Server-side abort handle for this card's in-flight generation: the client can
+        // cancel it (suggest-improvements/cancel) so a running LLM call stops burning
+        // tokens once the card no longer needs suggestions. A tombstone recorded by a
+        // cancel that arrived before this request registered cancels it immediately.
+        var suggestionCts = new CancellationTokenSource();
+        var tombstoned = false;
+        lock (SuggestionGateLock)
+        {
+            tombstoned = _suggestionCancelled.Remove(cardId);
+            _suggestionCts[cardId] = suggestionCts;
+        }
+        if (tombstoned) suggestionCts.Cancel();
         try
         {
+            if (suggestionCts.IsCancellationRequested)
+                return Ok(new { cancelled = true, suggestions = new List<object>() });
             var existing = await ReadCardSuggestionsAsync(cardId);
+            // Suggestions disabled for this project — return whatever is stored
+            // (if anything) without touching the LLM.
+            if (maxSuggestions <= 0)
+                return Ok(new { suggestions = existing ?? new List<object>() });
             if (topup)
             {
                 // "More like this" only tops up while the stored set is under the
-                // 3-cap; at the cap there's nothing left to add.
-                if (existing != null && existing.Count >= 3)
+                // per-project cap; at the cap there's nothing left to add.
+                if (existing != null && existing.Count >= maxSuggestions)
                     return Ok(new { suggestions = existing });
                 // Robustness: if the front-end's existing list is empty but the
                 // board still carries suggestions, re-derive descriptions from
@@ -608,9 +643,9 @@ public partial class AgentController : ControllerBase
             }
 
             // Only top-ups budget slots from the existing set (defensive: a plain
-            // initial request always asks for the full 0-3 even if it somehow
+            // initial request always asks for the full cap even if it somehow
             // carried an `existing` array).
-            var slots = topup ? Math.Max(1, 3 - (existing?.Count ?? existingDescs.Count)) : 3;
+            var slots = topup ? Math.Max(1, maxSuggestions - (existing?.Count ?? existingDescs.Count)) : maxSuggestions;
             var projectRoot = Path.GetFullPath(project);
             // Per-project control over how much whole-app context the suggestion LLM sees:
             // "full" (default) = skeleton + board history + git, "board" = skeleton + board
@@ -636,7 +671,7 @@ public partial class AgentController : ControllerBase
             else
             {
                 sb.AppendLine("A card on the kanban board was just completed successfully.");
-                sb.AppendLine("Generate up to 3 tightly-scoped, on-point follow-up suggestions for THIS card's work.");
+                sb.AppendLine($"Generate up to {maxSuggestions} tightly-scoped, on-point follow-up suggestions for THIS card's work.");
                 sb.AppendLine("Ground every suggestion in what the agent actually did, thought, and the real files it touched ");
                 sb.AppendLine("— prefer the single most valuable next increment over generic advice. Do NOT suggest work that ");
                 sb.AppendLine("the card already completed or that is unrelated to its task.");
@@ -684,13 +719,13 @@ public partial class AgentController : ControllerBase
             if (!string.IsNullOrWhiteSpace(projectContext))
                 sb.AppendLine("\n" + projectContext);
             sb.AppendLine();
-            sb.AppendLine($"Reply ONLY with a JSON array of 0-{(topup ? slots : 3)} objects, each shaped:");
+            sb.AppendLine($"Reply ONLY with a JSON array of 0-{(topup ? slots : maxSuggestions)} objects, each shaped:");
             sb.AppendLine(@"[{""description"": ""<suggestion text>"", ""files"": [""rel/path/file.ts"", ""rel/path/other.cs""], ""connection"": ""<which other card/feature this builds on — e.g. 'notification system built in card #a1b2c3'; empty string if it stands alone>""}]
 If nothing meaningful remains, reply with an empty array [] — never invent work.");
 
             var (raw, _, err) = await CallLlmRaw(
                 "You are an expert product engineer. Output ONLY valid JSON. No markdown, no explanation.",
-                sb.ToString(), CancellationToken.None, requestTimeout: _infiniteTimeout, maxTokens: 1024);
+                sb.ToString(), suggestionCts.Token, requestTimeout: _infiniteTimeout, maxTokens: 1024);
             var suggestions = new List<object>();
             // NOTE: CallLlmRaw's ParseAgentResponse mangles JSON arrays (it slices
             // from first { to last }, destroying the array wrapper), so it reports
@@ -760,12 +795,17 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                 var merged = new List<object>(existing);
                 foreach (var s in suggestions)
                 {
-                    if (merged.Count >= 3) break;
+                    if (merged.Count >= maxSuggestions) break;
                     merged.Add(s);
                 }
                 suggestions = merged;
             }
 
+            // A cancel arrived while the LLM was running (or it was tombstoned before the
+            // call) — drop the result and persist nothing, so stale suggestions never land
+            // on a card the client no longer wants them for.
+            if (suggestionCts.IsCancellationRequested)
+                return Ok(new { cancelled = true, suggestions = new List<object>() });
             await PersistCardSuggestionsAsync(cardId, suggestions);
             // Persist the context that grounded this generation alongside the
             // suggestions so a future 'explain this suggestion' tooltip can show
@@ -790,6 +830,50 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
             Console.WriteLine($"[SUGGEST IMPROVEMENTS] {ex.Message}");
             return Ok(new { suggestions = new List<object>() });
         }
+        finally
+        {
+            lock (SuggestionGateLock)
+            {
+                // Only remove our own registration — a newer generation for the same card
+                // may have replaced it while this one was finishing.
+                if (_suggestionCts.TryGetValue(cardId, out var cur) && ReferenceEquals(cur, suggestionCts))
+                    _suggestionCts.Remove(cardId);
+            }
+            suggestionCts.Dispose();
+        }
+    }
+
+    // Aborts the in-flight suggestion generation for a card (if any) so the LLM endpoint
+    // stops burning tokens. Called by the front end when a card is cancelled — moved back
+    // to To Do, text edited in place, or another card started while it was generating.
+    // Idempotent: a second cancel for the same card is a no-op.
+    [HttpPost("suggest-improvements/cancel")]
+    public IActionResult CancelSuggestImprovements([FromBody] JsonElement payload)
+    {
+        var cardId = payload.TryGetProperty("cardId", out var cidEl) && cidEl.ValueKind == JsonValueKind.String
+            ? cidEl.GetString() : null;
+        if (string.IsNullOrWhiteSpace(cardId))
+            return BadRequest(new { error = "cardId is required" });
+        CancellationTokenSource? cts = null;
+        lock (SuggestionGateLock)
+        {
+            if (_suggestionCts.TryGetValue(cardId, out cts))
+            {
+                _suggestionCts.Remove(cardId);
+            }
+            else
+            {
+                // Not registered yet (the request is still building its prompt/context) —
+                // remember the cancellation so the registration consumes it and skips the
+                // LLM call instead of burning tokens. Cap the set so a flood of cancels for
+                // requests that never arrive can't grow it without bound.
+                if (_suggestionCancelled.Count > 256) _suggestionCancelled.Clear();
+                _suggestionCancelled.Add(cardId);
+            }
+        }
+        cts?.Cancel();
+        cts?.Dispose();
+        return Ok(new { cancelled = true });
     }
     /// <summary>
     /// Builds the PROJECT CONTEXT block for the suggestion prompt: the full project

@@ -97,6 +97,48 @@ public class EditIntentClassifierTests
     }
 
     [Fact]
+    public async Task ClassifyAsync_HTMLSwap_LlmSaysTargetedEdit_CorrectedToReplaceSymbol()
+    {
+        // The LLM may answer targeted_edit for "replace `b` with `group`" on an HTML file;
+        // the DOM file type must deterministically correct it to ReplaceSymbol so the
+        // resolver picks HtmlReplace (targeted single-line replace), not HtmlInsertBefore.
+        var intent = await EditIntentClassifier.ClassifyAsync(
+            "Replace `b` with `group` in the benchmark-item ngFor",
+            "src/app/weaver/weaver.component.html",
+            (_, _, _) => Stub("""{"kind":"targeted_edit","symbol":"b"}"""),
+            default);
+
+        Assert.Equal(EditIntentKind.ReplaceSymbol, intent.Kind);
+        Assert.Equal("b", intent.Symbol);
+    }
+
+    [Fact]
+    public async Task ClassifyAsync_CodeSwap_TargetedEditStaysTargetedEdit()
+    {
+        // On a code file the swap stays a tiny anchored edit — never a method rewrite.
+        var intent = await EditIntentClassifier.ClassifyAsync(
+            "Replace `b` with `group` in the benchmark-item ngFor",
+            "src/app/foo/foo.component.ts",
+            (_, _, _) => Stub("""{"kind":"targeted_edit","symbol":"b"}"""),
+            default);
+
+        Assert.Equal(EditIntentKind.TargetedEdit, intent.Kind);
+    }
+
+    [Fact]
+    public async Task ClassifyAsync_HTMLNonSwap_TargetedEditStaysTargetedEdit()
+    {
+        // "tweak the wording" is not a swap — no correction fires on the HTML file.
+        var intent = await EditIntentClassifier.ClassifyAsync(
+            "tweak the wording of the empty state",
+            "src/app/weaver/weaver.component.html",
+            (_, _, _) => Stub("""{"kind":"targeted_edit"}"""),
+            default);
+
+        Assert.Equal(EditIntentKind.TargetedEdit, intent.Kind);
+    }
+
+    [Fact]
     public async Task ClassifyAsync_UnknownKind_FallsBackToTargetedEdit()
     {
         var intent = await EditIntentClassifier.ClassifyAsync(

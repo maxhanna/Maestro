@@ -49,6 +49,18 @@ public static class EditIntentClassifier
                 _ => EditIntentKind.TargetedEdit
             };
 
+            // Deterministic correction: a variable/expression swap on an HTML/template file
+            // must be a ReplaceSymbol (DOM replace) — EditStrategyResolver.Decide maps
+            // ReplaceSymbol → HtmlReplace, while TargetedEdit → HtmlInsertBefore, which is
+            // wrong for a swap. The LLM may answer targeted_edit for "replace `b` with
+            // `group` in the benchmark-item ngFor"; the DOM file type decides the intent here.
+            if (kind == EditIntentKind.TargetedEdit &&
+                HtmlDomEditor.IsHtmlDomFile(relPath) &&
+                EditClassifier.IsVariableSwap((changeDescription ?? "").ToLowerInvariant(), symbol))
+            {
+                kind = EditIntentKind.ReplaceSymbol;
+            }
+
             return new EditIntent(kind, symbol, preferredKind);
         }
         catch

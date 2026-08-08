@@ -3,6 +3,16 @@
 angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, VoiceInput, $http) {
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
+  // BRANCH toggle: turning the feature OFF must drop any branch the card picked up from a
+  // previous run (prStatus), so the stale "PR: weaver/xxx" tag can't linger after the card
+  // is stopped, sent back to To Do, and un-branched. Enabling is a no-op — the next run
+  // creates the branch. Returns true when prStatus was actually cleared (the caller persists).
+  function applyAutoPrToggle(card) {
+    if (!card || card.autoPr || !card.prStatus) return false;
+    delete card.prStatus;
+    return true;
+  }
+
   function loadCards() {
     return { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
   }
@@ -287,6 +297,11 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.archiveAllDone = function () {
         if (!vm.state.done.length) return;
         if (!$window.confirm('Archive all done tasks?')) return;
+        // Cards leaving Done are no longer completed — cancel any in-flight
+        // suggestion generation so results can't land on an archived card.
+        if (vm.cancelCardSuggestions) {
+          vm.state.done.forEach(function (c) { if (c) vm.cancelCardSuggestions(c); });
+        }
         Array.prototype.push.apply(vm.state.archived, vm.state.done);
         vm.state.done = [];
         vm.saveCards();
@@ -296,6 +311,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         var idx = vm.state.archived.findIndex(function (c) { return c.id === id; });
         if (idx === -1) return;
         var card = vm.state.archived.splice(idx, 1)[0];
+        // Back to To Do — no longer a completed card, so cancel any suggestion process.
+        if (vm.cancelCardSuggestions) vm.cancelCardSuggestions(card);
         vm.state.todo.push(card);
         vm.saveCards();
       };
@@ -448,6 +465,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (vm.reconcileBenchmarkRunning) vm.reconcileBenchmarkRunning();
       };
 
+      vm.onAutoPrToggle = function (card) {
+        var cleared = applyAutoPrToggle(card);
+        vm.saveCards();
+        if (cleared) console.log('BRANCH disabled — cleared PR state for card', card && card.id);
+      };
+
       vm.onSelfImprovingToggle = function (card) {
         if (card.selfImproving) {
           var idx = vm.state.todo.findIndex(function (c) { return c.id === card.id; });
@@ -570,6 +593,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
           var card = vm.state[from][idx];
 
+          // A card sent back to To Do is no longer a completed card — cancel any
+          // in-flight suggestion generation so suggestions can't land on it.
+          if (to.toLowerCase() === 'todo' && vm.cancelCardSuggestions) {
+            vm.cancelCardSuggestions(card);
+          }
+
           if (from.toLowerCase() === "doing" && to.toLowerCase() === "todo" && vm.streamingActive && vm.activeCardId === card.id) {
             console.log("Back pressed on active card; Stopping agent.");
             vm.stopAgent(card);
@@ -664,6 +693,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.reopenCard = function (card) {
         card.ready = false;
         // Preserve agentAnalysis/agentLog for previous-analysis display
+        // A card reopened into To Do is no longer completed — cancel its suggestions.
+        if (vm.cancelCardSuggestions) vm.cancelCardSuggestions(card);
         var idx = vm.state.done.findIndex(function (c) { return c.id === card.id; });
         if (idx === -1) return;
         vm.state.done.splice(idx, 1);
@@ -723,6 +754,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         var newText = $window.prompt('Edit task:', card.text);
         if (newText !== null && newText !== card.text) {
           card.text = newText;
+          // The text changed in place — any suggestions reference the old wording.
+          if (vm.invalidateCardSuggestions) vm.invalidateCardSuggestions(card);
           vm.saveCards();
         }
       };
@@ -730,6 +763,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.saveCardText = function (card) {
         // Debounce the save so it only fires 500ms after the user stops typing
         if (_saveCardTextTimer) { $timeout.cancel(_saveCardTextTimer); }
+        // Inline edits can rewrite a completed card's text — stale suggestions would
+        // reference the old wording. No-op unless the card actually has suggestion state.
+        if (vm.invalidateCardSuggestions) vm.invalidateCardSuggestions(card);
         _saveCardTextTimer = $timeout(function () {
           console.log("saving card text");
           vm.saveCards();
@@ -1175,6 +1211,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
               }
               if (fromCol === 'done' && targetCol === 'todo') {
                 cardObj.ready = false;
+              }
+              if (targetCol === 'todo' && vm.cancelCardSuggestions) {
+                vm.cancelCardSuggestions(cardObj);
               }
               var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
               if (idx === -1) return;

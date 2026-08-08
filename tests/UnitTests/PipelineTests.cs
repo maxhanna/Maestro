@@ -306,7 +306,7 @@ public class PipelineTests
     {
         var text = "Hello world"; // 11 chars
         var result = AgentTokenMetrics.EstimateTokens(text);
-        Assert.Equal(2, result); // 11 / 4 = 2.75 -> 2
+        Assert.Equal(2, result); // "Hello" + "world" (single space is free) = 2
     }
 
     [Theory]

@@ -816,10 +816,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             Edits = edits.Count > 0 ? edits : null
         };
     }
+    /// <summary>
+    /// True when the task prompt explicitly asks to create a new file/folder/artifact, in
+    /// which case a _create_file/_create_directory step is legitimate even when files are
+    /// attached. Two narrow patterns, both chosen so edit phrasing never matches:
+    ///  1. A literal "new &lt;artifact&gt;" — "create a new file", "needs a new service",
+    ///     "add a new test" — where artifact excludes pure edit targets like "method".
+    ///  2. An UNambiguous creation verb (create/make/generate/write/scaffold/init) directly
+    ///     followed by an article and an artifact noun — "create a helper file", "make a
+    ///     folder", "write a test". Verbs like "add"/"needs" are deliberately absent:
+    ///     "add a method to the component" is an edit, not a creation.
+    /// </summary>
+    private static bool PromptSignalsFileCreation(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var lower = prompt.ToLowerInvariant();
+        const string artifact =
+            @"(?:file|script|helper|module|service|component|folder|directory|class|interface|stylesheet|config|json|readme|doc|test|spec|tests|page|route|endpoint)";
+        if (Regex.IsMatch(lower, @"\bnew\s+" + artifact + @"\b")) return true;
+        return Regex.IsMatch(lower,
+            @"\b(create|make|generate|write|scaffold|init)\s+(?:a|an|the|another)\s+" + artifact + @"\b");
+    }
+
     private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
         PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string projectRoot, bool emitSse, CancellationToken ct,
-        bool skipLlm = false, string? lastStepCompletionNote = null)
+        bool skipLlm = false, string? lastStepCompletionNote = null,
+        List<string>? attachedFiles = null)
     {
         if (string.IsNullOrWhiteSpace(step.File) || string.IsNullOrWhiteSpace(step.Change))
             return (false, "Step is missing file or change description.");
@@ -898,6 +921,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 || Regex.IsMatch(ch, @"\b(desktop|downloads|documents|userprofile|%userprofile%|home dir|home directory)\b", RegexOptions.IgnoreCase);
             if (looksOsPath)
                 return (false, $"{step.File} writes RELATIVE TO THE PROJECT ROOT — it cannot create \"{ch}\" on the Desktop/OS filesystem. Use a _command step whose change is a real command with an absolute path, e.g. New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force (Desktop is at {osDesktopPath}).");
+        }
+        // ATTACHED-FILES EDIT GUARD: when the user attached specific files AND the task prompt
+        // does not ask to create a new file/folder, a _create_file/_create_directory step is
+        // almost always the planner dodging the real edit — the "group benchmarks by benchmark
+        // name" run invented benchmark_grouping_helper.ts at the repo ROOT instead of adding a
+        // method to the attached weaver.component.ts and updating its template. Reject
+        // deterministically (fires even in retry mode) and steer back to editing the attached
+        // files. Tasks that genuinely want a new artifact phrase it as creation ("create a
+        // helper file…") and stay allowed via PromptSignalsFileCreation.
+        if (attachedFiles is { Count: > 0 } &&
+            (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(step.File, "_create_directory", StringComparison.OrdinalIgnoreCase)) &&
+            !PromptSignalsFileCreation(originalPrompt))
+        {
+            var attachedList = string.Join(", ", attachedFiles.Select(f => Path.GetFileName(f.Replace('\\', '/'))));
+            return (false,
+                $"The task is scoped to the attached file(s) [{attachedList}] and does not ask to create a new file — do NOT create \"{step.Change}\". " +
+                "Implement the change as an EDIT to the attached file(s): add the method/property to the component and update its template, " +
+                "targeting those exact files. Only use _create_file/_create_directory when the task EXPLICITLY asks for a new file or folder.");
         }
         if (string.Equals(step.File, "_show", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(step.File, "_display", StringComparison.OrdinalIgnoreCase))
@@ -1102,7 +1144,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private async Task<(AgentPlan plan, string discoveryContext)> RunIncrementalPlanningLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
-        int? atomicStepEstimate = null)
+        int? atomicStepEstimate = null, List<string>? attachedFiles = null)
     {
         var planSoFar = new List<PlanStep>();
         var rejectionFeedback = new List<string>();
@@ -1542,7 +1584,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 var (valid, reason) = await ValidateIncrementalStepAsync(
                     proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
-                    skipLlm: skipLlm);
+                    skipLlm: skipLlm, attachedFiles: attachedFiles);
                 if (!valid)
                 {
                     var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";
@@ -2476,7 +2518,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             var (valid, reason) = await ValidateIncrementalStepAsync(
                 proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
-                skipLlm: skipLlm, lastStepCompletionNote: completionNote);
+                skipLlm: skipLlm, lastStepCompletionNote: completionNote, attachedFiles: attachedFiles);
             if (!valid)
             {
                 var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";

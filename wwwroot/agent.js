@@ -1,8 +1,48 @@
 angular.module('kanbanApp')
-    .factory('AgentMixin', ['$http', '$timeout', '$interval', '$window', function ($http, $timeout, $interval, $window) {
+    .factory('AgentMixin', ['$http', '$timeout', '$interval', '$window', '$q', function ($http, $timeout, $interval, $window, $q) {
         var _lastLogKey = '';
         var _suggestionContextCache = new WeakMap();
         function uid() { return Math.random().toString(36).slice(2, 9); }
+        // Pure guard: should a suggestion generation start for this card? Mirrors the
+        // entry checks of vm.suggestImprovements (tests/js/suggestion-cancel.test.js
+        // extracts these helpers from the live source).
+        function shouldStartSuggestions(card, maxSuggestions, topup) {
+            if (!card || maxSuggestions <= 0) return false;
+            if (topup) {
+                return Array.isArray(card._suggestions) && card._suggestions.length < maxSuggestions && !card._suggestionsGenerating;
+            }
+            return !(card._suggestions || card._suggestionsRequested);
+        }
+        // Pure cancel-state transition for an in-flight suggestion generation: marks the
+        // card cancelled, aborts the pending $http call via its deferred (if any), resets
+        // the generation flags, and reports whether a generation was actually in flight so
+        // callers can log accordingly. Does NOT delete _suggestionCancel — the promise
+        // handler (or the next generation) owns that, matching vm.cancelCardSuggestions.
+        function abortSuggestionGeneration(card) {
+            var wasGenerating = !!(card._suggestionsGenerating || card._suggestionCancel);
+            card._suggestionsCancelled = true;
+            if (card._suggestionCancel) {
+                try { card._suggestionCancel.resolve(); } catch (e) { }
+            }
+            card._suggestionsGenerating = false;
+            card._suggestionsRequested = false;
+            card._suggestionsError = null;
+            return wasGenerating;
+        }
+        // Pure companion to abortSuggestionGeneration for in-place text edits: a card's
+        // suggestions were generated against its OLD text, so after the text changes they
+        // are stale and must be dropped (cancel alone keeps them for display). Returns
+        // whether the card had any suggestion state at all — callers can skip work when
+        // there is nothing to invalidate. (tests/js/suggestion-cancel.test.js extracts it.)
+        function clearStaleSuggestions(card) {
+            var hadState = !!(card._suggestions || card._suggestionsRequested || card._suggestionsGenerating || card._suggestionCancel);
+            if (hadState) {
+                card._suggestions = undefined;
+                card._suggestionsNone = false;
+                card._suggestionsSaturated = false;
+            }
+            return hadState;
+        }
         function normalizeStepStatus(status) {
             if (status === 'written' || status === 'ok' || status === 'created' || status === 'modified') return 'done';
             if (status === 'proposing' || status === 'rejected' || status === 'exploring' || status === 'failed') return status;
@@ -19,6 +59,16 @@ angular.module('kanbanApp')
                 vm.agentActivityLog.push(entry); vm.agentActivityLogLength = vm.agentActivityLog.length;
                 if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift();
                 if (vm.currentRun && vm.currentRun.log) { vm.currentRun.log.push(entry); if (vm.currentRun.log.length > 200) vm.currentRun.log.shift(); }
+                // Focus-stats metrics (bootstrap auto-read, _discover, _explore) aggregate into
+                // vm.focusStats for the panel's stat row — run-level totals of files focused and
+                // chars saved, plus the effective focus threshold from the bootstrap phase.
+                if (level === 'metric' && detail && detail.kind === 'focusStats') {
+                    var fs = vm.focusStats || { files: 0, chars: 0, threshold: null };
+                    fs.files += (detail.filesFocused || 0);
+                    fs.chars += (detail.charsSaved || 0);
+                    if (detail.threshold != null) fs.threshold = detail.threshold;
+                    vm.focusStats = fs;
+                }
                 if (vm.scrollToBottom) vm.scrollToBottom();
             } catch (e) { }
         }
@@ -61,7 +111,7 @@ angular.module('kanbanApp')
                 vm.aiPrompt = ''; vm.aiResponse = ''; vm.activeCardText = ''; vm.activeCardId = null;
                 vm.activeCardIds = new Set(); vm.aiChatMessages = []; vm.aiChatInput = ''; vm.aiChatLoading = false; vm.chatMode = 'ask';
                 vm.streamingActive = false; vm.streamingThinking = ''; vm.streamingSummary = ''; vm._agentStopped = false; vm.streamingPhase = '';
-                vm.streamingContextSize = 0; vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.streamingTokenBuffer = '';
+                vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.streamingTokenBuffer = '';
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.agentRuns = []; vm.currentRun = null;
@@ -226,12 +276,74 @@ angular.module('kanbanApp')
                 };
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
                 vm.toggleChatMode = function () { vm.chatMode = vm.chatMode === 'ask' ? 'build' : 'ask'; };
+                // Token estimate mirroring AgentTokenMetrics.EstimateTokens in the C# server:
+                // single spaces free, words split at case boundaries (≤10 chars = 1 token),
+                // digit runs ~1/3, punctuation 1 per same-char run, quoted literals ~4 chars/token.
+                function partTokens(part) { return part.length <= 10 ? 1 : Math.ceil(part.length / 4); }
+                function digitTokens(len) { return len <= 3 ? 1 : Math.ceil(len / 3); }
+                function wordTokens(word) {
+                    for (var j = 0; j < word.length; j++) if (word.charCodeAt(j) > 127) return word.length;
+                    var total = 0, start = 0;
+                    for (var k = 1; k < word.length; k++) {
+                        if (word[k] >= 'A' && word[k] <= 'Z' && word[k - 1] >= 'a' && word[k - 1] <= 'z') {
+                            total += partTokens(word.slice(start, k));
+                            start = k;
+                        }
+                    }
+                    total += partTokens(word.slice(start));
+                    return Math.max(1, total);
+                }
+                function estimateTokens(text) {
+                    if (!text) return 0;
+                    var total = 0, i = 0, n = text.length;
+                    while (i < n) {
+                        var c = text[i];
+                        if (c === '"' || c === "'" || c === '`') {
+                            var qStart = i; i++;
+                            while (i < n) {
+                                if (text[i] === '\\') { i += 2; continue; }
+                                if (text[i] === c) { i++; break; }
+                                i++;
+                            }
+                            total += Math.max(1, Math.floor((i - qStart) / 4));
+                            continue;
+                        }
+                        if (/[a-zA-Z0-9_]/.test(c)) {
+                            var wStart = i;
+                            while (i < n && /[a-zA-Z0-9_]/.test(text[i])) i++;
+                            var run = text.slice(wStart, i);
+                            total += /^[0-9]/.test(run) ? digitTokens(run.length) : wordTokens(run);
+                            continue;
+                        }
+                        if (/\s/.test(c)) {
+                            var sStart = i;
+                            while (i < n && /\s/.test(text[i])) i++;
+                            var wLen = i - sStart;
+                            if (wLen >= 2) total += Math.floor(wLen / 4);
+                            continue;
+                        }
+                        while (i < n && text[i] === c) i++;
+                        total++;
+                    }
+                    return total;
+                }
                 vm.logFileSizeAndTokens = function (filePath, content) {
-                    if (!filePath || !content) return; const fileSize = content.length; const tokenCount = Math.ceil(fileSize / 4);
+                    if (!filePath || !content) return; const fileSize = content.length; const tokenCount = estimateTokens(content);
                     if (vm.addLogEntry) vm.addLogEntry({ type: 'debug', message: `File: ${filePath} | Size: ${fileSize} chars | Tokens: ~${tokenCount}` });
                 };
                 vm.executeAgent = function (card, isAutoRestart) {
                     if (!card || !card.text) return;
+                    // Any card starting means the board is no longer idle — cancel every
+                    // in-flight suggestion generation (idle-loop or manual) so they stop
+                    // burning the endpoint and can't land on a card that moved back to
+                    // To Do. The idle chain resumes on the next idle spell.
+                    if (vm.cancelCardSuggestions && vm.state) {
+                        ['todo', 'doing', 'done', 'archived', 'selfImproving'].forEach(function (col) {
+                            (vm.state[col] || []).forEach(function (c) {
+                                if (c && (c._suggestionsGenerating || c._suggestionCancel)) vm.cancelCardSuggestions(c);
+                            });
+                        });
+                    }
                     if (vm.agentRuns.some(function (r) { return r.cardId === card.id && r.active; })) return;
                     if (card.selfImproving && vm.selfImprovingAgentActive !== true) {
                         vm.selfImprovingAgentActive = true;
@@ -287,7 +399,8 @@ angular.module('kanbanApp')
                         vm.refreshStreamingActive();
                         function startAgent() {
                             run._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
-                            vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
+                            vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
+                            vm.focusStats = null;
                             vm.complexityScore = null; vm.complexityLabel = ''; vm.complexityTokenCap = null; vm.complexityMaxTokens = null; vm.complexityAtomicSteps = null;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.llmProgress = null; vm.llmProgressPercent = null; vm.llmProgressState = '';
@@ -377,6 +490,8 @@ angular.module('kanbanApp')
                                                                     if (parsed.message !== vm.lastPhaseLogged) { vm.lastPhaseLogged = parsed.message; pushAgentLog(vm, 'phase', parsed.message); }
                                                                 } else if (parsed && parsed.phase) { vm.streamingPhase = parsed.phase; }
                                                                 if (parsed && parsed.contextSize) { vm.streamingContextSize = parsed.contextSize; }
+                                                                if (parsed && parsed.contextChars) { vm.streamingContextChars = parsed.contextChars; }
+                                                                if (parsed && Array.isArray(parsed.contextBreakdown)) { vm.streamingContextBreakdown = parsed.contextBreakdown; }
                                                                 break;
                                                             case 'status':
                                                                 if (parsed && parsed.message) vm.streamingPhase = parsed.message;
@@ -732,7 +847,10 @@ angular.module('kanbanApp')
                         if (card.autoPr && proj) {
                             pushAgentLog(vm, 'info', 'Creating PR branch...');
                             $http.post('/api/pr/start', { projectPath: proj, cardId: card.id, cardText: card.text }).then(function (resp) {
-                                if (resp.data && resp.data.success) { card.prStatus = { status: 'branch-created', branch: resp.data.branchName, originalBranch: resp.data.originalBranch }; pushAgentLog(vm, 'info', 'PR branch: ' + card.prStatus.branch); }
+                                if (resp.data && resp.data.success) {
+                                    if (card.autoPr) { card.prStatus = { status: 'branch-created', branch: resp.data.branchName, originalBranch: resp.data.originalBranch }; pushAgentLog(vm, 'info', 'PR branch: ' + card.prStatus.branch); }
+                                    else { pushAgentLog(vm, 'info', 'PR branch was created but BRANCH was toggled off — card continues without a branch'); }
+                                }
                                 else { card.prStatus = { status: 'error', error: 'Branch creation failed' }; pushAgentLog(vm, 'warn', 'PR branch failed'); }
                                 startAgent();
                             }, function () { startAgent(); });
@@ -834,14 +952,16 @@ angular.module('kanbanApp')
 
                 vm.suggestImprovements = function (card, summary, project, opts) {
                     if (!card) return false;
-                    var topup = !!(opts && opts.topup);
-                    if (topup) {
-                        if (!Array.isArray(card._suggestions) || card._suggestions.length >= 3 || card._suggestionsGenerating) return false;
-                    } else if (card._suggestions || card._suggestionsRequested) {
-                        return false;
-                    }
                     var proj = project || card.filePath || vm.selectedProject;
                     if (!proj) return false;
+                    var maxSuggestions = vm.projectMaxSuggestions(proj);
+                    var topup = !!(opts && opts.topup);
+                    if (!shouldStartSuggestions(card, maxSuggestions, topup)) return false;
+                    // A fresh generation clears any earlier cancellation so the request can
+                    // complete normally; _suggestionCancel aborts the in-flight $http call
+                    // when the card is moved back to To Do or another card starts.
+                    card._suggestionsCancelled = false;
+                    card._suggestionCancel = $q.defer();
                     card._suggestionsRequested = true;
                     card._suggestionsGenerating = true;
                     card._suggestionsError = null;
@@ -870,8 +990,11 @@ angular.module('kanbanApp')
                         planItems: planLog,
                         filesEdited: filesEdited
                     };
+                    payload.maxSuggestions = maxSuggestions;
                     if (topup) { payload.topup = true; payload.existing = card._suggestions; }
-                    $http.post('/api/agent/suggest-improvements', payload).then(function (resp) {
+                    $http.post('/api/agent/suggest-improvements', payload, { timeout: card._suggestionCancel.promise }).then(function (resp) {
+                        if (card._suggestionsCancelled) { delete card._suggestionCancel; return; }
+                        delete card._suggestionCancel;
                         var suggestions = (resp.data && resp.data.suggestions) || [];
                         card._suggestionsGenerating = false;
                         card._suggestions = suggestions;
@@ -886,6 +1009,15 @@ angular.module('kanbanApp')
                         }
                         if (opts && opts.onDone) opts.onDone(true);
                     }, function (err) {
+                        if (card._suggestionsCancelled) {
+                            // Aborted because the card moved back to To Do or another card
+                            // started — leave the card's flags as the cancel set them, and
+                            // still release the idle chain so it can resume next idle spell.
+                            delete card._suggestionCancel;
+                            if (opts && opts.onDone) opts.onDone(false);
+                            return;
+                        }
+                        delete card._suggestionCancel;
                         card._suggestionsGenerating = false;
                         card._suggestionsError = (err && (err.data && err.data.error || err.statusText)) || 'Suggestion generation failed';
                         card._suggestions = card._suggestions || [];
@@ -895,6 +1027,31 @@ angular.module('kanbanApp')
                     });
                     return true;
                 };
+                // Aborts an in-flight suggestion generation for a card and resets its flags
+                // so no stale results land on it. Used when a card is sent back to To Do or
+                // when ANY card starts (the board is no longer idle — the suggestion process
+                // must stop burning the endpoint).
+                vm.cancelCardSuggestions = function (card) {
+                    if (!card) return;
+                    var wasGenerating = abortSuggestionGeneration(card);
+                    if (wasGenerating) {
+                        // Tell the server to abort the in-flight LLM call for this card so
+                        // the endpoint stops burning tokens (fire-and-forget; the client
+                        // already discards any late response via _suggestionsCancelled).
+                        if (card.id) $http.post('/api/agent/suggest-improvements/cancel', { cardId: card.id }).catch(function () { });
+                        pushAgentLog(vm, 'info', '💡 Suggestion generation cancelled — ' + ((card.text || '').slice(0, 80) || 'card') + ' is no longer a completed card.');
+                    }
+                };
+                // A card's text changed while it was a completed card — its suggestions were
+                // generated against the old wording. Abort any in-flight generation AND drop
+                // the stale suggestions so the card regenerates for its new text. Wired into
+                // the in-place edit paths (editCardText, saveCardText, remote changeCardText).
+                vm.invalidateCardSuggestions = function (card) {
+                    if (!card) return;
+                    // Nothing to invalidate — skip entirely so a quiet card is untouched.
+                    if (!clearStaleSuggestions(card)) return;
+                    vm.cancelCardSuggestions(card);
+                };
                 vm.moreLikeThis = function (card) {
                     if (!card) return;
                     vm.suggestImprovements(card, null, card.filePath || vm.selectedProject, { topup: true });
@@ -902,13 +1059,16 @@ angular.module('kanbanApp')
                 // ── Idle suggestion loop ──────────────────────────────────────
                 // When the agent is completely free (no run active, no benchmark,
                 // no self-improving cycle), quietly top up Done-column cards that
-                // don't yet carry 3 suggestions. It works through the cards one at
-                // a time and keeps going until every Done card is saturated or the
-                // user starts the agent again — the armed() check stops the loop
-                // the moment anything starts, and it resumes on the next idle spell.
+                // don't yet carry the project's suggestion cap (0-4, default 3). It
+                // works through the cards one at a time and keeps going until every
+                // Done card is saturated or the user starts the agent again — the
+                // armed() check stops the loop the moment anything starts, and it
+                // resumes on the next idle spell.
                 vm._suggestionIdleTimer = null;
                 vm._suggestionIdleBusy = false;
                 vm._suggestionIdleChainActive = false;
+                vm._suggestionIdlePaused = false; // Session-level pause toggled from the header chip
+                vm._idleSuggestionPending = 0; // Done cards still needing suggestions (header chip)
 
                 // Per-project control over the idle suggestion loop. Defaults to ON; a
                 // project can disable it so the agent never auto-generates Done-card
@@ -927,22 +1087,65 @@ angular.module('kanbanApp')
                     }
                     return true;
                 };
+                // Per-project cap on how many suggestions each completed card can get
+                // (0-4; default 3). Resolved by path against vm.projects — 0 means no
+                // suggestions for that project; unknown/unselected projects default to 3.
+                vm.projectMaxSuggestions = function (projPath) {
+                    var proj = projPath || vm.selectedProject || '';
+                    var fallback = 3;
+                    if (!proj || !Array.isArray(vm.projects)) return fallback;
+                    var norm = function (s) { return String(s || '').replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase(); };
+                    var target = norm(proj);
+                    for (var i = 0; i < vm.projects.length; i++) {
+                        var p = vm.projects[i];
+                        if (!p) continue;
+                        if (norm(p.Path || p.path) === target) {
+                            var m = p.MaxSuggestionsPerCard;
+                            return (typeof m === 'number' && m >= 0 && m <= 4) ? Math.round(m) : fallback;
+                        }
+                    }
+                    return fallback;
+                };
 
                 vm.suggestionIdleArmed = function () {
                     return !vm.streamingActive
                         && !vm.benchmarkRunning
                         && !vm.benchmarkAllActive
                         && vm.selfImprovingAgentActive !== true
-                        && vm.projectIdleSuggestionsEnabled();
+                        && vm.projectIdleSuggestionsEnabled()
+                        && !vm._suggestionIdlePaused;
+                };
+
+                // Pause/resume the idle suggestion loop on the spot from the kanban
+                // header chip. Pausing halts any in-flight chain immediately (the
+                // armed() gate stops the next step); resuming kicks the loop right
+                // away if the agent is idle. The pause is session-level and does not
+                // touch the per-project IdleSuggestions setting.
+                vm.toggleIdleSuggestions = function () {
+                    vm._suggestionIdlePaused = !vm._suggestionIdlePaused;
+                    if (vm._suggestionIdlePaused) {
+                        if (vm._suggestionIdleChainActive) {
+                            vm._suggestionIdleChainActive = false;
+                        }
+                        pushAgentLog(vm, 'info', '⏸ Idle suggestions paused — click the header chip to resume.');
+                    } else {
+                        pushAgentLog(vm, 'info', '▶ Idle suggestions resumed.');
+                        $timeout(function () { vm._runIdleSuggestions(); }, 500);
+                    }
+                    // Keep the header indicator accurate in both directions.
+                    vm._idleSuggestionPending = vm._doneCardsNeedingSuggestions().length;
                 };
 
                 vm._doneCardsNeedingSuggestions = function () {
                     var need = [];
-                    (vm.state.done || []).forEach(function (c) {
+                    if (!vm.state || !Array.isArray(vm.state.done)) return need;
+                    (vm.state.done).forEach(function (c) {
                         if (!c) return;
                         if (c._suggestionsSaturated) return;
                         if (c._suggestionsGenerating) return;
-                        if (Array.isArray(c._suggestions) && c._suggestions.length >= 3) return;
+                        var maxFor = vm.projectMaxSuggestions(c.filePath || vm.selectedProject);
+                        if (maxFor <= 0) return;
+                        if (Array.isArray(c._suggestions) && c._suggestions.length >= maxFor) return;
                         need.push(c);
                     });
                     return need;
@@ -952,6 +1155,20 @@ angular.module('kanbanApp')
                     var cards = vm._doneCardsNeedingSuggestions();
                     for (var i = 0; i < cards.length; i++) {
                         var c = cards[i];
+                        // Skip cards whose configured LLM endpoint is currently busy
+                        // with user-started work (same guard processQueuedCards uses)
+                        // so background suggestions never contend with a live run.
+                        if (vm.isEndpointBusy(c.llmEndpointId || '')) continue;
+                        // A card that already completed a successful generation with
+                        // zero suggestions has nothing relevant — mark it so the LLM
+                        // is never re-asked for it (re-asking would just hit the
+                        // endpoint again for a card that legitimately earned none).
+                        if (c._suggestionsRequested && !c._suggestionsError && Array.isArray(c._suggestions) && c._suggestions.length === 0) {
+                            c._suggestionsSaturated = true;
+                            c._suggestionsNone = true;
+                            if (vm.saveCards) vm.saveCards();
+                            continue;
+                        }
                         // Skip cards that would bail out of suggestImprovements
                         // (requested but never resolved) so we can't spin on them.
                         if (c._suggestionsRequested && !Array.isArray(c._suggestions)) continue;
@@ -962,6 +1179,9 @@ angular.module('kanbanApp')
                 };
 
                 vm._runIdleSuggestions = function () {
+                    // Keep the header indicator's pending count fresh on every tick
+                    // (interval, chain step, or post-completion re-run).
+                    vm._idleSuggestionPending = vm._doneCardsNeedingSuggestions().length;
                     if (vm._suggestionIdleBusy) return;
                     if (!vm.suggestionIdleArmed()) return;
                     var card = vm._nextIdleSuggestionCard();
@@ -987,7 +1207,15 @@ angular.module('kanbanApp')
                         onDone: function (ok) {
                             vm._suggestionIdleBusy = false;
                             var n = Array.isArray(card._suggestions) ? card._suggestions.length : 0;
-                            if (n >= 3) {
+                            var maxFor = vm.projectMaxSuggestions(card.filePath || vm.selectedProject);
+                            if (ok && n === 0) {
+                                // The LLM found nothing relevant — note it and never
+                                // retry this card, so the loop doesn't keep hammering
+                                // the endpoint for a card that legitimately earned none.
+                                card._suggestionsSaturated = true;
+                                card._suggestionsNone = true;
+                                pushAgentLog(vm, 'info', '💡 No relevant suggestions possible for this card — won\u2019t retry.');
+                            } else if (n >= maxFor) {
                                 card._suggestionsSaturated = true;
                             } else if (ok && beforeCount > 0 && n <= beforeCount) {
                                 // A top-up that added nothing new — the LLM couldn't
@@ -999,6 +1227,8 @@ angular.module('kanbanApp')
                                 card._suggestionsSaturated = true;
                             }
                             if (vm.saveCards) vm.saveCards();
+                            // Refresh the chip immediately — a card's suggestions just landed.
+                            vm._idleSuggestionPending = vm._doneCardsNeedingSuggestions().length;
                             $timeout(function () { vm._runIdleSuggestions(); }, 1500);
                         }
                     });

@@ -691,9 +691,13 @@ partial class AgentController
             {
                 // A re-focus also increments focusedCount in its iteration, so thresholdTuned
                 // implies focusedCount >= 1 — this metric always fires when tuning happened.
+                // The structured detail drives the client's focus stat row (files focused,
+                // chars saved, effective threshold); the message stays as the transcript line.
                 await EmitLog(emitSse, "metric",
                     $"📊 Discovery focus: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars" +
-                    (thresholdTuned ? $" — threshold auto-lowered to {effectiveThreshold:N0} under context pressure" : ""), ct: ct);
+                    (thresholdTuned ? $" — threshold auto-lowered to {effectiveThreshold:N0} under context pressure" : ""),
+                    new { kind = "focusStats", filesFocused = focusedCount, charsSaved = focusedCharsSaved, threshold = (int?)effectiveThreshold },
+                    ct);
             }
         }
         else
@@ -941,7 +945,9 @@ partial class AgentController
         if (focusedCount > 0)
         {
             await EmitLog(emitSse, "metric",
-                $"🔎 Discovery tool: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars", ct: ct);
+                $"🔎 Discovery tool: {focusedCount} file(s) read as focused regions, saved ~{focusedCharsSaved:N0} chars",
+                new { kind = "focusStats", filesFocused = focusedCount, charsSaved = focusedCharsSaved },
+                ct);
         }
         return merged.ToString();
     }

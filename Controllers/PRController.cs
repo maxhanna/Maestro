@@ -24,19 +24,22 @@ public class PRController : ControllerBase
                 if (string.IsNullOrWhiteSpace(req.ProjectPath))
                     return BadRequest(new { success = false, error = "ProjectPath required" });
                 var originalBranch = await _git.GetCurrentBranchAsync(req.ProjectPath);
-                var sanitized = Regex.Replace(req.CardId ?? "task", @"[^a-zA-Z0-9_-]", "");
-                var branchName = $"weaver/{sanitized}";
+                var branchName = BuildBranchName(req.CardId);
                 var hasChanges = await _git.HasUncommittedChangesAsync(req.ProjectPath);
                 if (hasChanges)
                 {
-                    // Stash any existing uncommitted changes so they don't leak into the PR branch
-                    await _git.RunGitAsync(req.ProjectPath, "stash push -m \"weaver-auto-stash\"");
+                    // Stash ALL existing work so nothing leaks into the PR branch and nothing is
+                    // lost: plain `stash push` only captures tracked changes, so untracked files
+                    // (e.g. a file the agent just created) would ride along onto the new branch.
+                    // -u / --include-untracked folds those in too; they are restored by the
+                    // `stash pop` in Finish once the original branch is checked back out.
+                    await _git.RunGitAsync(req.ProjectPath, "stash push -u -m \"weaver-auto-stash\"");
                 }
                 var branchResult = await _git.CreateBranchAsync(req.ProjectPath, branchName);
                 if (!branchResult.Success)
                 {
                     // Branch may already exist — try with timestamp suffix
-                    branchName = $"weaver/{sanitized}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+                    branchName = BuildBranchNameWithTimestamp(req.CardId);
                     branchResult = await _git.CreateBranchAsync(req.ProjectPath, branchName);
                 }
                 return Ok(new
@@ -61,7 +64,7 @@ public class PRController : ControllerBase
             {
                 if (string.IsNullOrWhiteSpace(req.ProjectPath))
                     return BadRequest(new { success = false, error = "ProjectPath required" });
-                var branchName = req.BranchName ?? "weaver/" + Regex.Replace(req.CardId ?? "task", @"[^a-zA-Z0-9_-]", "");
+                var branchName = req.BranchName ?? BuildBranchName(req.CardId);
                 // Commit all changes
                 var commitResult = await _git.CommitAllAsync(req.ProjectPath, req.CardText ?? "Weaver agent changes");
                 if (!commitResult.Success && !commitResult.Output.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase) && !commitResult.Error.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase))
@@ -80,10 +83,8 @@ public class PRController : ControllerBase
                 string? prUrl = null;
                 if (prResult.Success)
                 {
-                    prUrl = prResult.Output?.Trim();
                     // gh returns the PR URL on success
-                    var urlMatch = Regex.Match(prUrl ?? "", @"https?://[^\s]+");
-                    if (urlMatch.Success) prUrl = urlMatch.Value;
+                    prUrl = ExtractPrUrl(prResult.Output);
                 }
                 // Restore original branch
                 string? restoreError = null;
@@ -120,6 +121,35 @@ public class PRController : ControllerBase
                 return Ok(new { success = false, error = ex.Message });
             }
         }
+        /// <summary>
+        /// Turns a card id (or any free text) into the sanitized segment used in weaver/
+        /// branch names: only [a-zA-Z0-9_-] survive. Null/empty/all-punctuation ids fall
+        /// back to "task" so the branch name is always valid — git rejects a trailing
+        /// slash, so the old behavior ("weaver/") would fail checkout -b outright.
+        /// </summary>
+        private static string SanitizeBranchSegment(string? cardId)
+        {
+            var sanitized = Regex.Replace(cardId ?? "task", @"[^a-zA-Z0-9_-]", "");
+            return string.IsNullOrEmpty(sanitized) ? "task" : sanitized;
+        }
+
+        private static string BuildBranchName(string? cardId) => $"weaver/{SanitizeBranchSegment(cardId)}";
+
+        private static string BuildBranchNameWithTimestamp(string? cardId)
+            => $"weaver/{SanitizeBranchSegment(cardId)}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+        /// <summary>
+        /// gh prints the PR URL on success; pull the first http(s) URL out of its output.
+        /// Returns null when there is nothing URL-shaped (so the client shows its
+        /// "check your repository" fallback instead of raw gh output).
+        /// </summary>
+        private static string? ExtractPrUrl(string? output)
+        {
+            if (string.IsNullOrEmpty(output)) return null;
+            var match = Regex.Match(output, @"https?://[^\s]+");
+            return match.Success ? match.Value : null;
+        }
+
         private static string? ExtractCommitHash(string output)
         {
             if (string.IsNullOrEmpty(output)) return null;

@@ -123,6 +123,31 @@ partial class AgentController
         _ => ""
     };
 
+    /// <summary>
+    /// The canonical TARGETED-REPLACE worked example — the SAME small edit rendered in
+    /// both the oldString/newString format (code files) and the FORMAT D format (HTML
+    /// files), side by side, so the model sees that both anchor on the same single
+    /// unique line and only replace that line. Used by ResolveEditForStep for both the
+    /// HTML FORMAT D branch and the generic oldString/newString branch.
+    /// </summary>
+    internal static string BuildTargetedReplaceWorkedExample() =>
+        "WORKED EXAMPLE — the SAME small edit in BOTH formats (wrap an ngFor item in a group header):\n" +
+        "  The file contains this ONE unique line (line 42):\n" +
+        "    <div *ngFor=\"let b of benchmarks\" class=\"benchmark-item\">\n" +
+        "\n" +
+        "  FORMAT 1 — oldString/newString (for CODE files — the default):\n" +
+        "    oldString: \"<div *ngFor=\\\"let b of benchmarks\\\" class=\\\"benchmark-item\\\">\"\n" +
+        "    newString: \"<div *ngFor=\\\"let group of groupedBenchmarks | keyvalue\\\" class=\\\"benchmark-group\\\">\\n<h3>{{ group.key }}</h3>\\n<div *ngFor=\\\"let b of group.value\\\" class=\\\"benchmark-item\\\">\"\n" +
+        "\n" +
+        "  FORMAT 2 — FORMAT D (for HTML files — REQUIRED there):\n" +
+        "    { \"targetType\": \"html\", \"targetName\": \"<div *ngFor=\\\"let b of benchmarks\\\" class=\\\"benchmark-item\\\">\", \"replace\": true,\n" +
+        "      \"newCode\": [\"<div *ngFor=\\\"let group of groupedBenchmarks | keyvalue\\\" class=\\\"benchmark-group\\\">\", \"<h3>{{ group.key }}</h3>\", \"<div *ngFor=\\\"let b of group.value\\\" class=\\\"benchmark-item\\\">\"] }\n" +
+        "\n" +
+        "  Both formats anchor on the SAME single unique line and replace ONLY that line — " +
+        "neither re-emits the enclosing section. In the code-file format the anchor is \"oldString\" " +
+        "(unchanged lines you include stay); in FORMAT D the anchor is \"targetName\" and \"newCode\" " +
+        "holds only the replacement for it.";
+
     private static string BuildFullFileSystemPrompt()
     {
         return
