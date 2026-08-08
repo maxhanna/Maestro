@@ -291,7 +291,7 @@ partial class AgentController
         MetaPlanResult? metaPlan = null;
         var planAlreadyExecuted = false;
         var planCompleteDeclared = false;
-        AgentPlan plan;
+        AgentPlan plan = new();
         if (metaPlan?.SubPlans?.Count > 0)
         {
             await EmitLog(emitSse, "info", $"Phase 2 — META-PLAN ({metaPlan.SubPlans.Count} sub-plans)", ct: ct);
@@ -412,7 +412,10 @@ partial class AgentController
             discoveryContext = accumulatedContext.ToString();
             planAlreadyExecuted = true;
         }
-        else
+        // Snapshot pre-edit content of plan-targeted HTML files so post-execution template
+        // binding validation only flags bindings INTRODUCED by the edit — not pre-existing ones.
+        var preEditSnapshots = SnapshotPreEditFiles(projectRoot, plan ?? new AgentPlan());
+        if (!planAlreadyExecuted)
         {
             await EmitLog(emitSse, "info", "Phase 2 — PLAN & EXECUTE (interleaved, one atomic step at a time)", ct: ct);
             if (emitSse)
@@ -594,7 +597,7 @@ partial class AgentController
         if (anyEditsApplied || planCompleteDeclared)
         {
             (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues) =
-                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate);
+                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots);
         }
         else
         {
@@ -611,7 +614,7 @@ partial class AgentController
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
                 var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots);
                 if (reverifyComplete)
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
@@ -836,7 +839,7 @@ partial class AgentController
                     continue;
                 }
                 var (reVerified, reDetails, reIssues, reSpeculative) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots);
                 taskComplete = reVerified;
                 verificationDetails = reDetails;
                 verificationIssues = reIssues;
@@ -1279,10 +1282,36 @@ partial class AgentController
         return files;
     }
 
+    /// <summary>Snapshots the pre-edit on-disk content of plan-targeted files (HTML templates)
+    /// so post-execution template-binding validation only flags bindings INTRODUCED by the edit.</summary>
+    private static Dictionary<string, string> SnapshotPreEditFiles(string projectRoot, AgentPlan? plan, Dictionary<string, string>? existing = null)
+    {
+        var snap = existing ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (plan?.Plan == null) return snap;
+        foreach (var step in plan.Plan)
+        {
+            var file = step.File;
+            if (string.IsNullOrWhiteSpace(file)) continue;
+            var ext = Path.GetExtension(file).ToLowerInvariant();
+            if (ext != ".html" && ext != ".htm") continue;
+            var rel = file.Replace('\\', '/');
+            if (snap.ContainsKey(rel)) continue;
+            try
+            {
+                var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
+                if (System.IO.File.Exists(full))
+                    snap[rel] = System.IO.File.ReadAllText(full);
+            }
+            catch { }
+        }
+        return snap;
+    }
+
     private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct,
-        string? discoveryContext = null, int? atomicStepEstimate = null)
+        string? discoveryContext = null, int? atomicStepEstimate = null,
+        Dictionary<string, string>? preEditSnapshots = null)
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
@@ -1316,7 +1345,9 @@ partial class AgentController
         // and component logic wired under a UI task whose template was in scope but never
         // edited is flagged as unrendered. These checks are regex-based and cannot
         // hallucinate, so their findings are always CONFIRMED when they fire.
-        var bindingIssues = TemplateBindingValidator.CheckModifiedTemplates(projectRoot, modifiedPaths);
+        // preEditSnapshots (captured BEFORE edits) ensures only bindings INTRODUCED by the
+        // edit are validated — pre-existing missing bindings are not attributed to the agent.
+        var bindingIssues = TemplateBindingValidator.CheckModifiedTemplates(projectRoot, modifiedPaths, preEditSnapshots);
         var unrenderedIssues = TemplateBindingValidator.CheckUnrenderedComponentLogic(
             originalPrompt, projectRoot, modifiedPaths, allResults);
         var deterministicIssues = new List<string>();

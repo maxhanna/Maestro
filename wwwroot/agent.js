@@ -43,6 +43,27 @@ angular.module('kanbanApp')
             }
             return hadState;
         }
+        // Pure guard for the pr/finish completion path: if BRANCH was toggled off while
+        // the card was running, the finish POST must not re-record any PR state — the
+        // card's prStatus is cleared instead ("skipped") so no stale "PR: weaver/xxx"
+        // tag can come back once the response lands. Mirrors the pr/start response race
+        // guard. Returns the outcome: 'noop' (no branch state to resolve), 'skipped'
+        // (BRANCH off — prStatus cleared), 'pr-created', or 'error'.
+        // (tests/js/pr-finish-guard.test.js extracts this helper.)
+        function applyPrFinishOutcome(card, prResp, err) {
+            if (!card || !card.prStatus) return 'noop';
+            if (!card.autoPr) { delete card.prStatus; return 'skipped'; }
+            if (err) {
+                card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch };
+                return 'error';
+            }
+            if (prResp && prResp.data && prResp.data.success) {
+                card.prStatus = { status: 'pr-created', branch: card.prStatus.branch, prUrl: prResp.data.prUrl };
+                return 'pr-created';
+            }
+            card.prStatus = { status: 'error', error: (prResp && prResp.data && prResp.data.error) || 'PR creation failed', branch: card.prStatus.branch };
+            return 'error';
+        }
         function normalizeStepStatus(status) {
             if (status === 'written' || status === 'ok' || status === 'created' || status === 'modified') return 'done';
             if (status === 'proposing' || status === 'rejected' || status === 'exploring' || status === 'failed') return status;
@@ -797,10 +818,17 @@ angular.module('kanbanApp')
                                                                 if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {
                                                                     card.prStatus.status = 'creating-pr'; pushAgentLog(vm, 'info', 'Creating PR for branch ' + card.prStatus.branch + '...');
                                                                     $http.post('/api/pr/finish', { projectPath: proj, cardId: card.id, cardText: card.text, branchName: card.prStatus.branch, summary: finalSummary, originalBranch: card.prStatus.originalBranch }).then(function (prResp) {
-                                                                        if (prResp.data && prResp.data.success) { card.prStatus = { status: 'pr-created', branch: card.prStatus.branch, prUrl: prResp.data.prUrl }; pushAgentLog(vm, 'info', 'PR created: ' + (prResp.data.prUrl || 'Check your repository')); }
-                                                                        else { card.prStatus = { status: 'error', error: (prResp.data && prResp.data.error) || 'PR creation failed', branch: card.prStatus.branch }; pushAgentLog(vm, 'warn', 'PR creation: ' + card.prStatus.error); }
+                                                                        var outcome = applyPrFinishOutcome(card, prResp, null);
+                                                                        if (outcome === 'pr-created') { pushAgentLog(vm, 'info', 'PR created: ' + (card.prStatus.prUrl || 'Check your repository')); }
+                                                                        else if (outcome === 'error') { pushAgentLog(vm, 'warn', 'PR creation: ' + card.prStatus.error); }
+                                                                        else if (outcome === 'skipped') { pushAgentLog(vm, 'info', 'BRANCH was toggled off — skipping PR creation'); }
                                                                         finishCard();
-                                                                    }, function (err) { card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch }; pushAgentLog(vm, 'warn', 'PR creation failed: ' + card.prStatus.error); finishCard(); });
+                                                                    }, function (err) {
+                                                                        var outcome = applyPrFinishOutcome(card, null, err);
+                                                                        if (outcome === 'error') { pushAgentLog(vm, 'warn', 'PR creation failed: ' + card.prStatus.error); }
+                                                                        else if (outcome === 'skipped') { pushAgentLog(vm, 'info', 'BRANCH was toggled off — skipping PR creation'); }
+                                                                        finishCard();
+                                                                    });
                                                                 } else { if (incomplete) pushAgentLog(vm, 'warn', 'Card kept in Doing — no files were modified'); finishCard(); }
                                                                 break;
                                                             case 'error':

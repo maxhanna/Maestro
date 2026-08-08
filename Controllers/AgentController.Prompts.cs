@@ -424,7 +424,12 @@ partial class AgentController
         sb.Append("{\"planComplete\": true, \"completionReason\": \"one sentence: why nothing more is needed\"}\n\n");
         sb.Append("If you need to read a file not yet in discovery context before you can safely propose the next step:\n");
         sb.Append("{\"planComplete\": false, \"exploreFile\": \"{path/to/FILE_TO_EXPLORE.ext}\", \"thinking\": \"why you need this file\"}\n\n");
-        sb.Append("Otherwise, propose exactly ONE next step:\n");
+            sb.Append("Otherwise, propose the next step(s). If the task clearly has multiple independent parts remaining, ");
+            sb.Append("output MULTIPLE JSON objects back-to-back (one per step) — the system parses each one as a separate step. ");
+            sb.Append("Each object must be a complete, valid JSON object on its own (not inside an array). ");
+            sb.Append("Example for two remaining steps:\n");
+            sb.Append("{\"planComplete\":false,\"step\":{\"file\":\"a.ts\",\"change\":\"...\"}}\n");
+            sb.Append("{\"planComplete\":false,\"step\":{\"file\":\"b.ts\",\"change\":\"...\"}}\n\n");
         sb.Append("{\n");
         sb.Append("  \"planComplete\": false,\n");
         sb.Append("  \"thinking\": \"1-2 sentences: why this is the correct NEXT step given what's already planned\",\n");
@@ -453,7 +458,11 @@ partial class AgentController
         sb.Append("1. CRITICAL — NO EXPLORATION: You already have the FULL file contents of all attached files in the DISCOVERY CONTEXT section above. ");
         sb.Append("If you need to understand code before editing, reason about it in your \"thinking\" field, not in a separate step. ");
         sb.Append("NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step.\n");
-        sb.Append("2. ONE step per turn. Never propose multiple steps or a 'plan' array.\n");
+            sb.Append("2. When the task has multiple independent parts remaining, output MULTIPLE JSON objects ");
+            sb.Append("back-to-back in your response — one object per step. Each must be a complete, valid JSON object ");
+            sb.Append("(not inside an array). The system extracts every JSON object and queues them all. ");
+            sb.Append("Do NOT describe edits in prose thinking text — every edit MUST be its own structured JSON step object ");
+            sb.Append("or it will be ignored. Do NOT wrap them in a \"steps\" or \"plan\" array.\n");
         if (stepMode != "command")
         {
             sb.Append("3. The step MUST be atomic: one coherent edit at one location in one file. If the natural next ");

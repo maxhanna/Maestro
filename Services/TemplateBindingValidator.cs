@@ -358,8 +358,16 @@ public static class TemplateBindingValidator
     /// <summary>
     /// Scans the modified files of a run and validates any Angular template against its sibling
     /// component (same directory, .ts/.tsx counterpart). Returns the union of Check A issues.
+    /// ONLY flags bindings that were INTRODUCED or MODIFIED by the edit — pre-existing template
+    /// bindings (present before the run) are ignored so that pre-existing missing bindings do
+    /// not get falsely attributed to the agent's edit and fail verification.
     /// </summary>
-    public static List<string> CheckModifiedTemplates(string projectRoot, IEnumerable<string> modifiedRelPaths)
+    /// <param name="projectRoot">Root of the project.</param>
+    /// <param name="modifiedRelPaths">Relative paths of files modified/created this run.</param>
+    /// <param name="preEditSnapshots">Optional per-file pre-edit content keyed by relative path.
+    /// When supplied, only symbols in lines added/changed since the snapshot are validated.</param>
+    public static List<string> CheckModifiedTemplates(string projectRoot, IEnumerable<string> modifiedRelPaths,
+        Dictionary<string, string>? preEditSnapshots = null)
     {
         var issues = new List<string>();
         foreach (var rel in modifiedRelPaths)
@@ -371,7 +379,51 @@ public static class TemplateBindingValidator
             if (componentPath == null || !System.IO.File.Exists(componentPath)) continue;
             var htmlContent = System.IO.File.ReadAllText(full);
             var componentContent = System.IO.File.ReadAllText(componentPath);
-            issues.AddRange(ValidateTemplateBindings(rel, htmlContent, componentContent));
+            // If we have a pre-edit snapshot, only validate symbols in lines that were
+            // added or changed by the edit — skip pre-existing bindings entirely.
+            if (preEditSnapshots != null && preEditSnapshots.TryGetValue(rel, out var preEdit) && preEdit != null)
+            {
+                var newSymbols = ExtractNewTemplateSymbols(preEdit, htmlContent);
+                if (newSymbols.Count == 0) continue;
+                issues.AddRange(ValidateTemplateSymbols(rel, newSymbols, componentContent));
+            }
+            else
+            {
+                issues.AddRange(ValidateTemplateBindings(rel, htmlContent, componentContent));
+            }
+        }
+        return issues;
+    }
+
+    /// <summary>
+    /// Extracts template symbols that appear in newContent but NOT in preEditContent — i.e. symbols
+    /// introduced or modified by the edit. Compares line-by-line so moved/changed lines are caught.
+    /// </summary>
+    public static List<string> ExtractNewTemplateSymbols(string preEditContent, string newContent)
+    {
+        var preSymbols = new HashSet<string>(ExtractTemplateSymbols(preEditContent), StringComparer.Ordinal);
+        var newSymbols = ExtractTemplateSymbols(newContent);
+        return newSymbols.Where(s => !preSymbols.Contains(s)).Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
+    /// Validates a specific set of template symbols against the sibling component's members.
+    /// </summary>
+    public static List<string> ValidateTemplateSymbols(string templateRelPath, List<string> symbols, string componentContent)
+    {
+        if (!componentContent.Contains("@Component(", StringComparison.Ordinal)
+            && !componentContent.Contains("@Component (", StringComparison.Ordinal))
+            return new List<string>();
+        var members = new HashSet<string>(ExtractComponentMembers(componentContent), StringComparer.Ordinal);
+        if (members.Count == 0) return new List<string>();
+        var issues = new List<string>();
+        foreach (var sym in symbols.OrderBy(s => s, StringComparer.Ordinal))
+        {
+            if (members.Contains(sym)) continue;
+            issues.Add(
+                $"Template binding in {templateRelPath} references '{sym}' which is missing from the component class — " +
+                $"add it as a property/method (or fix the binding) or the template will not compile.");
+            if (issues.Count >= MaxIssuesPerTemplate) break;
         }
         return issues;
     }

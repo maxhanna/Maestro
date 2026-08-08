@@ -471,6 +471,34 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (cleared) console.log('BRANCH disabled — cleared PR state for card', card && card.id);
       };
 
+      // Abort the card's weaver branch: POST /api/pr/abort checks out the original
+      // branch, pops the pre-branch stash, and deletes the branch, leaving the repo
+      // as it was. Button-only (never automatic) so a completed PR or a run the user
+      // wants to keep is never undone behind their back. Mid-run changes are stashed
+      // server-side as weaver-abort and kept for recovery.
+      vm.abortBranch = function (card) {
+        if (!card || !card.prStatus || !card.prStatus.branch) return;
+        if (!$window.confirm('Abort branch "' + card.prStatus.branch + '"?\n\nThe original branch will be checked back out, the pre-branch stash restored, and the weaver branch deleted. Mid-run changes (if any) are kept in a weaver-abort stash for recovery.')) return;
+        var proj = card.filePath || vm.selectedProject;
+        if (!proj) { $window.alert('No project assigned'); return; }
+        $http.post('/api/pr/abort', {
+          projectPath: proj,
+          cardId: card.id,
+          branchName: card.prStatus.branch,
+          originalBranch: card.prStatus.originalBranch
+        }).then(function (resp) {
+          if (resp.data && resp.data.success) {
+            delete card.prStatus;
+            vm.saveCards();
+            console.log('Branch aborted for card', card && card.id, resp.data);
+          } else {
+            $window.alert('Abort failed: ' + ((resp.data && resp.data.error) || 'unknown error'));
+          }
+        }, function (err) {
+          $window.alert('Abort request failed: ' + (err.statusText || 'network error'));
+        });
+      };
+
       vm.onSelfImprovingToggle = function (card) {
         if (card.selfImproving) {
           var idx = vm.state.todo.findIndex(function (c) { return c.id === card.id; });
