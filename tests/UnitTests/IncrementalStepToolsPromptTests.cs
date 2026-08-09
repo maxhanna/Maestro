@@ -57,4 +57,34 @@ public class IncrementalStepToolsPromptTests
         // Edit-only mode proposes path-only steps — the tool surface is irrelevant there.
         Assert.DoesNotContain("### AVAILABLE STEPS", Build("edit"));
     }
+
+    [Fact]
+    public void SystemPrompt_WebChainExample_Included_WhenWebSearchEnabled()
+    {
+        var prompt = Build("all", new List<string> { "_command", "_web_search", "_web_fetch" });
+        Assert.Contains("### TOOL USE EXAMPLE", prompt);
+        // The complete chain must be visible end to end: search → fetch → write to disk.
+        Assert.Contains("\"file\":\"_web_search\"", prompt);
+        Assert.Contains("\"file\":\"_web_fetch\"", prompt);
+        Assert.Contains("\"file\":\"_command\"", prompt);
+        Assert.Contains("Set-Content -Path", prompt);
+        Assert.Contains("declare planComplete only after the file is written", prompt);
+    }
+
+    [Fact]
+    public void SystemPrompt_WebChainExample_Omitted_WhenWebSearchDisabled()
+    {
+        // The chain starts with _web_search — if the classifier excluded it, showing a web
+        // chain would push the model toward a tool it doesn't have.
+        var prompt = Build("all", new List<string> { "_command" });
+        Assert.DoesNotContain("### TOOL USE EXAMPLE", prompt);
+        Assert.DoesNotContain("Set-Content -Path", prompt);
+    }
+
+    [Fact]
+    public void SystemPrompt_EditMode_HasNoWebChainExample()
+    {
+        Assert.DoesNotContain("### TOOL USE EXAMPLE", Build("edit"));
+        Assert.DoesNotContain("Set-Content -Path", Build("edit"));
+    }
 }
