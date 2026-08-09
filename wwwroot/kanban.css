@@ -787,6 +787,14 @@ body.dragging-active .card:hover {
     text-decoration: line-through;
 }
 
+.plan-item-row.plan-rejected {
+    opacity: .6;
+}
+
+.plan-item-row.plan-rejected .plan-item-change {
+    text-decoration: line-through;
+}
+
 .plan-item-row.plan-cancelled {
     opacity: .45;
     text-decoration: line-through;

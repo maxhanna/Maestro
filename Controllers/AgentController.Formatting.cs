@@ -76,6 +76,75 @@ partial class AgentController
             throw;
         }
     }
+    /// <summary>
+    /// Appends a REJECTED plan step (with the rejection reason) to the card's
+    /// persisted _plan.items so web-gate vetoes survive a reload. The record carries
+    /// status="rejected" + error; PersistBoardDataPlanAsync preserves such records
+    /// across plan rebuilds.
+    /// </summary>
+    private async Task PersistRejectedPlanStepAsync(string? cardId, PlanStep step, string? error, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || step == null)
+            return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    if (cardObj["_plan"] is not JsonObject planObj)
+                    {
+                        // A card can be rejected on its very first proposal — create the
+                        // plan container so the rejection still lands on the card.
+                        planObj = new JsonObject { ["items"] = new JsonArray() };
+                        cardObj["_plan"] = planObj;
+                    }
+                    if (planObj["items"] is not JsonArray items)
+                    {
+                        items = new JsonArray();
+                        planObj["items"] = items;
+                    }
+                    items.Add(new JsonObject
+                    {
+                        ["index"] = items.Count,
+                        ["file"] = step.File,
+                        ["change"] = step.Change,
+                        ["line"] = step.LineNumber,
+                        ["done"] = false,
+                        ["status"] = "rejected",
+                        ["error"] = error ?? ""
+                    });
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "refresh", new
+                        {
+                            target = "boarddata",
+                            reason = "plan-step-rejected",
+                            cardId,
+                            planItemIndex = items.Count - 1
+                        }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn", "Failed to persist rejected plan step to card", new { cardId, error = ex.Message });
+        }
+    }
     private async Task<string> PostEditStyleFixAsync(
         string fullPath, string relPath, string content, string appliedNewStr,
         bool emitSse, CancellationToken ct)

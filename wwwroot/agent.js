@@ -566,6 +566,13 @@ angular.module('kanbanApp')
                                                                 if (parsed && parsed.items && parsed.items.length) {
                                                                     var existingState = {};
                                                                     if (vm.planItems) vm.planItems.forEach(function (pi) { existingState[pi.file + '|' + pi.change] = { done: pi.done, diffs: pi.diffs, _diffApplied: pi._diffApplied, _diffStepStatus: pi._diffStepStatus }; });
+                                                                    // Persisted rejected steps (web-gate vetoes) are not carried by plan events —
+                                                                    // preserve them from the current card so a saveCards can never wipe them.
+                                                                    var preservedRejected = [];
+                                                                    var planCard = vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
+                                                                    if (planCard && planCard._plan && planCard._plan.items) {
+                                                                        preservedRejected = planCard._plan.items.filter(function (pi) { return pi.status === 'rejected'; });
+                                                                    }
                                                                     vm.planItems = parsed.items.map(function (item, i) {
                                                                         var file = item.File || item.file || '?';
                                                                         var change = item.Change || item.change || '';
@@ -573,6 +580,7 @@ angular.module('kanbanApp')
                                                                         var prev = existingState[key] || {};
                                                                         return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '' };
                                                                     });
+                                                                    preservedRejected.forEach(function (ri) { ri.index = vm.planItems.length; vm.planItems.push(ri); });
                                                                     vm.verifyDiffs(vm.planItems);
                                                                     reconcilePlanItems(vm, $scope, $timeout);
                                                                     if (parsed.thinking) vm.streamingThinking = parsed.thinking;

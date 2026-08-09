@@ -81,6 +81,168 @@ public class WebNeedGuardTests
         Assert.Equal(expected, IsWeb(file));
     }
 
+    // ── TaskExplicitlyCommandsWeb (decisive explicit web-search commands) ──
+
+    private static readonly MethodInfo ExplicitWebMethod = typeof(Weaver.Controllers.AgentController)
+        .GetMethod("TaskExplicitlyCommandsWeb", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+        ?? throw new InvalidOperationException("TaskExplicitlyCommandsWeb static method not found.");
+
+    private static bool ExplicitWeb(string? p) => (bool)(ExplicitWebMethod.Invoke(null, new object?[] { p }) ?? false);
+
+    // A direct web-search command is AUTHORITATIVE — the classifier may not veto it.
+    // These are the exact phrasings that must bypass the LLM verification entirely.
+    [Theory]
+    [InlineData("Search the web for an interesting and relevant AI article and write the data into a text file on my desktop")]
+    [InlineData("search the internet for the latest npm versions and save them to a file")]
+    [InlineData("look up the current exchange rates online")]
+    [InlineData("fetch the current weather from the web")]
+    [InlineData("browse the web for job postings and summarize them")]
+    [InlineData("find an interesting AI article online and write it to a file")]
+    [InlineData("google for the latest AI news online")]
+    [InlineData("do a web search for recent advances in machine learning")]
+    public void TaskExplicitlyCommandsWeb_DetectsDirectWebSearchCommands(string prompt)
+    {
+        Assert.True(ExplicitWeb(prompt));
+    }
+
+    // Noisy phrasing that usually means searching the REPO must stay with the LLM
+    // classifier — only the classifier decides those, never the deterministic regex.
+    [Theory]
+    [InlineData("search for the add function in the repo and explain it")]
+    [InlineData("look up the config value in our codebase")]
+    [InlineData("find out where the retry logic lives in this project")]
+    [InlineData("Refactor the login component and add tests")]
+    [InlineData("Use the Google Maps API to geocode addresses")]
+    public void TaskExplicitlyCommandsWeb_LeavesRepoInternalPhrasingToTheClassifier(string prompt)
+    {
+        Assert.False(ExplicitWeb(prompt));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void TaskExplicitlyCommandsWeb_BlankPromptsNeverFire(string? prompt)
+    {
+        Assert.False(ExplicitWeb(prompt));
+    }
+
+    // ── TryParseWebNeedVerdict (classifier JSON parsing + reason capture) ──
+
+    private static readonly MethodInfo ParseVerdictMethod = typeof(Weaver.Controllers.AgentController)
+        .GetMethod("TryParseWebNeedVerdict", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+        ?? throw new InvalidOperationException("TryParseWebNeedVerdict static method not found.");
+
+    private static (bool Ok, bool NeedsWeb, string? Query, string Reason) ParseVerdict(string json)
+    {
+        var args = new object?[] { json, null, null, null };
+        var ok = (bool)(ParseVerdictMethod.Invoke(null, args) ?? false);
+        return (ok, (bool)(args[1] ?? false), (string?)args[2], (string)(args[3] ?? ""));
+    }
+
+    [Fact]
+    public void TryParseWebNeedVerdict_ParsesWebTaskWithQuery()
+    {
+        var (ok, needsWeb, query, reason) = ParseVerdict(
+            "{\"needsWeb\": true, \"reason\": \"task asks for live data\", \"query\": \"latest npm version of lodash\"}");
+        Assert.True(ok);
+        Assert.True(needsWeb);
+        Assert.Equal("latest npm version of lodash", query);
+        Assert.Equal("task asks for live data", reason);
+    }
+
+    // The exact failure mode from the "Search the web for an AI article" run: the
+    // classifier vetoes with a reason. The reason must come back so the agent panel
+    // can surface it instead of showing only the generic rejection line.
+    [Fact]
+    public void TryParseWebNeedVerdict_ParsesNoWebVetoWithReason()
+    {
+        var (ok, needsWeb, query, reason) = ParseVerdict(
+            "{\"needsWeb\": false, \"reason\": \"the article content can be written from the model's own knowledge\", \"query\": \"\"}");
+        Assert.True(ok);
+        Assert.False(needsWeb);
+        Assert.Null(query);
+        Assert.Contains("own knowledge", reason);
+    }
+
+    [Fact]
+    public void TryParseWebNeedVerdict_MissingReasonDefaultsEmpty()
+    {
+        var (ok, _, _, reason) = ParseVerdict("{\"needsWeb\": false}");
+        Assert.True(ok);
+        Assert.Equal("", reason);
+    }
+
+    [Fact]
+    public void TryParseWebNeedVerdict_MalformedJsonFails()
+    {
+        var (ok, _, _, _) = ParseVerdict("{\"needsWeb\": tru");
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void TryParseWebNeedVerdict_NonObjectRootFails()
+    {
+        var (ok, _, _, _) = ParseVerdict("[1,2,3]");
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void TryParseWebNeedVerdict_BlankOrEmptyJsonFails()
+    {
+        Assert.False(ParseVerdict("").Ok);
+        Assert.False(ParseVerdict("   ").Ok);
+    }
+
+    // ── ShouldRejectFetchCommand (scoped fetch-in-command guard) ──
+    // The guard fires ONLY on tasks that hint at needing web data, so a bare legit
+    // `curl https://…/health` on a non-web task stays allowed as a real command.
+
+    private static readonly MethodInfo RejectFetchMethod = typeof(Weaver.Controllers.AgentController)
+        .GetMethod("ShouldRejectFetchCommand", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+        ?? throw new InvalidOperationException("ShouldRejectFetchCommand static method not found.");
+
+    private static bool RejectFetch(string? prompt, string? command) =>
+        (bool)(RejectFetchMethod.Invoke(null, new object?[] { prompt, command }) ?? false);
+
+    [Fact]
+    public void ShouldRejectFetchCommand_RejectsOnWebHintingTask()
+    {
+        const string prompt = "Search the web for an interesting and relevant AI article and write the data into a text file on my desktop";
+        const string command = "Invoke-RestMethod https://api.current.ai/articles | Select-Object title, summary, url | ConvertTo-Csv -NoTypeInformation | Set-Content \"C:\\Users\\Saint\\Desktop\\ai_article_data.txt\"";
+        Assert.True(RejectFetch(prompt, command));
+    }
+
+    [Fact]
+    public void ShouldRejectFetchCommand_AllowsCurlHealthCheckOnNonWebTask()
+    {
+        Assert.False(RejectFetch("Check the uptime of the local service and report the response code", "curl https://my-server/health"));
+    }
+
+    [Fact]
+    public void ShouldRejectFetchCommand_AllowsFetchCommandOnNonWebTask()
+    {
+        // The api.current.ai-style command on a task with NO web hint is a legit terminal
+        // command (the relaxation: the guard only polices web-needing tasks).
+        Assert.False(RejectFetch("Run the build and fix the failing tests", "Invoke-RestMethod https://api.current.ai/articles | Out-File out.json"));
+    }
+
+    [Fact]
+    public void ShouldRejectFetchCommand_AllowsLegitUrlCommandsOnWebTask()
+    {
+        // Detector alone says no (git clone is not a content fetch) — hint doesn't matter.
+        Assert.False(RejectFetch("search the web for the latest release and clone it", "git clone https://github.com/foo/bar.git"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ShouldRejectFetchCommand_BlankPromptsNeverReject(string? prompt)
+    {
+        Assert.False(RejectFetch(prompt, "curl https://example.com/data.json"));
+    }
+
     // ── WebNotNeededFeedback (rejection feedback for web steps on non-web tasks) ──
 
     private static string Constant(string name)

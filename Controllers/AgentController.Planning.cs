@@ -338,6 +338,7 @@ partial class AgentController
                         {
                             if (existing is JsonObject eo)
                             {
+                                if (eo["status"]?.GetValue<string>() == "rejected") continue; // preserved below
                                 eo["done"] = true;
                                 planItems.Add(eo.DeepClone());
                             }
@@ -357,6 +358,20 @@ partial class AgentController
                             ["metaGroup"] = s.MetaGroup,
                             ["done"] = wasDone
                         });
+                    }
+                    // Preserve rejected step records (web-gate vetoes) across plan rebuilds
+                    // so the classifier's reason survives reloads — re-anchor their indexes
+                    // to the rebuilt array's tail.
+                    if (existingItems != null)
+                    {
+                        foreach (var existing in existingItems)
+                        {
+                            if (existing is JsonObject eo && eo["status"]?.GetValue<string>() == "rejected")
+                            {
+                                eo["index"] = planItems.Count;
+                                planItems.Add(eo.DeepClone());
+                            }
+                        }
                     }
                     cardObj["_plan"] = new JsonObject
                     {
@@ -906,6 +921,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return (false, $"_command step is not an executable shell command. You are on {(OperatingSystem.IsWindows() ? "Windows" : Environment.OSVersion)} and the Desktop is at {osDesktopPath}. A _command step's change must BE the real command with an absolute path, e.g. New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force. Never put planning notes in a _command step.");
             return (false, "_command step is not an executable shell command. Use _command only for real terminal commands such as `dotnet test`, `npm install`, or `cd app; npx ng g c name`. Put planning notes in the thinking field, not in a command step.");
         }
+        // FETCH-IN-COMMAND GUARD: a _command step that pulls CONTENT from an http(s)
+        // URL with a download tool is the planner doing a web search by writing a
+        // command — the "Invoke-RestMethod https://api.current.ai/..." failure mode
+        // (hallucinated API, results never land in context). Steer to the web tools.
+        // Only fires when the task hints at needing web data: a bare legit
+        // `curl https://…/health` on a non-web task stays allowed. Legit URL commands
+        // (git clone, npm install <url>, --source, git fetch origin) never match
+        // LooksLikeContentFetchCommand regardless.
+        if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
+            ShouldRejectFetchCommand(originalPrompt, step.Change))
+        {
+            return (false, FetchCommandFeedback);
+        }
         // OS tasks: _create_directory/_create_file write relative to the PROJECT ROOT — a step
         // whose change names an OS location would silently create the folder/file INSIDE the
         // project (the "/home/user/search_results" failure). Reject and steer to _command.
@@ -1157,6 +1185,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
         var webNeedVerifyFailures = 0; // consecutive failed classifier calls — caps re-confirmation at 2 per run
         string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
+        var fetchCommandRejections = 0; // consecutive fetch-command rejections this slot — auto-inject _web_search at the regen cap
+        string? webNeedVetoReason = null; // classifier's reason when web was vetoed — shown inline on the rejected step card
         // OS-filesystem task guard state: pure OS tasks reject repo file edits
         // deterministically; hint-y tasks get one memoized LLM verdict per file.
         var osTaskGuard = IsExternalFilesystemTask(prompt);
@@ -1200,12 +1230,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                     {
                         await EmitLog(emitSse, "info",
-                            "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                        var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                            "Task hints at needing current external info — checking whether _web_search is required…", ct: ct);
+                        var (needsWeb, query, vetoReason, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
                         if (verified)
                         {
                             webNeedVerified = needsWeb ? 1 : -1;
                             if (needsWeb) webInjectedQuery = query;
+                            else webNeedVetoReason = vetoReason;
                         }
                         else
                         {
@@ -1418,12 +1449,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                 {
                     await EmitLog(emitSse, "info",
-                        "The planner proposed a _web_search/_web_fetch step — verifying with the LLM whether the task actually needs current external info…", ct: ct);
-                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        "The planner proposed a _web_search/_web_fetch step — checking whether the task actually needs current external info…", ct: ct);
+                    var (needsWeb, query, vetoReason, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
                     if (verified)
                     {
                         webNeedVerified = needsWeb ? 1 : -1;
                         if (needsWeb) webInjectedQuery = query;
+                        else webNeedVetoReason = vetoReason;
                     }
                     else
                     {
@@ -1432,10 +1464,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 if (webNeedVerified == -1)
                 {
+                    // Surface the classifier's own reason inline on the rejected step card
+                    // (the plan-item error row) so a false veto is auditable without
+                    // expanding the transcript.
+                    var vetoDetail = string.IsNullOrWhiteSpace(webNeedVetoReason)
+                        ? ""
+                        : $" Classifier: {webNeedVetoReason}";
                     await EmitRejectedLog(emitSse,
-                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — task does not need current external info",
-                        WebNotNeededFeedback, ct);
-                    rejectionFeedback.Add(WebNotNeededFeedback);
+                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — task does not need current external info.{vetoDetail}",
+                        WebNotNeededFeedback + vetoDetail, ct);
+                    rejectionFeedback.Add(WebNotNeededFeedback + vetoDetail);
+                    if (emitSse)
+                        await SendSse(Response, "step", new
+                        {
+                            index = ++stepEventIndex,
+                            type = "plan",
+                            status = "rejected",
+                            path = proposal.Step.File,
+                            description = proposal.Step.Change,
+                            error = $"Task does not need current external info.{vetoDetail}",
+                            line = proposal.Step.LineNumber,
+                            planItemIndex = planSoFar.Count
+                        }, ct);
+                    // Persist the veto on the card's plan so it survives a reload.
+                    await PersistRejectedPlanStepAsync(cardId, proposal.Step, $"Task does not need current external info.{vetoDetail}", emitSse, ct);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
                 }
@@ -1457,12 +1509,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                 {
                     await EmitLog(emitSse, "info",
-                        "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        "Task hints at needing current external info — checking whether _web_search is required…", ct: ct);
+                    var (needsWeb, query, vetoReason, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
                     if (verified)
                     {
                         webNeedVerified = needsWeb ? 1 : -1;
                         if (needsWeb) webInjectedQuery = query;
+                        else webNeedVetoReason = vetoReason;
                     }
                     else
                     {
@@ -1567,6 +1620,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await EmitRejectedLog(emitSse,
                         $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — task targets the OS filesystem, not the repository",
                         OsTaskEditFeedback, ct);
+                    await PersistRejectedPlanStepAsync(cardId, proposal.Step, OsTaskEditFeedback, emitSse, ct);
                     rejectionFeedback.Add(OsTaskEditFeedback);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
@@ -1587,6 +1641,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     skipLlm: skipLlm, attachedFiles: attachedFiles);
                 if (!valid)
                 {
+                    if (string.Equals(reason, FetchCommandFeedback, StringComparison.Ordinal)) fetchCommandRejections++;
                     var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";
                     await EmitRejectedLog(emitSse,
                         $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", stepFb, ct);
@@ -1603,8 +1658,45 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             line = proposal.Step.LineNumber,
                             planItemIndex = planSoFar.Count
                         }, ct);
+                    // Persist the rejected step on the card's plan so every rejection
+                    // (OS-task guard, fetch-command guard, duplicates, ...) survives a reload.
+                    await PersistRejectedPlanStepAsync(cardId, proposal.Step, reason, emitSse, ct);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
                     {
+                        // FETCH-COMMAND AUTO-INJECT: the planner kept proposing URL-fetching
+                        // _command steps instead of a web step (the "api.current.ai" failure
+                        // mode) — inject _web_search directly, mirroring the missing-web-search
+                        // auto-inject, so the fetch-command loop can't dead-end in a slot failure.
+                        if (fetchCommandRejections >= 2)
+                        {
+                            var queryText = string.IsNullOrWhiteSpace(webInjectedQuery)
+                                ? BuildFallbackWebQuery(prompt)
+                                : webInjectedQuery.Trim();
+                            planSoFar.Add(new PlanStep { File = "_web_search", Change = queryText });
+                            thinkingLog.AppendLine($"Step {planSoFar.Count}: [auto-injected] {queryText}");
+                            if (emitSse)
+                            {
+                                await SendSse(Response, "thinking",
+                                    new { text = $"Auto-injected _web_search step — the planner kept proposing URL-fetching _command steps after {MAX_STEP_REGEN_ATTEMPTS} rejections." }, ct);
+                                await SendSse(Response, "step", new
+                                {
+                                    index = ++stepEventIndex,
+                                    type = "plan",
+                                    status = "pending",
+                                    path = "_web_search",
+                                    description = queryText,
+                                    line = 0,
+                                    planItemIndex = planSoFar.Count
+                                }, ct);
+                            }
+                            await EmitLog(emitSse, "warn",
+                                $"The planner kept proposing URL-fetching _command steps instead of _web_search after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a _web_search step: \"{queryText}\"", ct: ct);
+                            rejectionFeedback.Clear();
+                            regenAttempts = 0;
+                            fetchCommandRejections = 0;
+                            consecutiveSlotFailures = 0;
+                            continue;
+                        }
                         consecutiveSlotFailures++;
                         await EmitLog(emitSse, "warn",
                             $"Incremental planning: giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. " +
@@ -1626,6 +1718,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     continue;
                 }
                 consecutiveSlotFailures = 0;
+                fetchCommandRejections = 0;
                 var isDuplicate = false;
                 foreach (var existing in planSoFar)
                 {
@@ -1765,6 +1858,37 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return false;
     }
 
+    /// <summary>
+    /// Decisive detector for EXPLICIT web-search commands ("search the web for…",
+    /// "look it up online", "fetch … from the internet"). Unlike TaskHintsWebNeed —
+    /// which is deliberately BROAD and only opens the LLM classifier gate — a hit
+    /// here IS the verdict: the user directly commanded a web search, so no
+    /// classifier call may veto it (the classifier has been observed rejecting
+    /// "Search the web for an interesting AI article…" as no-web, which sent the
+    /// run down a hallucinated-command path). Repo-internal "search for"/"look up"
+    /// phrasing never matches: it lacks the web/internet/online target.
+    /// </summary>
+    private static readonly Regex ExplicitWebCommandRegex = new Regex(
+        @"\b(search|look up|find|fetch|browse|surf|google)\w*\b[^\r\n]{0,80}\b(web|internet|online|search engine)\b"
+        + @"|\b(web search|search the web|search the internet|search online|browse the web|surf the web|google search|look up .{0,60} online|find .{0,60} online)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool TaskExplicitlyCommandsWeb(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        return ExplicitWebCommandRegex.IsMatch(prompt.ToLowerInvariant());
+    }
+
+    /// <summary>
+    /// The fetch-in-command guard is deliberately scoped: it rejects a URL-fetching
+    /// _command step ONLY when the task hints at needing web data (the
+    /// "api.current.ai" hallucination happens on web tasks). On a non-web task a
+    /// bare legit `curl https://…/health` or similar stays allowed as a real
+    /// terminal command.
+    /// </summary>
+    private static bool ShouldRejectFetchCommand(string? prompt, string? command) =>
+        TaskHintsWebNeed(prompt) && AgentProjectUtilities.LooksLikeContentFetchCommand(command);
+
     private static bool IsWebStep(string? file)
     {
         return file != null &&
@@ -1826,8 +1950,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// query used later for the auto-injected _web_search step if the planner
     /// refuses to plan one after repeated rejections.
     /// </summary>
-    private async Task<(bool NeedsWeb, string? Query, bool Verified)> ConfirmWebNeedAsync(string prompt, bool emitSse, CancellationToken ct)
+    private async Task<(bool NeedsWeb, string? Query, string Reason, bool Verified)> ConfirmWebNeedAsync(string prompt, bool emitSse, CancellationToken ct)
     {
+        // An explicit web-search command in the task text is authoritative: the user
+        // told the agent to search the web, so no classifier call may veto it. This is
+        // the difference between "search for X" (usually repo search — the classifier
+        // decides) and "search the web for X" (an explicit instruction — always web).
+        if (TaskExplicitlyCommandsWeb(prompt))
+        {
+            await EmitLog(emitSse, "info",
+                "Task explicitly commands a web search — treating the task as web-required without a classifier call.", ct: ct);
+            return (true, BuildFallbackWebQuery(prompt), "", true);
+        }
         try
         {
             var taskPreview = AgentTextUtilities.Truncate(prompt ?? "", 1200);
@@ -1837,6 +1971,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.AppendLine();
             sb.AppendLine("DECIDE: does this task REQUIRE CURRENT, EXTERNAL information from the web (live prices, breaking news, up-to-date API docs, latest package versions, facts that change over time) — information that CANNOT be found or computed inside the local repository?");
             sb.AppendLine("Tasks about the repo's own code, files, or tests NEVER need the web, even if they contain words like 'search', 'look up', or 'find'.");
+            sb.AppendLine("An EXPLICIT instruction to search the web, browse the internet, or fetch from an online source is decisive: such tasks DO need the web.");
             sb.AppendLine("Output ONLY JSON: {\"needsWeb\": true|false, \"reason\": \"one short sentence\", \"query\": \"concise web search query under 80 chars — only when needsWeb is true, else an empty string\"}");
             var (raw, _, err) = await CallLlmRaw(
                 "You are a strict task classifier. Output ONLY the requested JSON.",
@@ -1844,19 +1979,58 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (string.IsNullOrWhiteSpace(raw))
             {
                 await EmitLog(emitSse, "warn", $"Web-need verification failed ({err}) — no verdict cached.", ct: ct);
-                return (false, null, false);
+                return (false, null, "", false);
             }
             var cleaned = ExtractFirstJsonObject(raw);
-            using var doc = JsonDocument.Parse(cleaned);
-            var needsWeb = doc.RootElement.TryGetProperty("needsWeb", out var nw) && nw.ValueKind == JsonValueKind.True;
-            var query = needsWeb && doc.RootElement.TryGetProperty("query", out var q) && q.ValueKind == JsonValueKind.String
-                ? q.GetString()
-                : null;
-            return (needsWeb, query, true);
+            if (!TryParseWebNeedVerdict(cleaned, out var needsWeb, out var query, out var reason))
+            {
+                await EmitLog(emitSse, "warn", "Web-need classifier output was unparseable — no verdict cached.", ct: ct);
+                return (false, null, "", false);
+            }
+            // Surface the classifier's reason so a false "does not need current
+            // external info" veto is auditable in the agent panel — the model can
+            // claim the task needs no web while the prompt clearly asked for one.
+            if (!needsWeb)
+            {
+                var why = string.IsNullOrWhiteSpace(reason) ? "no reason given" : reason;
+                if (why.Length > 200) why = why[..200] + "…";
+                await EmitLog(emitSse, "warn", $"Web-need classifier vetoed web usage — {why}", ct: ct);
+            }
+            return (needsWeb, query, reason, true);
         }
         catch
         {
-            return (false, null, false);
+            return (false, null, "", false);
+        }
+    }
+
+    /// <summary>
+    /// Parses the classifier's JSON verdict ({"needsWeb", "reason", "query"}) into a
+    /// (needsWeb, query, reason) tuple. Returns false when the text isn't a valid
+    /// JSON object — the caller treats that as a failed verification (the web-step
+    /// gate fails OPEN, the missing-web-search guard fails CLOSED). The reason is
+    /// captured so a false no-web veto can be surfaced to the agent panel.
+    /// </summary>
+    private static bool TryParseWebNeedVerdict(string json, out bool needsWeb, out string? query, out string reason)
+    {
+        needsWeb = false; query = null; reason = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            needsWeb = root.TryGetProperty("needsWeb", out var nw) && nw.ValueKind == JsonValueKind.True;
+            query = needsWeb && root.TryGetProperty("query", out var q) && q.ValueKind == JsonValueKind.String
+                ? q.GetString()
+                : null;
+            reason = root.TryGetProperty("reason", out var rj) && rj.ValueKind == JsonValueKind.String
+                ? rj.GetString()?.Trim() ?? ""
+                : "";
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -1864,6 +2038,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private const string OsTaskEditFeedback =
         "This task operates on the OS filesystem OUTSIDE the repository (desktop/home/Downloads/etc.) — the repository's source files are NOT the target. " +
         "Use \"_command\" (e.g. mkdir/New-Item for folders, rm/Move-Item for files) or \"_create_directory\" for the OS operation. Do NOT edit repository source files to perform it.";
+
+    /// <summary>
+    /// Feedback shown when a _command step tries to fetch web content instead of
+    /// using the web tools (the "Invoke-RestMethod https://api.current.ai/..."
+    /// failure mode). The fetched results must land in context via _web_search/
+    /// _web_fetch, not in a command's stdout/file.
+    /// </summary>
+    private const string FetchCommandFeedback =
+        "This _command step fetches content from a URL with a download tool (curl/wget/Invoke-RestMethod/Invoke-WebRequest/urllib/...). " +
+        "Fetching web content is NOT a shell command — use a \"_web_search\" step (put the query in \"change\") or a \"_web_fetch\" step " +
+        "(put the URL in \"change\") instead; the fetched results are injected into your context so you can use them. " +
+        "Reserve _command for real terminal commands (builds, tests, git, package installs).";
 
     /// <summary>
     /// True when an OS-filesystem task ALSO mentions repo work (README, link, note,
@@ -1964,12 +2150,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // every step's raw diff forever, we keep ONE section and LLM-summarize it once it passes
         // cfg.diffContextSummaryChars (when cfg.summarizeDiffContext is on).
         var diffContextAccum = new StringBuilder();
+        var rejectionStepIndex = 100000; // plan-level rejection step events use a high index offset so they never collide with ExecutePlan's 0-based per-step indexes
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
         var totalPlanningRounds = 0;
         var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
         var webNeedVerifyFailures = 0; // consecutive failed classifier calls — caps re-confirmation at 2 per run
         string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
+        var fetchCommandRejections = 0; // consecutive fetch-command rejections this slot — auto-inject _web_search at the regen cap
+        string? webNeedVetoReason = null; // classifier's reason when web was vetoed — shown inline on the rejected step card
         // OS-filesystem task guard state: pure OS tasks reject repo file edits
         // deterministically; hint-y tasks get one memoized LLM verdict per file.
         var osTaskGuard = IsExternalFilesystemTask(prompt);
@@ -2138,12 +2327,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                     {
                         await EmitLog(emitSse, "info",
-                            "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                        var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                            "Task hints at needing current external info — checking whether _web_search is required…", ct: ct);
+                        var (needsWeb, query, vetoReason, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
                         if (verified)
                         {
                             webNeedVerified = needsWeb ? 1 : -1;
                             if (needsWeb) webInjectedQuery = query;
+                            else webNeedVetoReason = vetoReason;
                         }
                         else
                         {
@@ -2344,12 +2534,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                 {
                     await EmitLog(emitSse, "info",
-                        "The planner proposed a _web_search/_web_fetch step — verifying with the LLM whether the task actually needs current external info…", ct: ct);
-                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        "The planner proposed a _web_search/_web_fetch step — checking whether the task actually needs current external info…", ct: ct);
+                    var (needsWeb, query, vetoReason, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
                     if (verified)
                     {
                         webNeedVerified = needsWeb ? 1 : -1;
                         if (needsWeb) webInjectedQuery = query;
+                        else webNeedVetoReason = vetoReason;
                     }
                     else
                     {
@@ -2358,10 +2549,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 if (webNeedVerified == -1)
                 {
+                    // Surface the classifier's own reason inline on the rejected step card
+                    // (the plan-item error row) so a false veto is auditable without
+                    // expanding the transcript.
+                    var vetoDetail = string.IsNullOrWhiteSpace(webNeedVetoReason)
+                        ? ""
+                        : $" Classifier: {webNeedVetoReason}";
                     await EmitRejectedLog(emitSse,
-                        $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — task does not need current external info",
-                        WebNotNeededFeedback, ct);
-                    rejectionFeedback.Add(WebNotNeededFeedback);
+                        $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — task does not need current external info.{vetoDetail}",
+                        WebNotNeededFeedback + vetoDetail, ct);
+                    rejectionFeedback.Add(WebNotNeededFeedback + vetoDetail);
+                    if (emitSse)
+                        await SendSse(Response, "step", new
+                        {
+                            index = rejectionStepIndex++,
+                            type = "plan",
+                            status = "rejected",
+                            path = proposal.Step.File,
+                            description = proposal.Step.Change,
+                            error = $"Task does not need current external info.{vetoDetail}",
+                            line = proposal.Step.LineNumber,
+                            planItemIndex = planSoFar.Count
+                        }, ct);
+                    // Persist the veto on the card's plan so it survives a reload.
+                    await PersistRejectedPlanStepAsync(cardId, proposal.Step, $"Task does not need current external info.{vetoDetail}", emitSse, ct);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
                 }
@@ -2381,12 +2592,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (webNeedVerified == 0 && webNeedVerifyFailures < 2)
                 {
                     await EmitLog(emitSse, "info",
-                        "Task hints at needing current external info — verifying with the LLM whether _web_search is required…", ct: ct);
-                    var (needsWeb, query, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
+                        "Task hints at needing current external info — checking whether _web_search is required…", ct: ct);
+                    var (needsWeb, query, vetoReason, verified) = await ConfirmWebNeedAsync(prompt, emitSse, ct);
                     if (verified)
                     {
                         webNeedVerified = needsWeb ? 1 : -1;
                         if (needsWeb) webInjectedQuery = query;
+                        else webNeedVetoReason = vetoReason;
                     }
                     else
                     {
@@ -2457,6 +2669,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await EmitRejectedLog(emitSse,
                         $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — task targets the OS filesystem, not the repository",
                         OsTaskEditFeedback, ct);
+                    await PersistRejectedPlanStepAsync(cardId, proposal.Step, OsTaskEditFeedback, emitSse, ct);
                     rejectionFeedback.Add(OsTaskEditFeedback);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
@@ -2521,9 +2734,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 skipLlm: skipLlm, lastStepCompletionNote: completionNote, attachedFiles: attachedFiles);
             if (!valid)
             {
+                if (string.Equals(reason, FetchCommandFeedback, StringComparison.Ordinal)) fetchCommandRejections++;
                 var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";
                 await EmitRejectedLog(emitSse,
                     $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", stepFb, ct);
+                // Persist the rejected step on the card's plan so every rejection
+                // (OS-task guard, fetch-command guard, duplicates, ...) survives a reload.
+                await PersistRejectedPlanStepAsync(cardId, proposal.Step, reason, emitSse, ct);
                 rejectionFeedback.Add(stepFb);
                 if (emitSse && planSoFar.Count > 0)
                 {
@@ -2547,6 +2764,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
                 {
+                    // FETCH-COMMAND AUTO-INJECT: the planner kept proposing URL-fetching
+                    // _command steps instead of a web step (the "api.current.ai" failure
+                    // mode) — inject _web_search directly, mirroring the missing-web-search
+                    // auto-inject, so the fetch-command loop can't dead-end in a slot failure.
+                    if (fetchCommandRejections >= 2)
+                    {
+                        var queryText = string.IsNullOrWhiteSpace(webInjectedQuery)
+                            ? BuildFallbackWebQuery(prompt)
+                            : webInjectedQuery.Trim();
+                        pendingSteps.Enqueue(new PlanStep { File = "_web_search", Change = queryText });
+                        await EmitLog(emitSse, "warn",
+                            $"The planner kept proposing URL-fetching _command steps instead of _web_search after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a _web_search step: \"{queryText}\"", ct: ct);
+                        rejectionFeedback.Clear();
+                        regenAttempts = 0;
+                        fetchCommandRejections = 0;
+                        consecutiveSlotFailures = 0;
+                        continue; // loop top executes the injected step, then planning resumes
+                    }
                     consecutiveSlotFailures++;
                     rejectionFeedback.Clear();
                     regenAttempts = 0;
@@ -2558,6 +2793,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 continue;
             }
             consecutiveSlotFailures = 0;
+            fetchCommandRejections = 0;
             var planningRounds = regenAttempts + 1;
             totalPlanningRounds += planningRounds;
             regenAttempts = 0;

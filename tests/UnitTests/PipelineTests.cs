@@ -319,6 +319,49 @@ public class PipelineTests
         Assert.Equal(expected, AgentProjectUtilities.LooksLikeShellCommand(command));
     }
 
+    // ── LooksLikeContentFetchCommand (the "api.current.ai" failure mode) ──
+    // A _command step that fetches content from an http(s) URL with a download tool
+    // must be steered to _web_search/_web_fetch. Legit URL-using commands (clone /
+    // install / --source / git fetch) must never match.
+
+    [Theory]
+    [InlineData("Invoke-RestMethod https://api.current.ai/articles | Select-Object title, summary, url | ConvertTo-Csv -NoTypeInformation | Set-Content \"C:\\Users\\Saint\\Desktop\\ai_article_data.txt\"")]
+    [InlineData("curl https://example.com/article -o article.txt")]
+    [InlineData("wget https://example.com/data.json")]
+    [InlineData("Invoke-WebRequest -Uri https://example.com/page -OutFile page.html")]
+    [InlineData("irm https://api.github.com/repos/foo/bar")]
+    [InlineData("python -c \"import urllib.request as u; open('out.txt','w').write(u.urlopen('https://example.com').read())\"")]
+    [InlineData("python -c \"import requests; print(requests.get('https://example.com').text)\"")]
+    [InlineData("node -e \"fetch('https://example.com/api').then(r => r.text()).then(console.log)\"")]
+    [InlineData("(New-Object System.Net.WebClient).DownloadString(\"https://example.com\")")]
+    public void LooksLikeContentFetchCommand_FlagsFetchingCommands(string command)
+    {
+        Assert.True(AgentProjectUtilities.LooksLikeContentFetchCommand(command));
+    }
+
+    [Theory]
+    [InlineData("git clone https://github.com/foo/bar.git")]
+    [InlineData("npm install https://github.com/foo/pkg")]
+    [InlineData("dotnet add package Newtonsoft.Json --source https://api.nuget.org/v3/index.json")]
+    [InlineData("git fetch origin")]
+    [InlineData("git fetch https://github.com/foo/bar.git")]
+    [InlineData("dotnet test")]
+    [InlineData("curl --version")]
+    [InlineData("Create a script that downloads files from a server")]
+    public void LooksLikeContentFetchCommand_IgnoresLegitUrlAndLocalCommands(string command)
+    {
+        Assert.False(AgentProjectUtilities.LooksLikeContentFetchCommand(command));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void LooksLikeContentFetchCommand_BlankCommandsNeverFlag(string? command)
+    {
+        Assert.False(AgentProjectUtilities.LooksLikeContentFetchCommand(command!));
+    }
+
     [Fact]
     public void EditClassifier_TypeScriptPropertyAddition_UsesAnchoredEdit()
     {

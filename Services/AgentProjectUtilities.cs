@@ -168,6 +168,27 @@ public static class AgentProjectUtilities
                firstToken.StartsWith("./", StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// True when a _command step's text looks like it FETCHES CONTENT from an http(s)
+    /// URL with a download tool (curl/wget/Invoke-RestMethod/Invoke-WebRequest,
+    /// python urllib/requests, .NET WebClient/HttpClient, JS fetch()). This is the
+    /// "api.current.ai" failure mode — the planner doing a web search by writing a
+    /// command against an invented API instead of using _web_search/_web_fetch.
+    /// Legitimate URL-using commands (git clone, npm install &lt;git url&gt;,
+    /// dotnet add package --source, git fetch origin) never match: they lack a
+    /// content-fetch tool word, and bare `git fetch` has no URL in the fetch call.
+    /// </summary>
+    public static bool LooksLikeContentFetchCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return false;
+        return ContentFetchCommandRegex.IsMatch(command);
+    }
+
+    private static readonly Regex ContentFetchCommandRegex = new Regex(
+        @"(?i)\b(curl|wget|curl\.exe|irm|iwr|invoke-restmethod|invoke-webrequest|requests\.(?:get|post)|urllib|httpclient|webclient|downloadstring|downloadfile)\b[^\r\n]{0,200}https?://"
+        + @"|\bfetch\(\s*['""]?https?://",
+        RegexOptions.Compiled);
+
     public static bool HasSuccessfulEdits(IEnumerable<object> steps) =>
         steps.OfType<Dictionary<string, object?>>().Any(s =>
             s.TryGetValue("type", out var t) &&

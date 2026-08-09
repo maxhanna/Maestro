@@ -98,10 +98,10 @@
             <div class="section-body">
               <div class="plan-items-list">
                 <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                  ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                  title="{{item.done ? '✅' : '⬜'}} {{item.metaGroup ? item.metaGroup + ' — ' : ''}}{{item.file}}:{{item.line}} {{item.change}}">
+                  ng-class="{'plan-done': item.done, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && item.status!=='rejected'}"
+                  title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.metaGroup ? item.metaGroup + ' — ' : ''}}{{item.file}}:{{item.line}} {{item.change}}">
                   <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
-                    title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                    title="{{item.status==='rejected' ? 'Rejected step' : (item.done ? 'Mark not done' : 'Mark done')}}">{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}}</span>
                   <div class="plan-item-body">
                     <div class="plan-item-heading">
                       <div class="plan-item-text">
@@ -119,6 +119,7 @@
                         ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
+                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
                         <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
@@ -388,10 +389,10 @@
             <div class="section-body">
               <div class="plan-items-list">
                 <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                  ng-class="{'plan-done': item.done, 'plan-cancelled': item.cancelled, 'plan-pending': !item.done && !item.cancelled}"
-                  title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
+                  ng-class="{'plan-done': item.done, 'plan-cancelled': item.cancelled, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && !item.cancelled && item.status!=='rejected'}"
+                  title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.file}}:{{item.line}} {{item.change}}">
                   <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
-                    title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : item.cancelled ? '⏭' : '⬜'}}</span>
+                    title="{{item.status==='rejected' ? 'Rejected step' : (item.done ? 'Mark not done' : 'Mark done')}}">{{item.status==='rejected' ? '✗' : (item.done ? '✅' : item.cancelled ? '⏭' : '⬜')}}</span>
                   <div class="plan-item-body">
                     <div class="plan-item-heading">
                       <div class="plan-item-text">
@@ -410,6 +411,7 @@
                       <span class="plan-item-icon" ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
+                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
                         <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
@@ -732,9 +734,9 @@
             <div class="section-body">
               <div class="plan-items-list">
                 <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                  ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                  title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
-                  <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                  ng-class="{'plan-done': item.done, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && item.status!=='rejected'}"
+                  title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.file}}:{{item.line}} {{item.change}}">
+                  <span class="plan-item-icon">{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}}</span>
                   <div class="plan-item-body">
                     <div class="plan-item-heading">
                       <div class="plan-item-text">
@@ -748,6 +750,7 @@
                         {{item._showDetail ? '▲' : '▼'}}
                       </span>
                     </div>
+                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
                     <div ng-if="item._showDetail" class="plan-item-detail">
                       <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ? item.oldString.slice(0,200) + '…' : item.oldString}}</div>
                       <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ? item.newString.slice(0,200) + '…' : item.newString}}</div>
@@ -796,9 +799,6 @@
             <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
             <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
-            <button class="card-tag tag-pr-abort" ng-if="card.prStatus && card.prStatus.branch"
-              ng-click="vm.abortBranch(card); $event.stopPropagation();"
-              title="Abort branch '{{card.prStatus.branch}}' — check out the original branch, restore the pre-branch stash, and delete the branch (mid-run changes are kept in a weaver-abort stash).">↩ Abort</button>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
               <a ng-href="{{card.prStatus.prUrl}}" target="_blank" rel="noopener" ng-click="$event.stopPropagation()">🔗 PR</a>
             </span>
