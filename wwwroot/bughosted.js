@@ -53,12 +53,16 @@ angular.module('kanbanApp')
         return {
             init: function (vm, $scope) {
                 vm.bughostedUsername = ''; vm.bughostedPassword = ''; vm.bughostedHeartbeatEnabled = false;
+                vm.bughostedShareRank = false;
                 vm.bughostedClientId = ''; vm.bughostedStatus = 'disconnected'; vm.bughostedTesting = false;
                 vm.bughostedTestResult = ''; vm.bughostedTestError = ''; vm.remoteCommands = [];
                 vm.bughostedAutoLogin = readAutoLoginFlag();
 
+                // Rank is only sent to the bughosted server when the user opts in
+                // (vm.bughostedShareRank). Off = zeros, so nothing leaks by default.
                 function collectRankPayload() {
                     var out = { userScore: 0, rankTitle: '' };
+                    if (!vm.bughostedShareRank) return out;
                     try {
                         if (typeof vm.userStats !== 'function' || typeof vm.userRankProgress !== 'function') return out;
                         var stats = vm.userStats();
@@ -94,7 +98,7 @@ angular.module('kanbanApp')
                                 rankTitle: rank.rankTitle
                             }
                         ),
-                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, compactThinkingContext: vm.compactThinkingContext, summarizeDiffContext: vm.summarizeDiffContext, diffContextSummaryChars: vm.diffContextSummaryChars, llmTimeoutMinutes: vm.llmInfiniteTimeout ? 0 : (vm.llmTimeoutMinutes || 0), approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
+                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedShareRank: vm.bughostedShareRank, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, compactThinkingContext: vm.compactThinkingContext, summarizeDiffContext: vm.summarizeDiffContext, diffContextSummaryChars: vm.diffContextSummaryChars, llmTimeoutMinutes: vm.llmInfiniteTimeout ? 0 : (vm.llmTimeoutMinutes || 0), approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
                     };
                 }
 
@@ -242,6 +246,7 @@ angular.module('kanbanApp')
                         if (cmd.params.showKanban !== undefined) vm.showKanban = cmd.params.showKanban;
                         if (cmd.params.showCalendar !== undefined) vm.showCalendar = cmd.params.showCalendar;
                         if (cmd.params.autoQueue !== undefined) vm.autoQueue = cmd.params.autoQueue;
+                        if (cmd.params.bughostedShareRank !== undefined) vm.bughostedShareRank = cmd.params.bughostedShareRank;
                         if (cmd.params.prByDefault !== undefined) vm.prByDefault = cmd.params.prByDefault;
                         if (cmd.params.maxFileContextChars !== undefined) vm.maxFileContextChars = cmd.params.maxFileContextChars;
                         if (cmd.params.maxFullFileTokens !== undefined) vm.maxFullFileTokens = cmd.params.maxFullFileTokens;

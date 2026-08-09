@@ -522,6 +522,7 @@ angular.module('kanbanApp')
                             vm.bughostedUsername = cfg.bughostedUsername || '';
                             vm.bughostedPassword = cfg.bughostedPassword || '';
                             vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
+                            vm.bughostedShareRank = cfg.bughostedShareRank === true;
                             vm.themeColors = mergeTheme(cfg.themeColors);
                             vm.savedThemes = (cfg.savedThemes || []).map(function (t) { return { name: t.name || 'Untitled', colors: mergeTheme(t.colors), _editing: false, _editName: '' }; });
                             applyTheme(null, vm.themeColors);
@@ -578,6 +579,7 @@ angular.module('kanbanApp')
                         cfg.bughostedUsername = vm.bughostedUsername || '';
                         cfg.bughostedPassword = vm.bughostedPassword || '';
                         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
+                        cfg.bughostedShareRank = vm.bughostedShareRank === true;
                         // The user edited the credential fields to empty this session — empty is
                         // authoritative, so tell the server not to restore the old credentials.
                         cfg.clearBughostedCredentials = !!(vm._bughostedCredsEdited && !vm.bughostedUsername && !vm.bughostedPassword);
