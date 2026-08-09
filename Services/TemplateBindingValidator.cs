@@ -46,9 +46,12 @@ public static class TemplateBindingValidator
     private static readonly Regex _bracketStartRegex = new(@"^\s*[\{\}\[\]\(\)\,;:\.\|&\+\-=\*\/<>!?]", RegexOptions.Compiled);
 
     /// <summary>Member declaration: optional modifiers + optional decorator, then name followed by
-    /// `(`, `:`, `?:` or `=` (method or property, incl. get/set and @Input/@Output fields).</summary>
+    /// `(`, `:`, `?:`, `!:` or `=` (method or property, incl. get/set, @Input/@Output fields and
+    /// definite-assignment-asserted members like `keywordsInput!: ElementRef<...>`). The `=` branch
+    /// requires the char after it to not be `=` or `>` so comparisons (`a != b`) and arrows (`a => b`)
+    /// inside method bodies are never mistaken for member declarations.</summary>
     private static readonly Regex _memberDeclRegex = new(
-        @"^\s*(?:(?:public|private|protected|static|readonly|abstract|override|async|get|set)\s+)*(?:@\w+(?:\s*\([^)]*\))?\s+)*([A-Za-z_$][\w$]*)\s*(?:\(|\??[:=])",
+        @"^\s*(?:(?:public|private|protected|static|readonly|abstract|override|async|get|set)\s+)*(?:@\w+(?:\s*\([^)]*\))?\s+)*([A-Za-z_$][\w$]*)\s*(?:\(|(?:!|\?)?:|=(?!=|>))",
         RegexOptions.Compiled);
 
     private static readonly Regex _classDeclRegex = new(
@@ -67,8 +70,12 @@ public static class TemplateBindingValidator
     private static readonly Regex _stringLiteralRegex = new(
         @"'(?:[^'\\]|\\.)*'|""(?:[^""\\]|\\.)*""|`(?:[^`\\]|\\.)*`", RegexOptions.Compiled);
 
+    /// <summary>Member-access chain roots plus optional-chaining segments. `?.` is a chain
+    /// separator too, so `a?.b?.c` yields ONE match (root `a`) instead of three standalone
+    /// roots (`a`, `b`, `c`) — the post-`?.` identifiers are data fields, not component members.
+    /// The `!` non-null segment (`a!.b`) is likewise part of the chain.</summary>
     private static readonly Regex _chainRegex = new(
-        @"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*", RegexOptions.Compiled);
+        @"[A-Za-z_$][\w$]*(?:(?:!|\?)?\.[A-Za-z_$][\w$]*)*", RegexOptions.Compiled);
 
     private static readonly Regex _objectKeyRegex = new(
         @"(?<=[\{,(]\s*)([A-Za-z_$][\w$]*)\s*:", RegexOptions.Compiled);
@@ -93,23 +100,31 @@ public static class TemplateBindingValidator
         var depth = 0;
         var inDecorator = false;
         var decoratorParenDepth = 0;
+        var inTemplateLiteral = false;
+        var inBlockComment = false;
         foreach (var rawLine in content.Split('\n'))
         {
             var line = rawLine.TrimEnd('\r');
+            // Strip string literals (incl. multi-line backticks) and comments FIRST so brace/paren
+            // counting and member scanning never get skewed by braces/parens inside strings — a
+            // single "}" inside a template literal (`` `${x}` ``, CSS/HTML strings) previously
+            // knocked depth negative and silently dropped every member declared after it.
+            CountStructuralChars(line, ref inTemplateLiteral, ref inBlockComment,
+                out var braceDelta, out var parenDelta, out var code);
             if (inDecorator)
             {
-                decoratorParenDepth += line.Count(c => c == '(') - line.Count(c => c == ')');
+                decoratorParenDepth += parenDelta;
                 if (decoratorParenDepth <= 0) inDecorator = false;
                 continue;
             }
-            var trimmedStart = line.TrimStart();
+            var trimmedStart = code.TrimStart();
             if (trimmedStart.StartsWith('@'))
             {
                 // Strip a single-line decorator (@Input() userId?: number;) and keep scanning
                 // the remainder for the member declaration. Multi-line decorators (@Component({
                 // ...}) balance > 0) enter skip mode until their parens close.
                 var decMatch = Regex.Match(trimmedStart, @"^@\w+(\([^)]*\))");
-                var balance = line.Count(c => c == '(') - line.Count(c => c == ')');
+                var balance = parenDelta;
                 if (balance > 0)
                 {
                     inDecorator = true;
@@ -118,11 +133,11 @@ public static class TemplateBindingValidator
                 }
                 if (decMatch.Success)
                 {
-                    var remainder = line.Substring(line.Length - trimmedStart.Length + decMatch.Length);
+                    var remainder = code.Substring(code.Length - trimmedStart.Length + decMatch.Length);
                     if (inClass)
                     {
                         CollectMemberFromLine(remainder, members);
-                        depth += line.Count(c => c == '{') - line.Count(c => c == '}');
+                        depth += braceDelta;
                         if (depth <= 0) { inClass = false; depth = 0; }
                     }
                 }
@@ -133,24 +148,103 @@ public static class TemplateBindingValidator
                 if (_classDeclRegex.IsMatch(line))
                 {
                     inClass = true;
-                    depth = line.Count(c => c == '{') - line.Count(c => c == '}');
+                    depth = braceDelta;
                     if (depth <= 0) depth = 0;
                 }
                 continue;
             }
             // Inside a class body.
-            if (depth <= 1 && line.TrimStart().StartsWith('}'))
+            if (depth <= 1 && code.TrimStart().StartsWith('}'))
             {
                 inClass = false;
                 depth = 0;
                 continue;
             }
-            CollectMemberFromLine(line, members);
-            depth += line.Count(c => c == '{') - line.Count(c => c == '}');
+            CollectMemberFromLine(code, members);
+            depth += braceDelta;
             if (depth <= 0) { inClass = false; depth = 0; }
         }
         members.Remove("constructor");
         return members.ToList();
+    }
+
+    /// <summary>
+    /// Scans a line of TypeScript, blanking out string literals (single/double quotes and
+    /// backtick template literals, which may span lines), line comments and /* */ block
+    /// comments. Returns the brace/paren balance computed on the remaining code plus the
+    /// code itself (strings/comments replaced with spaces) for member scanning. Template
+    /// literals are blanked entirely — including `${...}` interpolations — which is safe for
+    /// depth tracking because an interpolation's braces always pair with its own `${`.
+    /// </summary>
+    private static void CountStructuralChars(string line, ref bool inTemplateLiteral, ref bool inBlockComment,
+        out int braceDelta, out int parenDelta, out string code)
+    {
+        var sb = new System.Text.StringBuilder(line.Length);
+        braceDelta = 0;
+        parenDelta = 0;
+        var i = 0;
+        var n = line.Length;
+        while (i < n)
+        {
+            var c = line[i];
+            var next = i + 1 < n ? line[i + 1] : '\0';
+            if (inBlockComment)
+            {
+                if (c == '*' && next == '/')
+                {
+                    inBlockComment = false;
+                    sb.Append(' '); sb.Append(' '); i += 2;
+                    continue;
+                }
+                sb.Append(' '); i++;
+                continue;
+            }
+            if (inTemplateLiteral)
+            {
+                if (c == '\\') { sb.Append(' '); i += 2; continue; }
+                if (c == '`') { inTemplateLiteral = false; sb.Append(' '); i++; continue; }
+                sb.Append(' '); i++;
+                continue;
+            }
+            if (c == '/' && next == '/')
+            {
+                sb.Append(' ', n - i);
+                break;
+            }
+            if (c == '/' && next == '*')
+            {
+                inBlockComment = true;
+                sb.Append(' '); sb.Append(' '); i += 2;
+                continue;
+            }
+            if (c == '\'' || c == '"')
+            {
+                var quote = c;
+                i++;
+                while (i < n && line[i] != quote)
+                {
+                    if (line[i] == '\\') i++;
+                    i++;
+                }
+                if (i < n) i++; // closing quote
+                sb.Append(' ');
+                continue;
+            }
+            if (c == '`')
+            {
+                inTemplateLiteral = true;
+                sb.Append(' ');
+                i++;
+                continue;
+            }
+            if (c == '{') { braceDelta++; sb.Append(c); }
+            else if (c == '}') { braceDelta--; sb.Append(c); }
+            else if (c == '(') { parenDelta++; sb.Append(c); }
+            else if (c == ')') { parenDelta--; sb.Append(c); }
+            else sb.Append(c);
+            i++;
+        }
+        code = sb.ToString();
     }
 
     private static void CollectMemberFromLine(string line, HashSet<string> members)
@@ -306,11 +400,13 @@ public static class TemplateBindingValidator
         foreach (Match m in _chainRegex.Matches(seg))
         {
             var parts = m.Value.Split('.');
-            var root = parts[0];
+            // Strip optional-chaining / non-null markers left by `?.` / `!.` separators —
+            // `a?.b` splits to ["a?", "b"]; the root must resolve as `a`, not `a?`.
+            var root = parts[0].TrimEnd('?', '!');
             if (root.StartsWith("$")) continue;
             if (_controllerAliases.Contains(root))
             {
-                if (parts.Length > 1) AddCandidate(parts[1], symbols);
+                if (parts.Length > 1) AddCandidate(parts[1].TrimEnd('?', '!'), symbols);
                 continue;
             }
             AddCandidate(root, symbols);

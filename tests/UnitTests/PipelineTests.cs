@@ -1,6 +1,7 @@
 using Xunit;
 using Weaver.Services;
 using Weaver;
+using Weaver.Controllers;
 
 namespace Weaver.UnitTests;
 
@@ -517,5 +518,53 @@ class Dto { int id; }
         // Should favor CodeEdit because of 'component' and 'update' which are strong edit signals
         Assert.Equal(PipelineType.CodeEdit, type);
         Assert.True(editScore > 0);
+    }
+
+    // ─── Post-execution repair-loop churn circuit breaker ────────────────────
+
+    [Fact]
+    public void RepairChurnBreaker_TripsAfterMaxConsecutiveZeroChangePasses()
+    {
+        // Two consecutive passes that change nothing trip the breaker (max = 2).
+        var (count1, tripped1) = AgentController.AdvanceRepairChurnBreaker(0, changedFiles: false, maxZeroChangeRepairs: 2);
+        Assert.Equal(1, count1);
+        Assert.False(tripped1);
+
+        var (count2, tripped2) = AgentController.AdvanceRepairChurnBreaker(count1, changedFiles: false, maxZeroChangeRepairs: 2);
+        Assert.Equal(2, count2);
+        Assert.True(tripped2);
+    }
+
+    [Fact]
+    public void RepairChurnBreaker_AnyRealChangeResetsTheCounter()
+    {
+        // One zero-change pass, then a pass that actually edits a file → counter resets to 0.
+        var (count1, tripped1) = AgentController.AdvanceRepairChurnBreaker(0, changedFiles: false, maxZeroChangeRepairs: 2);
+        Assert.Equal(1, count1);
+
+        var (count2, tripped2) = AgentController.AdvanceRepairChurnBreaker(count1, changedFiles: true, maxZeroChangeRepairs: 2);
+        Assert.Equal(0, count2);
+        Assert.False(tripped2);
+
+        // And the reset lets the breaker run the full window again before tripping.
+        var (count3, tripped3) = AgentController.AdvanceRepairChurnBreaker(count2, changedFiles: false, maxZeroChangeRepairs: 2);
+        Assert.Equal(1, count3);
+        Assert.False(tripped3);
+    }
+
+    [Fact]
+    public void RepairChurnBreaker_ThresholdOneTripsImmediately()
+    {
+        var (count, tripped) = AgentController.AdvanceRepairChurnBreaker(0, changedFiles: false, maxZeroChangeRepairs: 1);
+        Assert.Equal(1, count);
+        Assert.True(tripped);
+    }
+
+    [Fact]
+    public void RepairChurnBreaker_NeverTripsWhileChangesLand()
+    {
+        var (count, tripped) = AgentController.AdvanceRepairChurnBreaker(0, changedFiles: true, maxZeroChangeRepairs: 2);
+        Assert.Equal(0, count);
+        Assert.False(tripped);
     }
 }

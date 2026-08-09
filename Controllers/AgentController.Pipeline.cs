@@ -292,6 +292,12 @@ partial class AgentController
         var planAlreadyExecuted = false;
         var planCompleteDeclared = false;
         AgentPlan plan = new();
+        // Pre-edit content of HTML files targeted by this run, captured BEFORE each edit lands.
+        // Post-execution template-binding validation uses these to only flag bindings the run
+        // INTRODUCED — pre-existing bindings (template refs, array properties, members the
+        // regex extractor misses) never false-positive the repair loop. First capture per file
+        // wins so a file edited across multiple steps is compared against its ORIGINAL content.
+        var preEditSnapshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (metaPlan?.SubPlans?.Count > 0)
         {
             await EmitLog(emitSse, "info", $"Phase 2 — META-PLAN ({metaPlan.SubPlans.Count} sub-plans)", ct: ct);
@@ -385,6 +391,9 @@ partial class AgentController
                         summary: $"Sub-plan {i + 1}/{metaPlan.SubPlans.Count}: {subPlan.Title}",
                         score: subPlanResult.Score);
                     var subResults = new List<object>();
+                    // Snapshot the sub-plan's HTML targets before execution so template-binding
+                    // validation only flags bindings these edits introduce (first capture wins).
+                    SnapshotPreEditFiles(projectRoot, subPlanResult, preEditSnapshots);
                     await ExecutePlan(prompt, projectRoot, emitSse, "", subPlanResult, ct, subResults,
                         steeringContext: subPlan.ContextNote, attachedFiles: attachedFiles, cardId: cardId);
                     await UpdateMetaPlanSubPlanStatusAsync(cardId, subPlan.Id, true, emitSse, ct);
@@ -414,7 +423,7 @@ partial class AgentController
         }
         // Snapshot pre-edit content of plan-targeted HTML files so post-execution template
         // binding validation only flags bindings INTRODUCED by the edit — not pre-existing ones.
-        var preEditSnapshots = SnapshotPreEditFiles(projectRoot, plan ?? new AgentPlan());
+        preEditSnapshots = SnapshotPreEditFiles(projectRoot, plan ?? new AgentPlan(), preEditSnapshots);
         if (!planAlreadyExecuted)
         {
             await EmitLog(emitSse, "info", "Phase 2 — PLAN & EXECUTE (interleaved, one atomic step at a time)", ct: ct);
@@ -423,8 +432,13 @@ partial class AgentController
                 var ctxBreakdown = BuildContextBreakdown(ds, discoveryContext);
                 await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext), contextChars = discoveryContext.Length, contextBreakdown = ctxBreakdown, prompt }, ct);
             }
-            var (interleavedPlan, interleavedResults, updatedContext, interleavedComplete) = await RunInterleavedPlanExecutionLoop(
+            var (interleavedPlan, interleavedResults, updatedContext, interleavedComplete, interleavedSnapshots) = await RunInterleavedPlanExecutionLoop(
                 prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles, atomicStepEstimate);
+            // Merge the loop's per-step pre-edit captures (captured right before each edit) so
+            // post-execution template-binding validation sees the run's pre-edit content even
+            // when the pre-loop meta-plan named no HTML files. First capture per file wins.
+            foreach (var kv in interleavedSnapshots)
+                if (!preEditSnapshots.ContainsKey(kv.Key)) preEditSnapshots[kv.Key] = kv.Value;
             plan = interleavedPlan;
             discoveryContext = updatedContext;
             allSteps.AddRange(interleavedResults);
@@ -669,9 +683,11 @@ partial class AgentController
         if (!taskComplete)
         {
             const int MaxPostVerifyRepairIterations = 3;
+            const int MaxZeroChangeRepairs = 2; // consecutive repair passes that change NO files trip the churn circuit breaker
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
             var partialEditFeedback = new StringBuilder();
+            var zeroChangeRepairs = 0;
             while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)
             {
                 repairIteration++;
@@ -815,6 +831,7 @@ partial class AgentController
                 var mergedDone = new HashSet<int>();
                 for (var i = 0; i < originalStepCount && i < (plan?.Plan?.Count ?? 0); i++)
                     mergedDone.Add(i);
+                var successfulEditsBefore = CountSuccessfulEditResults(allSteps);
                 if (plan != null)
                 {
                     await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
@@ -837,6 +854,32 @@ partial class AgentController
                         break;
                     }
                     continue;
+                }
+                // CHURN CIRCUIT BREAKER: the repair executed but changed NO files and the
+                // verifier issue survived — consecutive passes like this mean the verifier
+                // keeps flagging something no edit can fix (a false positive like the
+                // template-binding churn). Stop repairing instead of burning LLM calls on
+                // garbage steps; the changes already made are kept and the task finishes.
+                var successfulEditsAfter = CountSuccessfulEditResults(allSteps);
+                var (newZeroChangeCount, breakerTripped) = AdvanceRepairChurnBreaker(
+                    zeroChangeRepairs, successfulEditsAfter != successfulEditsBefore, MaxZeroChangeRepairs);
+                zeroChangeRepairs = newZeroChangeCount;
+                if (breakerTripped)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"⛔ Repair circuit breaker tripped — {zeroChangeRepairs} consecutive repair passes produced zero file changes. " +
+                        $"The verifier issue is likely a false positive; stopping the repair loop and keeping changes. " +
+                        $"Remaining issues: {string.Join("; ", verificationIssues ?? [])}", ct: ct);
+                    verificationDetails += $" — repair circuit breaker tripped after {zeroChangeRepairs} consecutive zero-change passes " +
+                        $"(verifier issue likely non-actionable); changes kept";
+                    taskComplete = true;
+                    break;
+                }
+                if (zeroChangeRepairs > 0)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Repair pass {repairIteration}: repair changed NO files ({zeroChangeRepairs}/{MaxZeroChangeRepairs} consecutive) — " +
+                        $"verifier issue likely false-positive; next no-change pass trips the circuit breaker.", ct: ct);
                 }
                 var (reVerified, reDetails, reIssues, reSpeculative) =
                     await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots);
@@ -1280,6 +1323,29 @@ partial class AgentController
             catch { }
         }
         return files;
+    }
+
+    /// <summary>Counts results in a step/result collection that represent files actually
+    /// modified or created this run — used by the repair-loop circuit breaker to detect
+    /// passes that changed nothing (verifier churn).</summary>
+    private static int CountSuccessfulEditResults(List<object> results) => results
+        .OfType<Dictionary<string, object?>>()
+        .Count(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+                    r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
+
+    /// <summary>
+    /// Repair-loop churn circuit breaker: after `maxZeroChangeRepairs` CONSECUTIVE repair
+    /// passes that changed no files, the breaker trips so a false-positive verifier issue
+    /// (e.g. the template-binding churn) cannot keep spawning garbage repair steps. Any pass
+    /// that actually changed a file resets the counter. Returns the new count and whether
+    /// the breaker tripped.
+    /// </summary>
+    public static (int count, bool tripped) AdvanceRepairChurnBreaker(
+        int zeroChangeRepairs, bool changedFiles, int maxZeroChangeRepairs)
+    {
+        if (changedFiles) return (0, false);
+        var next = zeroChangeRepairs + 1;
+        return next >= maxZeroChangeRepairs ? (next, true) : (next, false);
     }
 
     /// <summary>Snapshots the pre-edit on-disk content of plan-targeted files (HTML templates)

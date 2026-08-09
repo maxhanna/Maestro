@@ -175,6 +175,225 @@ public class TemplateBindingValidatorTests
         Assert.DoesNotContain("svc", members);
     }
 
+    // ─── Check A: hardened extraction (patterns the old regexes missed) ──────
+    // Members declared with definite-assignment assertions (keywordsInput!:), inline or
+    // multi-line @ViewChild decorators, and members declared AFTER methods containing braces
+    // inside string/template literals — a "}" in a backtick string used to knock depth
+    // tracking negative and silently drop every subsequent member.
+
+    private const string HardenedComponent = """
+        import { Component, ViewChild, ElementRef } from '@angular/core';
+
+        @Component({ selector: 'app-crawler' })
+        export class CrawlerComponent {
+          load() {
+            const label = "weird ( brace }";
+            const css = `padding: ${this.indexCount}px }`;
+            return 1;
+          }
+          parentRef!: ElementRef<HTMLDivElement> | null;
+          onMobile = window.innerWidth < 768;
+          noFavourites = false;
+          @ViewChild('keywordsInput') keywordsInput!: ElementRef<HTMLInputElement>;
+          searchResults: any[] = [];
+          indexCount = 0;
+        }
+        """;
+
+    [Fact]
+    public void ComponentMemberExtractor_BracesInStringsDoNotBreakDepthTracking()
+    {
+        // The regression: a "}" inside a template literal (and "(" / "}" inside a quoted
+        // string) inside a method used to knock class-body depth negative, exiting the class
+        // early and dropping EVERY member declared after it — the all-five-bindings-missing
+        // crawler false positive.
+        var members = TemplateBindingValidator.ExtractComponentMembers(HardenedComponent);
+        Assert.Contains("parentRef", members);      // !: definite-assignment assertion
+        Assert.Contains("onMobile", members);       // plain assignment AFTER the string-brace method
+        Assert.Contains("noFavourites", members);
+        Assert.Contains("keywordsInput", members);  // @ViewChild(...) + !:
+        Assert.Contains("searchResults", members);
+        Assert.Contains("indexCount", members);
+        Assert.Contains("load", members);
+    }
+
+    [Fact]
+    public void ComponentMemberExtractor_MultiLineDecoratorThenMember_Collected()
+    {
+        var ts = """
+            @Component({ selector: 'app-x' })
+            export class XComponent {
+              @ViewChild('input')
+              inputRef!: ElementRef<HTMLInputElement>;
+              title = 'x';
+            }
+            """;
+        var members = TemplateBindingValidator.ExtractComponentMembers(ts);
+        Assert.Contains("inputRef", members);
+        Assert.Contains("title", members);
+    }
+
+    [Fact]
+    public void ComponentMemberExtractor_ComparisonsAndArrowsNotMembers()
+    {
+        var ts = """
+            @Component({ selector: 'app-x' })
+            export class XComponent {
+              run() {
+                if (a != b) { return; }
+                const fn = (x: number) => x * 2;
+                return a === b;
+              }
+            }
+            """;
+        var members = TemplateBindingValidator.ExtractComponentMembers(ts);
+        Assert.Contains("run", members);
+        Assert.DoesNotContain("a", members);
+        Assert.DoesNotContain("b", members);
+        Assert.DoesNotContain("fn", members);
+        Assert.DoesNotContain("x", members);
+    }
+
+    [Fact]
+    public void TemplateSymbols_OptionalChaining_TreatedAsSingleChain()
+    {
+        // keywordsInput?.nativeElement?.value?.length used to extract nativeElement / value /
+        // length as standalone "missing" symbols — exactly how 'length' got flagged.
+        var html = """<div *ngIf="keywordsInput?.nativeElement?.value?.length > 0">{{ keywordsInput?.nativeElement?.value }}</div>""";
+        var symbols = TemplateBindingValidator.ExtractTemplateSymbols(html);
+        Assert.Contains("keywordsInput", symbols);
+        Assert.DoesNotContain("nativeElement", symbols);
+        Assert.DoesNotContain("value", symbols);
+        Assert.DoesNotContain("length", symbols);
+    }
+
+    [Fact]
+    public void ValidateTemplateBindings_HardenedPatterns_NoFalsePositives()
+    {
+        // Whole-template fallback (no snapshot): the crawler component's pre-existing bindings
+        // — #keywordsInput template ref, parentRef / noFavourites / onMobile members, and the
+        // optional-chained keywordsInput?.nativeElement?.value?.length — must ALL resolve.
+        var html = """
+            <div class="notificationContainer">
+              <input #keywordsInput />
+              <div *ngIf="!searchResults.length && indexCount" class="nbDiv">Total indexes: {{ indexCount }}</div>
+              <div *ngIf="parentRef">{{ parentRef.nativeElement }}</div>
+              <div *ngIf="noFavourites">None</div>
+              <div *ngIf="onMobile && keywordsInput?.nativeElement?.value?.length">mobile</div>
+            </div>
+            """;
+        Assert.Empty(TemplateBindingValidator.ValidateTemplateBindings("crawler.component.html", html, HardenedComponent));
+    }
+
+    // ─── Check A: snapshot-based validation (only symbols the edit introduced) ─
+    // The crawler-component false-positive regression: whole-template validation flags
+    // PRE-EXISTING bindings that the regex extractor can't resolve (template refs like
+    // #keywordsInput, array properties like searchResults.length, or members defined in
+    // ways the extractor misses) — which drove the repair loop to add garbage steps. With
+    // the pre-edit snapshot supplied, only symbols INTRODUCED by the edit are validated.
+
+    private const string CrawlerComponent = """
+        @Component({ selector: 'app-crawler' })
+        export class CrawlerComponent {
+          indexCount = 0;
+          isLoading = false;
+          constructor(private crawlerService: any) {}
+        }
+        """;
+
+    private const string CrawlerHtmlBefore = """
+        <div class="notificationContainer">
+          <input #keywordsInput />
+          <div *ngIf="!searchResults.length && indexCount" class="nbDiv">Total indexes: {{ indexCount }}</div>
+          <div *ngIf="noFavourites">No favourites yet</div>
+          <div *ngIf="onMobile">On mobile</div>
+          <div *ngIf="parentRef">Parent</div>
+        </div>
+        """;
+
+    private static string TempProjectRoot()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver-tbv-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    [Fact]
+    public void CheckModifiedTemplates_WithPreEditSnapshot_PreexistingBindingsNotFlagged()
+    {
+        // The edit only adds a pipe to an EXISTING binding — every other binding (some not
+        // even resolvable: #keywordsInput template ref, searchResults.length array property,
+        // onMobile/noFavourites/parentRef absent from the component) predates the run.
+        var dir = TempProjectRoot();
+        try
+        {
+            var newHtml = CrawlerHtmlBefore.Replace("{{ indexCount }}", "{{ indexCount | number:'1.0-0' }}");
+            File.WriteAllText(Path.Combine(dir, "crawler.component.html"), newHtml);
+            File.WriteAllText(Path.Combine(dir, "crawler.component.ts"), CrawlerComponent);
+            var snapshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["crawler.component.html"] = CrawlerHtmlBefore
+            };
+            var issues = TemplateBindingValidator.CheckModifiedTemplates(
+                dir, new[] { "crawler.component.html" }, snapshots);
+            Assert.Empty(issues);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void CheckModifiedTemplates_WithPreEditSnapshot_NewlyIntroducedMissingSymbolFlagged()
+    {
+        // Pre-edit template is fully valid; the edit introduces a binding to a symbol the
+        // component does not expose — the snapshot path must STILL flag it.
+        var dir = TempProjectRoot();
+        try
+        {
+            var before = """<div *ngIf="indexCount">Total: {{ indexCount }}</div>""";
+            var after = before + "\n<span>{{ totallyMadeUp }}</span>";
+            File.WriteAllText(Path.Combine(dir, "crawler.component.html"), after);
+            File.WriteAllText(Path.Combine(dir, "crawler.component.ts"), CrawlerComponent);
+            var snapshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["crawler.component.html"] = before
+            };
+            var issues = TemplateBindingValidator.CheckModifiedTemplates(
+                dir, new[] { "crawler.component.html" }, snapshots);
+            Assert.Contains(issues, i => i.Contains("totallyMadeUp"));
+            Assert.DoesNotContain(issues, i => i.Contains("indexCount"));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void CheckModifiedTemplates_WithoutSnapshot_FallsBackToWholeTemplateValidation()
+    {
+        // Documents the pre-fix contract: with no pre-edit snapshot (the interleaved loop
+        // before this fix supplied none), every pre-existing unresolved binding is flagged —
+        // the false-positive that spawned the garbage repair steps.
+        var dir = TempProjectRoot();
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "crawler.component.html"), CrawlerHtmlBefore);
+            File.WriteAllText(Path.Combine(dir, "crawler.component.ts"), CrawlerComponent);
+            var issues = TemplateBindingValidator.CheckModifiedTemplates(
+                dir, new[] { "crawler.component.html" }, null);
+            Assert.Contains(issues, i => i.Contains("onMobile"));
+            Assert.Contains(issues, i => i.Contains("noFavourites"));
+            Assert.DoesNotContain(issues, i => i.Contains("keywordsInput")); // template ref — never a symbol
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
     // ─── Check B: component wired but never rendered ──────────────────────────
 
     private static List<object> ReadStep(string path)

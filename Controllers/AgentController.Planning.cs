@@ -1887,7 +1887,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// terminal command.
     /// </summary>
     private static bool ShouldRejectFetchCommand(string? prompt, string? command) =>
-        TaskHintsWebNeed(prompt) && AgentProjectUtilities.LooksLikeContentFetchCommand(command);
+        TaskHintsWebNeed(prompt) && AgentProjectUtilities.LooksLikeContentFetchCommand(command ?? "");
 
     private static bool IsWebStep(string? file)
     {
@@ -2135,13 +2135,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return "latest information";
     }
 
-    private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared)> RunInterleavedPlanExecutionLoop(
+    private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared,
+        Dictionary<string, string> preEditSnapshots)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
         List<string>? attachedFiles = null, int? atomicStepEstimate = null)
     {
         var planSoFar = new List<PlanStep>();
         var allResults = new List<object>();
+        // First-capture-per-file pre-edit content of every file edited this run. Unlike the
+        // per-step preEditContents (which holds the content before the LAST edit, for diffs),
+        // this keeps the ORIGINAL pre-run content so post-execution template-binding validation
+        // only flags symbols the run actually introduced — pre-existing bindings (template refs
+        // like #keywordsInput, array properties like searchResults.length, members the regex
+        // extractor simply misses) never false-positive the repair loop.
+        var preRunSnapshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var rejectionFeedback = new List<string>();
         var planCompleteDeclared = false;
         var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2232,7 +2240,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (queuedStep.File != null && !AgentProjectUtilities.IsSpecialMarker(queuedStep.File))
                 {
                     var fp = Path.GetFullPath(Path.Combine(projectRoot, (queuedStep.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
-                    if (System.IO.File.Exists(fp)) preEditContents[queuedStep.File!] = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                    if (System.IO.File.Exists(fp))
+                    {
+                        var preContent = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                        preEditContents[queuedStep.File!] = preContent;
+                        var relKey = queuedStep.File!.Replace('\\', '/');
+                        if (!preRunSnapshots.ContainsKey(relKey)) preRunSnapshots[relKey] = preContent;
+                    }
                 }
                 try
                 {
@@ -2872,7 +2886,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (stepToRun?.File != null && !AgentProjectUtilities.IsSpecialMarker(stepToRun.File))
                 {
                     var fp = Path.GetFullPath(Path.Combine(projectRoot, (stepToRun.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
-                    if (System.IO.File.Exists(fp) && stepToRun.File != null) preEditContents[stepToRun.File] = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                    if (System.IO.File.Exists(fp) && stepToRun.File != null)
+                    {
+                        var preContent = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                        preEditContents[stepToRun.File] = preContent;
+                        var relKey = stepToRun.File!.Replace('\\', '/');
+                        if (!preRunSnapshots.ContainsKey(relKey)) preRunSnapshots[relKey] = preContent;
+                    }
                 }
                 try
                 {
@@ -2927,7 +2947,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         if (synthStep?.File != null && !AgentProjectUtilities.IsSpecialMarker(synthStep.File))
                         {
                             var sfp = Path.GetFullPath(Path.Combine(projectRoot, synthStep.File.Replace('/', Path.DirectorySeparatorChar)));
-                            if (System.IO.File.Exists(sfp)) preEditContents[synthStep.File] = await System.IO.File.ReadAllTextAsync(sfp, Encoding.UTF8, ct);
+                            if (System.IO.File.Exists(sfp))
+                            {
+                                var preContent = await System.IO.File.ReadAllTextAsync(sfp, Encoding.UTF8, ct);
+                                preEditContents[synthStep.File] = preContent;
+                                var relKey = synthStep.File.Replace('\\', '/');
+                                if (!preRunSnapshots.ContainsKey(relKey)) preRunSnapshots[relKey] = preContent;
+                            }
                         }
                         try
                         {
@@ -3268,7 +3294,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             Score = 90,
             Plan = planSoFar
         };
-        return (finalPlan, allResults, discoveryContext, planCompleteDeclared);
+        return (finalPlan, allResults, discoveryContext, planCompleteDeclared, preRunSnapshots);
     }
     private async Task<string> RefreshFileInDiscoveryContext(
         string relPath, string discoveryContext, string projectRoot, CancellationToken ct)
