@@ -53,6 +53,13 @@ angular.module('kanbanApp')
                     vm.saveCards();
                 };
 
+                // Quick-remove from the "attached files" strip in the picker popup:
+                // a file shown there is always in card.attached, so toggling removes it
+                // from both the card model and the selected-UI state (and saves).
+                vm.pickerRemoveFile = function (path) {
+                    vm.pickerToggleFile(path);
+                };
+
                 vm.attachFile = function (cardId) {
                     vm.pickerCardId = cardId;
                     vm.pickerPath = '';

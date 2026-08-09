@@ -1470,6 +1470,22 @@ partial class AgentController
             sb.AppendLine();
         }
         sb.AppendLine("### CURRENT STATE OF MODIFIED FILES (AUTHORITATIVE — read from disk after ALL edits) ###");
+        // Anchors = the post-edit content of every applied edit per path. When a large file
+        // body is windowed below, these anchors guarantee the verifier ALWAYS sees the region
+        // this run changed (a 36k-char stylesheet whose edit lands at char 29k must not be
+        // shown as only its first 12k chars — the verifier then honestly reports the new rule
+        // as 'not found').
+        var anchorsByPath = allResults
+            .OfType<Dictionary<string, object?>>()
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() is "edit" or "create" &&
+                        r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" &&
+                        r.GetValueOrDefault("path")?.ToString() is string _)
+            .GroupBy(r => r["path"]!.ToString()!)
+            .ToDictionary(g => g.Key, g => g
+                .Select(r => r.GetValueOrDefault("newStringPreview")?.ToString())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Cast<string>()
+                .ToList(), StringComparer.OrdinalIgnoreCase);
         var typeFilesToInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var relPath in modifiedPaths)
         {
@@ -1480,12 +1496,15 @@ partial class AgentController
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
                 // Cap per-file bodies so a run that creates several large files (new server.py /
                 // .cs / .html bodies) can't balloon the verifier prompt. Small files pass through
-                // untouched; the marker keeps the truncation explicit so the verifier knows the
-                // tail is omitted rather than concluding the file ends there.
+                // untouched. Large files are windowed around the edited region(s) — head + the
+                // change this run made + tail — so the verifier never concludes a change is
+                // 'missing' just because it landed beyond a head-only truncation point.
                 const int MaxFileBodyChars = 12000;
                 if (content.Length > MaxFileBodyChars)
-                    content = content[..MaxFileBodyChars] +
-                        $"\n… [TRUNCATED — file is {content.Length} chars, showing first {MaxFileBodyChars}]";
+                {
+                    anchorsByPath.TryGetValue(relPath, out var fileAnchors);
+                    content = AgentTextUtilities.BuildVerifierFileView(content, fileAnchors, MaxFileBodyChars);
+                }
                 sb.AppendLine($"\n### {relPath}");
                 sb.AppendLine("```");
                 sb.AppendLine(content);

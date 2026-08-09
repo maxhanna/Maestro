@@ -1328,10 +1328,14 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
     }
     private static List<object> ExtractFilesEdited(List<object> steps)
     {
-        var result = steps.OfType<Dictionary<string, object?>>()
-            .Where(s => s.TryGetValue("type", out var t) && (t?.ToString() == "edit" || t?.ToString() == "rename") &&
-                        s.TryGetValue("status", out var st) && st?.ToString() == "done")
-            .Select(s => (object)new
+        var result = new List<object>();
+        var paths = new List<string?>();
+        foreach (var step in steps)
+        {
+            if (step is not Dictionary<string, object?> s) continue;
+            if (!(s.TryGetValue("type", out var t) && (t?.ToString() == "edit" || t?.ToString() == "rename") &&
+                  s.TryGetValue("status", out var st) && st?.ToString() == "done")) continue;
+            result.Add((object)new
             {
                 path = s.GetValueOrDefault("path"),
                 action = s.GetValueOrDefault("editAction"),
@@ -1339,23 +1343,43 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                 linesAdded = s.GetValueOrDefault("linesAdded"),
                 linesRemoved = s.GetValueOrDefault("linesRemoved"),
                 preview = s.GetValueOrDefault("diffPreview")
-            }).ToList();
-        if (result.Count > 0) return result;
-        foreach (var step in steps)
-        {
-            if (step is Dictionary<string, object?>) continue;
-            try
-            {
-                var json = JsonSerializer.Serialize(step);
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-                var type = root.TryGetProperty("type", out var t) ? t.GetString() : "";
-                var status = root.TryGetProperty("status", out var st) ? st.GetString() : "";
-                if ((type == "edit" || type == "rename") && status == "done")
-                    result.Add(new { path = root.TryGetProperty("path", out var p) ? p.GetString() : null, action = (string?)null, toPath = (string?)null, linesAdded = 0, linesRemoved = 0, preview = (string?)null });
-            }
-            catch { }
+            });
+            paths.Add(s.GetValueOrDefault("path")?.ToString());
         }
-        return result;
+        if (result.Count == 0)
+        {
+            foreach (var step in steps)
+            {
+                if (step is Dictionary<string, object?>) continue;
+                try
+                {
+                    var json = JsonSerializer.Serialize(step);
+                    using var doc = JsonDocument.Parse(json);
+                    var root = doc.RootElement;
+                    var type = root.TryGetProperty("type", out var t) ? t.GetString() : "";
+                    var status = root.TryGetProperty("status", out var st) ? st.GetString() : "";
+                    if ((type == "edit" || type == "rename") && status == "done")
+                    {
+                        result.Add(new { path = root.TryGetProperty("path", out var p) ? p.GetString() : null, action = (string?)null, toPath = (string?)null, linesAdded = 0, linesRemoved = 0, preview = (string?)null });
+                        paths.Add(root.TryGetProperty("path", out var p2) ? p2.GetString() : null);
+                    }
+                }
+                catch { }
+            }
+        }
+        // A file edited across multiple steps appears once per step. Dedupe by path — the
+        // LAST edit per file wins (its preview is the final state). Duplicate paths crash
+        // the client's ng-repeat ('track by f.path') and are meaningless for the
+        // "files changed" list.
+        var keep = new HashSet<int>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = result.Count - 1; i >= 0; i--)
+        {
+            var p = paths[i];
+            if (string.IsNullOrWhiteSpace(p)) continue;
+            if (seen.Add(p.Replace('\\', '/')))
+                keep.Add(i);
+        }
+        return result.Where((_, i) => keep.Contains(i)).ToList();
     }
 }

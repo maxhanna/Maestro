@@ -114,6 +114,110 @@ public static class AgentTextUtilities
 
     public static string NormalizeLineEndings(string s) => s.Replace("\r\n", "\n");
 
+    /// <summary>
+    /// Builds a bounded view of a large file for the post-execution verifier. When the file
+    /// fits within <paramref name="maxChars"/> the whole content is returned unchanged.
+    /// When it doesn't, the view keeps a bounded head, a window around each located anchor
+    /// (the newString of each applied edit — so the verifier ALWAYS sees the region this run
+    /// changed, even in a 40k-char stylesheet), and a bounded tail, each with explicit
+    /// truncation markers. Anchors are matched verbatim after line-ending normalization,
+    /// with a fallback to the anchor's longest distinctive line so an edit that was later
+    /// reformatted or merged is still located. Falls back to head+tail when no anchor can be
+    /// located (e.g. a full-file rewrite superseded the snippet).
+    /// </summary>
+    public static string BuildVerifierFileView(string content, IReadOnlyList<string>? anchors, int maxChars = 12000)
+    {
+        if (string.IsNullOrEmpty(content) || content.Length <= maxChars)
+            return content;
+        var normalized = NormalizeLineEndings(content);
+        var windows = new List<(int start, int end)>();
+        if (anchors != null)
+        {
+            foreach (var anchor in anchors)
+            {
+                if (string.IsNullOrWhiteSpace(anchor)) continue;
+                var normAnchor = NormalizeLineEndings(anchor).Trim('\r', '\n');
+                if (normAnchor.Length == 0) continue;
+                var idx = normalized.IndexOf(normAnchor, StringComparison.Ordinal);
+                if (idx < 0)
+                {
+                    // An edit that was later reformatted/merged may no longer match verbatim —
+                    // retry with its longest distinctive line (selector/method signature lines
+                    // survive reformatting).
+                    var bestLine = normAnchor.Split('\n')
+                        .Select(l => l.Trim())
+                        .Where(l => l.Length >= 20 && !l.StartsWith("//") && !l.StartsWith("/*") && !l.StartsWith("*"))
+                        .OrderByDescending(l => l.Length)
+                        .FirstOrDefault();
+                    if (bestLine != null)
+                        idx = normalized.IndexOf(bestLine, StringComparison.Ordinal);
+                }
+                if (idx >= 0)
+                {
+                    var windowStart = Math.Max(0, idx - 400);
+                    var windowEnd = Math.Min(normalized.Length, idx + normAnchor.Length + 400);
+                    windows.Add((windowStart, windowEnd));
+                }
+            }
+        }
+        if (windows.Count > 1)
+        {
+            windows.Sort((a, b) => a.start.CompareTo(b.start));
+            var merged = new List<(int start, int end)> { windows[0] };
+            foreach (var w in windows.Skip(1))
+            {
+                var last = merged[^1];
+                if (w.start <= last.end) merged[^1] = (last.start, Math.Max(last.end, w.end));
+                else merged.Add(w);
+            }
+            windows = merged;
+        }
+        const int HeadBudget = 3000;
+        const int TailBudget = 2000;
+        var regionBudget = Math.Max(0, maxChars - HeadBudget - TailBudget);
+        var sb = new StringBuilder();
+        var printedTo = 0;
+        // Head: up to the budget, but stop before the first edited region so it is never cut.
+        var headEnd = Math.Min(HeadBudget, windows.Count > 0 ? windows[0].start : normalized.Length);
+        headEnd = Math.Min(headEnd, normalized.Length);
+        if (headEnd > printedTo)
+        {
+            sb.Append(normalized[..headEnd]);
+            printedTo = headEnd;
+            if (printedTo < normalized.Length)
+                sb.Append("\n… [TRUNCATED — head of file shown; edited regions and tail follow]");
+        }
+        // Edited regions: the change(s) this run made, with ±400 chars of context.
+        var regionUsed = 0;
+        foreach (var w in windows)
+        {
+            var start = w.start;
+            var end = w.end;
+            if (start < printedTo) start = printedTo;
+            if (start >= end) continue;
+            var allowed = Math.Max(0, regionBudget - regionUsed);
+            if (allowed <= 0) break;
+            var take = Math.Min(end - start, allowed);
+            if (start > printedTo)
+                sb.Append("\n… [EDITED REGION — the change(s) this run made to this file] …\n");
+            sb.Append(normalized[start..(start + take)]);
+            printedTo = Math.Max(printedTo, start + take);
+            regionUsed += take;
+            if (take < end - start)
+                sb.Append("\n… [region truncated]");
+        }
+        // Tail: the last chars of the file, so end-of-file edits are still visible.
+        var tailStart = Math.Max(printedTo, normalized.Length - TailBudget);
+        if (tailStart < normalized.Length)
+        {
+            if (tailStart > printedTo)
+                sb.Append("\n… [TAIL — end of file] …\n");
+            sb.Append(normalized[tailStart..]);
+        }
+        sb.Append($"\n… [TRUNCATED — file is {content.Length} chars, showing head + edited regions + tail capped at {maxChars} chars]");
+        return sb.ToString();
+    }
+
     public static string StripLineLeadingWhitespace(string s)
     {
         var lines = s.Split('\n');

@@ -841,6 +841,20 @@
           <label style="display: flex; flex-direction: row; gap: 10px;">Project: <span
               style="width: 200%">{{vm.selectedProject}}</span></label>
         </div>
+        <!-- Quick-remove strip: the files already attached/selected, so the user can
+             drop them without hunting through the tree to uncheck. Live-bound to
+             vm.pickerSelected (pre-populated from the card's attached files on open,
+             kept in sync by every toggle), so it updates as files are added/removed. -->
+        <div class="picker-selected" ng-if="vm.pickerCardId && vm.pickerSelected.length">
+          <div class="picker-selected-header">📎 Attached files ({{vm.pickerSelected.length}})</div>
+          <div class="picker-selected-list">
+            <div class="picker-selected-item" ng-repeat="f in vm.pickerSelected track by f">
+              <span class="picker-selected-path" title="{{f}}">{{f}}</span>
+              <button class="picker-selected-remove" ng-click="vm.pickerRemoveFile(f)"
+                title="Remove {{f}}">✕</button>
+            </div>
+          </div>
+        </div>
         <div class="file-picker-nav">
           <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath || vm.isSearchResult">⬆
             Up</button>

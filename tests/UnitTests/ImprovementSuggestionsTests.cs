@@ -389,7 +389,7 @@ public class ImprovementSuggestionsTests
     }
 
     [Fact]
-    public void SuggestionEndpoint_WhileAnotherCardExecuting_ReturnsCancelled()
+    public async Task SuggestionEndpoint_WhileAnotherCardExecuting_ReturnsCancelled()
     {
         var (controller, db, dbPath) = BuildHarness();
         try
@@ -415,7 +415,7 @@ public class ImprovementSuggestionsTests
                     BindingFlags.Public | BindingFlags.Instance)
                     ?? throw new InvalidOperationException("SuggestImprovements not found");
                 var task = (Task<Microsoft.AspNetCore.Mvc.IActionResult>)method.Invoke(controller, new object?[] { payload })!;
-                var result = task.GetAwaiter().GetResult() as Microsoft.AspNetCore.Mvc.OkObjectResult;
+                var result = await task as Microsoft.AspNetCore.Mvc.OkObjectResult;
                 Assert.NotNull(result);
                 var json = System.Text.Json.JsonSerializer.Serialize(result!.Value);
                 Assert.Contains("\"cancelled\":true", json);

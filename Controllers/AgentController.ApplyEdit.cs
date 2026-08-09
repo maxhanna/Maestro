@@ -1507,6 +1507,20 @@ partial class AgentController
                     await EmitLog(emitSse, "info",
                         $"Merged duplicate CSS selectors in {relPath}", ct: ct);
                 }
+                // Deterministic missing-dot repair: a selector naming a class defined in the
+                // same file WITHOUT the '.' prefix (e.g. 'favoritesTable tbody tr td a {' when
+                // the file has '.favouritesTable') silently never matches. The LLM verifier
+                // cannot catch it — it only sees old/new snippets, never the real file — so
+                // repair it against the ACTUAL content.
+                var (repairedCss, repairWarnings) = CssSelectorRepair.RepairBareClassSelectors(newContent);
+                if (repairedCss != newContent)
+                {
+                    newContent = repairedCss;
+                    foreach (var w in repairWarnings)
+                        await EmitLog(emitSse, "warn", w, ct: ct);
+                    await EmitLog(emitSse, "info",
+                        $"🔧 Auto-repaired bare CSS class selector(s) in {relPath}", ct: ct);
+                }
             }
             if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC)
             {

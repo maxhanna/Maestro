@@ -51,6 +51,55 @@ angular.module('kanbanApp')
             }
             return hadState;
         }
+        // Pure dedupe for the "files changed" list: a file edited across multiple steps
+        // appears once per step, and the server's finish event can carry duplicates — which
+        // crashes the streaming panel's ng-repeat ('track by f.path'). The LAST edit per
+        // path wins (its preview is the final state); order is otherwise preserved.
+        // (tests/js/files-edited-dedupe.test.js extracts this helper from the live source.)
+        function dedupeFilesEdited(files) {
+            if (!Array.isArray(files)) return [];
+            var seen = {};
+            var out = [];
+            for (var i = files.length - 1; i >= 0; i--) {
+                var f = files[i];
+                if (!f || !f.path) continue;
+                var key = String(f.path).replace(/\\/g, '/').toLowerCase();
+                if (!seen[key]) {
+                    seen[key] = true;
+                    out.push(f);
+                }
+            }
+            out.reverse();
+            return out;
+        }
+        // Pure guard for the queue drain: may this ready card auto-start when the current
+        // run finishes? Endpoint-parked cards (_endpointQueued) and suggestion-auto cards
+        // (_autoQueued) always drain — the click was an explicit action. Otherwise the
+        // global autoQueue toggle decides, and an armed self-improving card drains too.
+        // (tests/js/suggestion-ready.test.js extracts this helper from the live source.)
+        function autoQueueEligible(card, autoQueue, selfImprovingArmed) {
+            if (!card) return false;
+            if (card._endpointQueued || card._autoQueued) return true;
+            if (autoQueue) return true;
+            if (selfImprovingArmed && card.selfImproving) return true;
+            return false;
+        }
+        // Pure wiring for a suggestion-created card: it comes in READIED (ready=true) so
+        // the user sees it armed. When another card is already running it is marked
+        // _autoQueued so the queue drain starts it the moment the current card finishes
+        // (even with the global autoQueue toggle off). Returns true when the caller should
+        // leave it for the queue, false when the board is idle and it can start right away.
+        // (tests/js/suggestion-ready.test.js extracts this helper from the live source.)
+        function prepareSuggestionCardForAutoRun(card, streamingActive) {
+            if (!card) return true;
+            card.ready = true;
+            if (streamingActive) {
+                card._autoQueued = true;
+                return true;
+            }
+            delete card._autoQueued;
+            return false;
+        }
         // Pure guard for the pr/finish completion path: if BRANCH was toggled off while
         // the card was running, the finish POST must not re-record any PR state — the
         // card's prStatus is cleared instead ("skipped") so no stale "PR: weaver/xxx"
@@ -102,8 +151,14 @@ angular.module('kanbanApp')
             } catch (e) { }
         }
         function refreshFilesEditedFromSteps(vm) {
-            var seen = {};
-            vm.streamingFilesEdited = vm.streamingSteps.filter(function (s) { return (s.type === 'edit' || s.type === 'create' || s.type === 'rename') && s.status === 'done' && s.path; }).filter(function (s) { var already = seen[s.path]; seen[s.path] = true; return !already; }).map(function (s) { var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved }; if (s.type === 'rename') info.editAction = 'renamed → ' + (s.toPath || ''); else if (s.type === 'create') info.editAction = 'created'; return info; });
+            vm.streamingFilesEdited = dedupeFilesEdited(vm.streamingSteps
+                .filter(function (s) { return (s.type === 'edit' || s.type === 'create' || s.type === 'rename') && s.status === 'done' && s.path; })
+                .map(function (s) {
+                    var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved };
+                    if (s.type === 'rename') info.editAction = 'renamed → ' + (s.toPath || '');
+                    else if (s.type === 'create') info.editAction = 'created';
+                    return info;
+                }));
         }
         function reconcilePlanItems(vm, $scope, $timeout) {
             if (!vm.planItems || !vm.planItems.length) return;
@@ -190,7 +245,7 @@ angular.module('kanbanApp')
                             var ep = card.llmEndpointId || '';
                             if (vm.isEndpointBusy(ep)) continue;
                             var isArmedSelfImproving = card.selfImproving && vm.selfImprovingAgentActive === true;
-                            if (!card._endpointQueued && !vm.autoQueue && !isArmedSelfImproving) continue;
+                            if (!autoQueueEligible(card, vm.autoQueue, isArmedSelfImproving)) continue;
                             vm.moveCardToDoing(card.id);
                             vm.executeAgent(card);
                         }
@@ -412,6 +467,7 @@ angular.module('kanbanApp')
                         return;
                     }
                     delete card._endpointQueued;
+                    delete card._autoQueued;
                     var proj = card.filePath || vm.selectedProject; if (!proj) return $window.alert('No project assigned');
                     try {
                         if (!isAutoRestart) card._agentIteration = 0;
@@ -750,7 +806,7 @@ angular.module('kanbanApp')
                                                                 var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
                                                                 var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
                                                                 var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
-                                                                if (parsed && parsed.filesEdited && parsed.filesEdited.length) vm.streamingFilesEdited = parsed.filesEdited;
+                                                                if (parsed && parsed.filesEdited && parsed.filesEdited.length) vm.streamingFilesEdited = dedupeFilesEdited(parsed.filesEdited);
                                                                 else refreshFilesEditedFromSteps(vm);
                                                                 vm.agentResult = { summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited, steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                  vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
@@ -1383,9 +1439,20 @@ angular.module('kanbanApp')
                         _suggestionSourceCardId: sourceCard.id
                     };
                     vm.state.todo.push(newCard);
+                    // Auto-ready the suggestion card: the click was an explicit action, so the
+                    // card comes in readied — it starts immediately when the board is idle, or
+                    // stays Ready and is queued to run the moment the current card finishes.
+                    var startNow = !prepareSuggestionCardForAutoRun(newCard, !!vm.streamingActive);
                     vm.saveCards();
                     pushAgentLog(vm, 'success', '💡 Suggestion queued as a new card: ' + (newCard.text || '').slice(0, 80));
                     if (vm.showSideToast) vm.showSideToast('💡 Added to To Do — ' + (files.length ? files.length + ' file(s) attached' : 'no attachments'));
+                    if (startNow) {
+                        // Board idle → run immediately (ready=true → startCard moves it to Doing
+                        // and executes). A brief tick lets the card land in the To Do column first.
+                        $timeout(function () {
+                            if (vm.startCard) vm.startCard(newCard);
+                        }, 50);
+                    }
                     // Scroll the new card into view so the user sees where it landed.
                     $timeout(function () {
                         var el = document.querySelector('[data-card-id="' + newCard.id + '"]');

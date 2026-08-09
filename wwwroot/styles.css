@@ -4696,6 +4696,70 @@ h3 .small.ghost:hover {
 	font-weight: 600;
 }
 
+/* Quick-remove strip for already-attached files in the Attach Files popup */
+.picker-selected {
+	margin-bottom: 8px;
+	padding: 8px;
+	border: var(--border);
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.picker-selected-header {
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+	color: var(--muted);
+	margin-bottom: 5px;
+}
+
+.picker-selected-list {
+	max-height: 90px;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.picker-selected-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 4px;
+	border-radius: 4px;
+}
+
+.picker-selected-item:hover {
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.picker-selected-path {
+	flex: 1;
+	min-width: 0;
+	font-size: 12px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.picker-selected-remove {
+	flex-shrink: 0;
+	background: transparent;
+	border: none;
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 12px;
+	line-height: 1;
+	padding: 2px 5px;
+	border-radius: 4px;
+}
+
+.picker-selected-remove:hover {
+	color: #f87171;
+	background: rgba(248, 113, 113, 0.12);
+}
+
 .attachFileFooter {
 	display: flex;
 	justify-content: space-between;

@@ -631,6 +631,21 @@ partial class AgentController
             var status = s.TryGetValue("status", out var st) ? st?.ToString() : "?";
             var error = s.TryGetValue("error", out var e) ? e?.ToString() : null;
             sb.AppendLine($"- {path}: {status}{(error != null ? $" → {error}" : "")}");
+            // The OLD→NEW diff of exactly what THIS step changed. Without it the assessor
+            // cannot distinguish rules this run ADDED from pre-existing ones — it just sees
+            // "path: done" plus the whole current file, so it hedges and a redundant follow-up
+            // step gets planned (e.g. adding an HTML class the CSS already targets with a
+            // selector). The current file already includes the '+' lines.
+            var diff = s.GetValueOrDefault("diffPreview")?.ToString();
+            if (!string.IsNullOrWhiteSpace(diff))
+            {
+                const int MaxDiffChars = 4000;
+                if (diff.Length > MaxDiffChars)
+                    diff = diff[..MaxDiffChars] + $"\n… [diff truncated — {diff.Length} chars]";
+                sb.AppendLine("  OLD→NEW (exactly what this step changed):");
+                foreach (var line in diff.Split('\n'))
+                    sb.AppendLine("    " + line);
+            }
         }
         sb.AppendLine();
         var modifiedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -675,6 +690,7 @@ user did not ask for. Check for:
 2. Are there bugs, syntax errors, or logic issues in the modified files that would break the requested change?
 3. Did any planned step fail or get left unfinished?
 4. Check files in ""Unmodified attached files"" ONLY against the explicit request — mark incomplete only if the user's request clearly required changing them.
+5. A newly added CSS rule IS a valid way to style existing markup — do NOT require adding classes or attributes to the HTML when a selector already targets the element (e.g. '.titleCell > div:last-child' targets the URL div without touching the HTML). CSS-only changes fully satisfy styling tasks; the OLD→NEW diffs above show exactly what was added.
 A task is complete when the explicit request is satisfied, even if you can imagine further improvements. When in doubt, mark complete=true.
 Respond with JSON only:
 ```json
@@ -1019,6 +1035,17 @@ Respond with JSON only:
                     await EmitLog(emitSse, "warn", w, ct: ct);
                 await EmitLog(emitSse, "info",
                     $"Merged duplicate CSS selectors in {relPath} (fullFile path)", ct: ct);
+            }
+            // Deterministic missing-dot repair (see ApplyEdit.cs): a selector naming a class
+            // defined in this file without the '.' prefix silently never matches.
+            var (repaired, repairWarnings) = CssSelectorRepair.RepairBareClassSelectors(fullContent);
+            if (repaired != fullContent)
+            {
+                fullContent = repaired;
+                foreach (var w in repairWarnings)
+                    await EmitLog(emitSse, "warn", w, ct: ct);
+                await EmitLog(emitSse, "info",
+                    $"🔧 Auto-repaired bare CSS class selector(s) in {relPath} (fullFile path)", ct: ct);
             }
         }
         if (CodeFormatterService.CanFormat(relPath))

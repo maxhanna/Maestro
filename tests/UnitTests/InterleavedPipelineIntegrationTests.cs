@@ -157,6 +157,15 @@ public class InterleavedPipelineIntegrationTests : IDisposable
         // call (e.g. the repair replanner firing) fails the test loudly.
         Assert.Empty(_clientFactory.Unmatched);
 
+        // Regression: the between-steps assessor must have SEEN the actual OLD→NEW diff of
+        // the applied edit (the "doesn't see that the last step satisfied the prompt" bug:
+        // without the diff, the assessor cannot tell what this run added vs pre-existing
+        // CSS/markup and plans a redundant follow-up step). The assess prompt must carry the
+        // diff marker and the pipe change itself.
+        var assessPrompt = Assert.Single(_clientFactory.AssessPrompts);
+        Assert.Contains("OLD→NEW", assessPrompt);
+        Assert.Contains("| number:'1.0-0'", assessPrompt);
+
         // Sanity: the scripted LLM saw the expected call kinds.
         Assert.Contains("checklist", _clientFactory.Calls);
         Assert.Contains("planner-step", _clientFactory.Calls);
@@ -248,6 +257,11 @@ public class InterleavedPipelineIntegrationTests : IDisposable
     {
         public readonly List<string> Calls = new();
         public readonly List<string> Unmatched = new();
+        // User prompts of the between-steps AssessCompletion calls — the regression hook for
+        // the redundant-step fix: the assessor must see the OLD→NEW diff of each applied
+        // edit (otherwise it cannot tell what this run added and plans a redundant follow-up
+        // step, e.g. adding an HTML class the CSS already targets).
+        public readonly List<string> AssessPrompts = new();
         private int _plannerCalls;
 
         public HttpClient CreateClient(string name) => new(new ScriptedHandler(this));
@@ -312,7 +326,10 @@ public class InterleavedPipelineIntegrationTests : IDisposable
                 if (user.Contains("Decide: keep or abandon", StringComparison.Ordinal))
                     return ("{\"decision\": \"keep\", \"reason\": \"verified\", \"score\": 95, \"needsExtraStep\": false}", "verify");
                 if (user.Contains("Evaluate the code changes against the ORIGINAL TASK ONLY", StringComparison.Ordinal))
+                {
+                    _owner.AssessPrompts.Add(user);
                     return ("{\"complete\": true, \"reason\": \"task satisfied\", \"issues\": []}", "assess");
+                }
                 if (system.Contains("meticulous code reviewer verifying if a task is fully complete", StringComparison.Ordinal))
                     return ("{\"complete\": true, \"reason\": \"done\", \"issues\": []}", "post-verify");
                 if (system.Contains("You detect code cohesion issues after an edit. Output ONLY JSON.", StringComparison.Ordinal))
