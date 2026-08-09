@@ -286,6 +286,163 @@ public class CssSelectorRepairTests
     }
 
     [Fact]
+    public void FindBareClassSelectorIssues_FavouritesRegression_ReturnsRepairSuggestions()
+    {
+        const string css = """
+            .favouritesTable {
+              width: 100%;
+            }
+
+            favoritesTable tbody tr td .titleMain,
+            favouritesTable tbody tr td a {
+              white-space: nowrap;
+            }
+            """;
+        var issues = CssSelectorRepair.FindBareClassSelectorIssues("favourites.component.css", css);
+        Assert.Equal(2, issues.Count);
+        Assert.Contains(issues, i => i.Contains("bare 'favoritesTable'") && i.Contains(".favouritesTable'"));
+        Assert.Contains(issues, i => i.Contains("bare 'favouritesTable'") && i.Contains(".favouritesTable'"));
+        Assert.All(issues, i => Assert.Contains("prefix with '.'", i));
+    }
+
+    [Fact]
+    public void FindBareClassSelectorIssues_NoDefinedClass_NoIssue()
+    {
+        // 'bogusTable' has no matching class anywhere in the file — nothing to report.
+        const string css = "bogusTable tbody tr td a {\n  white-space: nowrap;\n}\n";
+        Assert.Empty(CssSelectorRepair.FindBareClassSelectorIssues("x.css", css));
+    }
+
+    [Fact]
+    public void FindBareClassSelectorIssues_CleanCss_NoIssue()
+    {
+        const string css = """
+            .foo {
+              color: red;
+            }
+
+            .foo span,
+            div > p + a {
+              display: block;
+            }
+            """;
+        Assert.Empty(CssSelectorRepair.FindBareClassSelectorIssues("x.css", css));
+    }
+
+    [Fact]
+    public void FindBareClassSelectorIssues_PreEditSnapshot_OnlyNewTokensFlagged()
+    {
+        const string preEdit = """
+            .foo {
+              color: red;
+            }
+
+            foo span {
+              display: block;
+            }
+            """;
+        // The run ADDED a rule with a bare 'bar' (now that .bar is defined). The pre-existing
+        // bare 'foo' must NOT be attributed to the run.
+        const string css = """
+            .foo {
+              color: red;
+            }
+
+            .bar {
+              color: blue;
+            }
+
+            foo span {
+              display: block;
+            }
+
+            bar a {
+              display: inline;
+            }
+            """;
+        var issues = CssSelectorRepair.FindBareClassSelectorIssues("x.css", css, preEdit);
+        var issue = Assert.Single(issues);
+        Assert.Contains("bare 'bar'", issue);
+        Assert.DoesNotContain("bare 'foo'", issue);
+    }
+
+    [Fact]
+    public void FindBareClassSelectorIssues_AtRuleSelectorNeverFlagged_NestedRuleIs()
+    {
+        const string css = """
+            .card {
+              padding: 8px;
+            }
+
+            @media (max-width: 600px) {
+              card grid {
+                display: grid;
+              }
+            }
+            """;
+        var issues = CssSelectorRepair.FindBareClassSelectorIssues("x.css", css);
+        var issue = Assert.Single(issues);
+        Assert.Contains("bare 'card'", issue);
+        Assert.DoesNotContain("@media", issue);
+    }
+
+    [Fact]
+    public void FindBareClassSelectorIssues_RepeatedToken_DedupedToOneIssue()
+    {
+        const string css = """
+            .icon {
+              color: red;
+            }
+
+            icon small {
+              font-size: 10px;
+            }
+
+            icon big {
+              font-size: 20px;
+            }
+            """;
+        var issues = CssSelectorRepair.FindBareClassSelectorIssues("x.css", css);
+        Assert.Single(issues);
+    }
+
+    [Fact]
+    public void CheckModifiedCss_ScansCssFiles_IgnoresOthers_AndUsesSnapshots()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "css-check-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // bad.css: pre-existing bare token (snapshot covers it) + one introduced by the run.
+            System.IO.File.WriteAllText(Path.Combine(dir, "bad.css"),
+                ".foo { color: red; }\n\nfoo span { display: block; }\n\n.bar { color: blue; }\n\nbar a { display: inline; }\n");
+            // clean.css: nothing bare.
+            System.IO.File.WriteAllText(Path.Combine(dir, "clean.css"),
+                ".ok { color: green; }\n\n.ok div { display: block; }\n");
+            // ignored.txt: not CSS, must be skipped even with a bare-looking token.
+            System.IO.File.WriteAllText(Path.Combine(dir, "notes.txt"), "foo bar baz");
+
+            var snapshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["bad.css"] = ".foo { color: red; }\n\nfoo span { display: block; }\n"
+            };
+            var issues = CssSelectorRepair.CheckModifiedCss(dir,
+                new[] { "bad.css", "clean.css", "notes.txt" }, snapshots);
+
+            // Only the NEW bare 'bar' in bad.css is flagged; pre-existing 'foo' is skipped;
+            // clean.css and notes.txt contribute nothing.
+            var issue = Assert.Single(issues);
+            Assert.Contains("bad.css", issue);
+            Assert.Contains("bare 'bar'", issue);
+            Assert.DoesNotContain("bare 'foo'", issue);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
     public void EmptyOrNull_NoOp()
     {
         var (empty, warnings) = CssSelectorRepair.RepairBareClassSelectors("");

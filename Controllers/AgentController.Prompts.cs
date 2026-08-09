@@ -410,6 +410,38 @@ partial class AgentController
         sb.Append("When a step needs an absolute OS path (config, logs, files outside the repo), use the REAL path above — ");
         sb.Append($"NEVER invent a Unix-style path like /home/user/... on {osName} unless you are actually on a Unix host. ");
         sb.Append("Only a _command step can touch the OS filesystem outside the repo; _create_directory/_create_file are relative to the project root.\n\n");
+        if (stepMode != "edit")
+        {
+            // AVAILABLE STEPS — the tool surface WITH descriptions, mirroring
+            // BuildPlanningPrompt's STEP TYPES section. Bare marker names alone (just the
+            // strings listed in the file-field schema) make the model drift into "which class
+            // method do I call" and invent application code (Selenium/Python scripts) instead
+            // of calling the step tools directly for web/OS/terminal work. The classifier
+            // already filtered enabledTools to the relevant subset, so this stays small.
+            sb.Append("### AVAILABLE STEPS (the \"file\" marker) ###\n");
+            foreach (var kvp in AllTools)
+            {
+                if (enabled == null || enabled.Contains(kvp.Key))
+                    sb.Append("  ").Append(kvp.Value).Append('\n');
+            }
+            sb.Append("  \"_checkpoint\"         — Split large refactor into phases\n\n");
+            // TOOL USE EXAMPLE — isolated tool descriptions still leave models unsure how to
+            // COMPOSE them. Show a complete web-task chain (_web_search → _web_fetch/_command →
+            // _command Set-Content) so the planner sees the tools used end to end. Gated on
+            // _web_search being available (the chain starts with it); the tool classifier
+            // decides whether web tools belong to this task at all.
+            if (enabled == null || enabled.Contains("_web_search"))
+            {
+                sb.Append("### TOOL USE EXAMPLE (compose the step tools end to end) ###\n");
+                sb.Append("Web/OS tasks are a CHAIN of step tools, one step per turn — never application code. ");
+                sb.Append("Example — \"search the web for an AI article and write it to my desktop\":\n");
+                sb.Append("  1. {\"planComplete\":false,\"step\":{\"file\":\"_web_search\",\"change\":\"AI research breakthroughs latest\"}}\n");
+                sb.Append("  2. {\"planComplete\":false,\"step\":{\"file\":\"_web_fetch\",\"change\":\"https://example.com/ai-article\"}}\n");
+                sb.Append("     (fetch via _command instead: {\"file\":\"_command\",\"change\":\"Invoke-RestMethod https://example.com/api | Select-Object title,summary,url\"})\n");
+                sb.Append("  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"... | Set-Content -Path \\\"<desktop-path>\\ai_article.txt\\\" -Encoding UTF8\"}}\n");
+                sb.Append("Each step consumes the previous step's output; declare planComplete only after the file is written.\n\n");
+            }
+        }
         sb.Append("Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n");
         if (atomicStepEstimate is > 0)
         {

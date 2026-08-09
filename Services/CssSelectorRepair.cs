@@ -19,6 +19,7 @@ public static class CssSelectorRepair
 {
     private static readonly Regex ClassTokenRegex = new(@"\.([A-Za-z_][A-Za-z0-9_-]*)");
     private const int MaxEditDistance = 2;
+    private const int MaxIssuesPerFile = 10;
 
     private static readonly HashSet<string> HtmlElements = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -101,6 +102,124 @@ public static class CssSelectorRepair
             if (d <= MaxEditDistance && d < bestDist) { bestDist = d; best = cls; }
         }
         return best;
+    }
+
+    /// <summary>
+    /// Deterministic post-execution check (mirrors the template-binding check): scans CSS for
+    /// bare class-like selector tokens — a class name WITHOUT the leading '.' (e.g.
+    /// 'favoritesTable tbody tr td a {' when the file defines '.favouritesTable') — that match
+    /// a class defined in the same file, and returns CONFIRMED issue strings with the repair
+    /// suggestion. Uses the SAME matching as <see cref="RepairBareClassSelectors"/>, so anything
+    /// flagged here is exactly what the deterministic repair would fix; it never rewrites, it
+    /// only reports. When <paramref name="preEditCss"/> is supplied, tokens already present in
+    /// the pre-edit content are skipped so pre-existing broken selectors are not attributed to
+    /// the current run's edits.
+    /// </summary>
+    public static List<string> FindBareClassSelectorIssues(string relPath, string css, string? preEditCss = null)
+    {
+        var issues = new List<string>();
+        if (string.IsNullOrWhiteSpace(css)) return issues;
+        var rules = ParseRules(css);
+        var definedClasses = ExtractDefinedClasses(rules);
+        if (definedClasses.Count == 0) return issues;
+        var preTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (preEditCss != null)
+        {
+            var preRules = ParseRules(preEditCss);
+            var preClasses = ExtractDefinedClasses(preRules);
+            if (preClasses.Count > 0)
+                foreach (var (_, tok, _) in FindBareClassTokens(preEditCss, preClasses))
+                    preTokens.Add(tok);
+        }
+        foreach (var (selector, tok, match) in FindBareClassTokens(css, definedClasses))
+        {
+            // Pre-existing bare tokens (present before this run) are not the agent's doing —
+            // skip them exactly like pre-existing template bindings are skipped.
+            if (preEditCss != null && preTokens.Contains(tok)) continue;
+            issues.Add(
+                $"CSS selector '{selector}' in {relPath} uses bare '{tok}' — prefix with '.' ('.{match}') or the rule never matches. " +
+                $"(Deterministic bare-selector check — a class named '{match}' is defined in the same file.)");
+            if (issues.Count >= MaxIssuesPerFile) break;
+        }
+        return issues;
+    }
+
+    /// <summary>
+    /// Scans the modified files of a run for bare class-like selector tokens (mirrors
+    /// <c>TemplateBindingValidator.CheckModifiedTemplates</c>). Returns CONFIRMED issue strings
+    /// for every bare token in a modified .css file that matches a class defined in that file;
+    /// pre-edit snapshots (keyed by relative path) restrict findings to tokens INTRODUCED by the
+    /// run.
+    /// </summary>
+    public static List<string> CheckModifiedCss(string projectRoot, IEnumerable<string> modifiedRelPaths,
+        Dictionary<string, string>? preEditSnapshots = null)
+    {
+        var issues = new List<string>();
+        foreach (var rel in modifiedRelPaths)
+        {
+            if (!string.Equals(Path.GetExtension(rel), ".css", StringComparison.OrdinalIgnoreCase)) continue;
+            var normRel = rel.Replace('\\', '/');
+            var full = SafeFullPath(projectRoot, rel);
+            if (full == null || !System.IO.File.Exists(full)) continue;
+            var css = System.IO.File.ReadAllText(full);
+            string? preEdit = null;
+            if (preEditSnapshots != null)
+            {
+                // Normalize both sides so 'maxhanna.client\\src\\app\\x.css' matches
+                // 'maxhanna.client/src/app/x.css' regardless of which the caller used.
+                foreach (var kv in preEditSnapshots)
+                {
+                    if (string.Equals(kv.Key.Replace('\\', '/'), normRel, StringComparison.OrdinalIgnoreCase))
+                    {
+                        preEdit = kv.Value;
+                        break;
+                    }
+                }
+            }
+            issues.AddRange(FindBareClassSelectorIssues(normRel, css, preEdit));
+        }
+        return issues;
+    }
+
+    private static string? SafeFullPath(string projectRoot, string relPath)
+    {
+        try
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+            var rootFull = Path.GetFullPath(projectRoot);
+            if (!full.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase)) return null;
+            return full;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Finds (selector, token, matched class) for every bare class-like token in the
+    /// file that matches a defined class. Dedupes repeated tokens so a class misspelled in many
+    /// rules yields one finding, not a wall of noise.</summary>
+    private static List<(string selector, string token, string match)> FindBareClassTokens(string css, HashSet<string> definedClasses)
+    {
+        var found = new List<(string, string, string)>();
+        if (string.IsNullOrWhiteSpace(css) || definedClasses.Count == 0) return found;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Walk(List<Rule> rules)
+        {
+            foreach (var r in rules)
+            {
+                if (!r.IsAtRule)
+                {
+                    foreach (var tok in SelectorTokens(r.Selector))
+                    {
+                        var match = FindClassMatch(tok, definedClasses);
+                        if (match == null) continue;
+                        if (seen.Add(tok + "|" + match))
+                            found.Add((r.Selector, tok, match));
+                    }
+                }
+                if (r.Nested != null) Walk(r.Nested);
+            }
+        }
+        Walk(ParseRules(css));
+        return found;
     }
 
     private static IEnumerable<string> SelectorTokens(string selector)

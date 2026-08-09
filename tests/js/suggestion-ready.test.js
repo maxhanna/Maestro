@@ -31,13 +31,17 @@ function test(name, fn) {
 const src = fs.readFileSync(path.join(__dirname, '../../wwwroot/agent.js'), 'utf8');
 const readyMatch = /function prepareSuggestionCardForAutoRun\(card, streamingActive\) \{[\s\S]*?\n        \}/.exec(src);
 const gateMatch = /function autoQueueEligible\(card, autoQueue, selfImprovingArmed\) \{[\s\S]*?\n        \}/.exec(src);
+const capMatch = /function drainBlockedBySuggestionCap\(card, startedSuggestionCard\) \{[\s\S]*?\n        \}/.exec(src);
 assert(readyMatch, 'prepareSuggestionCardForAutoRun not found in wwwroot/agent.js — marker format may have drifted');
 assert(gateMatch, 'autoQueueEligible not found in wwwroot/agent.js — marker format may have drifted');
+assert(capMatch, 'drainBlockedBySuggestionCap not found in wwwroot/agent.js — marker format may have drifted');
 
 const prepareSuggestionCardForAutoRun = eval('(function prepareSuggestionCardForAutoRun(card, streamingActive) {' +
   readyMatch[0].replace(/^function prepareSuggestionCardForAutoRun\(card, streamingActive\) \{/, '').replace(/\n        \}$/, '') + '})');
 const autoQueueEligible = eval('(function autoQueueEligible(card, autoQueue, selfImprovingArmed) {' +
   gateMatch[0].replace(/^function autoQueueEligible\(card, autoQueue, selfImprovingArmed\) \{/, '').replace(/\n        \}$/, '') + '})');
+const drainBlockedBySuggestionCap = eval('(function drainBlockedBySuggestionCap(card, startedSuggestionCard) {' +
+  capMatch[0].replace(/^function drainBlockedBySuggestionCap\(card, startedSuggestionCard\) \{/, '').replace(/\n        \}$/, '') + '})');
 
 // ── prepareSuggestionCardForAutoRun ─────────────────────────────────────────
 
@@ -92,6 +96,26 @@ test('plain ready card with autoQueue off does NOT drain', () => {
 
 test('null card never drains', () => {
   assert.strictEqual(autoQueueEligible(null, true, false), false);
+});
+
+// ── drainBlockedBySuggestionCap (one queued suggestion per drain) ────────────
+
+test('first suggestion card of the drain is not blocked', () => {
+  assert.strictEqual(drainBlockedBySuggestionCap({ _autoQueued: true }, false), false);
+});
+
+test('second suggestion card of the drain is blocked', () => {
+  assert.strictEqual(drainBlockedBySuggestionCap({ _autoQueued: true }, true), true);
+});
+
+test('non-suggestion cards are never blocked, even after one started', () => {
+  assert.strictEqual(drainBlockedBySuggestionCap({}, true), false);
+  assert.strictEqual(drainBlockedBySuggestionCap({ _endpointQueued: true }, true), false);
+  assert.strictEqual(drainBlockedBySuggestionCap({ selfImproving: true }, true), false);
+});
+
+test('null card is never blocked', () => {
+  assert.strictEqual(drainBlockedBySuggestionCap(null, true), false);
 });
 
 // ── Summary ─────────────────────────────────────────────────────────────────

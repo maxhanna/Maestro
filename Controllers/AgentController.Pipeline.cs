@@ -1348,8 +1348,9 @@ partial class AgentController
         return next >= maxZeroChangeRepairs ? (next, true) : (next, false);
     }
 
-    /// <summary>Snapshots the pre-edit on-disk content of plan-targeted files (HTML templates)
-    /// so post-execution template-binding validation only flags bindings INTRODUCED by the edit.</summary>
+    /// <summary>Snapshots the pre-edit on-disk content of plan-targeted files (HTML templates and
+    /// CSS) so post-execution deterministic validation only flags bindings/bare selectors
+    /// INTRODUCED by the edit, never pre-existing ones.</summary>
     private static Dictionary<string, string> SnapshotPreEditFiles(string projectRoot, AgentPlan? plan, Dictionary<string, string>? existing = null)
     {
         var snap = existing ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1359,7 +1360,7 @@ partial class AgentController
             var file = step.File;
             if (string.IsNullOrWhiteSpace(file)) continue;
             var ext = Path.GetExtension(file).ToLowerInvariant();
-            if (ext != ".html" && ext != ".htm") continue;
+            if (ext != ".html" && ext != ".htm" && ext != ".css") continue;
             var rel = file.Replace('\\', '/');
             if (snap.ContainsKey(rel)) continue;
             try
@@ -1406,23 +1407,27 @@ partial class AgentController
             }
             modifiedPaths = exploredPaths;
         }
-        // Deterministic template-binding validation (independent of the LLM verifier): an
-        // edited/new template must reference symbols the sibling component actually exposes,
-        // and component logic wired under a UI task whose template was in scope but never
-        // edited is flagged as unrendered. These checks are regex-based and cannot
-        // hallucinate, so their findings are always CONFIRMED when they fire.
-        // preEditSnapshots (captured BEFORE edits) ensures only bindings INTRODUCED by the
-        // edit are validated — pre-existing missing bindings are not attributed to the agent.
+        // Deterministic validation (independent of the LLM verifier): an edited/new template
+        // must reference symbols the sibling component actually exposes, component logic wired
+        // under a UI task whose template was in scope but never edited is flagged as
+        // unrendered, and modified CSS is scanned for bare class-like selector tokens (a class
+        // name without the '.' prefix that matches a class defined in the file). These checks
+        // are deterministic and cannot hallucinate, so their findings are always CONFIRMED
+        // when they fire. preEditSnapshots (captured BEFORE edits) ensures only bindings /
+        // bare selectors INTRODUCED by the edit are validated — pre-existing issues are not
+        // attributed to the agent.
         var bindingIssues = TemplateBindingValidator.CheckModifiedTemplates(projectRoot, modifiedPaths, preEditSnapshots);
         var unrenderedIssues = TemplateBindingValidator.CheckUnrenderedComponentLogic(
             originalPrompt, projectRoot, modifiedPaths, allResults);
+        var cssIssues = CssSelectorRepair.CheckModifiedCss(projectRoot, modifiedPaths, preEditSnapshots);
         var deterministicIssues = new List<string>();
         deterministicIssues.AddRange(bindingIssues);
         deterministicIssues.AddRange(unrenderedIssues);
+        deterministicIssues.AddRange(cssIssues);
         if (deterministicIssues.Count > 0)
         {
             await EmitLog(emitSse, "warn",
-                $"🔧 Deterministic template-binding check: {deterministicIssues.Count} CONFIRMED issue(s): {string.Join("; ", deterministicIssues)}", ct: ct);
+                $"🔧 Deterministic checks: {deterministicIssues.Count} CONFIRMED issue(s): {string.Join("; ", deterministicIssues)}", ct: ct);
         }
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
@@ -1640,7 +1645,7 @@ partial class AgentController
             if (deterministicIssues.Count > 0)
             {
                 return (false,
-                    $"Verification LLM call failed: {error}. Deterministic template-binding check found: {string.Join("; ", deterministicIssues)}",
+                    $"Verification LLM call failed: {error}. Deterministic checks found: {string.Join("; ", deterministicIssues)}",
                     deterministicIssues, new List<string>());
             }
             return (false, $"Verification LLM call failed: {error}", new List<string>(), new List<string>());
@@ -1666,7 +1671,7 @@ partial class AgentController
                     isComplete = false;
                     confirmedIssues.AddRange(deterministicIssues);
                     if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
-                    reason += "Deterministic template-binding check: " + string.Join("; ", deterministicIssues);
+                    reason += "Deterministic checks: " + string.Join("; ", deterministicIssues);
                 }
                 var issuesJoined = string.Join("; ", confirmedIssues);
                 var details = reason + (string.IsNullOrWhiteSpace(issuesJoined) ? "" : $"\nIssues: {issuesJoined}");
@@ -1685,7 +1690,7 @@ partial class AgentController
         if (deterministicIssues.Count > 0)
         {
             return (false,
-                "Verification LLM output unparseable. Deterministic template-binding check found: " + string.Join("; ", deterministicIssues),
+                "Verification LLM output unparseable. Deterministic checks found: " + string.Join("; ", deterministicIssues),
                 deterministicIssues, new List<string>());
         }
         return (true, "", new List<string>(), new List<string>());

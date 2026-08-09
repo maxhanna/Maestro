@@ -100,6 +100,17 @@ angular.module('kanbanApp')
             delete card._autoQueued;
             return false;
         }
+        // One-at-a-time cap for the queue drain: several clicked suggestions queue as
+        // _autoQueued cards, and without a cap they'd all start at once when the current
+        // run finishes (even across different endpoints). Returns true when this card must
+        // NOT start because a suggestion card already started this drain — the rest wait;
+        // the drain fires again when each finishes and starts the next, so suggestion cards
+        // run serially. Non-suggestion cards are never blocked.
+        // (tests/js/suggestion-ready.test.js extracts this helper from the live source.)
+        function drainBlockedBySuggestionCap(card, startedSuggestionCard) {
+            if (!card || !card._autoQueued || !startedSuggestionCard) return false;
+            return true;
+        }
         // Pure guard for the pr/finish completion path: if BRANCH was toggled off while
         // the card was running, the finish POST must not re-record any PR state — the
         // card's prStatus is cleared instead ("skipped") so no stale "PR: weaver/xxx"
@@ -240,12 +251,18 @@ angular.module('kanbanApp')
                                 if (c.ready && c.selfImproving && (c._endpointQueued || c.filePath === vm.selectedProject)) candidates.push(c);
                             });
                         }
+                        var startedSuggestionCard = false;
                         for (var i = 0; i < candidates.length; i++) {
                             var card = candidates[i];
                             var ep = card.llmEndpointId || '';
                             if (vm.isEndpointBusy(ep)) continue;
                             var isArmedSelfImproving = card.selfImproving && vm.selfImprovingAgentActive === true;
                             if (!autoQueueEligible(card, vm.autoQueue, isArmedSelfImproving)) continue;
+                            // Only ONE queued suggestion card may start per drain — several
+                            // clicked suggestions run serially (the next drain fires when each
+                            // finishes) instead of all firing at once across endpoints.
+                            if (drainBlockedBySuggestionCap(card, startedSuggestionCard)) continue;
+                            if (card._autoQueued) startedSuggestionCard = true;
                             vm.moveCardToDoing(card.id);
                             vm.executeAgent(card);
                         }
