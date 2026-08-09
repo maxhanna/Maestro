@@ -94,6 +94,34 @@ public class PrBranchFeatureTests
         Assert.Null(InvokeStatic<string?>("ExtractCommitHash", "nothing to commit, working tree clean"));
     }
 
+    // ── FindWeaverAutoStashRef (abort must only pop the weaver stash) ────────
+
+    [Fact]
+    public void FindWeaverAutoStashRef_Finds_The_Auto_Stash_On_Top()
+    {
+        var list = "stash@{0}: On master: weaver-auto-stash\n";
+        Assert.Equal("stash@{0}", InvokeStatic<string?>("FindWeaverAutoStashRef", list));
+    }
+
+    [Fact]
+    public void FindWeaverAutoStashRef_Skips_Newer_Abort_Stash_On_Top()
+    {
+        // A weaver-abort stash pushed after Start sits at stash@{0}; the auto-stash
+        // is below it and must still be found (per-line anchor keeps the message regex
+        // from matching the "weaver-abort" entry).
+        var list = "stash@{0}: On weaver/card1: weaver-abort\nstash@{1}: On master: weaver-auto-stash\n";
+        Assert.Equal("stash@{1}", InvokeStatic<string?>("FindWeaverAutoStashRef", list));
+    }
+
+    [Fact]
+    public void FindWeaverAutoStashRef_Returns_Null_Without_Auto_Stash()
+    {
+        Assert.Null(InvokeStatic<string?>("FindWeaverAutoStashRef", null));
+        Assert.Null(InvokeStatic<string?>("FindWeaverAutoStashRef", ""));
+        // Unrelated user stashes must never be popped by abort.
+        Assert.Null(InvokeStatic<string?>("FindWeaverAutoStashRef", "stash@{0}: On master: WIP on settings\nstash@{1}: On master: stash-2\n"));
+    }
+
     // ── GitService resilience (works whether or not git is installed) ────────
 
     [Fact]
@@ -286,6 +314,126 @@ public class PrBranchFeatureTests
             Assert.Matches(@"^weaver/TestCard1-\d{14}$", resp.GetProperty("branchName").GetString());
             // The pre-existing branch is the "original" the PR flow must restore.
             Assert.Equal("master", resp.GetProperty("originalBranch").GetString());
+        }
+        finally { TryCleanup(dir); }
+    }
+
+    private static async Task<JsonElement> CallAbort(PRController controller, string dir, string branchName, string originalBranch)
+    {
+        var result = await controller.Abort(new PrAbortRequest
+        {
+            ProjectPath = dir,
+            CardId = "card1",
+            BranchName = branchName,
+            OriginalBranch = originalBranch
+        });
+        var ok = Assert.IsType<OkObjectResult>(result);
+        return JsonSerializer.SerializeToElement(ok.Value);
+    }
+
+    [GitAvailableFact]
+    public async Task Abort_Restores_Original_Branch_Pops_Stash_And_Deletes_Branch()
+    {
+        var dir = CreateTempRepo();
+        try
+        {
+            CommitFile(dir, "file.txt", "hello v1");
+            // Pre-branch work: dirty the tree, then Start stashes it and branches.
+            File.WriteAllText(Path.Combine(dir, "file.txt"), "hello v2");
+
+            var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
+            var startResp = await CallStart(controller, dir, "card1");
+            Assert.True(startResp.GetProperty("success").GetBoolean());
+            var branch = startResp.GetProperty("branchName").GetString()!;
+            Assert.Equal("weaver/card1", branch);
+            // On the weaver branch, working tree clean (the v2 change is stashed).
+            Assert.Equal("weaver/card1", RunGit(dir, "rev-parse --abbrev-ref HEAD").output.Trim());
+
+            var resp = await CallAbort(controller, dir, branch, "master");
+
+            Assert.True(resp.GetProperty("success").GetBoolean(), resp.TryGetProperty("error", out var errEl) ? errEl.GetString() : "no error");
+            Assert.Equal("master", resp.GetProperty("restoredBranch").GetString());
+            Assert.True(resp.GetProperty("branchDeleted").GetBoolean());
+            // Back on the original branch, pre-branch changes restored from the stash.
+            Assert.Equal("master", RunGit(dir, "rev-parse --abbrev-ref HEAD").output.Trim());
+            Assert.Equal("hello v2", File.ReadAllText(Path.Combine(dir, "file.txt")));
+            // The weaver branch is gone.
+            var (exit, branchOut, _) = RunGit(dir, "branch --list weaver/card1");
+            Assert.True(exit == 0 && branchOut.Trim() == "", $"branch still exists: {branchOut}");
+        }
+        finally { TryCleanup(dir); }
+    }
+
+    [GitAvailableFact]
+    public async Task Abort_Preserves_MidRun_Changes_In_WeaverAbort_Stash()
+    {
+        var dir = CreateTempRepo();
+        try
+        {
+            CommitFile(dir, "file.txt", "hello v1");
+            File.WriteAllText(Path.Combine(dir, "file.txt"), "hello v2"); // stashed by Start
+
+            var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
+            var startResp = await CallStart(controller, dir, "card1");
+            var branch = startResp.GetProperty("branchName").GetString()!;
+
+            // The agent edits a file mid-run on the weaver branch — this must never be lost.
+            File.WriteAllText(Path.Combine(dir, "file.txt"), "agent mid-run edit");
+
+            var resp = await CallAbort(controller, dir, branch, "master");
+
+            Assert.True(resp.GetProperty("success").GetBoolean(), resp.TryGetProperty("error", out var errEl) ? errEl.GetString() : "no error");
+            Assert.Equal("master", resp.GetProperty("restoredBranch").GetString());
+            // The pre-branch stash was popped: the repo is back to the pre-branch state.
+            Assert.Equal("hello v2", File.ReadAllText(Path.Combine(dir, "file.txt")));
+            // The mid-run edit was swept into the weaver-abort stash, not destroyed.
+            var (exit, stashOut, _) = RunGit(dir, "stash list");
+            Assert.True(exit == 0 && stashOut.Contains("weaver-abort"), $"weaver-abort stash missing: {stashOut}");
+            var (exit2, showOut, _) = RunGit(dir, "stash show --name-only stash@{0}");
+            Assert.True(exit2 == 0 && showOut.Contains("file.txt"), $"abort stash missing file.txt: {showOut}");
+            // And the branch is deleted.
+            Assert.Equal("", RunGit(dir, "branch --list weaver/card1").output.Trim());
+        }
+        finally { TryCleanup(dir); }
+    }
+
+    [GitAvailableFact]
+    public async Task Abort_When_Already_Back_On_Original_Still_Deletes_Branch()
+    {
+        var dir = CreateTempRepo();
+        try
+        {
+            CommitFile(dir, "file.txt", "hello");
+            RunGit(dir, "checkout -b weaver/card1");
+            RunGit(dir, "checkout master"); // already restored, branch left behind
+
+            var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
+            var resp = await CallAbort(controller, dir, "weaver/card1", "master");
+
+            Assert.True(resp.GetProperty("success").GetBoolean(), resp.TryGetProperty("error", out var errEl) ? errEl.GetString() : "no error");
+            Assert.Equal("master", resp.GetProperty("restoredBranch").GetString());
+            Assert.Equal("", RunGit(dir, "branch --list weaver/card1").output.Trim());
+        }
+        finally { TryCleanup(dir); }
+    }
+
+    [GitAvailableFact]
+    public async Task Abort_When_Branch_Already_Gone_Reports_Success()
+    {
+        var dir = CreateTempRepo();
+        try
+        {
+            CommitFile(dir, "file.txt", "hello");
+            // Branch was already deleted elsewhere — abort's end state is already true.
+            RunGit(dir, "checkout -b weaver/card1");
+            RunGit(dir, "checkout master");
+            RunGit(dir, "branch -D weaver/card1");
+
+            var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
+            var resp = await CallAbort(controller, dir, "weaver/card1", "master");
+
+            Assert.True(resp.GetProperty("success").GetBoolean(), resp.TryGetProperty("error", out var errEl) ? errEl.GetString() : "no error");
+            Assert.True(resp.GetProperty("branchDeleted").GetBoolean());
         }
         finally { TryCleanup(dir); }
     }

@@ -333,6 +333,9 @@
                 SELF-IMPROVING</span>
               <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
                 title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
+              <button class="card-tag tag-pr-abort" ng-if="card.prStatus && card.prStatus.branch"
+                ng-click="vm.abortBranch(card); $event.stopPropagation();"
+                title="Abort branch '{{card.prStatus.branch}}' — check out the original branch, restore the pre-branch stash, and delete the branch (mid-run changes are kept in a weaver-abort stash).">↩ Abort</button>
             </div>
           </div>
 
@@ -793,6 +796,9 @@
             <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
             <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
+            <button class="card-tag tag-pr-abort" ng-if="card.prStatus && card.prStatus.branch"
+              ng-click="vm.abortBranch(card); $event.stopPropagation();"
+              title="Abort branch '{{card.prStatus.branch}}' — check out the original branch, restore the pre-branch stash, and delete the branch (mid-run changes are kept in a weaver-abort stash).">↩ Abort</button>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
               <a ng-href="{{card.prStatus.prUrl}}" target="_blank" rel="noopener" ng-click="$event.stopPropagation()">🔗 PR</a>
             </span>

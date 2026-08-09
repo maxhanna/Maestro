@@ -1291,13 +1291,14 @@ partial class AgentController
                 .OrderByDescending(f => f)
                 .Take(10)
                 .ToList();
+            Console.WriteLine($"[CollectDiffs] {relPath}: found {files.Count} diff(s) in {undoDir}");
             foreach (var f in files)
             {
                 var rel = f.Replace(projectRoot, "").TrimStart('\\', '/');
                 diffs.Add(rel);
             }
         }
-        catch { }
+        catch (Exception ex) { Console.WriteLine($"[CollectDiffs] EXCEPTION for {relPath}: {ex.Message}"); }
         return diffs;
     }
     private async Task<List<PlanStep>?> ReplanRemainingSteps(
@@ -1375,8 +1376,9 @@ partial class AgentController
                 diffPath = null;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Console.WriteLine($"[SaveEditWithUndo] EXCEPTION for {relPath}: {ex.Message}");
             diffPath = null;
         }
         await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);

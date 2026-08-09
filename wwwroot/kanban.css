@@ -1699,6 +1699,22 @@ body.dragging-active .card:hover {
     text-decoration: underline;
 }
 
+/* Abort-branch button — sits next to the PR tag on a card that still holds a
+   weaver branch (prStatus.branch). Red-tinted so it reads as a destructive action;
+   it is the ONLY trigger for /api/pr/abort (never automatic). */
+.card .card-tag.tag-pr-abort {
+    background: rgba(239, 68, 68, 0.16);
+    color: var(--brand-error);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.card .card-tag.tag-pr-abort:hover {
+    background: rgba(239, 68, 68, 0.3);
+    border-color: var(--brand-error);
+}
+
 /* ── Responsive ─────────────────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
