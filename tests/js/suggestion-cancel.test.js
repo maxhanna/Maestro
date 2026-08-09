@@ -31,9 +31,11 @@ const src = fs.readFileSync(path.join(__dirname, '../../wwwroot/agent.js'), 'utf
 const startMatch = /function shouldStartSuggestions\(card, maxSuggestions, topup\) \{[\s\S]*?\n        \}/.exec(src);
 const abortMatch = /function abortSuggestionGeneration\(card\) \{[\s\S]*?\n        \}/.exec(src);
 const staleMatch = /function clearStaleSuggestions\(card\) \{[\s\S]*?\n        \}/.exec(src);
+const busyMatch = /function suggestionSystemBlocked\(state\) \{[\s\S]*?\n        \}/.exec(src);
 assert(startMatch, 'shouldStartSuggestions not found in wwwroot/agent.js — marker format may have drifted');
 assert(abortMatch, 'abortSuggestionGeneration not found in wwwroot/agent.js — marker format may have drifted');
 assert(staleMatch, 'clearStaleSuggestions not found in wwwroot/agent.js — marker format may have drifted');
+assert(busyMatch, 'suggestionSystemBlocked not found in wwwroot/agent.js — marker format may have drifted');
 
 const shouldStartSuggestions = eval('(function shouldStartSuggestions(card, maxSuggestions, topup) {' +
   startMatch[0].replace(/^function shouldStartSuggestions\(card, maxSuggestions, topup\) \{/, '').replace(/\n        \}$/, '') + '})');
@@ -41,6 +43,8 @@ const abortSuggestionGeneration = eval('(function abortSuggestionGeneration(card
   abortMatch[0].replace(/^function abortSuggestionGeneration\(card\) \{/, '').replace(/\n        \}$/, '') + '})');
 const clearStaleSuggestions = eval('(function clearStaleSuggestions(card) {' +
   staleMatch[0].replace(/^function clearStaleSuggestions\(card\) \{/, '').replace(/\n        \}$/, '') + '})');
+const suggestionSystemBlocked = eval('(function suggestionSystemBlocked(state) {' +
+  busyMatch[0].replace(/^function suggestionSystemBlocked\(state\) \{/, '').replace(/\n        \}$/, '') + '})');
 
 console.log('suggestion start/cancel helper tests\n');
 
@@ -191,6 +195,39 @@ test('text edit on a card with nothing to invalidate → no-op, no new keys', fu
   if (clearStaleSuggestions(card)) abortSuggestionGeneration(card);
   assert.deepStrictEqual(Object.keys(card).sort(), ['id', 'text']);
   assert.strictEqual(card._suggestionsCancelled, undefined);
+});
+
+// ── suggestionSystemBlocked: idle-only enforcement ─────────────────────────
+test('completely idle board → suggestions allowed', function () {
+  assert.strictEqual(suggestionSystemBlocked({}), false);
+});
+
+test('null state → not blocked', function () {
+  assert.strictEqual(suggestionSystemBlocked(null), false);
+});
+
+test('card executing (streamingActive) → blocked', function () {
+  assert.strictEqual(suggestionSystemBlocked({ streamingActive: true }), true);
+});
+
+test('benchmark running → blocked', function () {
+  assert.strictEqual(suggestionSystemBlocked({ benchmarkRunning: true }), true);
+});
+
+test('benchmark-all active → blocked', function () {
+  assert.strictEqual(suggestionSystemBlocked({ benchmarkAllActive: true }), true);
+});
+
+test('self-improving cycle armed → blocked', function () {
+  assert.strictEqual(suggestionSystemBlocked({ selfImprovingAgentActive: true }), true);
+});
+
+test('self-improving flag not literally true → not blocked', function () {
+  assert.strictEqual(suggestionSystemBlocked({ selfImprovingAgentActive: 'x' }), false);
+});
+
+test('idle flags present but nothing executing → not blocked', function () {
+  assert.strictEqual(suggestionSystemBlocked({ streamingActive: false, benchmarkRunning: false, _suggestionIdlePaused: true }), false);
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

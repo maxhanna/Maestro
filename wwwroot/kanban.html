@@ -19,7 +19,7 @@
     <button ng-click="vm.toggleColumn('archived')" class="{{vm.showArchived ? 'active' : 'ghost'}}" title="Toggle Archived view">
       🗄 Archived ({{vm.cardsForProject('archived').length}})
     </button>
-    <span class="idle-suggest-chip" ng-if="vm._idleSuggestionPending > 0 || vm._suggestionIdleChainActive"
+    <span class="idle-suggest-chip" ng-if="(vm._idleSuggestionPending > 0 || vm._suggestionIdleChainActive) && !vm.suggestionSystemBlocked()"
       ng-class="{running: vm._suggestionIdleChainActive, paused: vm._suggestionIdlePaused}"
       ng-click="vm.toggleIdleSuggestions()" ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleIdleSuggestions()"
       role="button" tabindex="0"

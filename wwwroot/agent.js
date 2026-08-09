@@ -29,6 +29,14 @@ angular.module('kanbanApp')
             card._suggestionsError = null;
             return wasGenerating;
         }
+        // Pure guard: is any execution (a card run, a benchmark, a self-improving cycle)
+        // active? The suggestion system may ONLY work while the board is completely idle —
+        // never while a card is executing. The completion path calls suggestImprovements
+        // AFTER its run is marked inactive, so post-run suggestions still land.
+        // (tests/js/suggestion-cancel.test.js extracts this helper from the live source.)
+        function suggestionSystemBlocked(state) {
+            return !!(state && (state.streamingActive || state.benchmarkRunning || state.benchmarkAllActive || state.selfImprovingAgentActive === true));
+        }
         // Pure companion to abortSuggestionGeneration for in-place text edits: a card's
         // suggestions were generated against its OLD text, so after the text changes they
         // are stale and must be dropped (cancel alone keeps them for display). Returns
@@ -359,12 +367,21 @@ angular.module('kanbanApp')
                     // burning the endpoint and can't land on a card that moved back to
                     // To Do. The idle chain resumes on the next idle spell.
                     if (vm.cancelCardSuggestions && vm.state) {
+                        // Cancel EVERY card unconditionally (cancelCardSuggestions no-ops when
+                        // nothing is in flight) — a card starting must abort the whole
+                        // suggestion system, not just cards that still carry the generating
+                        // flag, so a flag-timing race can never leave a request running.
                         ['todo', 'doing', 'done', 'archived', 'selfImproving'].forEach(function (col) {
                             (vm.state[col] || []).forEach(function (c) {
-                                if (c && (c._suggestionsGenerating || c._suggestionCancel)) vm.cancelCardSuggestions(c);
+                                if (c) vm.cancelCardSuggestions(c);
                             });
                         });
                     }
+                    // The board is no longer idle — stop the idle suggestion chain immediately.
+                    // The in-flight $http calls were aborted above; their onDone re-checks
+                    // armed() (now false) so the chain cannot resume until the run finishes.
+                    vm._suggestionIdleChainActive = false;
+                    vm._suggestionIdleBusy = false;
                     if (vm.agentRuns.some(function (r) { return r.cardId === card.id && r.active; })) return;
                     if (card.selfImproving && vm.selfImprovingAgentActive !== true) {
                         vm.selfImprovingAgentActive = true;
@@ -990,6 +1007,15 @@ angular.module('kanbanApp')
                     if (!card) return false;
                     var proj = project || card.filePath || vm.selectedProject;
                     if (!proj) return false;
+                    // Idle-only: suggestion generation must NEVER start while a card is
+                    // executing — refuse and release the idle chain; the server enforces the
+                    // same rule as a backstop (and aborts any already-running generation the
+                    // moment a run starts). The completion path fires after its own run is
+                    // marked inactive, so post-run suggestions still land here.
+                    if (suggestionSystemBlocked(vm)) {
+                        if (opts && opts.onDone) opts.onDone(false);
+                        return false;
+                    }
                     var maxSuggestions = vm.projectMaxSuggestions(proj);
                     var topup = !!(opts && opts.topup);
                     if (!shouldStartSuggestions(card, maxSuggestions, topup)) return false;
@@ -1030,6 +1056,19 @@ angular.module('kanbanApp')
                     if (topup) { payload.topup = true; payload.existing = card._suggestions; }
                     $http.post('/api/agent/suggest-improvements', payload, { timeout: card._suggestionCancel.promise }).then(function (resp) {
                         if (card._suggestionsCancelled) { delete card._suggestionCancel; return; }
+                        if (resp && resp.data && resp.data.cancelled) {
+                            // The server refused because a card is executing (idle-only guard).
+                            // Leave the card needing suggestions — it is retried on the next
+                            // idle spell — and release the idle chain without marking the
+                            // card saturated or logging a failure.
+                            delete card._suggestionCancel;
+                            card._suggestionsCancelled = false;
+                            card._suggestionsGenerating = false;
+                            card._suggestionsRequested = false;
+                            card._suggestionsError = null;
+                            if (opts && opts.onDone) opts.onDone(false);
+                            return;
+                        }
                         delete card._suggestionCancel;
                         var suggestions = (resp.data && resp.data.suggestions) || [];
                         card._suggestionsGenerating = false;
@@ -1143,11 +1182,14 @@ angular.module('kanbanApp')
                     return fallback;
                 };
 
+                // True while any execution is active — the suggestion system may NEVER work
+                // during the execution of a card, only when the system is completely idle.
+                vm.suggestionSystemBlocked = function () {
+                    return suggestionSystemBlocked(vm);
+                };
+
                 vm.suggestionIdleArmed = function () {
-                    return !vm.streamingActive
-                        && !vm.benchmarkRunning
-                        && !vm.benchmarkAllActive
-                        && vm.selfImprovingAgentActive !== true
+                    return !suggestionSystemBlocked(vm)
                         && vm.projectIdleSuggestionsEnabled()
                         && !vm._suggestionIdlePaused;
                 };

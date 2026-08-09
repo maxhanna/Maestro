@@ -1291,7 +1291,35 @@ partial class AgentController
         var lastSpace = note.LastIndexOf(' ', 197);
         return note[..(lastSpace > 0 ? lastSpace : 197)] + "...";
     }
+    /// <summary>
+    /// Entry funnel for EVERY agent execution: registers the run so Done-card suggestion
+    /// generation is blocked while any card executes, and aborts every in-flight suggestion
+    /// generation the moment a run starts (server-side enforcement — the board is no longer
+    /// idle even if the client's cancel POST was lost or another client started the card).
+    /// The suggestion system only ever works while the system is completely idle.
+    /// </summary>
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> Orchestrate(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
+        List<string>? attachedFiles = null, bool skipContextReview = false,
+        string? steeringContext = null, bool skipQualityCheck = false,
+        AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
+        string? cardId = null, bool createTests = false, string? buildCommands = null)
+    {
+        var runKey = !string.IsNullOrWhiteSpace(cardId) ? "card:" + cardId : "anon:" + Guid.NewGuid().ToString("N");
+        _executingCards[runKey] = DateTime.UtcNow.Ticks;
+        AbortAllInFlightSuggestions("a card started executing");
+        try
+        {
+            return await OrchestrateCore(prompt, projectRoot, emitSse, ct, attachedFiles, skipContextReview,
+                steeringContext, skipQualityCheck, existingPlan, completedStepIndices, cardId, createTests, buildCommands);
+        }
+        finally
+        {
+            _executingCards.TryRemove(runKey, out _);
+        }
+    }
+
+    private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> OrchestrateCore(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,

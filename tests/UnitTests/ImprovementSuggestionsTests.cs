@@ -353,4 +353,82 @@ public class ImprovementSuggestionsTests
         Assert.Equal("full", InvokeNormalizeDepth("garbage"));
         Assert.Equal("full", InvokeNormalizeDepth("everything"));
     }
+
+    // ── Idle-only guard: suggestions must never run while a card executes ────
+    // The suggestion system only works while the board is completely idle. The pure
+    // guard: allowed when nothing is executing, or when the executing card IS the one
+    // the suggestions are for (it just finished — the completion-triggered flow, whose
+    // run is winding down). Blocked whenever a DIFFERENT card is executing.
+
+    [Fact]
+    public void SuggestionGuard_NoCardExecuting_Allowed()
+    {
+        Assert.True(AgentController.SuggestionAllowedWhileExecuting(false, false, "card-1"));
+        Assert.True(AgentController.SuggestionAllowedWhileExecuting(false, false, null));
+    }
+
+    [Fact]
+    public void SuggestionGuard_OtherCardExecuting_Blocked()
+    {
+        // An idle-loop request for card-1 while card-2 is running must be refused.
+        Assert.False(AgentController.SuggestionAllowedWhileExecuting(true, false, "card-1"));
+        // Unknown card (empty id) while something executes → refused.
+        Assert.False(AgentController.SuggestionAllowedWhileExecuting(true, false, null));
+        Assert.False(AgentController.SuggestionAllowedWhileExecuting(true, false, ""));
+    }
+
+    [Fact]
+    public void SuggestionGuard_SameCardExecuting_Allowed()
+    {
+        // The completion-triggered request for the card that JUST finished: its run entry
+        // may still exist while the run winds down — suggestions for THIS card are the point.
+        Assert.True(AgentController.SuggestionAllowedWhileExecuting(true, true, "card-1"));
+        // An empty/unidentifiable card id while something executes is refused — the guard
+        // cannot verify the executing card IS this one, so it errs on the side of blocking.
+        Assert.False(AgentController.SuggestionAllowedWhileExecuting(true, true, ""));
+    }
+
+    [Fact]
+    public void SuggestionEndpoint_WhileAnotherCardExecuting_ReturnsCancelled()
+    {
+        var (controller, db, dbPath) = BuildHarness();
+        try
+        {
+            // Simulate card-2 executing (server-side run registry).
+            // _executingCards is a static readonly field — mutate the live instance in place
+            // (seed the entry) and clean up in the finally below so no state leaks between tests.
+            var registry = typeof(AgentController).GetField("_executingCards",
+                BindingFlags.NonPublic | BindingFlags.Static)
+                ?? throw new InvalidOperationException("_executingCards not found");
+            var dict = (System.Collections.Concurrent.ConcurrentDictionary<string, long>?)registry.GetValue(null)
+                ?? throw new InvalidOperationException("_executingCards null");
+            dict["card:card-2"] = DateTime.UtcNow.Ticks;
+            try
+            {
+                var payload = System.Text.Json.JsonSerializer.SerializeToElement(new
+                {
+                    project = "C:/some/project",
+                    cardId = "card-1",
+                    cardText = "task"
+                });
+                var method = typeof(AgentController).GetMethod("SuggestImprovements",
+                    BindingFlags.Public | BindingFlags.Instance)
+                    ?? throw new InvalidOperationException("SuggestImprovements not found");
+                var task = (Task<Microsoft.AspNetCore.Mvc.IActionResult>)method.Invoke(controller, new object?[] { payload })!;
+                var result = task.GetAwaiter().GetResult() as Microsoft.AspNetCore.Mvc.OkObjectResult;
+                Assert.NotNull(result);
+                var json = System.Text.Json.JsonSerializer.Serialize(result!.Value);
+                Assert.Contains("\"cancelled\":true", json);
+            }
+            finally
+            {
+                dict.TryRemove("card:card-2", out _);
+            }
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { }
+            try { Directory.Delete(Path.GetDirectoryName(dbPath)!, true); } catch { }
+        }
+    }
 }

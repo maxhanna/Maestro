@@ -74,6 +74,12 @@ public partial class AgentController : ControllerBase
     private static readonly object SuggestionGateLock = new();
     private static readonly Dictionary<string, CancellationTokenSource> _suggestionCts = new();
     private static readonly HashSet<string> _suggestionCancelled = new();
+    // Executions currently running ("card:<cardId>" or "anon:<guid>" → started ticks).
+    // Any entry means the board is NOT idle: Done-card suggestion generation must not start,
+    // and the moment a run starts every in-flight generation is aborted server-side — the
+    // suggestion system only ever works while the system is completely idle. The completion
+    // request for the card that JUST finished is exempt (its run is winding down).
+    private static readonly ConcurrentDictionary<string, long> _executingCards = new();
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
@@ -588,6 +594,17 @@ public partial class AgentController : ControllerBase
         if (string.IsNullOrWhiteSpace(cardId) || string.IsNullOrWhiteSpace(project))
             return BadRequest(new { error = "cardId and project are required" });
 
+        // Idle-only guard: Done-card suggestions may ONLY run while the system is completely
+        // idle. A card executing right now means the board is NOT idle — refuse without
+        // touching the LLM. The completion-triggered request for the card that JUST finished
+        // is exempt (its run is winding down and its registry entry may still exist); any
+        // OTHER executing card blocks. The client treats cancelled=true as a no-op and
+        // retries on the next idle spell, so the card is never marked saturated.
+        var anyExecuting = _executingCards.Count > 0;
+        var thisCardExecuting = anyExecuting && _executingCards.ContainsKey("card:" + cardId);
+        if (!SuggestionAllowedWhileExecuting(anyExecuting, thisCardExecuting, cardId))
+            return Ok(new { cancelled = true, suggestions = new List<object>() });
+
         // Server-side abort handle for this card's in-flight generation: the client can
         // cancel it (suggest-improvements/cancel) so a running LLM call stops burning
         // tokens once the card no longer needs suggestions. A tombstone recorded by a
@@ -840,6 +857,37 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                     _suggestionCts.Remove(cardId);
             }
             suggestionCts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Pure idle-only guard for suggestion generation: allowed when no card is executing,
+    /// or when the executing card IS the one the suggestions are for (it just finished and
+    /// its run is winding down — the completion-triggered flow). Blocked whenever a
+    /// DIFFERENT card is executing or the card is unknown.
+    /// </summary>
+    public static bool SuggestionAllowedWhileExecuting(bool anyCardExecuting, bool thisCardExecuting, string? cardId)
+    {
+        if (!anyCardExecuting) return true;
+        if (string.IsNullOrWhiteSpace(cardId)) return false;
+        return thisCardExecuting;
+    }
+
+    /// <summary>
+    /// Aborts every in-flight suggestion generation server-side. Called the moment a card
+    /// starts executing — Done-card suggestions must never keep burning the LLM endpoint
+    /// while the board is busy, even if the client's per-card cancel POST was lost or the
+    /// run was started from another client. Each request's finally removes its own
+    /// registration from <see cref="_suggestionCts"/>.
+    /// </summary>
+    private static void AbortAllInFlightSuggestions(string reason)
+    {
+        lock (SuggestionGateLock)
+        {
+            foreach (var cts in _suggestionCts.Values)
+            {
+                try { cts.Cancel(); } catch { }
+            }
         }
     }
 
