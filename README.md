@@ -14,11 +14,11 @@ Source code: https://github.com/maxhanna/Weaver
 
 Discord:
 https://discord.gg/YQWkD6ZQDx
-
+<pre>
 ░█░█░█▀▀░█▀█░█░█░█▀▀░█▀▄
 ░█▄█░█▀▀░█▀█░▀▄▀░█▀▀░█▀▄
 ░▀░▀░▀▀▀░▀░▀░░▀░░▀▀▀░▀░▀
-
+</pre>
 ---
 
 ## Requirements
