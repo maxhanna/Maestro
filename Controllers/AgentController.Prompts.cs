@@ -657,11 +657,12 @@ partial class AgentController
             sb.AppendLine();
             sb.AppendLine("### WEB RESULTS ARE IN CONTEXT ###");
             sb.AppendLine("An earlier _web_search/_web_fetch step already ran — its results are in the " +
-                "DISCOVERY CONTEXT above under '### WEB RESULTS [<query>] ###'. Base the NEXT step on " +
-                "that content: reference the actual article/title/URL from the results, and do NOT " +
-                "search the web again or write code to fetch pages — the information is already in " +
-                "context. If you must save it to a file, create the file with the content drawn from " +
-                "those results.");
+                "DISCOVERY CONTEXT above under '### WEB RESULTS [<query>] ###'. Do NOT search the web " +
+                "again, and do NOT write code (Python/JS/C#/Selenium) to fetch pages. If a result " +
+                "lists a concrete article URL and the task needs that article's full detail, propose " +
+                "a _web_fetch step with THAT exact URL from the results (never an invented one). " +
+                "Otherwise finish the task from the results already in context — reference the actual " +
+                "titles/URLs, and if a file must be written, draw its content from those results.");
         }
         sb.AppendLine();
         sb.AppendLine("Propose the NEXT step now, or declare the plan complete. Output ONLY JSON.");
