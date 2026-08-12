@@ -55,8 +55,13 @@ public class Calculator
     [Fact]
     public void BraceLanguage_CrlfInput_NormalizesLineEndings()
     {
+        // Normalize to LF first, then re-encode to CRLF, so the input is genuine CRLF
+        // regardless of this test file's on-disk line endings (core.autocrlf=true on
+        // Windows checks out LF files as CRLF, so CsFile is already CRLF here — a
+        // bare Replace("\n","\r\n") would double-encode \r\n → \r\r\n and corrupt the
+        // line counts the production code derives from the input).
         var region = AgentDiscovery.ExtractIdentifierRegions(
-            CsFile.Replace("\n", "\r\n"), new List<string> { "result" }, ".cs");
+            CsFile.Replace("\r\n", "\n").Replace("\n", "\r\n"), new List<string> { "result" }, ".cs");
 
         Assert.Contains("public int Add(int a, int b)", region);
         Assert.Contains("// ▼ 'result' — lines 5–9", region);

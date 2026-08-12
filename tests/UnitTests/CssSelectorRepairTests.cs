@@ -208,7 +208,11 @@ public class CssSelectorRepairTests
               display: block;
             }
             """;
-        var (repaired, warnings) = CssSelectorRepair.RepairBareClassSelectors(css);
+        // RepairBareClassSelectors passes line endings through unchanged, so normalize
+        // to LF before asserting — otherwise the test breaks on Windows checkouts with
+        // core.autocrlf=true, where the raw-string literal inherits CRLF from the source
+        // file but the assertions below use \n.
+        var (repaired, warnings) = CssSelectorRepair.RepairBareClassSelectors(css.Replace("\r\n", "\n"));
         Assert.Equal(2, warnings.Count);
         Assert.Contains("\n  .titleMain a {", repaired);
         Assert.Contains("\n.titleMain {\n  display: block;", repaired);
