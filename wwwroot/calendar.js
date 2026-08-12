@@ -95,35 +95,54 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
   }
 
   // ── Cron matching (5-field: minute hour day-of-month month day-of-week) ──
+  // matchField lives at module scope so the full matcher (cronMatches) and the
+  // day-level matcher (cronDayMatches) share ONE implementation.
+  function matchField(field, val) {
+    if (field === '*') return true;
+    if (field.indexOf('*/') === 0) {
+      var interval = parseInt(field.slice(2), 10);
+      return interval > 0 && val % interval === 0;
+    }
+    var vals = field.split(',');
+    for (var i = 0; i < vals.length; i++) {
+      var v = vals[i];
+      if (v.indexOf('-') > 0) {
+        var range = v.split('-');
+        var lo = parseInt(range[0], 10);
+        var hi = parseInt(range[1], 10);
+        if (val >= lo && val <= hi) return true;
+      } else if (parseInt(v, 10) === val) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function cronMatches(expr, date) {
     try {
       var parts = expr.trim().split(/\s+/);
       if (parts.length !== 5) return false;
-      function matchField(field, val) {
-        if (field === '*') return true;
-        if (field.indexOf('*/') === 0) {
-          var interval = parseInt(field.slice(2), 10);
-          return interval > 0 && val % interval === 0;
-        }
-        var vals = field.split(',');
-        for (var i = 0; i < vals.length; i++) {
-          var v = vals[i];
-          if (v.indexOf('-') > 0) {
-            var range = v.split('-');
-            var lo = parseInt(range[0], 10);
-            var hi = parseInt(range[1], 10);
-            if (val >= lo && val <= hi) return true;
-          } else if (parseInt(v, 10) === val) {
-            return true;
-          }
-        }
-        return false;
-      }
       return matchField(parts[0], date.getMinutes()) &&
         matchField(parts[1], date.getHours()) &&
         matchField(parts[2], date.getDate()) &&
         matchField(parts[3], date.getMonth() + 1) &&
         matchField(parts[4], date.getDay());
+    } catch (e) { return false; }
+  }
+
+  // Day-level match for CALENDAR PLACEMENT: does this cron fire on the given day?
+  // Only the day-of-month, month and day-of-week fields matter — the fire TIME is
+  // rendered separately (card.time / the next-fire hint). So "0 9 * * *" (daily)
+  // marks every single day, "0 9 */2 * *" marks every second day, "0 9 * * 1"
+  // marks every Monday. This is what makes a daily cron appear on EVERY day of
+  // the viewed month instead of only the date it was created for.
+  function cronDayMatches(expr, dt) {
+    try {
+      var parts = expr.trim().split(/\s+/);
+      if (parts.length !== 5) return false;
+      return matchField(parts[2], dt.getDate()) &&
+        matchField(parts[3], dt.getMonth() + 1) &&
+        matchField(parts[4], dt.getDay());
     } catch (e) { return false; }
   }
 
@@ -504,12 +523,17 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           return parts[parts.length - 1] || '';
         }
 
-        function cardsForDate(dateStr) {
+        function cardsForDate(dateStr, dt) {
           var result = [];
           var projectBase = baseName(project);
           for (var ci = 0; ci < cards.length; ci++) {
             var c = cards[ci];
-            if (c.date !== dateStr) continue;
+            // A card renders on its exact date; a cron card ALSO renders on every
+            // day of the viewed month whose day-level fields its schedule fires —
+            // so a daily cron shows every single day, not just its creation date.
+            var onDate = c.date === dateStr ||
+              (c.cronExpression && dt && cronDayMatches(c.cronExpression, dt));
+            if (!onDate) continue;
             if (!project) { result.push(c); continue; }
             // Match full path, or basename (legacy cards stored only the folder name).
             if (c.filePath === project || baseName(c.filePath) === projectBase) {
@@ -566,7 +590,7 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           return best;
         }
         function makeDay(num, dateStr, inMonth, dt) {
-          var dayCards = cardsForDate(dateStr);
+          var dayCards = cardsForDate(dateStr, dt);
           var nfList = firesByDate[dateStr] || [];
           return { num: num, date: dateStr, inMonth: inMonth, isToday: dateStr === todayStr, isWeekend: isWeekend(dt), cards: dayCards, nextFires: nfList, nextFiresTitle: nextFiresTitle(nfList), lastRun: dayLastRun(dayCards) };
         }

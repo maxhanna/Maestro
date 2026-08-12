@@ -48,9 +48,127 @@ public class NewsServiceTests
     [InlineData("Search for recent AI articles about machine learning advancements and summarize the top three", false)]
     [InlineData("Search the web for recent AI breakthroughs and verify each result is a real published paper", false)]
     [InlineData("Search the web for the latest release notes for weaver and add a summary line to NOTES.md.", false)]
+    // Widened topic vocabulary: general-topic news must route to the digest, not plain search.
+    [InlineData("Find the local Montreal news and insert it into a text document on desktop", true)]
+    [InlineData("Get the latest food news and write it to a text file", true)]
+    [InlineData("What are today's top stories in sports?", true)]
+    [InlineData("Find the latest business headlines and save them to a document", true)]
+    [InlineData("Show me today's sports updates", true)]
+    // …but a topic alone is not news — no news word/noun, no recency, no persist intent.
+    [InlineData("Find the best pizza place in Montreal", false)]
     public void LooksLikeNewsQuery_Marker(string prompt, bool expected)
     {
         Assert.Equal(expected, NewsService.LooksLikeNewsQuery(prompt));
+    }
+
+    // ── Topic/place-aware planning: the prompt becomes a plan (query + topics + places + region) ──
+    [Fact]
+    public void ExtractPlanDeterministic_MontrealPrompt_DetectsPlaceRegionAndQuery()
+    {
+        var plan = NewsService.ExtractPlanDeterministic(
+            "Find the local Montreal news and insert it into a text document on desktop", null);
+
+        Assert.Contains("montreal", plan.Places);
+        Assert.Equal("canada", plan.Region);
+        Assert.Contains("local", plan.Topics);
+        Assert.Contains("montreal", plan.SearchQuery, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("AI News", plan.SearchQuery);
+    }
+
+    [Fact]
+    public void ExtractPlanDeterministic_AIQuery_DetectsAITopic_NoPlaces()
+    {
+        var plan = NewsService.ExtractPlanDeterministic("Search the web for the latest AI news", null);
+
+        Assert.Contains("ai", plan.Topics);
+        Assert.Empty(plan.Places);
+        Assert.Null(plan.Region);
+        Assert.Equal("AI news", plan.SearchQuery); // original casing preserved
+    }
+
+    [Fact]
+    public void ParsePlanJson_FencedOutput_Parses()
+    {
+        var plan = NewsService.ParsePlanJson(
+            "```json\n{\"query\": \"paris food news\", \"topics\": [\"food\"], \"places\": [\"paris\"], \"region\": \"france\"}\n```");
+
+        Assert.NotNull(plan);
+        Assert.Equal("paris food news", plan!.SearchQuery);
+        Assert.Equal("food", Assert.Single(plan.Topics));
+        Assert.Equal("france", plan.Region);
+    }
+
+    [Fact]
+    public void ParsePlanJson_Garbage_ReturnsNull()
+    {
+        Assert.Null(NewsService.ParsePlanJson("LLM SUMMARY"));
+        Assert.Null(NewsService.ParsePlanJson(null));
+        Assert.Null(NewsService.ParsePlanJson("{\"query\": \"\"}"));
+    }
+
+    [Fact]
+    public async Task FetchNewsAsync_LocalMontrealNews_UsesLocalitySources_NotTechFeeds()
+    {
+        // No LLM plan extractor — the deterministic fallback must do the locality routing.
+        var factory = new NewsScriptedClientFactory();
+        var service = new NewsService(factory);
+
+        var digest = await service.FetchNewsAsync(
+            "Find the local Montreal news and insert it into a text document on desktop",
+            limit: 8, ct: CancellationToken.None);
+
+        // Google News query search carries the place into the provider; region feeds joined.
+        Assert.Contains(factory.Gets, u => u.Contains("news.google.com") && u.Contains("montreal", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(factory.Gets, u => u.Contains("gl=CA")); // Canada locale
+        Assert.Contains(factory.Gets, u => u.Contains("cbc.ca"));
+        Assert.Contains(factory.Gets, u => u.Contains("globalnews.ca"));
+        // Tech feeds must NOT be fetched for a local-news query.
+        Assert.DoesNotContain(factory.Gets, u => u.Contains("venturebeat"));
+        Assert.DoesNotContain(factory.Gets, u => u.Contains("hn.algolia"));
+        // The CBC fixture landed; header reflects a general (non-AI) digest.
+        Assert.Contains("# News — ", digest);
+        Assert.DoesNotContain("# AI News", digest);
+        Assert.Contains("Montreal Metro gets $10B transit boost", digest);
+        Assert.Contains("1 item(s) from CBC.", digest);
+    }
+
+    [Fact]
+    public async Task FetchNewsAsync_LlmPlan_OverridesQueryTopicsAndRegion()
+    {
+        // The LLM planner (fenced JSON, as a real model tends to emit) picks food + Paris.
+        var factory = new NewsScriptedClientFactory();
+        var service = new NewsService(factory, null,
+            (prompt, _) => Task.FromResult<string?>(
+                "```json\n{\"query\": \"paris food news\", \"topics\": [\"food\"], \"places\": [\"paris\"], \"region\": \"france\"}\n```"));
+
+        var digest = await service.FetchNewsAsync(
+            "Find the latest food news in Paris and write it to a text file",
+            limit: 8, ct: CancellationToken.None);
+
+        // The query lands in the Google News search URL (encoding-agnostic: the recorded Uri
+        // may show literal spaces or %20 depending on normalization).
+        Assert.Contains(factory.Gets, u => u.Contains("news.google.com") && u.Contains("paris") && u.Contains("food"));
+        Assert.Contains(factory.Gets, u => u.Contains("gl=FR")); // France locale from region
+        Assert.Contains(factory.Gets, u => u.Contains("eater.com"));
+        Assert.DoesNotContain(factory.Gets, u => u.Contains("export.arxiv")); // no science topic
+        Assert.DoesNotContain(factory.Gets, u => u.Contains("venturebeat"));
+        Assert.Contains("# News — ", digest);
+        Assert.Contains("Montreal's new poutine festival draws record crowds", digest);
+    }
+
+    [Fact]
+    public async Task FetchNewsAsync_LlmPlan_Garbage_DeterministicFallback()
+    {
+        // A broken/empty LLM plan must not break the digest — deterministic extraction takes over.
+        var factory = new NewsScriptedClientFactory();
+        var service = new NewsService(factory, null,
+            (_, _) => Task.FromResult<string?>("LLM SUMMARY"));
+
+        var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
+
+        Assert.Contains("# AI News — ", digest);
+        Assert.Contains("AI Startup Raises $200M", digest);
+        Assert.Contains("https://vb.example.com/1", digest);
     }
 
     // ── Digest pipeline: parallel sources → dedup → round-robin → snippets → markdown ──
@@ -62,7 +180,7 @@ public class NewsServiceTests
         var factory = new NewsScriptedClientFactory();
         var service = new NewsService(factory);
 
-        var digest = await service.FetchNewsAsync("AI news", 8, CancellationToken.None);
+        var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
         Assert.Contains("# AI News — ", digest);
         Assert.Contains("\"AI news\"", digest);
@@ -99,7 +217,7 @@ public class NewsServiceTests
         var factory = new NewsScriptedClientFactory { FailTechCrunch = true };
         var service = new NewsService(factory);
 
-        var digest = await service.FetchNewsAsync("AI news", 8, CancellationToken.None);
+        var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
         // TechCrunch vanished; every other source still contributed.
         Assert.Contains("AI Startup Raises $200M", digest);
@@ -113,7 +231,7 @@ public class NewsServiceTests
         var factory = new NewsScriptedClientFactory { FailAll = true };
         var service = new NewsService(factory);
 
-        var digest = await service.FetchNewsAsync("AI news", 8, CancellationToken.None);
+        var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
         Assert.Contains("# AI News", digest);
         Assert.Contains("No fresh items could be fetched", digest);
@@ -126,7 +244,7 @@ public class NewsServiceTests
         var service = new NewsService(factory,
             (articleText, _) => Task.FromResult<string?>("INJECTED SUMMARY of [" + articleText[..20] + "]"));
 
-        var digest = await service.FetchNewsAsync("AI news", 8, CancellationToken.None);
+        var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
         // The thin snippet (< 200 chars) triggered the article fetch + summarizer path.
         Assert.Contains("INJECTED SUMMARY", digest);
@@ -295,6 +413,14 @@ public class NewsServiceTests
                     return Task.FromResult(Text(Rss()));
                 if (host.Contains("example.com") && _owner.ServeArticleHtml)
                     return Task.FromResult(Text("<html><body><article>" + new string('x', 300) + "</article></body></html>"));
+                if (host.Contains("cbc.ca"))
+                    return Task.FromResult(Text(Rss(
+                        ("Montreal Metro gets $10B transit boost", "https://cbc.example.com/montreal-transit",
+                            "Quebec and Ottawa announced a major transit investment for Montreal. " + new string('q', 220)))));
+                if (host.Contains("eater"))
+                    return Task.FromResult(Text(Rss(
+                        ("Montreal's new poutine festival draws record crowds", "https://eater.example.com/poutine",
+                            "Food writers flocked to the poutine festival this year. " + new string('e', 210)))));
                 return Task.FromResult(Json(new { }));
             }
         }

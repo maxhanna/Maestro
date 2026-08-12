@@ -975,6 +975,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return violations;
     }
 
+    /// <summary>
+    /// Classic-route mirror of the incremental && / redundant-OS-write guards: the classic
+    /// full-plan route has no per-step validation (ValidateIncrementalStepAsync only runs in
+    /// the interleaved route), so scan the WHOLE plan before executing any step and reject
+    /// Windows PowerShell `&&` chains and _command steps that re-write a demanded OS output
+    /// already covered by an earlier plan item. Evaluated against the steps BEFORE each
+    /// command so a single legitimate write in the plan is never flagged.
+    /// </summary>
+    private static List<(PlanStep Step, string Reason)> FindPlanCommandViolations(
+        AgentPlan plan, string prompt)
+    {
+        var violations = new List<(PlanStep, string)>();
+        if (plan?.Plan == null) return violations;
+        var prior = new List<PlanStep>();
+        foreach (var step in plan.Plan)
+        {
+            if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase))
+            {
+                if (OperatingSystem.IsWindows() && WindowsPowerShellAndChainReason(step.Change) is string andReason)
+                    violations.Add((step, andReason));
+                else if (RedundantOsWriteReason(prompt, step.Change, prior) is string dupReason)
+                    violations.Add((step, dupReason));
+            }
+            prior.Add(step);
+        }
+        return violations;
+    }
+
     private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
         PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string projectRoot, bool emitSse, CancellationToken ct,
@@ -1082,6 +1110,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ShouldRejectFetchCommand(originalPrompt, step.Change))
         {
             return (false, FetchCommandFeedback);
+        }
+        // WINDOWS POWER-SHELL && GUARD: powershell.exe (PS 5.1) rejects `&&` as a statement
+        // separator — the whole chained write fails with a parser error on the user's machine
+        // (the "echo … > file && echo … >> file" run). Windows-only; bash/PS7 allow &&.
+        if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
+            OperatingSystem.IsWindows() &&
+            WindowsPowerShellAndChainReason(step.Change) is string andChainReason)
+        {
+            return (false, andChainReason);
+        }
+        // REDUNDANT OS-OUTPUT WRITE GUARD: once a committed _command step already wrote the
+        // demanded OS output (Set-Content/echo>/Out-File to the demanded directory), a NEW
+        // _command step writing the same location is stacked re-work — reject so the planner
+        // completes instead of piling redundant writes (Set-Content, then an echo && chain,
+        // then an Invoke-RestMethod redirect — all to the same desktop file).
+        if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
+            RedundantOsWriteReason(originalPrompt, step.Change, planSoFar) is string redundantWriteReason)
+        {
+            return (false, redundantWriteReason);
         }
         // OS tasks: _create_directory/_create_file write relative to the PROJECT ROOT — a step
         // whose change names an OS location would silently create the folder/file INSIDE the
@@ -2238,6 +2285,66 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "Fetching web content is NOT a shell command — use a \"_web_search\" step (put the query in \"change\") or a \"_web_fetch\" step " +
         "(put the URL in \"change\") instead; the fetched results are injected into your context so you can use them. " +
         "Reserve _command for real terminal commands (builds, tests, git, package installs).";
+
+    /// <summary>
+    /// Windows PowerShell 5.1 (powershell.exe) rejects `&&` as a statement separator
+    /// ("The token '&&' is not a valid statement separator in this version"). The planner
+    /// (trained mostly on bash/PS7) chains commands with && and the whole write fails — the
+    /// "echo … > file && echo … >> file" run. OS-independent so it can be unit-tested on any
+    /// host; the CALLER gates on OperatingSystem.IsWindows() (Linux bash and PS7 allow &&).
+    /// Quoted strings are ignored: a literal "a && b" inside quotes is valid PS 5.1.
+    /// </summary>
+    public static string? WindowsPowerShellAndChainReason(string? change)
+    {
+        if (string.IsNullOrWhiteSpace(change)) return null;
+        var unquoted = Regex.Replace(change, "\"([^\"]*)\"|'([^']*)'", "");
+        if (!unquoted.Contains("&&")) return null;
+        return "_command chains commands with '&&' — the shell on this machine is Windows PowerShell 5.1, which does NOT support '&&' as a statement separator " +
+               "(\"The token '&&' is not a valid statement separator in this version\"). Run ONE command per _command step, separate commands with ';', " +
+               "or write the file in a single Set-Content/Out-File/Add-Content step with an absolute path.";
+    }
+
+    /// <summary>
+    /// Redundant OS-output write guard: once a committed _command step ALREADY satisfies the
+    /// task's demanded OS file output (its command references the demanded directory/file),
+    /// any NEW _command step writing to that same demanded location is stacked re-work — the
+    /// "Search the web … write the data into a text file on my desktop" run proposed
+    /// Set-Content, then an echo && chain, then an Invoke-RestMethod redirect, ALL to the
+    /// same file. Only fires when the demand is ALREADY satisfied, so a genuine repair (the
+    /// verifier says the file is missing or its content is wrong) can still overwrite.
+    /// </summary>
+    public static string? RedundantOsWriteReason(string? prompt, string? newCommand, IEnumerable<PlanStep> committed)
+    {
+        if (!AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out var demand)) return null;
+        var newCmd = (newCommand ?? "").Replace('\\', '/');
+        var demandDir = (demand.DirectoryPath ?? "").Replace('\\', '/');
+        // A prompt that NAMES the file pins the exact target — only writes to THAT file are
+        // redundant. A generic demand ("a text file on my desktop") falls back to the default
+        // name for IsOsOutputWritten, but the planner may legitimately pick any name, so the
+        // directory match is what catches stacked writes there.
+        var hasRealHint = !string.IsNullOrWhiteSpace(demand.FileNameHint);
+        var demandFile = hasRealHint
+            ? demand.FileNameHint!
+            : AgentOsOutputVerifier.DefaultDumpFileName;
+        var writesToDemand = hasRealHint
+            ? newCmd.Contains(demandFile, StringComparison.OrdinalIgnoreCase)
+            : (demandDir.Length > 0 && newCmd.Contains(demandDir, StringComparison.OrdinalIgnoreCase)) ||
+              (demandFile.Length > 0 && newCmd.Contains(demandFile, StringComparison.OrdinalIgnoreCase));
+        if (!writesToDemand) return null;
+        var alreadyWritten = AgentOsOutputVerifier.IsOsOutputWritten(demand, committed.Select(s => new Dictionary<string, object?>
+        {
+            ["type"] = s.File,
+            ["command"] = s.Change,
+            ["status"] = "done"
+        }));
+        if (!alreadyWritten) return null;
+        var where = string.IsNullOrWhiteSpace(demand.FileNameHint)
+            ? (demandDir.Length > 0 ? demandDir : "the demanded location")
+            : Path.Combine(demand.DirectoryPath ?? "", demand.FileNameHint!);
+        return $"The demanded OS output file ({where}) was ALREADY written by a completed _command step — the task's file requirement is satisfied. " +
+               "Do NOT add another Set-Content/Out-File/redirect write to the same location. If the run is complete, return planComplete=true; " +
+               "only write again if a verifier issue explicitly says the existing file content is wrong.";
+    }
 
     /// <summary>
     /// True when an OS-filesystem task ALSO mentions repo work (README, link, note,

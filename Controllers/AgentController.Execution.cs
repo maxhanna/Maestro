@@ -115,9 +115,14 @@ partial class AgentController
         // the directory via an earlier _create_directory step, or a path the task names, or an
         // OS path, all pass — the exemptions are identical to the incremental guard.
         var inventedCreates = FindInventedCreateDirectories(plan, prompt, projectRoot);
-        if (inventedCreates.Count > 0)
+        // CLASSIC-ROUTE COMMAND-VIOLATION GATE (mirror of the incremental && / redundant-write
+        // guards): a whole-plan _command step that chains with '&&' on Windows PowerShell 5.1
+        // would fail with a parser error at execution time, and a _command step that re-writes
+        // a demanded OS output already covered by an earlier plan item is stacked re-work.
+        var commandViolations = FindPlanCommandViolations(plan, prompt);
+        if (inventedCreates.Count > 0 || commandViolations.Count > 0)
         {
-            foreach (var (badStep, badReason) in inventedCreates)
+            foreach (var (badStep, badReason) in inventedCreates.Concat(commandViolations))
             {
                 await EmitLog(emitSse, "error", badReason, ct: ct);
                 if (!string.IsNullOrWhiteSpace(cardId))
@@ -1106,7 +1111,7 @@ partial class AgentController
     }
 
     private NewsService? _newsService;
-    private NewsService GetNewsService() => _newsService ??= new NewsService(_clientFactory, SummarizeArticleForNewsAsync);
+    private NewsService GetNewsService() => _newsService ??= new NewsService(_clientFactory, SummarizeArticleForNewsAsync, ClassifyNewsPlanAsync);
 
     /// <summary>Summarizes a fetched article for the news digest (≤150 words). Falls back to
     /// the feed snippet when llama is unreachable or returns nothing — the digest must never
@@ -1117,6 +1122,34 @@ partial class AgentController
             "You are a news summarizer. Summarize the article below in at most 150 words, covering the key facts, numbers and names. Output ONLY the summary text.",
             articleText, emitSse: false, ct, maxTokens: 300);
         return err == null && !string.IsNullOrWhiteSpace(raw) ? raw.Trim() : null;
+    }
+
+    /// <summary>Asks the LLM to turn the user's news request into a research plan (search query
+    /// + topics + places + region). The NewsService picks its feed set and Google News locale
+    /// from this plan — so "Find the local Montreal news…" lands on Montreal/Quebec sources, not
+    /// the AI feeds. Any failure (endpoint down, non-JSON output) returns null and the service
+    /// falls back to its deterministic keyword/place extractor — the digest never hard-depends
+    /// on this call.</summary>
+    private async Task<string?> ClassifyNewsPlanAsync(string prompt, CancellationToken ct)
+    {
+        try
+        {
+            const string system =
+                "You are a news research planner. Given the user's news request, output ONLY a JSON object:\n" +
+                "{\"query\": \"<concise search query, include any location and topic words>\", " +
+                "\"topics\": [\"<one of: ai, tech, science, business, sports, food, entertainment, gaming, health, climate, politics, world, local>\"], " +
+                "\"places\": [\"<place names mentioned, e.g. montreal, quebec>\"], " +
+                "\"region\": \"<one of: canada, usa, uk, france, germany, australia, india, japan, brazil, or empty>\"}.\n" +
+                "Example for \"Find the local Montreal news\": " +
+                "{\"query\": \"montreal local news\", \"topics\": [\"local\"], \"places\": [\"montreal\"], \"region\": \"canada\"}.\n" +
+                "Empty arrays/strings are allowed; output the JSON with no markdown fences and no extra text.";
+            var (raw, err) = await CallLlmRawText(system, prompt, emitSse: false, ct, maxTokens: 200);
+            return err == null && !string.IsNullOrWhiteSpace(raw) ? raw.Trim() : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -1130,7 +1163,7 @@ partial class AgentController
     {
         if (NewsService.LooksLikeNewsQuery(prompt) || NewsService.LooksLikeNewsQuery(query))
         {
-            var digest = await GetNewsService().FetchNewsAsync(query, NewsService.DefaultLimit, ct);
+            var digest = await GetNewsService().FetchNewsAsync(prompt ?? query, query, NewsService.DefaultLimit, ct);
             return (digest, null);
         }
         return await WebSearchAsync(query, ct);
