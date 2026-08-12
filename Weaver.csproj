@@ -29,6 +29,16 @@
          embedded-resource globs. -->
     <EmbeddedResource Remove="tests\**" />
     <None Remove="tests\**" />
+    <!-- Exclude stale obj/bin trees under tests/ from compilation. tests/UnitTests
+         was once a separate project (Weaver.UnitTests.csproj, since inlined here);
+         a leftover tests/UnitTests/obj/ carries its own generated AssemblyInfo.cs
+         and .NETCoreApp AssemblyAttributes.cs, which define the same [AssemblyTitle]/
+         [AssemblyVersion]/[TargetFramework] attributes as this project's own generated
+         copies — producing CS0579 duplicate-attribute build errors. The default
+         Compile glob (**) picks them up because tests/** is only removed from
+         EmbeddedResource/None above, not from Compile. -->
+    <Compile Remove="tests\**\obj\**" />
+    <Compile Remove="tests\**\bin\**" />
   </ItemGroup>
 
   <ItemGroup>
