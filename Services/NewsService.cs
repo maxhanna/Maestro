@@ -919,13 +919,11 @@ public partial class NewsService
             if (summary == null)
                 return (false, "", new List<string>());
 
-            // Fill missing items with snippet fallbacks.
-            for (var i = 0; i < itemSummaries.Count; i++)
-            {
-                if (string.IsNullOrWhiteSpace(itemSummaries[i]))
-                    itemSummaries[i] = TruncateFallback(
-                        bodies[i].body.Length > 0 ? bodies[i].body : bodies[i].item.Title);
-            }
+            // Do NOT fill missing items with snippet fallbacks. With relevance
+            // filtering, the model intentionally omits irrelevant articles — an
+            // empty summary means "filtered out", not "parse failure". The output
+            // assembly drops items with empty summaries. Filling them would
+            // defeat the filtering feature by re-including every article.
 
             if (string.IsNullOrWhiteSpace(summary))
                 return (false, "", new List<string>());
