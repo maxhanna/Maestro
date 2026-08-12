@@ -436,8 +436,11 @@ partial class AgentController
                 sb.Append("Web/OS tasks are a CHAIN of step tools, one step per turn — never application code. ");
                 sb.Append("Example — \"search the web for an AI article and write it to my desktop\":\n");
                 sb.Append("  1. {\"planComplete\":false,\"step\":{\"file\":\"_web_search\",\"change\":\"AI research breakthroughs latest\"}}\n");
-                sb.Append("  2. {\"planComplete\":false,\"step\":{\"file\":\"_web_fetch\",\"change\":\"https://example.com/ai-article\"}}\n");
-                sb.Append("     (fetch via _command instead: {\"file\":\"_command\",\"change\":\"Invoke-RestMethod https://example.com/api | Select-Object title,summary,url\"})\n");
+                sb.Append("  2. {\"planComplete\":false,\"step\":{\"file\":\"_web_fetch\",\"change\":\"<the EXACT URL of one article from the search results — copy it verbatim, NEVER invent one>\"}}\n");
+                sb.Append("     (fetch via _command instead: {\"file\":\"_command\",\"change\":\"Invoke-RestMethod <the EXACT API URL from the search results> | Select-Object title,summary,url\"})\n");
+                sb.Append("⚠ A _web_fetch step MUST use a real URL that appears in the search results or the task text. ");
+                sb.Append("Inventing a URL (e.g. www.example.com/...) makes the fetch fail and wastes a step. ");
+                sb.Append("If the search results give no usable URL, do NOT fetch — dump the search results to the demanded file with _command instead.\n");
                 sb.Append("  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"... | Set-Content -Path \\\"<desktop-path>\\ai_article.txt\\\" -Encoding UTF8\"}}\n");
                 sb.Append("Each step consumes the previous step's output; declare planComplete only after the file is written.\n\n");
             }
@@ -601,11 +604,19 @@ partial class AgentController
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string? steeringContext, List<string> rejectionFeedback, string? extendedReasoning = null,
-        int? atomicStepEstimate = null)
+        int? atomicStepEstimate = null, string? requirementChecklist = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("### TASK ###");
         sb.AppendLine(originalPrompt);
+        // The extracted EXPLICIT REQUIREMENTS CHECKLIST rides in the PLANNER prompt as its own
+        // section — never in the task text itself, so the web-need/OS-task heuristics that scan
+        // the raw task never see checklist wording ("search", "fetch", "current", "latest").
+        if (!string.IsNullOrWhiteSpace(requirementChecklist))
+        {
+            sb.AppendLine();
+            sb.AppendLine(requirementChecklist);
+        }
         if (atomicStepEstimate is > 0)
         {
             sb.AppendLine();
@@ -1062,7 +1073,7 @@ partial class AgentController
     }
     private static string BuildReplanPrompt(string originalPrompt, List<string> history, string? steeringContext = null,
     AgentPlan? existingPlan = null, List<object>? executedSteps = null,
-    string qualityCheckReason = "", string fileContents = "")
+    string qualityCheckReason = "", string fileContents = "", string? requirementChecklist = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("Previous plan did not fully complete. You must ONLY plan the FEWEST new steps needed.");
@@ -1071,6 +1082,7 @@ partial class AgentController
         sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
+        if (!string.IsNullOrWhiteSpace(requirementChecklist)) { sb.AppendLine("## Requirements"); sb.AppendLine(requirementChecklist); sb.AppendLine(); }
         if (existingPlan?.Plan?.Count > 0)
         {
             sb.AppendLine("## Existing plan with results");
@@ -1112,12 +1124,44 @@ partial class AgentController
             sb.AppendLine();
         }
         sb.AppendLine("## Original task"); sb.AppendLine(originalPrompt); sb.AppendLine();
+        // OS-OUTPUT-DEMAND guidance: when the original task explicitly asks for a file on the
+        // OS filesystem ("write the data into a text file on my desktop"), the ONLY step that
+        // can create it is a _command writing to the absolute path — never application code
+        // in a repo file (a pre-fix repair replanner invented a Node fs writeArticleToFile()
+        // method in an Angular service, which cannot touch the desktop and satisfied nothing).
+        if (AgentOsOutputVerifier.TryGetOsFileOutputDemand(originalPrompt, out var osDemand))
+        {
+            var osTarget = string.IsNullOrWhiteSpace(osDemand.FileNameHint)
+                ? Path.Combine(osDemand.DirectoryPath, AgentOsOutputVerifier.DefaultDumpFileName)
+                : Path.Combine(osDemand.DirectoryPath, osDemand.FileNameHint!);
+            sb.AppendLine("## OS-OUTPUT DEMAND (the task asks for a file OUTSIDE the repository) ##");
+            sb.AppendLine($"The task demands a file at \"{osTarget}\" on the OS filesystem. ");
+            sb.AppendLine($"The ONLY step type that can create it is a _command step with an absolute path, e.g. ");
+            sb.AppendLine($"{{\"file\":\"_command\",\"change\":\"Set-Content -Path \\\"{osTarget}\\\" -Value \\\"<content>\\\" -Encoding UTF8\"}}. ");
+            sb.AppendLine("Do NOT create or edit application code (a method, service, or script in the repo) to \"write\" this file — ");
+            sb.AppendLine("a repo edit cannot touch the OS desktop and will fail verification deterministically. ");
+            sb.AppendLine("If the run already gathered web results, draw the file's content from those results.\n");
+        }
         if (!string.IsNullOrWhiteSpace(qualityCheckReason))
         {
             sb.AppendLine("## Quality check assessment");
             sb.AppendLine(qualityCheckReason);
             sb.AppendLine();
             sb.AppendLine("CRITICAL: The quality check above identifies specific missing implementations. You MUST create steps to implement exactly what it asks for. Do not return an empty plan if the quality check identifies missing methods or properties that need to be added.");
+        }
+        // Harvested web results: a failed _web_fetch / completed _web_search leaves real search
+        // output in the executed results. Without it, the replanner invents URLs or content.
+        // Append the same ### WEB RESULTS sections the live planner sees so a repair can
+        // (a) pick a REAL URL to fetch or (b) write the actual gathered data to the demanded file.
+        if (executedSteps != null)
+        {
+            var webResults = AppendWebResultsToDiscoveryContext("", executedSteps.OfType<Dictionary<string, object?>>());
+            if (!string.IsNullOrWhiteSpace(webResults))
+            {
+                sb.AppendLine("## Web results gathered so far (use these — never invent URLs or content) ##");
+                sb.AppendLine(webResults.Trim());
+                sb.AppendLine();
+            }
         }
         sb.AppendLine("## What went wrong");
         foreach (var h in history) sb.AppendLine(h);

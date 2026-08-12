@@ -1,0 +1,426 @@
+# Weaver Test Audit
+
+A full inventory of every test in the repository: what each suite covers, how to run
+them, what can be improved, and what is missing. Generated from a sweep of all test
+sources in `tests/` — every file and test method is accounted for below.
+
+**Last audited:** August 11, 2026 · **Suite size:** 93 C# test classes
+(1,541 runtime test cases per `dotnet test`) + 12 standalone JS suites (166 tests),
+run together via `node tests/js/run-all.js`.
+
+---
+
+## 1. How the tests are organized and run
+
+There are two completely separate test harnesses:
+
+| Harness | Location | Runner | Framework |
+|---|---|---|---|
+| C# unit / integration tests | `tests/UnitTests/*.cs` | `dotnet test` (project root) | xUnit (compiled **into** `Weaver.csproj` — see the comment at `Weaver.csproj:18`) |
+| JS client-logic tests | `tests/js/*.test.js` | `node tests/js/<file>.test.js` | Hand-rolled mini-runner (a local `test(name, fn)` + `process.exit(failed ? 1 : 0)` at the bottom of each file) |
+
+Run everything:
+
+```bash
+dotnet test --nologo          # C# suite
+for f in tests/js/*.test.js; do node "$f" || break; done   # JS suite
+```
+
+Notes:
+
+- **There is no CI.** No `.github/workflows`, no npm `test` script, no aggregator for the
+  JS files. The JS suites only run if someone remembers to loop over them. See §4.
+- The C# tests live inside the main project (not a separate test project), so
+  `dotnet test` builds the whole app first and the tests run against the real code —
+  there is no production/test assembly split.
+- Several suites are **self-contained mini-projects**: they spawn real
+  `node wwwroot/filetree.js` (FileTreeOrderIndependenceTests), drive the real
+  `Orchestrate` pipeline with fake/scripted LLM clients (the `*Pipeline*Tests`,
+  `ToolSelectionEvalTests`, `SyntheticGroundTruthEvalTests`), or touch real temp
+  directories on disk (all the `*CorpusTests`). These are integration tests in
+  xUnit clothing.
+- The suite is **fully green**: `FileTreeOrderIndependenceTests` was previously the one
+  known pre-existing failure (it spawned `node wwwroot/filetree.js` and could not locate
+  the helper when the test assembly was built to an output directory outside the repo
+  tree — the csproj bundles `wwwroot/**` as embedded resources, so nothing copied the
+  file next to the DLL). `LocateHelper` now falls back to the embedded manifest resource
+  (plus a cwd probe), so the corpus runs from any output location.
+
+---
+
+## 2. Inventory — C# unit/integration suites (93 classes)
+
+Grouped by domain. Method names in the `METHODS:` lines are abbreviated but verbatim.
+
+### 2.1 Core edit-application machinery (the "no drift" layer)
+
+The claim these tests collectively lock: **the applied file equals the pure intended
+substitution — nothing added, removed, or reformatted by accident; sibling blocks stay
+byte-identical; bad input fails closed.**
+
+| File | Tests | What it covers |
+|---|---|---|
+| `AnchorSanityTests` | 7 | Rejects garbage anchors (bare punctuation, lone closing braces); deterministic-batch markers and first-non-blank-line helpers behave. |
+| `AttachedFilesEditGuardTests` | 8 | The attached-files guard: when a task has attached files, `_create_file`/`_create_directory` dodges are rejected (even in retry mode), while explicit creation intent or no attached files is allowed and normal edit steps pass. |
+| `AstCodeEditorServiceTests` | 17 | AST block extraction per language (C#/TS/Python/Go/Rust), `FindAllFunctions`, and `AutoFixSyntaxErrors` (semicolons, no-op on valid JS, fuzz: broken snippets repair-or-leave without crashing, repairs are strict progress). |
+| `BatchEditCorpusTests` | 8 | Batch edits land independently with zero cross-edit interference; overlapping/identical-oldString/failed/no-op edits reject the **whole** batch untouched; a fuzz chain proves every edit lands. |
+| `CreateFileConflictGuardTests` | 9 | Name-collision guard: same-name-in-other-dir is fine, same-dir blocks; listing skips phantom dirs; directory-target redirection. |
+| `CreateFileDirectoryGuardTests` | 17 | The **invented-directory guard** for `_create_file` steps: a create whose directory prefix is nonsense (no matching path anywhere in the project) is rejected with corrective guidance steering to the **closest real directory** — match scored on normalized (case-insensitive, separator-normalized, dotted-path-aware) trailing+leading shared segments, falling back to the nearest existing ancestor. Covers: exact dir passes, invented-but-similar dirs rejected and steered to the right leaf/ancestor, deep-vs-shallow steering picks the better match, `maxhanna.client/src/…` dotted prefixes now parse (the pre-existing extraction regex stopped at the first dot), a legit `docs/README.md` whose path the **task explicitly names** is exempted (corpus tests demand it), OS-path creates are left to the OS-task veto, and the research-verb guard no longer rejects creates whose leaf starts with read/find/search (`README.md`, `findings.txt`, `search_results.json`). |
+| `CreateFileCorpusTests` | 2 | For a non-existent file the pipeline must **always** pick `_create_file` and write the exact fullFile bytes (fence/CRLF/edge-newline semantics); re-applying is byte-identical. |
+| `CreateFilePathScopingTests` | 7 | New-file paths resolve against the plan's `_create_directory` step, executed directory results, or root; extensionless root files are never mistaken for dirs. |
+| `DeleteCorpusTests` | 6 | The anti-over-match guarantee: deletion removes **only** the exact target block, refuses on duplicates without a disambiguator, and the surviving duplicate is always the untargeted one. |
+| `DeterministicBatchIntegrationTests` | 9 | Deterministic multi-edit batches (swap / set-to / member-add) resolve through `PrepareEditContextAsync` with **zero** LLM calls (a client factory that throws proves it) and apply every occurrence end-to-end, including G1 drift re-anchoring. |
+| `DeterministicEditGeneratorTests` | 94 | The biggest suite: `Swap`/`SetTo` (quoted keys, units, multi-occurrence, decline cases), `Property`/`MultiMember` add (C#/TS anchoring, per-class overrides, filters, exclusions), `Multi` batches, `Decide` fallbacks, G1 drift recovery. |
+| `EditClassifierTests` | 16 | Classifies edit intent (create-file vs delete vs anchored vs insert-method vs fill-class-body) and `IsVariableSwap` phrasing detection. |
+| `EditIntentClassifierTests` | 14 | LLM-based intent classification mapping with graceful fallbacks (invalid JSON, nulls, unknown kinds → `TargetedEdit`). |
+| `EditStrategyResolverTests` | 9 | Resolves the concrete edit strategy per language/intent; `AddProperty` → fill-class-body never class-replace; Roslyn/tree-sitter symbol resolution with anchored fallback. |
+| `FormatCCorpusTests` | 8 | FORMAT C (insertAfter) full-chain fuzz on .ts/.js/.cs: pure substitution, already-done guard on rerun, pre-edit validation agrees with `IsRemovalAlreadyApplied`. |
+| `FormatCEditTests` | 5 | The CRLF bug regression: AST resolver returns LF blocks while the file is CRLF; text-fallback prefix ending in `\r` broke `IndexOf`; end-to-end resolve+apply succeeds on CRLF files. |
+| `FormatCSqlEditTests` | 6 | SQL inside C# string edits: escaped-newline fixups, SQL formatting inside the method while C# stays byte-intact, fuzz corpus with no C# drift. |
+| `FormatDPayloadCorpusTests` | 19 | FORMAT D full-file payloads: parse mapping, insert-before/after/replace purity, already-done guard, anchor-drift fallback chain, empty-new-code → deletion routing. |
+| `HtmlDomEditorTests` | 27 | HTML anchor resolution (exact → fuzzy → hallucination rejection via tag gate), duplicate-anchor disambiguation by keyword/line, strip-leading-closing-divs, reindent, and fuzz: never false-negative on existing targets, never picks the wrong element. |
+| `InventedEditFileSiblingTests` | 7 | The **sibling-steering extension** of the invented-file guard's anchored-EDIT arm: an edit to a non-existent file is rejected AND the feedback now proposes the closest REAL sibling path — (1) the invented leaf name exists verbatim in a different real directory (`src/app/services/card.service.ts` → `src/shared/card.service.ts`), or (2) the invented leaf is a typo/plural/case variant (Levenshtein ≤ 2, `card.service.ts` → `cards.service.ts`, or an invented subdir whose closest real dir holds the near-miss `utill.ts` → `util.ts`); no plausible sibling → the generic invented-file rejection (never a bare pass); and the boundaries hold — edits to real files pass, newString-only invented paths still redirect to `_create_file`, and an edit to a file an earlier `_create_file` step creates is exempt. Regression-checked: neutering `FindRealSiblingForInventedFile` fails exactly the 3 steering tests, never the boundary tests. |
+| `LlmCssCleanerPipelineTests` | 14 | CSS cleanup full pipeline is byte-identical on pristine files; agent edits that "squish" declarations get fixed with unrelated lines untouched; missing-brace repair. |
+| `LlmCssCleanerTests` | 15 | The CSS tokenizer never mangles selectors/pseudo-classes/hex colors/keyframes/units; squished declarations still repaired. |
+| `ReindentSnippetFuzzCorpusTests` | 2 | The `.ts` generics bug (content-sniffing routed TS through the HTML indenter): extension-gated indenter, fuzz with braces-in-strings and template literals. |
+| `SnippetReindentTests` | 4 | Same bug, hand-picked shapes: `Promise<void>` never flattened, HTML still tag-depth, already-indented passes through. |
+| `SurroundingLineReanchorTests` | 13 | When the file drifted between plan and apply, the anchor is re-anchored by surrounding lines; ambiguity and over-large anchors return null (fail closed). |
+| `TargetedAnchorGuardTests` | 7 | Huge oldStrings (>30 lines / >400 chars) are rejected even in retry mode; small targeted anchors pass. |
+| `TsJsIndentationTests` | 11 | Brace-depth indenter: braces in strings/template literals/comments never shift depth; CRLF preserved; already-indented passes through. |
+
+### 2.2 Verification, triage, and deterministic checks (the "can't call it done" layer)
+
+| File | Tests | What it covers |
+|---|---|---|
+| `PostExecuteVerifyTests` | 48 | Parse of verifier issues (confirmed/speculative), the full **triage** rule set (phantom claims, checklist-echo, should-be-rename, view-child event gating, hallucinated references, prose-word parentheticals — incl. the **pronoun regression**: "...still references it (class=\"...\")" must not read the prose word 'it' as a method-call symbol, or the hallucinated-reference rule drops a genuine deterministic issue whose symbol is absent from the current files), `DetectPartialEdit` (claimed vs actually-edited symbol), and skip-phantom already-done steps. |
+| `AgentRenameVerifierTests` | 26 | The deterministic **rename-all completeness** check (`AgentRenameVerifier`): parse precision (only every/all/each + occurrence phrase, 'everywhere/throughout', or direct 'rename all X to Y' forms fire — single renames, aggregation tasks, and vacuous 'rename X to X' never do; quotes + case handled) and scan recall (an edited file still containing the old name yields a CONFIRMED issue with the remaining count, singular '1 time', word-boundary counting so `MAX_RETRIES_COUNT` is never an occurrence of `MAX_RETRIES`, multiple files flag only the dirty one, clean/missing/non-rename files pass). |
+| `TemplateBindingValidatorTests` | 29 | Template bindings must resolve to real component members: valid pass, missing flagged, loop vars / pipes / `$` locals / object keys / optional chains not false-flagged, Angular 17 control flow, pre-edit-snapshot diffing, whole-template fallback, **and the binding-attribute shapes** (`[(ngModel)]="title"` banana boxes, `[class.active]`, `[style.color]`, `(click)` — declared members pass, undeclared members flag). |
+| `CssSelectorRepairTests` | 49 | The bare-selector check (missing-dot class tokens repaired, incl. inside `@media`/`@supports`, keyframes excluded, pre-edit snapshot only flags new tokens), the unwired-CSS check (a run-introduced class/custom-property must be referenced in the connected template/component, `:not()` excluded, global stylesheets skipped, **`.scss`/`.less` files scanned too** — same connected-template wiring and selector parsing, incl. SCSS nested rules and snapshot diffing), **dynamic class wiring** (a class applied via `classList.add(this.stateClass)` / `querySelector('.' + cls)` / template-literal `querySelector(\`.${hero}\`) where the class name appears NOWHERE as a literal is credited as wired; a class-shaped variable never applied, one consumed by a non-class call like `setAttribute`, and a literal `classList.add('other-class')` for a DIFFERENT class are all still flagged), **and** the orphaned-template-reference check (the mirror: a class REMOVED by the run must not stay referenced by the connected template/component — removed-but-still-referenced is flagged, both-cleaned passes, a removal that predates the run is not attributed, still-defined classes pass, prefix-safe so `card` never matches `card-body`, no-snapshot files (created by the run) judge nothing, standalone stylesheets skipped). |
+| `StubDetectionRegressionTests` | 9 | Lines carried over unchanged from oldString are never stubs; empty ctors are idiomatic; only genuinely new empty/`NotImplemented`/placeholder bodies flagged. |
+| `LooksLikePlaceholderStubFuzzCorpusTests` | 2 | Seeded 13-variant corpus (65 docs) guarding precision + recall as the detector evolves: real one-liners / multi-line bodies and carried-over lines (including carried-over STUB SHAPES — empty helper, NotImplemented throw, TODO comment) never flagged; genuine stubs (empty methods, bare AND named empty arrows, throws, console-only bodies, placeholder comments) all caught; every detector branch exercised + seedable-determinism guard. |
+| `PluralCollectionFuzzCorpusTests` | 2 | Seeded 32-doc corpus for the plural/Array similarity CHAIN in `DetectHallucinatedProperties` (`w+s/w+es/w+Array/w+List`, both directions), each doc sweeping all four rules: **genuine collections never flagged** — present in the file next to their singular, declared in the same edit, in a collection-only file, both members referenced together, or declared only in the sibling component `.ts` (HTML surface) — all pass; **recall locked** — the same extension introduced without presence or declaration is wiped with an exact `did you mean '<singular>'`, and a singular introduced next to an existing plural is wiped with `did you mean '<collection>'` (provably chain-driven: the extension is longer than its singular, so only the chain — never the typo rule — can fire). Regression-checked: neutering the chain fails both tests. |
+| `IsPlausibleTypoFuzzCorpusTests` | 3 | **Unit layer** (1 test): seeded corpus for the letter-dropping typo heuristic itself — identity, plural/Array/longer/different-first-letter/absent-letter genuine names never flagged; every dropped-letter variant (drop 1–4, same first char, ≥ 4 chars) caught; > 4-drop boundary never fires. **End-to-end layer** (2 tests): the SAME seed words and buckets driven through `DetectHallucinatedProperties` — the guard the apply pipeline actually calls — locking the guarantees where an edit gets wiped: existing members referenced as-is, same-edit declarations, plural/Array variants already in the file, longer/different-first-letter/absent-letter names all pass; every dropped-letter variant is wiped with "did you mean"; plural/Array/List extensions introduced WITHOUT presence or declaration are also wiped (the guard's 'pluralizing' class, stricter than the raw heuristic); and the > 4-drop boundary still passes end-to-end. The HTML surface drives the exact apply-site call with the sibling component `.ts` merged in — a member declared ONLY in the .ts passes when referenced in the template, and every dropped-letter variant of it is wiped via the cross-file word set. Regression-checked: neutering `IsPlausibleTypo` inside the guard fails both end-to-end tests. |
+| `HallucinationDetectionTests` | 10 | Wall-of-text and semantic-repetition detectors at hand-tuned thresholds (dense prose passes, pathological walls flagged). |
+| `HallucinationFuzzTests` | 10 | Threshold sweeps across seeded random sizes/densities so a threshold regression can't slip past the hand-picked shapes. |
+
+### 2.3 Pipeline orchestration, planning, and the interleaved loop
+
+| File | Tests | What it covers |
+|---|---|---|
+| `PipelineTests` | 35 | Task classification (command vs edit), skeleton extraction per language, excerpt selection, plan-JSON repair, exploration parsing, token estimation, step parsers, and the **repair-churn breaker** (stops after N consecutive zero-change repair passes). Plus the **shell-command gate locks**: the `Set-Content`/`Out-File`/`Add-Content` write cmdlets leading a command, and every taught desktop-write chain (discovery-section + web-chain example + CommandPipeline working example) pass the gate, while prose mentioning the write verbs stays rejected. |
+| `PlanningTokenCapTests` | 3 | The planning/editing thinking cap: never exceeds 840, never below 120, smaller than the overall budget. |
+| `IncrementalStepToolsPromptTests` | 8 | The step-tools prompt: available steps listed, disabled tools omitted, edit mode has no tool section, web-chain example toggles with web search. Plus the **never-invent-a-URL lock** (regression): the web-chain example must demand a REAL URL copied verbatim from the search results and must NOT contain a fetchable invented URL (example.com/ai-article) — the exact trap the field failure exposed (the model lifted the example-domain pattern into `www.example.com/latest-ai-breakthrough` and the fetch failed). |
+| `HostEnvironmentPromptTests` | 5 | System prompt carries the real host environment (desktop path, OS path style) and never invents Unix paths. |
+| `WebNeedGuardTests` | 14 | Web-need classifier verdict parsing; fetch-in-command guard (rejects on web-hinting tasks, allows bare curl health-checks and legit URL commands); veto feedback text; fallback query builder. |
+| `OsMarkerGuardTests` | 15 | OS-filesystem task detection: OS paths rejected for OS tasks, repo-relative allowed, real command steps pass, research-guard doesn't reject `_web_search`/`_web_fetch`. |
+| `WebResultsIntoContextTests` | 12 | Search/fetch output is harvested into the discovery context as `### WEB RESULTS ###` sections, capped at 20k chars, only web steps harvested. |
+| `WebResultsNudgePromptTests` | 3 | The "results are in context, pick a concrete URL" nudge appears when results exist and not otherwise. |
+| `RequirementChecklistSeparationTests` | 7 | The extracted EXPLICIT REQUIREMENTS CHECKLIST rides in the planner prompts as its own section (incremental user prompt + replan prompt) and is never appended to the task `prompt`; `TaskHintsWebNeed` on the plain task is false while the checklist-appended form trips the hint — the exact hijack the separation prevents. Plus the **replan OS-write guidance** (3 new): `BuildReplanPrompt` gains a `## OS-OUTPUT DEMAND` section when the task demands an OS file — naming the demanded path, steering to `_command` + `Set-Content` as the ONLY tool that can create it, and explicitly forbidding application-code edits (the pre-fix replanner invented a Node fs `writeArticleToFile()` in an Angular service); the replan prompt also receives the **harvested web results** (real titles/URLs) so a repair writes actual gathered content instead of inventing it; a plain repo task gets neither section. |
+| `WebResultsUiTests` | 9 | Client-side truncation/capping of displayed web results without starving the agent's context; harvest semantics. |
+| `BetweenStepsVerificationTests` | 14 | The bug fix where a timed-out assessment LLM forced a redundant step: after `needsExtraStep=false` + unavailable assessment LLM, the plan is declared complete; command-only and failed-edit steps short-circuit. Plus the **web-only gate mirror** (5 new): a successful `_web_search`/`_web_fetch` result triggers between-steps whole-task verification (the edit-gated `IsLastEditVerifiedComplete` never fires without an edit); failed/non-web results never open the gate; an unavailable assessment after a web step **keeps planning** (a web step has no per-step verifier confirmation, so LLM-down must not read as "verified complete" — that would prematurely end a multi-step web chain); a real complete verdict after a web step declares complete. |
+| `InterleavedPipelineIntegrationTests` | 1 | Full real-pipeline run of a pipe-only template edit: exactly one step, zero repair steps, no `.ts` edits (the whole-template false-positive regression). |
+| `GuardInteractionTests` | 5 | Two guards on one prompt (audit §5.2): on a dual web-hint + OS-filesystem prompt, a URL-fetching `_command` is vetoed by the fetch-in-command guard (NOT any OS message — the order claim), a real `_command` passes both, `_create_file` with an OS path gets the OS-path veto, a bare `curl …/health` on a repo-only prompt stays allowed (fetch guard precision), and `_web_fetch` itself is never vetoed. |
+| `SseEventShapeTests` | 4 | The SSE frame the client parses (`SendSse`): `event: <name>` / `data: <json>` / blank-line terminator, the data line is valid JSON carrying the payload, multiple frames append without corruption, and event names like `verifiedComplete` are preserved verbatim (never lowercased/mangled). |
+| `WebTaskInterleavedPipelineIntegrationTests` | 9 | Full OS-filesystem web-task runs through the real interleaved pipeline with a fake HTTP endpoint: (1) the web chain — step 1 is `_web_search`, step 2 must be `_web_fetch` of a **concrete URL from the results** (not an invented repo edit; the step-2 prompt must contain the harvested results), and a premature planComplete auto-dumps the harvested results to the demanded file (zero repo edits; the new **web-only completion assessment** runs after each web step and at the plan-complete recheck, scripted content-aware on the dump file's existence); (2) the steering path — no web content to dump, the premature planComplete is rejected and the planner is steered to plan the `_command` write, which completes; (3) the **boarddata negative** (mirroring `RejectedPlanStepPersistenceTests`): a card-keyed run whose demanded OS output file is NEVER written stays incomplete — the planner's planComplete is rejected at the OS-output gate, the deterministic missing-file issue drives the repair loop (asserted to run and be steered at the missing file), the replanner's empty plan cannot falsely complete it, no file is created, no repo edit substitutes, and the card persists both the CONFIRMED ground-truth issue and `_verification: { complete: false }`. Regression-checked: neutering `CheckOsOutputWritten` makes the run falsely complete and the test fails. Plus the **web-only completion assessment** (2 new): a no-OS-demand "search the web" run completes THROUGH the between-steps assessment right after the search — one planner turn, no second turn/Step-2 prompt, the assessment ran (the final whole-task check is skipped because the pipeline records verified_complete); and the incomplete arm — an assessment that keeps saying not-done makes the loop REJECT each planComplete with the assessment's reason as feedback (a later planner prompt carries "NOT complete" + "completion assessment"), the run closes via the pre-existing "replanner proposed no further steps" repair fallback, and no LLM call is unscripted. Regression-checked: neutering `IsLastWebStepComplete` fails all three web-gate tests. Plus the **failed-fetch recovery** (2 new): (a) the exact field failure — the planner's step 2 `_web_fetch`s an INVENTED URL (`www.example.com/latest-ai-breakthrough`, the scripted handler throws on that host), the loop does NOT halt: the failed step is removed and the error is fed back (a later planner prompt carries "failed" + the URL + "REAL URL"), step 3 retries with the REAL result URL (`example.com/alphafold3`), the OS gate auto-dumps, and the run completes with zero repo edits — the failed fetch is recorded with its error reason, and a **web-step error no longer forces `complete=false` at the Orchestrate level** (the blunt "any error step = incomplete" rule nuked recovered runs); (b) the repair-loop safety net — every fetch fails (retry budget exhausted), the run halts, and the repair loop's **deterministic auto-dump** writes the harvested search results to the demanded file WITHOUT ever calling the replanner (asserted: `RepairUserPrompts` empty — the pre-fix path called the replanner, which invented the Angular-service write). Regression-checked: neutering the interleaved web-retry, the repair-loop dump, or the web-error non-fatal exclusion each fails the corresponding test. Plus the **cross-tool state-carry evals** (2 new — the multi-turn context-carry eval extended to web values): turn 1's state is a VALUE from a web search result (the article URL); turn 2's tool call must consume that EXACT value. **Fetch arm**: `_web_search` → `_web_fetch https://example.com/alphafold3` — the step-2 prompt carries the harvested `### WEB RESULTS` with the URL, and the planned step, the executed step result, and the actual HTTP GET (`FetchedUrls` — newly recorded by the fake handler) all carry the SAME URL, while the invented `www.example.com` domain is never fetched; content-aware ground truth keeps the run incomplete until a fetch actually executed against the harvested URL. **Edit arm**: `_web_search` → an anchored edit into `src/links.ts` whose `newString` embeds the exact harvested URL (the task explicitly commands web via "find … online" so the web-step gate admits the search), the landed file contains the exact URL, no fetch ever executes, and the content-aware assessor (file contains the real URL) prevents false completion; the per-step verifier, cohesion, post-verify, and architecture-note routes were scripted for the edit path. |
+| `SyntheticGroundTruthEvalTests` | 57 | Synthetic tasks with computed ground truth (a CSS rule must gain declarations; a getter must exist; the `s.departure.ested` typo must never land; counting/aggregation/arithmetic datasets with computed answers); correct planners reproduce the truth, hallucinated variants never land silently; the **dropped-entry grouping guard** (the mirror of the duplicate-key guard: an aggregation edit whose grouped output has FEWER object-literal entries than the flat input — every group key present, one row silently gone — is rejected before it lands, with direct-guard tests covering the scope gates: well-formed outputs pass, delete-style edits with fewer objects pass, non-grouping change descriptions pass, regroupings of already-grouped data pass, and an empty change description falls back to shape-only); new-class-unwired cannot complete until repaired; a verifier claiming "the change was not made" for a provably-landed edit gets the CONFIRMED APPLIED EDITS section in its prompt + the confirmed edit on the card as ground truth. Plus the **multi-turn chain** task (2 tests): the correct answer depends on the method name established in turn 2 — a correct 3-step planner reproduces the computed chain; a turn-3 context failure that references `loadWithRetry()` instead of `loadWithRetries()` is failed deterministically (content-aware between-steps assessment + planComplete recheck reject it, the verifier flags the inconsistency as CONFIRMED, and the repair fixes it). Locked the **pruned-plan repair bug** it exposed: pruning the merged plan could shift the repair step into the completed-index range and silently skip it, after which the churn breaker completed the run with the defect intact — `mergedDone` is now computed by plan-step identity post-prune. The HTML guard's scan target now includes **structural-directive expressions** (`*ngIf="…"`, `*ngFor="…"`, `*ngSwitchCase="…"` — any `*directive="…"`), so a typo in a structural expression (`vm.isActiv`, `vm.card`, `vm.activ`) is caught like any `{{ }}` / `[binding]` / `(event)` typo, while the directive NAME and ngFor loop variables are proven never to false-positive (4 new guard tests). Plus the **(click) handler task** (2 tests): the correct answer requires an Open button wired to the REAL `vm.openCard` method (spacing-robust ground truth, since the apply self-heal normalizes `word (` → `word(`); a hallucinated handler that typo's the method name (`vm.opnCard`) is rejected by the guard before it lands and the run fails loudly instead of completing. Plus the **cross-file TS resolution** (3 guard tests): `DetectHallucinatedProperties` now merges the sibling component `.ts` into the scan context for HTML edits — a binding referencing a genuinely declared member never false-positives against a similar template token (`vm.item` declared in the `.ts` while the template has `items`), an exact TS reference passes, and a TS-member typo whose real name is absent from the template is still caught (`vm.opnCard` with only `vm.openCard` in the `.ts`). Plus the **clean-pass ground truth** (4 tests): a fully clean run (template + CSS edits, everything passing) still publishes the 🎯 Ground truth section — one entry per deterministic check that RAN with its verified expectation (`✓ Template bindings:`, `✓ CSS selector scan:`, `✓ CSS wiring:`, `✓ Applied edit confirmed on disk:`) and never a `CONFIRMED` item; a satisfied OS-output demand on an edit-free web run publishes the `✓ OS output:` pass via the no-edit path; a run with NO checks (no edits, no OS demand) publishes nothing (section stays hidden); and a UI task whose component `.ts` + sibling template were both edited records the `✓ Component wiring:` pass. Plus the **per-step ground truth** (1 test): each plan item carries ITS OWN deterministic expected outcome — the click-handler step's expectation (the new Open-button line present in the file) is attached to the plan item at persistence and stamped `verified=true` against disk when the step completes (paren-spacing-normalized like the apply self-heal), so the plan view shows ✓ per step. Plus the **final verification verdict** (1 test): a complete run persists the final verification reason onto the card as `_verification` ({ complete, reason, at }) so the reason is visible after the run instead of only in the log. Plus the **rename-all post-execution completeness** (2 tests): a "confident" PARTIAL rename (one of five occurrences replaced via a unique anchor) fails verification deterministically — the old name provably still occurs, the CONFIRMED issue drives the repair loop, and the run completes only after the replanner replaces the rest; a correct single-step full rename publishes the `✓ Rename-all:` positive pass entry on the card with zero repair prompts. Plus the **non-JSON retry discipline for the rename and group shapes** (2 tests): turn 1 is confident-wrong prose with no JSON, the proposal is rejected with parse feedback (second planner prompt carries the rejection), turn 2 lands the corrected step and still reaches the computed ground truth (rename: 0 old / N new occurrences; group: the canonical structure matches) — the three-behavior discipline (correct / confident-wrong-rejected / non-JSON-retried) now holds for every corpus shape. Plus the **checklist-separation run** (1 test): a plain rename run whose extracted checklist carries "latest"/"current" completes with zero unscripted LLM calls (the web-need classifier is never invoked), no `_web_search`/`_web_fetch` steps, and the planner still sees the checklist section — proving the checklist no longer reaches the task-prompt web-need scan. Plus the **per-step LLM token spend** (2 tests): every labeled LLM round (planner, verify, replan, completion assessment, command step) now emits a 📊 metric log row with the estimated prompt + response tokens and feeds a per-step accumulator that the edit/web step results carry as `llmTokens` ({ calls, promptTokens, responseTokens, totalTokens }) — so the agent panel shows per planning/verification-round spend, not just the discovery context. The integration test computes the expected numbers before the run: a correct single-step rename fires exactly 2 labeled rounds (1 planner + 1 verify — the scripted keep/95 ends the rounds after round 1), the edit step carries exactly those, and the prompt share is >= the recorded planner prompt (the verify prompt only adds); the reflection test locks the accumulator contract directly (exact `EstimateTokens` sums per labeled round, `TakeStepLlmMetrics` snapshots and resets, unlabeled rounds record nothing). Labels are passed as explicit parameters to the LLM wrappers (no ambient state), so the fire-and-forget edit-knowledge background call can't race a labeled round. Plus the **orphaned-template-reference run** (1 test): the planner removes the `.flight-schedule-container` rule from the stylesheet but leaves the template referencing the class — the deterministic check fails verification and drives the repair loop, which strips the reference from the template; only then does the run complete (replanner prompt carries the orphaned issue; zero unscripted calls). |
+| `ToolSelectionEvalTests` | 7 | **Data-driven golden-tool corpus** (15 cases loaded from `tests/tool-selection-corpus.json`, copied to the test output — new cases are a pure JSON edit, no C# change; a missing/empty corpus fails loudly at discovery): each asserts the RIGHT tool is planned AND its sandbox side effect lands (edit lands token on disk, `_web_search` GETs the engine + output harvested, `_web_fetch` fetches the exact URL, create-file/dir/delete/rename hit the filesystem, `_command` runs with output/file side effects, `_sql_migration` writes migrations/). Plus 6 adversarial traces asserting **side effects**, not just output: fetch-in-command never runs (filesystem byte-identical), web veto produces no search side effect, create-file dodge rejected, **invented-symbol edit rejected before landing** (hallucinated-removal guard names the file's REAL members; the fiction never appears), **invented-file edit rejected before landing** (the new non-existent-path guard rejects with corrective guidance; the invented path never appears on disk), missing-web-search auto-injects and actually runs, **fetch-command loop-guard** (3× URL-fetching `_command` refusals → auto-inject EXACTLY ONE `_web_search`, never re-inject per rejection; the search really runs and its results reach the follow-up planner turn), **and the guard-interaction trace** (a web-hinting OS task: the URL-fetch `_command` is vetoed by the fetch guard, the repo edit is vetoed by the OS-task guard — both reasons reach the next planner turns — and the corrected real `_command` completes the run). |
+| `AdversarialUserScenarioTests` | 27 | Adversarial synthetic-user corpus against BOTH planning modes: (incremental) mid-run intent changes / contradictions / scope-push steering stays visible in every planner turn and the run completes with no unscripted LLM calls; (classic full-plan route) the same corpus reaches the "Plan the complete minimum set of steps" planner under `### USER STEERING ###`, the scripted plan honors the intent-change/scope-push, and a steering-scoped classic plan executes without the out-of-scope change landing. Plus the **wrong-target corpus** (3 scenarios): the steering must reach the COMPLETION assessment and the final verifier (it now does — `AssessCompletion` + `PostExecuteVerify` inject a "User steering / latest intent" section), and a content-aware assessor (computed ground truth over the real on-disk file) proves the run never completes with the overridden/contradicted/scope-pushed target. Locked the two gaps it exposed: the dup-step guard now checks content presence (reversal steps that edit on top of a previous edit are actionable, not duplicates) and a planComplete claim after an "incomplete" assessment is re-assessed before acceptance. Plus the **multi-turn context-carry eval**: turn 1's tool call establishes state (adds `getItems()`), the later turn-2 prompt must carry it (the edit log references the change), and the turn-2 tool call must consume the EXACT carried symbol — a ground-truth assessor keeps the loop alive until `getGrouped()` actually calls `getItems()` on disk; a hallucinated variant (`getItemsList`) is rejected by `DetectHallucinatedProperties` mid-apply with "did you mean 'getItems'?" and the eval fails. And its **classic-route mirror**: a two-item classic plan (item 1 creates `items-store.ts`, item 2 wires the demo component) must carry the created file path + symbol across plan items — asserted on the parsed plan BEFORE any execution (created file still absent, demo pristine), then the chain executes end-to-end and the reference lands with the exact carried path (`import { ItemsStore } from './items-store'`) via the deterministic create shape (path in `file`, content in `newString`), zero unscripted LLM calls. Plus the **three-hop chain** (1 new): turn 1 adds `getItems()`, turn 2 adds `getGrouped()` (calls `getItems()` — referencing hop 1 AND establishing hop-2 state), turn 3 adds `getSummary()` (calls `getGrouped()` — the exact symbol turn 2 created); a ground-truth assessor keeps the loop alive until `getSummary` lands. EVERY intermediate planner turn carries the accumulated context, asserted with strings that exist ONLY in the run context (not the task wording): turn 2's prompt contains hop-1's edit-log change description + landed code line; turn 3's prompt contains BOTH hop descriptions and BOTH code lines — the edit log accumulated hop by hop, never reset. Regression-checked: a turn-3 edit referencing a hallucinated `getGroupedList()` variant breaks the chain deterministically (the run cannot complete). |
+| `LiveSteerEndpointTests` | 6 | **Live** steering via `POST api/agent/steer` (vs run-start `steeringContext`): message stored + executing-card flag, latest-wins overwrite, missing cardId/message → BadRequest, the mid-run integration — a steer posted while turn 2 is in flight appears in the turn-3 planner prompt (never turns 1–2), the override edit lands undoing turn 2's proposal, the steer is consumed exactly once, and the delivered steer is persisted on the card as `_steers` (turn + message + timestamp); plus the stale-steer guard — a steer posted while the run is NOT executing (active:false) is dropped by the run-end cleanup (`ClearRunStateForCard`, the stream finally's exact path) so the next run's planner prompts never see it. |
+| `VerificationPersistenceTests` | 4 | Final verification verdict on the card as `_verification` (mirrors ground-truth persistence): complete verdict + reason + timestamp written to boarddata, an incomplete run with no reason gets the deterministic fallback ("did not pass — review the run log"), survives a `PersistBoardDataPlanAsync` plan rebuild (lives at card level), unknown cardId silent no-op. |
+| `SteerPersistenceTests` | 5 | Delivered live steers persist onto the card as `_steers` (mirroring the ground-truth section): message + turn written to boarddata, multiple steers append in order, survive a `PersistBoardDataPlanAsync` plan rebuild, empty message no-op, unknown cardId silent no-op. |
+
+### 2.4 Discovery, exploration, and context building
+
+| File | Tests | What it covers |
+|---|---|---|
+| `Bm25ScoringTests` | 13 | Filename bonus attribution, token-hit trimming, stopword-only prompts, 2-char token fallback, sub-20-token files skipped, hit formatting. |
+| `IdentifierDiscoveryTests` | 13 | Identifier token extraction (snake/kebab/camel/Pascal/dotted, leading-underscore privates, version-like and all-digit dropped), identifier path-match outranks content, bonuses capped. |
+| `IdentifierRegionExtractionTests` | 14 | Given a file + identifier, extract the enclosing method/def/scope region; brace-in-string safety; CRLF normalization; region caps. |
+| `FocusedRegionAttachTests` | 19 | When context is over budget, large files get focused regions; pressure scales the threshold; refocusing, monotonicity, floor clamping. |
+| `FileIgnoreListTests` | 4 | Ignored segments, default ignore dirs (build/VCS/deps), config add/`-` remove, case-insensitivity. |
+| `ExtractMemberInventoryTests` | 7 | Component member inventory (real TS members, excluding control-flow keywords, capped at 24) — the check that stops the model inventing helpers. |
+| `ExternalFilesystemTaskTests` | 6 | OS-filesystem gate: fires only with OS-location + filesystem-action words, never on repo-internal phrasing. |
+
+### 2.5 Suggestions, idle loop, and cancellation
+
+| File | Tests | What it covers |
+|---|---|---|
+| `ImprovementSuggestionsTests` | 17 | Suggestion persistence round-trip, zero-suggestion = done (LLM never re-invoked), top-up dedupe (exact/contained repeats, same-batch repeats), context stripping, depth normalization, and the **suggestion guard** (never runs while another card executes; same-card allowed; endpoint returns cancelled). |
+| `SuggestionCancelEndpointTests` | 5 | Server-side cancel: CTS cancelled + handle removed, unknown-card tombstoning so late registration skips the LLM, idempotent cancels, missing cardId → BadRequest. |
+
+### 2.6 Branch / PR feature
+
+| File | Tests | What it covers |
+|---|---|---|
+| `PrBranchFeatureTests` | 12 | Branch-name sanitization and construction (`weaver/...` + UTC timestamp), PR URL / commit-hash extraction, the auto-stash ref finder (top-of-stack, skips newer abort stashes), current-branch detection. |
+
+### 2.7 Persistence and board data
+
+| File | Tests | What it covers |
+|---|---|---|
+| `RejectedPlanStepPersistenceTests` | 3 | Rejected plan steps persist with the card, survive a board-data rebuild with **re-anchored indexes**, appends don't duplicate. |
+| `BughostedFeedbackProxyTests` | 8 | The `POST api/bughosted/feedback` proxy (audit §5.1): unknown clientId → 401, empty message → 400, a valid message forwards token/cardId/cardText/message/planSummary/filesEdited/**steps** (each step's type/change/status, camelCase) to `{url}/weaver/feedback`, the upstream body is passed through verbatim, upstream non-success surfaces status + body, an upstream throw returns 500, **and the fixed payload caps** — an oversized planSummary is truncated to 2,000 chars and an oversized filesEdited list is trimmed to the first 100 entries with each path truncated to 300 chars before forwarding (a huge run can never bloat the payload). |
+| `DatabaseServiceTests` | 12 | Legacy flat-file → SQLite migration (import + delete originals), version file seeding, local version round-trip. |
+| `SqlMigrationServiceTests` | 12 | SQL migration service: statement extraction (plain SQL, inside C# verbatim strings, nested parens), timestamped migration-file writing, already-covered detection, strip. |
+
+### 2.8 Config, retries, and resilience
+
+| File | Tests | What it covers |
+|---|---|---|
+| `ConfigControllerSaveTests` | 3 | Credential wipe requires the explicit clear flag; empty saves never nuke existing credentials; overwrite semantics. |
+| `LlmRetryDisableTests` | 6 | The retry-disable config key: only literal `true` disables; garbage/missing stays enabled. |
+| `StreamRecoveryRetryTests` | 37 | Which LLM stream failures are recoverable (partial content + transient error → retry with continuation hint) vs permanent (hallucination, repetition, JSON parse, empty); hint/finish-prompt/stitch mechanics; the prose-path truncation marker appears exactly when the response was token-capped AND the caller opted in (silent otherwise, no marker on a complete response). |
+| `TerminalTransientRetryTests` | 19 | Which terminal failures are transient (file locks, NuGet restore/network) vs permanent (compile errors, test failures, permission denied); retry only surfaces genuine errors. |
+
+### 2.9 Health, metrics, context accounting
+
+| File | Tests | What it covers |
+|---|---|---|
+| `EndpointHealthTests` | 14 | Endpoint health tracking (calls vs stream errors, case-insensitive keys, idle-trim over 24h, corrupt-blob tolerance). |
+| `ContextBreakdownTests` | 6 | The context breakdown rows show real non-zero token estimates for skeleton + scaffolding (never 0), skeleton capped to the remainder, empty context → no rows. Plus the **task-input row** (2 new): the raw prompt + requirement-checklist share is its own `task` row (estimated like the other non-file rows, never subtracted from the discovery scaffolding residual), named "task prompt + requirements checklist" when the checklist exists and plain "task prompt" when not — so the breakdown categories cover every part of what the LLM sees. |
+| `AgentTokenMetricsTests` | 4 | Token estimation, conversation compaction (summarize old turns, keep recent three in full, too-few-command-turns untouched). |
+
+### 2.10 Text / JSON / formatting utilities
+
+| File | Tests | What it covers |
+|---|---|---|
+| `AgentTextUtilitiesTests` | 21 | Verifier file views (whole small file, anchored regions, head/tail bounds, longest-line fallback); `CheckAppliedEditsPresent` disk ground truth — landed edit confirmed, absent edit is a CONFIRMED issue, reformatted edits found via distinctive-line fallback, CRLF, multi-edit, last-edit-per-path missing-enforcement (churn-free across repair passes), missing target file; **per-step ground truth** (`ComputeStepGroundTruth`) — literal-swap new-content expectation, 'did you mean' typo-fix expectation (dropped-letter + plural families), multi-line anchor is the last substantial line, FullFile/NewCode forms, empty-new no-op, and `NormalizeParenSpacing` mirroring the apply self-heal. |
+| `GroundTruthPersistenceTests` | 5 | Card-level `_groundTruth` persistence (writes to boarddata, survives a `PersistBoardDataPlanAsync` rebuild, empty list no-op, unknown cardId silent no-op) plus the **per-step verified-flag preservation**: a plan rebuild recomputes the expectation texts from the steps but keeps the `verified=true/false` marks already stamped at step completion (matched by file|change + anchor). |
+| `CodeFormatterServiceTests` | 4 | Formatter gate: case-insensitive `CanFormat`, unsupported extensions and empty content returned unchanged, C# formatted via in-process Roslyn. |
+| `AgentUtilitiesEdgeCasesTests` | 3 | Plan-JSON candidate repair (unquoted keys, truncation, newlines in strings, missing closing quote/bracket). |
+| `TryNormalizeSignatureTests` | 1 | Skeleton signature normalization across C#/TS/Python/Go/Rust (8 theory rows). |
+| `TargetedReplaceExampleTests` | 5 | The planner prompt's anchored-edit teaching example is well-formed (labels, single-line anchors, escaping). |
+| `ExtractFilesEditedTests` | 6 | files-edited dedupe (same file edited twice collapses, rename+edit collapses, case/slash normalization). |
+
+### 2.11 Complexity scoring and benchmarks
+
+| File | Tests | What it covers |
+|---|---|---|
+| `HeuristicComplexityScoreTests` | 15 | The complexity heuristic (baseline 20, micro/large signals, length fallback, monotonic step estimates, never-zero). |
+| `BenchmarkFreshnessTests` | 13 | Benchmark data-freshness marker enforcement (today passes, stale/hardcoded/future fail, `fetchedAt` variants). |
+| `BenchmarkProjectTests` | 8 | Benchmark project root resolution, create/reuse/adopt idempotency. |
+
+### 2.12 File tree
+
+| File | Tests | What it covers |
+|---|---|---|
+| `FileTreeOrderIndependenceTests` | 2 | The file-tree builder is order-independent (spawns real `node wwwroot/filetree.js`); regression test for the old parents-first builder that orphaned subtrees. **FIXED**: the helper is located via walk-up → cwd probe → extraction from the assembly's embedded manifest (`Weaver.wwwroot.filetree.js`, since `wwwroot/**` is an embedded resource), so the corpus runs green from any build-output location — previously a build to an out-of-repo dir (e.g. `-p:OutDir=/tmp`) threw `TypeInitializationException` and failed the fuzz test. |
+
+### 2.13 Harness / not-actually-tests
+
+| File | Tests | What it covers |
+|---|---|---|
+| `FuzzHarness` | — | Shared discipline for seeded-random corpus tests: deterministic per-doc RNG, `AssertAllDocsChecked` (no silently-degraded corpus), `AssertExercised` (no vacuous pass), byte-identical no-op asserts. |
+
+---
+
+## 3. Inventory — JS client-logic suites (12 files, 166 tests)
+
+Each file is a self-contained node script with its own mini-runner
+(`test(name, fn)` + exit-code). They test extracted client logic modules
+(`wwwroot/*.js`). `tests/js/run-all.js` is the **aggregator**: it spawns every
+`*.test.js`, counts the per-test `✓`/`✗` lines, and exits non-zero on any failing
+file — so the whole JS suite is one command (`node tests/js/run-all.js`), which the
+new CI workflow runs on every push:
+
+| File | Tests | What it covers |
+|---|---|---|
+| `auto-pr-toggle.test.js` | 6 | Toggling the card **BRANCH** checkbox: unchecking with a stale branch / created PR clears `prStatus`; checking preserves it; no-ops on clean cards. |
+| `board-heal.test.js` | 13 | Card upsert rules (fresh → todo, re-delivery updates in place, done stays done, metadata-only preserves text) and the **heal** dedupe (within-column duplicates collapse, doing/done/archived rank above todo twins, invariant: no id survives in two columns). |
+| `calendar-idempotency.test.js` | 11 | Cron/scheduled cards: a live instance in todo/doing suppresses the fire, but a done instance doesn't; different task/schedule never false-suppresses; one-off and non-cron cards unaffected. |
+| `error-core.test.js` | 23 | Stack parsing per browser (Chrome/Firefox/Safari legacy forms), `shouldFilter` (AbortError, cross-origin), error-key dedupe with burst windows, key caps, reset. |
+| `files-edited-dedupe.test.js` | 6 | Duplicate file paths collapse, order preserved, case/slash-insensitive, junk entries dropped. |
+| `meeting-ticker.test.js` | 16 | The step ticker labels: LLM batch markers (`(deterministic batch: N edits...)`) parsed into "N/M edits" labels, path basename extraction, 40-char truncation, partial-batch detection, marker format locked to the C# generator emission. |
+| `pr-finish-guard.test.js` | 10 | The PR-finish completion guard: a finish response landing after BRANCH was toggled off clears `prStatus` and skips the outcome; success/failure/HTTP-error paths on normal runs. |
+| `suggestion-cancel.test.js` | 29 | `cancelCardSuggestions`: start-eligibility (cap, already-has, already-requested, topup), abort of in-flight generation (flags reset, deferred resolved safely), clearing suggestions/display flags, text-edit invalidation, and the idle **guard** (executing card / benchmark / self-improving cycle blocks suggestions). |
+| `steer-now.test.js` | 8 | `vm.steerNow` (the live ⚡ Steer now button): POSTs `{cardId, message}` to `api/agent/steer` mid-run; empty message / no active card guards; `active:true` info vs `active:false` warn feedback; input cleared after a successful POST so it can't leak into the next run's run-start steering; HTTP-error and network-failure warn paths. |
+| `context-sse.test.js` | 9 | The SSE `case 'context':` handler (audit §5.1): size/chars/breakdown update the live counter without touching the phase or log, partial events leave untouched fields alone, non-array breakdown never clobbers, and the `final` event persists the PEAK onto `card._context` + `saveCards` (with a silent no-op when no card matches). |
+| `feedback.test.js` | 21 | `vm.sendFeedback` (audit §5.1): null-card/empty-message/already-sending guards, the not-connected error path, the full POST payload (`clientId/cardId/cardText/message/planSummary/filesEdited/steps` — object-with-`path` entries flattened, empties dropped, `agentAnalysis` missing degrades safely, message trimmed, **step changes picked via description→path→command→url fallback with status, junk steps dropped**), the success path (`_feedbackSent` **appended as an array entry** on the re-found card + `saveCards` + popup cleared + log, second submission appends, legacy single-object shape normalized), both failure paths (server `data.error` surfaced; HTTP-status fallback), the ✓ chip helpers (`feedbackSentCount`/`feedbackSentLast`/`feedbackSentLabel` — `✓ Sent` for one, `✓ N sent` for several, legacy object counts as one), and `openFeedback`/`closeFeedback` (`feedbackPrevious` preview populated from the card's `_feedbackSent` array, legacy object normalized, empty when none, reset on close, plus a kanban.html wiring assertion that the popup renders `vm.feedbackPrevious`). |
+| `suggestion-ready.test.js` | 14 | The ready/queue/drain logic: idle board → start now; card running → readied + `_autoQueued`; drain rules (endpoint-parked, suggestion-auto, self-improving always drain; plain ready card needs autoQueue; **only one suggestion card starts per drain**). |
+
+---
+
+## 4. What can be improved
+
+Concrete, prioritized. These are the weakest spots found in the sweep.
+
+### 4.1 Not a test, and shouldn't ship as one
+- ~~**`DebugSkeletonTests.DumpSkeletons`** — prints to stdout and `Assert.True(true)`, could
+  never fail.~~ **Removed**: the real coverage (`AgentSkeleton.GetSkeletonForRange` for
+  C# / TypeScript / Python / Go-Rust / complex signatures) lives in
+  `PipelineTests.GetSkeletonForRange_*`, which still covers skeleton extraction.
+
+### 4.2 Running the JS suites together (and CI) — **DONE**
+- ~~Each JS file is a standalone script; there is no aggregator and no CI.~~ **Fixed**: `tests/js/run-all.js`
+  spawns every `*.test.js`, counts the uniform `✓`/`✗` result lines (the per-file summary
+  lines were NOT uniform, so counting lines is the robust approach), aggregates totals,
+  prints each failing file's output, and exits non-zero on any failure or crash — one
+  command runs the whole JS suite. **CI added**: `.github/workflows/test.yml` runs
+  `dotnet test` + `node tests/js/run-all.js` on every push/PR (setup-dotnet 10.0 + Node 22).
+- The C# suites are green: the one known-failing fuzz test (`FileTreeOrderIndependenceTests`)
+  was fixed — its failure was not the seeded generator but `LocateHelper`'s walk-up-only
+  search, which threw when the assembly was built outside the repo tree; it now falls back
+  to the embedded `Weaver.wwwroot.filetree.js` manifest resource, so `dotnet test` is fully
+  green from any output directory.
+
+### 4.3 Test-vs-runtime count mismatch makes coverage hard to reason about
+- The dump-style count of 862 test *methods* expands to ≈1,269 runtime *cases* because
+  of `[Theory]` rows. That's fine, but it means nobody can tell "how many tests" from a
+  file listing. Consider a convention: keep `[Theory]` rows few and named, or add a
+  README note per file. (Minor.)
+
+### 4.4 The integration suites are extremely valuable — and underused
+- Only **one** scenario each for `InterleavedPipelineIntegrationTests` and
+  `WebTaskInterleavedPipelineIntegrationTests`. The scripted-LLM harness pattern is
+  proven (zero unscripted calls asserted) — the marginal cost of a new scenario is low,
+  so grow the corpora:
+  - more real-prompt shapes (the failing shapes you've seen in logs: "put a max height
+    and overflow auto on the schedules", "format numbers with commas", CSS attachment
+    ellipsis, etc.) as regression entries,
+  - more adversarial web traces: the 14-prompt tool corpus is a `[Theory]` (all run),
+    but only **4** adversarial traces exist — the guard suites (`WebNeedGuardTests`,
+    `OsMarkerGuardTests`) have far more shapes they *could* assert side-effect-freedom
+    for. The corpus-loop shape is right; grow it rather than adding more one-off traces.
+
+### 4.5 Fuzz discipline is strong in the edit layer, absent elsewhere
+- The seeded-RNG `FuzzHarness` guards are used by the CSS/HTML/AST/format corpora — the
+  strongest part of the suite. But the same corpus-vs-hand-picked gap exists for the
+  **verification layer**: `PostExecuteVerifyTests` and `TemplateBindingValidatorTests`
+  are hand-picked only; a seeded fuzz sweep of random templates against
+  `ExtractComponentMembers`/`ExtractTemplateSymbols` would lock the false-positive
+  regression class that has already bitten twice (the `#keywordsInput`/`parentRef`
+  false positives, the `s.departure.ested` hallucination).
+
+### 4.6 Some suites test the extracted helper rather than the wiring
+- `AnchorSanityTests`, `BetweenStepsVerificationTests`, `ExternalFilesystemTaskTests`
+  etc. reach into `private static` helpers via reflection. That's fine for unit
+  coverage, but for each such helper there should be **one** end-to-end test that the
+  helper is actually called at the right point in `Orchestrate` (the unwired-CSS work
+  showed how easily a check can be wired but skipped: the triage layer silently dropped
+  the issue, and only an end-to-end test caught it).
+
+### 4.7 Thin spots inside otherwise-good suites
+- ~~`ExtractMemberInventoryTests` (7) and `TemplateBindingValidatorTests` (24) don't test
+  `*.tsx`/`*.vue`-style bindings or `[(ngModel)]` banana boxes explicitly.~~
+  **Done for bindings**: `TemplateBindingValidatorTests` (now 29) covers `[(ngModel)]`
+  banana boxes, `[class.active]`, `[style.color]`, and `(click)` handlers — declared
+  members pass, undeclared members flag. `*.tsx`/`*.vue` component-syntax coverage in
+  `ExtractComponentMembers` is still open (the validator is regex-based on the template
+  string and component members, so it's a smaller gap).
+- `WebNeedGuardTests` (14) has no case for a `_command` whose URL is *plausible* but the
+  domain is clearly invented (the `api.current.ai` class) — it covers legit-curl vs
+  web-task, not invented-domain detection.
+- `StreamRecoveryRetryTests` (34) doesn't cover the **interleaved loop's** recovery path
+  (mid-plan step stream failure → retry with hint → same step re-planned) — only the
+  standalone recovery classifier.
+
+---
+
+## 5. What's missing
+
+Gaps verified against the current codebase (searched for, not found, as of this audit).
+Ordered by how much they matter.
+
+### 5.1 Features shipped with zero tests
+- ~~**The bughosted feedback loop** … no test anywhere.~~ **Covered**: `tests/js/feedback.test.js`
+  (11 tests — guards, payload shape, success ✓ indicator, failure paths) and
+  `tests/UnitTests/BughostedFeedbackProxyTests.cs` (6 tests — 401/400, forwarding,
+  pass-through, upstream error surfacing). The moderator-side view lives in the
+  BugHosted repo; the proxy contract is now locked here.
+- **The server-side abort-branch path** (the button-triggered "abort branch" that
+  checks out the original branch, stash-pops, and deletes the weaver branch):
+  `PrBranchFeatureTests` covers the *helpers* (stash find, branch-name build) but not
+  the abort flow itself. Add a test that drives the abort endpoint/function with a real
+  temp git repo: creates a branch + stash, aborts, asserts the repo is left exactly as
+  it was (original branch checked out, stash popped, weaver branch gone, working tree
+  byte-identical). Also assert it's only reachable via the explicit button path — never
+  auto-fired on stop/un-branch.
+- **The interactive diff system** (swap diffs to change which edit is applied, delete
+  diffs for a card, open diff in IDE): the entire surface is untested, and it has
+  regressed before (the "old diff system" complaint). The pure logic — which diff is
+  "active", swap semantics, delete-all-when-done — should be extracted into a module
+  with JS tests mirroring `files-edited-dedupe`/`meeting-ticker`.
+- ~~**The live `context` SSE event** … no JS test.~~ **Covered**: `tests/js/context-sse.test.js`
+  (9 tests — live counter updates without touching phase/log, `final` persistence to
+  `card._context` + `saveCards`, silent no-op when no card matches).
+
+### 5.2 Guard interactions (each guard has unit tests; their *interactions* don't)
+- ~~No test exercises two guards at once …~~ **Covered**: `GuardInteractionTests` (5 tests)
+  locks the veto ORDER at the validator level (fetch veto beats any OS message for a
+  URL-fetching `_command`; OS-path veto for OS-location create steps; precision
+  boundaries), and the `ToolSelectionEvalTests` guard-interaction trace runs BOTH vetoes
+  through the real loop on one prompt.
+- ~~No test for auto-inject loop-guard …~~ **Covered**: the new
+  `Trace_FetchCommandLoopGuard_AutoInjectsExactlyOneSearch` runs 3× URL-fetching
+  `_command` refusals to the regen cap and asserts EXACTLY ONE auto-injected
+  `_web_search` (never re-inject per rejection), that it really runs, and that its
+  results reach the follow-up planner turn.
+
+### 5.3 The "unexpected input" class the Reddit post describes
+- The adversarial corpus is prompt-layer + wrong-target focused; it does NOT yet
+  cover the **refusal-loop** class (a planner that keeps returning the same rejected
+  step through the regen cap) or a **self-contradiction across three+ steering
+  messages** (latest-wins across multiple live steers, not just one steering block).
+- **Multi-turn context failures**: the multi-turn chain task asserts the *outcome* side
+  (a turn-3 reference inconsistent with turn 2 fails deterministically), but nothing
+  asserts the *prompt* side — that turn-3+ planner prompts still carry turn-1 facts
+  (general conversation history retention across a multi-step run with harvested web
+  results + exploration, beyond the steering-context test).
+
+### 5.4 Execution-environment surfaces
+- ~~**`_command` side-effect sandboxing** … no test that a legit `_command` runs.~~
+  **Covered by the data-driven corpus**: `Command_Hello` runs a real `echo … > hello-from-command.txt`
+  through the pipeline and asserts the file + content land; `Command_Pwd` asserts the
+  output names the sandbox cwd. A *legit* command's side effect is now proven end to end.
+- ~~**`_sql_migration` steps** … no pipeline-level test.~~ **Covered by the corpus**: the
+  `SqlMigration_PrefsTable` case plans, executes, writes the timestamped `migrations/*.sql`
+  file, and asserts the `CREATE TABLE IF NOT EXISTS` content lands.
+- ~~**SSE event shape** … no test.~~ **Covered**: `SseEventShapeTests` (4 tests) locks the
+  frame format the client parses (`event:`/`data:`/blank-line, valid JSON payload,
+  multi-frame integrity, verbatim event names). A full phase→context→step→verification→complete
+  *sequence* test is still open.
+
+### 5.5 Concurrency
+- The suggestion guard (idle vs executing) is unit-tested on both sides, but nothing
+  tests **two concurrent run requests** (second card started while first executes →
+  queued, not started) end to end. `suggestion-ready` covers drain/queue flags in JS
+  isolation; the server-side serialization has no test.
+- `EndpointHealthTests` covers counters; the **multi-client** (two SSE sessions on the
+  same run) path is untested.
+
+### 5.6 Performance
+- `FocusedRegionAttachTests` is the only budget-related suite. There is no test that a
+  large run stays under the discovery-context cap (the 20k web-results cap is tested;
+  the *aggregate* context cap is not), and no perf regression test (e.g., BM25 over a
+  synthetic 10k-file tree stays under a time bound).
+
+---
+
+## 6. Coverage summary by domain
+
+| Domain | Suites | Approx. methods | Verdict |
+|---|---|---|---|
+| Edit application (no-drift) | 25 classes | ~345 | **Strong** — fuzz corpora + byte-identity asserts; best-covered area |
+| Verification & triage | 6 classes | ~131 | Good, hand-picked; needs fuzz (see §4.5) |
+| Pipeline orchestration | 15 classes | ~121 | Good but thin on integration scenarios (§4.4) |
+| Discovery & context | 7 classes | ~76 | Good |
+| Suggestions & cancel | 2 C# + 2 JS | ~65 | Good unit coverage; missing concurrency (§5.5) |
+| Branch / PR | 1 class + 2 JS | ~28 | Helpers well covered; abort flow missing (§5.1) |
+| Persistence & SQL migration | 3 classes | ~27 | Good |
+| Config & resilience (retries) | 4 classes | ~62 | Strong |
+| Health / metrics / context | 3 classes | ~22 | Good |
+| Text / JSON / formatting utils | 6 classes | ~25 | Good |
+| Complexity scoring & benchmarks | 3 classes | ~36 | Good |
+| File tree | 1 class | 2 | **Fixed** — embedded-manifest helper lookup; green from any output dir |
+| JS client logic | 12 files | 166 | Good per-module; `run-all.js` aggregator + CI workflow (§4.2) |
+| Feedback / context-SSE / SSE shape / guard interactions | 3 classes + 2 JS | ~35 | Covered (§5.1–5.2, §5.4); abort-branch + diff system still open (§5.1) |
+
+Bottom line: the edit-application layer is the most thoroughly tested part of the
+codebase — likely because every prior bug surfaced there. Since this audit was first
+written the highest-leverage gaps have closed: a JS aggregator + CI runner (§4.2), the
+bughosted feedback proxy + `sendFeedback` (JS + C#, §5.1), the live context-SSE handler
+(§5.1), guard interactions incl. veto order and the fetch-command auto-inject loop-guard
+(§5.2), the SSE frame shape (§5.4), and the `[(ngModel)]`/`[class]` binding shapes
+(§4.7). The remaining open items are the abort-branch flow and the interactive diff
+system (both §5.1), a full SSE event *sequence* test and the verification-layer fuzz
+(§4.5), and the concurrency paths (§5.5).

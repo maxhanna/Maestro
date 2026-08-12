@@ -383,7 +383,12 @@ partial class AgentController
                 // overall Thinking Max Tokens slider only governs accumulated deep
                 // thinking, NOT this per-step pre-plan output.
                 maxTokens: GetPlanningTokenCap(
-                    _complexityScores.TryGetValue(cardId ?? "", out var cs) ? cs : 100));
+                    _complexityScores.TryGetValue(cardId ?? "", out var cs) ? cs : 100),
+                // The cap is intentional, but a silent mid-sentence stop looks like a
+                // transport bug to users watching the panel. Opt into the explicit
+                // truncation marker so a budget cut is visible (and lands in the
+                // reasoning handed to the planner) instead of masquerading as a hang.
+                appendTruncationMarker: true);
             if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
             {
                 // Attach the actual reason as detail so the agent panel and meeting UI can

@@ -574,18 +574,44 @@ partial class AgentController
                       r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("needsExtraStep") is false);
     }
     /// <summary>
+    /// True when the most recent executed result is a SUCCESSFUL web step
+    /// (_web_search/_web_fetch) — the web-only mirror of IsLastEditVerifiedComplete.
+    /// IsLastEditVerifiedComplete requires an edit/create result, so a web-only run
+    /// (search/fetch with no file edits) never triggered the between-steps whole-task
+    /// assessment: the planner could declare planComplete right after a fetch — with
+    /// the demanded write still missing — and the run would end with the assessment
+    /// never having run. A successful web step now opens the same gate.
+    /// </summary>
+    private static bool IsLastWebStepComplete(List<Dictionary<string, object?>> newResults)
+    {
+        return newResults
+            .Any(r => r.GetValueOrDefault("type")?.ToString() is "_web_search" or "_web_fetch" or "web_search" or "web_fetch" &&
+                      r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
+    }
+    /// <summary>
     /// The between-steps verdict after AssessCompletion returns. If the assessment
     /// LLM was unavailable (empty / timed out / unparseable), do NOT force a
     /// redundant follow-up step — the per-step verifier already confirmed the last
     /// edit is complete (needsExtraStep=false) and no step failed, so the plan is
     /// declared complete. A real "not complete" assessment still keeps planning.
+    /// Web-gated runs (requireAssessment=true) invert the unavailable case: a web
+    /// step has NO per-step verifier confirmation (unlike a needsExtraStep=false
+    /// edit), so an unavailable assessment must NOT be treated as "verified
+    /// complete" — that would prematurely end a multi-step web chain (search →
+    /// fetch → write). Keep planning instead; the planner and the OS-output gate
+    /// still protect completion.
     /// </summary>
     private static bool ShouldDeclarePlanCompleteAfterAssessment(
-        bool isComplete, string? assessReason, out string completeReason, out bool assessFailed)
+        bool isComplete, string? assessReason, bool requireAssessment, out string completeReason, out bool assessFailed)
     {
         assessFailed = string.IsNullOrWhiteSpace(assessReason) ||
             assessReason.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
             assessReason.Contains("Could not parse", StringComparison.OrdinalIgnoreCase);
+        if (assessFailed && requireAssessment)
+        {
+            completeReason = "web-only run — assessment LLM unavailable, continuing instead of declaring complete";
+            return false;
+        }
         completeReason = assessFailed
             ? "last edit verified complete (needsExtraStep=false) — assessment LLM unavailable, stopping instead of planning a redundant step"
             : assessReason ?? "";
@@ -593,14 +619,24 @@ partial class AgentController
     }
     private async Task<(bool isComplete, string reason)> AssessCompletion(
         string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
-        AgentPlan? plan = null, List<string>? attachedFiles = null, int? atomicStepEstimate = null)
+        AgentPlan? plan = null, List<string>? attachedFiles = null, int? atomicStepEstimate = null,
+        string? steeringContext = null)
     {
         var editSteps = executedSteps.OfType<Dictionary<string, object?>>()
             .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "edit")
             .GroupBy(s => s.GetValueOrDefault("path")?.ToString() ?? Guid.NewGuid().ToString())
             .Select(g => g.Last())
             .ToList();
-        if (editSteps.Count == 0) return (true, "No edit steps — command-only task");
+        // Web-only runs (search/fetch, no edits) previously fell through to the
+        // command-only short-circuit: the between-steps whole-task assessment NEVER ran
+        // for them, so a web task could "complete" after a successful fetch with the
+        // demanded output still missing. When the run gathered web evidence, run the real
+        // LLM assessment with a Web step results section instead. Only a PURE command run
+        // (e.g. `ping 8.8.8.8`) keeps the no-LLM short-circuit.
+        var webSteps = executedSteps.OfType<Dictionary<string, object?>>()
+            .Where(s => s.TryGetValue("type", out var t) && t?.ToString() is "_web_search" or "_web_fetch" or "web_search" or "web_fetch")
+            .ToList();
+        if (editSteps.Count == 0 && webSteps.Count == 0) return (true, "No edit steps — command-only task");
         var failed = editSteps.Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "skipped")).ToList();
         if (failed.Count > 0)
         {
@@ -609,6 +645,21 @@ partial class AgentController
         }
         var sb = new StringBuilder();
         sb.AppendLine("## Task"); sb.AppendLine(prompt); sb.AppendLine();
+        // The user's mid-run steering is their LATEST intent and overrides the original task
+        // where they conflict. Judging only against the stale original task lets a run
+        // "complete" with the overridden (wrong) target — e.g. a "ignore the rename" steer
+        // after a rename+add task must NOT be assessed as incomplete for skipping the rename
+        // (or complete because the rename landed). The planner already sees the steering; the
+        // completion assessment must judge against the same latest-intent contract.
+        if (!string.IsNullOrWhiteSpace(steeringContext))
+        {
+            sb.AppendLine("## User steering — the user's LATEST instruction");
+            sb.AppendLine("This is the user's most recent message and OVERRIDES the original task where they " +
+                "conflict: parts of the original task the steering cancels are no longer required, and " +
+                "anything the steering adds or changes IS required.");
+            sb.AppendLine(steeringContext);
+            sb.AppendLine();
+        }
         if (atomicStepEstimate is > 0)
         {
             var executed = plan?.Plan?.Count ?? editSteps.Count;
@@ -624,30 +675,55 @@ partial class AgentController
                 sb.AppendLine($"- {step.File}: {step.Change}");
             sb.AppendLine();
         }
-        sb.AppendLine("## Edit results");
-        foreach (var s in editSteps.Take(10))
+        if (editSteps.Count > 0)
         {
-            var path = s.GetValueOrDefault("path")?.ToString() ?? "?";
-            var status = s.TryGetValue("status", out var st) ? st?.ToString() : "?";
-            var error = s.TryGetValue("error", out var e) ? e?.ToString() : null;
-            sb.AppendLine($"- {path}: {status}{(error != null ? $" → {error}" : "")}");
-            // The OLD→NEW diff of exactly what THIS step changed. Without it the assessor
-            // cannot distinguish rules this run ADDED from pre-existing ones — it just sees
-            // "path: done" plus the whole current file, so it hedges and a redundant follow-up
-            // step gets planned (e.g. adding an HTML class the CSS already targets with a
-            // selector). The current file already includes the '+' lines.
-            var diff = s.GetValueOrDefault("diffPreview")?.ToString();
-            if (!string.IsNullOrWhiteSpace(diff))
+            sb.AppendLine("## Edit results");
+            foreach (var s in editSteps.Take(10))
             {
-                const int MaxDiffChars = 4000;
-                if (diff.Length > MaxDiffChars)
-                    diff = diff[..MaxDiffChars] + $"\n… [diff truncated — {diff.Length} chars]";
-                sb.AppendLine("  OLD→NEW (exactly what this step changed):");
-                foreach (var line in diff.Split('\n'))
-                    sb.AppendLine("    " + line);
+                var path = s.GetValueOrDefault("path")?.ToString() ?? "?";
+                var status = s.TryGetValue("status", out var st) ? st?.ToString() : "?";
+                var error = s.TryGetValue("error", out var e) ? e?.ToString() : null;
+                sb.AppendLine($"- {path}: {status}{(error != null ? $" → {error}" : "")}");
+                // The OLD→NEW diff of exactly what THIS step changed. Without it the assessor
+                // cannot distinguish rules this run ADDED from pre-existing ones — it just sees
+                // "path: done" plus the whole current file, so it hedges and a redundant follow-up
+                // step gets planned (e.g. adding an HTML class the CSS already targets with a
+                // selector). The current file already includes the '+' lines.
+                var diff = s.GetValueOrDefault("diffPreview")?.ToString();
+                if (!string.IsNullOrWhiteSpace(diff))
+                {
+                    const int MaxDiffChars = 4000;
+                    if (diff.Length > MaxDiffChars)
+                        diff = diff[..MaxDiffChars] + $"\n… [diff truncated — {diff.Length} chars]";
+                    sb.AppendLine("  OLD→NEW (exactly what this step changed):");
+                    foreach (var line in diff.Split('\n'))
+                        sb.AppendLine("    " + line);
+                }
             }
+            sb.AppendLine();
         }
-        sb.AppendLine();
+        if (webSteps.Count > 0)
+        {
+            sb.AppendLine("## Web step results");
+            foreach (var s in webSteps.Take(10))
+            {
+                var q = s.GetValueOrDefault("query")?.ToString() ?? s.GetValueOrDefault("url")?.ToString() ?? "?";
+                var status = s.TryGetValue("status", out var st) ? st?.ToString() : "?";
+                var error = s.TryGetValue("error", out var e) ? e?.ToString() : null;
+                sb.AppendLine($"- {s.GetValueOrDefault("type")}: {q} — {status}{(error != null ? $" → {error}" : "")}");
+                var outp = s.GetValueOrDefault("output")?.ToString();
+                if (!string.IsNullOrWhiteSpace(outp))
+                {
+                    const int MaxWebChars = 4000;
+                    if (outp.Length > MaxWebChars)
+                        outp = outp[..MaxWebChars] + $"\n… [output truncated — {outp.Length} chars]";
+                    sb.AppendLine("  Results:");
+                    foreach (var line in outp.Split('\n').Take(40))
+                        sb.AppendLine("    " + line);
+                }
+            }
+            sb.AppendLine();
+        }
         var modifiedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in editSteps)
         {
@@ -683,8 +759,10 @@ partial class AgentController
                 sb.AppendLine($"### {relPath}\n```\n{content}\n```\n");
             }
         }
-        sb.AppendLine(@"Evaluate the code changes against the ORIGINAL TASK ONLY. Judge strictly against what the user
-EXPLICITLY requested — do NOT invent additional requirements, features, files, or 'best practice' improvements the
+        sb.AppendLine(@"Evaluate the code changes against the ORIGINAL TASK ONLY — as MODIFIED BY THE USER
+STEERING (latest intent) when steering is present above, since the steering overrides the original task where
+they conflict and parts the steering cancels are NOT required. Judge strictly against what the user EXPLICITLY
+requested — do NOT invent additional requirements, features, files, or 'best practice' improvements the
 user did not ask for. Check for:
 1. Does the code address everything the user EXPLICITLY requested?
 2. Are there bugs, syntax errors, or logic issues in the modified files that would break the requested change?
@@ -692,6 +770,7 @@ user did not ask for. Check for:
 4. Check files in ""Unmodified attached files"" ONLY against the explicit request — mark incomplete only if the user's request clearly required changing them.
 5. A newly added CSS rule IS a valid way to style existing markup — do NOT require adding classes or attributes to the HTML when a selector already targets the element (e.g. '.titleCell > div:last-child' targets the URL div without touching the HTML). CSS-only changes fully satisfy styling tasks; the OLD→NEW diffs above show exactly what was added.
 A task is complete when the explicit request is satisfied, even if you can imagine further improvements. When in doubt, mark complete=true.
+A WEB-ONLY run: judge completion against the WEB STEP RESULTS above and the user's request. If the task demanded an OUTPUT (e.g. write the gathered data to a file on disk), that output must have been produced — mark incomplete if the demanded write has not happened yet, even though the web steps themselves succeeded.
 Respond with JSON only:
 ```json
 {
@@ -704,7 +783,8 @@ Respond with JSON only:
         // Use the configurable LLM timeout (not a hard 30s cap): on slow local models a 30s
         // deadline turns a healthy completion assessment into a fake "timed out" verdict,
         // which then forces the interleaved loop to plan a redundant follow-up step.
-        var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, _infiniteTimeout);
+        var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, _infiniteTimeout,
+            llmRoundLabel: "completion assessment");
         if (string.IsNullOrWhiteSpace(raw))
         {
             // One retry — transient endpoint slowness shouldn't veto a verified-complete task.
@@ -814,7 +894,7 @@ Respond with JSON only:
         }
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
     }
-    private static void PopulateEditResult(
+    private void PopulateEditResult(
         Dictionary<string, object?> result, string action, string path,
         string? oldStr, string? newStr, string writtenContent)
     {
@@ -829,6 +909,10 @@ Respond with JSON only:
         result["diffPreview"] = AgentDiffUtilities.BuildDiffPreview(oldStr, newStr);
         result["oldLines"] = (oldStr ?? "").Split('\n');
         result["newLines"] = (newStr ?? "").Split('\n');
+        // Per-step LLM token spend (planning + verification rounds since the last emitted
+        // step) so the panel shows what this step cost, not just the discovery context.
+        var llmMetrics = TakeStepLlmMetrics();
+        if (llmMetrics != null) result["llmTokens"] = llmMetrics;
     }
     private async Task<string> EnrichWithTypeChain(
         string projectRoot,
@@ -1012,7 +1096,7 @@ Respond with JSON only:
             };
             if (emitSse) await SendSse(Response, "step", skip, ct);
             allResults.Add(skip);
-            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
             return stepIndex + 1;
         }
         var dir = Path.GetDirectoryName(fullPath);
@@ -1069,7 +1153,7 @@ Respond with JSON only:
         r["planItemIndex"] = planItemIndex;
         if (emitSse) await SendSse(Response, "step", r, ct);
         allResults.Add(r);
-        await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+        await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
         try { _fileHints.LearnFromAppliedEdit(projectRoot, fullPath, fullContent); }
         catch { }
         _ = Task.Run(async () =>

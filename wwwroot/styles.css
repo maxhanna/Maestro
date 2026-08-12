@@ -3411,6 +3411,30 @@ h3 .small.ghost:hover {
 	color: var(--error);
 }
 
+.steering-now-btn {
+	background: rgba(6, 182, 212, 0.12);
+	border: 1px solid rgba(6, 182, 212, 0.35);
+	color: #67e8f9;
+	cursor: pointer;
+	font-size: 12px;
+	font-weight: 600;
+	padding: 6px 12px;
+	border-radius: 6px;
+	white-space: nowrap;
+	transition: all 0.15s ease;
+}
+
+.steering-now-btn:hover {
+	background: rgba(6, 182, 212, 0.25);
+	border-color: var(--accent);
+	box-shadow: 0 0 8px rgba(6, 182, 212, 0.2);
+}
+
+.steering-now-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
 .agent-activity-log {
 	margin-top: 6px;
 }
@@ -3720,6 +3744,37 @@ h3 .small.ghost:hover {
 	max-width: calc(100% - 50px);
 }
 
+/* Per-step computed ground truth — each plan step's own deterministic expected outcome */
+.plan-item-gt-entry {
+    display: flex;
+    gap: 4px;
+    align-items: baseline;
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.72);
+    word-break: break-word;
+}
+
+.plan-item-gt-entry.gt-verified {
+    color: rgba(152, 195, 121, 0.95);
+}
+
+.plan-item-gt-entry.gt-missed {
+    color: #e06c75;
+}
+
+.plan-item-gt-mark {
+    flex-shrink: 0;
+    width: 1em;
+    text-align: center;
+}
+
+/* Final verification reason — the verified_complete step in the live steps list */
+.step-verification-reason {
+    font-size: 0.85em;
+    color: rgba(152, 195, 121, 0.9);
+    word-break: break-word;
+}
+
 .plan-item-row {
 	display: flex;
 	flex-wrap: wrap;
@@ -3802,6 +3857,20 @@ h3 .small.ghost:hover {
 	color: #e5c07b;
 	background: rgba(229, 192, 123, 0.12);
 	border-color: rgba(229, 192, 123, 0.4);
+}
+
+.step-llm-tokens {
+	font-size: 10px;
+	font-weight: 700;
+	color: #61afef;
+	background: rgba(97, 175, 239, 0.12);
+	border: 1px solid rgba(97, 175, 239, 0.35);
+	border-radius: 8px;
+	padding: 0 6px;
+	margin-left: 6px;
+	flex-shrink: 0;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
 }
 
 .diff-meta.batch-meta.batch-partial {

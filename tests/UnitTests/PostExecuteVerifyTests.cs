@@ -209,6 +209,28 @@ public class PostExecuteVerifyTests
         Assert.Contains("phantom", reason);
     }
 
+    [Fact]
+    public void Triage_ProsePronounBeforeParenthetical_NotReadAsSymbol_Keeps()
+    {
+        // The orphaned-template-reference issue says "...still references it (class=\"...\")..." —
+        // the method-call extractor must NOT read the prose word 'it' as a code symbol. Doing so
+        // makes the hallucinated-reference rule drop a GENUINE deterministic issue (its symbol
+        // '.flight-schedule-container' is absent from the current files because the run removed
+        // the rule — exactly why the issue exists), and the run completes with the orphaned
+        // template reference intact. Regression for the deterministic orphaned-CSS check.
+        var files = new Dictionary<string, string>
+        {
+            ["globe/globe.component.css"] = ".flight-detail-panel { padding: 12px; }\n",
+            ["globe/globe.component.html"] = "<div class=\"flight-detail-panel\"></div>\n"
+        };
+        var (keep, reason) = InvokeTriageVerifierIssue(
+            "CSS class '.flight-schedule-container' was REMOVED from globe.component.css by this run, " +
+            "but the connected template/component still references it (class=\"flight-schedule-container\", " +
+            "[class.flight-schedule-container], ng-class, or querySelector) — the element now points at a " +
+            "class that no longer exists. (Deterministic orphaned-template-reference check.)", files);
+        Assert.True(keep, $"genuine deterministic issue must stay actionable — reason: {reason}");
+    }
+
     // ── Triage: checklist-echo substitution preferences ────────────────────
 
     [Fact]
@@ -585,6 +607,26 @@ public class PostExecuteVerifyTests
         var (keep, _) = InvokeTriageVerifierIssue(
             "`saveCards` is never called anywhere in the project", files);
         Assert.True(keep);
+    }
+
+    [Fact]
+    public void Triage_HallucinatedReference_ProseWordParentheticals_NotTreatedAsCodeSymbols()
+    {
+        // Regression: the deterministic unwired-CSS check's issue text contains natural-language
+        // parentheticals ("template/component (globe.component.html)", "should style (class=…)").
+        // The hallucinated-reference rule must NOT extract 'component'/'style' as code symbols
+        // and drop a genuine issue — that would silently unblock dead CSS.
+        var files = new Dictionary<string, string>
+        {
+            ["globe/globe.component.css"] = ".flight-detail-body { max-height: 300px; }",
+            ["globe/globe.component.html"] = "<div class=\"flight-detail-panel\"></div>"
+        };
+        var issue = "Newly created CSS class '.flight-detail-body' in globe.component.css is never referenced " +
+                    "in the connected template/component (globe.component.html) — the rule will never apply. " +
+                    "Wire it up: add the class to the element it should style (class=\"flight-detail-body\").";
+        var (keep, reason) = InvokeTriageVerifierIssue(issue, files);
+        Assert.True(keep);
+        Assert.DoesNotContain("not present in any file", reason);
     }
 
     // ── Repair-loop skip-phantom path ───────────────────────────────────────

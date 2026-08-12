@@ -284,6 +284,14 @@ partial class AgentController
         var userPrompt = new StringBuilder();
         userPrompt.AppendLine("### TASK ###");
         userPrompt.AppendLine(prompt);
+        // The extracted EXPLICIT REQUIREMENTS CHECKLIST rides in the planner user prompt as its
+        // own section — never in the task text itself, so the web-need/OS-task heuristics that
+        // scan the raw task never see checklist wording ("search", "fetch", "current").
+        if (!string.IsNullOrWhiteSpace(_requirementChecklist))
+        {
+            userPrompt.AppendLine();
+            userPrompt.AppendLine(_requirementChecklist);
+        }
         if (!string.IsNullOrWhiteSpace(steeringContext))
         {
             userPrompt.AppendLine();
@@ -307,7 +315,7 @@ partial class AgentController
             Console.WriteLine($"### CALLING LLM WITH PROMPT >>> {planningPrompt} >>> {userPrompt}");
             (raw, _, llmError) = await CallLlmRawStreaming(
                 planningPrompt, userPrompt.ToString(), emitSse, ct,
-                requestTimeout: _infiniteTimeout, maxTokens: 2048);
+                requestTimeout: _infiniteTimeout, maxTokens: 2048, llmRoundLabel: "full plan");
             if (string.IsNullOrWhiteSpace(raw))
             {
                 await EmitLog(emitSse, "error",
@@ -1387,9 +1395,19 @@ partial class AgentController
         }
 
         bool complete = pipelineComplete;
+        // A web-step error (_web_fetch/_web_search) is NOT fatal to the verdict: fetches fail
+        // for transient/invented-URL reasons and the pipeline already handles recovery — the
+        // interleaved loop retries failed web steps with feedback, the OS-output gate auto-
+        // dumps harvested results when a demanded file is missing, and PostExecuteVerify keeps
+        // the run incomplete while a demanded output is genuinely absent. A failed fetch that
+        // truly left the task undone is caught by those deterministic gates (CONFIRMED OS issue
+        // + no verified_complete), not by this blunt error-count rule. The pre-fix behavior
+        // marked a run INCOMPLETE even when it recovered (retried fetch succeeded, file auto-
+        // dumped, verified_complete recorded) just because an error result sat in the steps.
         var hasFatalStepErrors = allSteps.OfType<Dictionary<string, object?>>()
             .Any(s => s.TryGetValue("status", out var status) && s.TryGetValue("type", out var type)
-                && status?.ToString() == "error" && type?.ToString() != "list");
+                && status?.ToString() == "error"
+                && type?.ToString() is not ("list" or "_web_search" or "_web_fetch" or "web_search" or "web_fetch"));
         if (hasFatalStepErrors)
         {
             complete = false;
@@ -1406,7 +1424,7 @@ partial class AgentController
             if (verified) hasDone = true;
             if (!hasDone)
             {
-                var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
+                var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
                 if (ok && hasFatalStepErrors)
                 {
                     ok = false;
@@ -1438,7 +1456,7 @@ partial class AgentController
                             steeringContext: steeringContext, attachedFiles: attachedFiles,
                             completedStepIndices: doneIndices, cardId: cardId);
                         allSteps.AddRange(retryResults);
-                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
+                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
                         complete = ok2;
                     }
                     if (!complete && plan?.Plan?.Count > 0)
@@ -1537,7 +1555,7 @@ partial class AgentController
                                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                                 completedStepIndices: mergedDone, cardId: cardId);
                             allSteps.AddRange(newResults);
-                            var (ok3, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
+                            var (ok3, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
                             complete = ok3;
                         }
                         else
@@ -1623,10 +1641,11 @@ partial class AgentController
         }
         var replanPrompt = BuildReplanPrompt(originalPrompt, new List<string> { failHist },
             steeringContext, existingPlan, executedSteps, qualityCheckReason,
-            fileContents.ToString() + "\n\n## FAILED CODE SNIPPETS (do NOT reproduce)\n" + failedCodeSnippets.ToString());
+            fileContents.ToString() + "\n\n## FAILED CODE SNIPPETS (do NOT reproduce)\n" + failedCodeSnippets.ToString(),
+            _requirementChecklist);
         var (raw, _, llmError) = await CallLlmRaw(
                 "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1, \"line\": 42}]}. For every edit step include the 1-based line number. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan.",
-                replanPrompt, ct, requestTimeout: _infiniteTimeout);
+                replanPrompt, ct, requestTimeout: _infiniteTimeout, llmRoundLabel: "replan");
         if (string.IsNullOrWhiteSpace(raw)) return null;
         try
         {
@@ -1645,8 +1664,17 @@ partial class AgentController
                 var change = item.TryGetProperty("change", out var c) ? c.GetString() : null;
                 var priority = item.TryGetProperty("priority", out var p) ? p.GetInt32() : 1;
                 var line = item.TryGetProperty("line", out var l) ? l.GetInt32() : 0;
+                // Repair steps may carry concrete old/new edits (mirroring the planner's FORMAT
+                // C/D) so a deterministic repair can be applied directly without an extra
+                // edit-resolution LLM round-trip.
+                var oldString = item.TryGetProperty("oldString", out var os) ? os.GetString() : null;
+                var newString = item.TryGetProperty("newString", out var ns) ? ns.GetString() : null;
                 if (!string.IsNullOrWhiteSpace(file) && !string.IsNullOrWhiteSpace(change))
-                    steps.Add(new PlanStep { File = file, Change = change, Priority = priority, LineNumber = line });
+                    steps.Add(new PlanStep
+                    {
+                        File = file, Change = change, Priority = priority, LineNumber = line,
+                        OldString = oldString, NewString = newString
+                    });
             }
             return steps.Count > 0 ? steps : null;
         }

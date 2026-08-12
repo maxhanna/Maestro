@@ -85,6 +85,13 @@ public static class TemplateBindingValidator
         @"\b(panel|template|render|ng[-]?(?:for|if|repeat|model|click|class|show|hide|switch|style|change|blur|init|disabled|options|value|bind|href|src))\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    /// <summary>True when the task prompt targets the rendered UI surface (panel/template/
+    /// render/ng-* bindings) — the precondition under which the unrendered-component-logic
+    /// check is even eligible to fire. Exposed so the post-execution verifier can record a
+    /// positive "component wiring" pass only when the check genuinely evaluated .ts edits.</summary>
+    public static bool IsUiTargetTask(string? prompt) =>
+        !string.IsNullOrWhiteSpace(prompt) && _uiTargetRegex.IsMatch(prompt);
+
     // ─── Check A: template bindings must reference component members ──────────
 
     /// <summary>
@@ -536,7 +543,7 @@ public static class TemplateBindingValidator
         string prompt, string projectRoot, IEnumerable<string> modifiedRelPaths, IEnumerable<object> allResults)
     {
         var issues = new List<string>();
-        if (!_uiTargetRegex.IsMatch(prompt ?? "")) return issues;
+        if (!IsUiTargetTask(prompt)) return issues;
         var modified = new HashSet<string>(modifiedRelPaths.Select(NormRel), StringComparer.OrdinalIgnoreCase);
         var inScope = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in allResults.OfType<Dictionary<string, object?>>())

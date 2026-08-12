@@ -107,7 +107,7 @@ partial class AgentController
             AgentTokenMetrics.CompactConversation(conversation, pipelineCfg.contextWindowTokens);
             var (raw, _, err) = await CallLlmRaw(
                 "You are a terminal agent. Output only JSON.",
-                conversation.ToString(), ct, _infiniteTimeout);
+                conversation.ToString(), ct, _infiniteTimeout, llmRoundLabel: $"command step {i + 1}");
             if (string.IsNullOrWhiteSpace(raw)) { summary ??= "Completed with issues"; break; }
             var cleaned = raw.Trim();
             if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
@@ -224,7 +224,7 @@ partial class AgentController
                             };
                             steps.Add(benignResult);
                             if (emitSse) await SendSse(Response, "step", benignResult, ct);
-                            await PersistBoardDataPlanStepAsync(cardId, pi, emitSse, ct);
+                            await PersistBoardDataPlanStepAsync(cardId, pi, emitSse, ct, projectRoot: projectRoot);
                             conversation.AppendLine($"→ Step {pi + 1} OK (already existed): {cmdClean}");
                             conversation.AppendLine($"  Output: {AgentTextUtilities.Truncate(freshOut, 300)}");
                         }
@@ -259,7 +259,7 @@ partial class AgentController
                     };
                     steps.Add(result);
                     if (emitSse) await SendSse(Response, "step", result, ct);
-                    await PersistBoardDataPlanStepAsync(cardId, pi, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, pi, emitSse, ct, projectRoot: projectRoot);
                     conversation.AppendLine($"→ Auto-executed step {pi + 1}: {cmdClean}");
                     conversation.AppendLine($"  Output: {AgentTextUtilities.Truncate(freshOut, 500)}");
                 }
@@ -278,7 +278,7 @@ partial class AgentController
                     conversation.AppendLine("-> Step " + stepNum + " marked done.");
                     if (emitSse)
                         await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = stepNum - 1, status = "done" }, ct);
-                    await PersistBoardDataPlanStepAsync(cardId, stepNum - 1, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, stepNum - 1, emitSse, ct, projectRoot: projectRoot);
                 }
                 continue;
             }
@@ -327,7 +327,7 @@ partial class AgentController
                         {
                             if (emitSse)
                                 await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = advStep, status = "done" }, ct);
-                            await PersistBoardDataPlanStepAsync(cardId, advStep, emitSse, ct);
+                            await PersistBoardDataPlanStepAsync(cardId, advStep, emitSse, ct, projectRoot: projectRoot);
                         }
                     }
                     consecutiveErrors = 0;
@@ -341,6 +341,8 @@ partial class AgentController
                 if (!usedSearchQueries.Add(query)) { conversation.AppendLine("Already searched for \"" + query + "\". Use the results above."); continue; }
                 var (searchOut, _) = await WebSearchAsync(query, ct);
                 var wr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_search", ["query"] = query, ["status"] = "done", ["output"] = searchOut };
+                var wrMetrics = TakeStepLlmMetrics();
+                if (wrMetrics != null) wr["llmTokens"] = wrMetrics;
                 steps.Add(wr);
                 if (emitSse)
                 {
@@ -365,6 +367,8 @@ partial class AgentController
                 var isFetchError = fetchOut.StartsWith("HTTP 4") || fetchOut.StartsWith("HTTP 5") ||
                     (!string.IsNullOrWhiteSpace(fetchErr) && (fetchErr.Contains("404") || fetchErr.Contains("500")));
                 var fr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_fetch", ["url"] = url, ["status"] = isFetchError ? "error" : "done", ["output"] = fetchOut };
+                var frMetrics = TakeStepLlmMetrics();
+                if (frMetrics != null) fr["llmTokens"] = frMetrics;
                 steps.Add(fr);
                 if (emitSse)
                 {

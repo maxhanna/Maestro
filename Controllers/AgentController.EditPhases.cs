@@ -52,7 +52,7 @@ partial class AgentController
             };
             if (emitSse) await SendSse(Response, "step", skip, ct);
             allResults.Add(skip);
-            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
             return stepIndex + 1;
         }
         if (!System.IO.File.Exists(fullPath) && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
@@ -80,7 +80,7 @@ partial class AgentController
                 };
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
-                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
                 return stepIndex + 1;
             }
             catch (Exception ex)
@@ -119,7 +119,7 @@ partial class AgentController
             };
             if (emitSse) await SendSse(Response, "step", r, ct);
             allResults.Add(r);
-            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
             return stepIndex + 1;
         }
         if (verdict == PreEditVerdict.Irrelevant)
@@ -137,7 +137,7 @@ partial class AgentController
             };
             if (emitSse) await SendSse(Response, "step", r, ct);
             allResults.Add(r);
-            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
             return stepIndex + 1;
         }
         return null;

@@ -41,7 +41,9 @@ public class FileTreeOrderIndependenceTests
 
     private static string LocateHelper()
     {
-        // Tests run from tests/UnitTests/bin/<cfg>/<tfm>/ — walk up to the repo root.
+        // 1. Fast path: tests usually run from tests/UnitTests/bin/<cfg>/<tfm>/ (or
+        //    bin/<cfg>/<tfm>/), which sits inside the repo — walk up to the repo root
+        //    and use the on-disk wwwroot/filetree.js, the file the browser actually ships.
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null)
         {
@@ -49,8 +51,31 @@ public class FileTreeOrderIndependenceTests
             if (File.Exists(candidate)) return candidate;
             dir = dir.Parent;
         }
+        // 2. The test runner's CURRENT DIRECTORY is the repo root when `dotnet test` is
+        //    invoked from the repo — even when the assembly was built to an output
+        //    location outside the repo (CI checkout copies, -p:OutDir=/tmp, …).
+        var cwdCandidate = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "filetree.js");
+        if (File.Exists(cwdCandidate)) return cwdCandidate;
+        // 3. Last resort: Weaver.csproj bundles wwwroot/** as EMBEDDED RESOURCES (they ride
+        //    inside the single-file exe), so filetree.js always travels with this assembly —
+        //    extract it to a temp file instead of failing. This keeps the corpus green for
+        //    ANY build-output location, not just in-repo ones (the old walk-up-only lookup
+        //    threw TypeInitializationException when the DLL lived outside the repo tree).
+        //    Extraction happens once per process via the static HelperPath below.
+        var assembly = typeof(FileTreeOrderIndependenceTests).Assembly;
+        foreach (var name in assembly.GetManifestResourceNames())
+        {
+            if (!name.EndsWith(".wwwroot.filetree.js", StringComparison.OrdinalIgnoreCase)) continue;
+            using var stream = assembly.GetManifestResourceStream(name)!;
+            var tmp = Path.Combine(Path.GetTempPath(), "weaver_filetree_" + Guid.NewGuid().ToString("N") + ".js");
+            using (var fs = File.Create(tmp))
+                stream.CopyTo(fs);
+            return tmp;
+        }
         throw new InvalidOperationException(
-            "Cannot locate wwwroot/filetree.js — the pure tree builder must exist for this corpus.");
+            "Cannot locate wwwroot/filetree.js — neither the on-disk file (walk-up + cwd probes) nor the " +
+            "embedded manifest resource (Weaver.wwwroot.filetree.js) is available. The pure tree builder " +
+            "must exist for this corpus.");
     }
 
     /// <summary>

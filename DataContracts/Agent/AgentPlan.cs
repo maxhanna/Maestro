@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Weaver.Services;
 
 namespace Weaver;
 
@@ -102,4 +103,22 @@ public class PlanStep
     /// <summary>fullFile format: the complete file content to write (used when the file does not exist).</summary>
     [JsonPropertyName("fullFile")]
     public string? FullFile { get; set; }
+
+    /// <summary>
+    /// Deterministic expected outcome for THIS step, computed from the step's own content —
+    /// the known-correct answer the step is checked against (a literal swap's new text must
+    /// be present; a 'did you mean' typo fix's corrected token must be what's on disk).
+    /// Pure function of the step — no LLM, no disk. Attached to the plan item so each step
+    /// shows its own expected outcome, and verified against disk when the step completes
+    /// (see PersistBoardDataPlanStepAsync). Getter-only: never parsed from LLM responses.
+    /// </summary>
+    [JsonPropertyName("groundTruth")]
+    public List<StepGroundTruth>? GroundTruth
+    {
+        get
+        {
+            var items = AgentTextUtilities.ComputeStepGroundTruth(File, OldString, NewString, FullFile, NewCode, Edits);
+            return items.Count == 0 ? null : items;
+        }
+    }
 }

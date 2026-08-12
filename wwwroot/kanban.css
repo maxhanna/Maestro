@@ -312,6 +312,72 @@ body.dragging-active .card:hover {
     margin-left: 6px;
 }
 
+/* Peak-context badge — the run's final discovery-context size, persisted onto the
+   card (_context) so completed cards keep showing the counter instead of it
+   disappearing/resetting once the run ends. Blue like the live context tag. */
+.card .card-tag.tag-context {
+    background: rgba(97, 175, 239, 0.14);
+    color: #61afef;
+    font-weight: 700;
+    border: 1px solid rgba(97, 175, 239, 0.35);
+    font-variant-numeric: tabular-nums;
+}
+.card .card-meta .card-tag.tag-context {
+    margin-left: 6px;
+}
+
+/* Bughosted feedback-sent chip — done/archived cards that had feedback successfully
+   submitted to the bughosted server show a small green check next to the Feedback
+   button (state persists on the card as _feedbackSent, survives reloads). */
+.card .feedback-sent-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .4px;
+    text-transform: uppercase;
+    color: var(--brand-success, #22c55e);
+    background: rgba(34, 197, 94, 0.14);
+    border: 1px solid rgba(34, 197, 94, 0.35);
+    padding: 2px 7px;
+    border-radius: 999px;
+    white-space: nowrap;
+    cursor: default;
+}
+
+/* Feedback popup — previously submitted messages shown on reopen so the user knows
+   what was already reported to bughosted before writing a new one. */
+.feedback-previous {
+    margin: 4px 0 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(97, 175, 239, 0.08);
+    border: 1px solid rgba(97, 175, 239, 0.25);
+}
+.feedback-previous-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .4px;
+    text-transform: uppercase;
+    color: var(--secondary-font-color, #98a1b3);
+    margin-bottom: 3px;
+}
+.feedback-previous-entry {
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 2px 0;
+    border-top: 1px solid rgba(97, 175, 239, 0.12);
+}
+.feedback-previous-entry:first-of-type {
+    border-top: 0;
+}
+.feedback-previous-time {
+    color: var(--secondary-font-color, #98a1b3);
+    font-size: 11px;
+    cursor: default;
+}
+
 /* Improvement-suggestion chip — cards created from a completed card's
    'Add to To Do' suggestion. A soft violet/glow tone so it reads as a
    generated task, distinct from READY/QUEUED/bench/self-improving tags. */
@@ -872,6 +938,118 @@ body.dragging-active .card:hover {
     overflow-x: auto;
     max-height: 180px;
     overflow-y: auto;
+}
+
+/* Per-step computed ground truth — each plan step's own deterministic expected outcome */
+.plan-item-gt {
+    margin: 2px 0 0 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.plan-item-gt-entry {
+    display: flex;
+    gap: 4px;
+    align-items: baseline;
+    font-size: 0.88em;
+    color: rgba(255, 255, 255, 0.72);
+    word-break: break-word;
+}
+
+.plan-item-gt-entry.gt-verified {
+    color: rgba(152, 195, 121, 0.95);
+}
+
+.plan-item-gt-entry.gt-missed {
+    color: #e06c75;
+}
+
+.plan-item-gt-mark {
+    flex-shrink: 0;
+    width: 1em;
+    text-align: center;
+}
+
+/* Final verification verdict — the reason the run was (or wasn't) verified complete */
+.verification-ok {
+    color: rgba(152, 195, 121, 0.95);
+}
+
+.verification-fail {
+    color: #e06c75;
+}
+
+.verification-reason {
+    padding: 5px 8px;
+    margin: 3px 0;
+    border-left: 3px solid rgba(255, 255, 255, 0.25);
+    border-radius: 4px;
+    font-size: 0.91em;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.verification-reason-ok {
+    background: rgba(38, 166, 91, 0.10);
+    border-left-color: rgba(38, 166, 91, 0.6);
+    color: rgba(152, 195, 121, 0.95);
+}
+
+.verification-reason-fail {
+    background: rgba(224, 108, 117, 0.10);
+    border-left-color: rgba(224, 108, 117, 0.6);
+    color: #e06c75;
+}
+
+.verification-at {
+    font-size: 0.82em;
+    opacity: 0.55;
+}
+
+.step-verification-reason {
+    font-size: 0.88em;
+    color: rgba(152, 195, 121, 0.9);
+    word-break: break-word;
+}
+
+/* Computed ground truth — the known-correct answer the run is checked against */
+.ground-truth-item {
+    padding: 5px 8px;
+    margin: 3px 0;
+    background: rgba(38, 166, 91, 0.12);
+    border-left: 3px solid rgba(38, 166, 91, 0.6);
+    border-radius: 4px;
+    font-size: 0.91em;
+    white-space: pre-wrap;
+}
+
+/* Delivered steers — the live-steer transcript (what was injected, at which turn) */
+.steer-item {
+    padding: 5px 8px;
+    margin: 3px 0;
+    background: rgba(255, 193, 7, 0.10);
+    border-left: 3px solid rgba(255, 193, 7, 0.55);
+    border-radius: 4px;
+    font-size: 0.91em;
+    white-space: pre-wrap;
+}
+
+.steer-turn {
+    font-weight: 600;
+    color: #e6a700;
+    margin-right: 6px;
+}
+
+.steer-message {
+    color: #e8d9a8;
+}
+
+.steer-at {
+    display: block;
+    margin-top: 2px;
+    font-size: 0.8em;
+    opacity: 0.55;
 }
 
 /* Diff rows inside plan items */

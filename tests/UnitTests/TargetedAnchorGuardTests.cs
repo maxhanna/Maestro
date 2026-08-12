@@ -21,17 +21,47 @@ public class TargetedAnchorGuardTests
         "ValidateIncrementalStepAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
     /// <summary>Runs the REAL private validator on an uninitialized controller — the early
-    /// guard paths are pure (static helpers only), so no DI/state is needed.</summary>
+    /// guard paths are pure (static helpers only), so no DI/state is needed. The step's target
+    /// file is materialized as an empty file in a temp project root: the validator resolves
+    /// relative paths against the project root (which cannot be the test host's CWD), and the
+    /// invented-file guard rejects edits to paths that do not exist — so this guard's tests
+    /// must target files the sandbox contains.</summary>
     private static (bool valid, string? reason) Validate(PlanStep step, string prompt, bool skipLlm = false, List<string>? attachedFiles = null)
     {
         var controller = RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
-        var task = (Task<(bool valid, string? reason)>)ValidateMethod.Invoke(controller, new object?[]
+        var projectRoot = MaterializeSandbox(step.File);
+        try
         {
-            step, prompt, /*discoveryContext*/ "", /*planSoFar*/ new List<PlanStep>(),
-            /*projectRoot*/ ".", /*emitSse*/ false, CancellationToken.None, /*skipLlm*/ skipLlm, /*lastStepCompletionNote*/ null, /*attachedFiles*/ attachedFiles
-        })!;
-        var result = task.GetAwaiter().GetResult();
-        return (result.valid, result.reason);
+            var task = (Task<(bool valid, string? reason)>)ValidateMethod.Invoke(controller, new object?[]
+            {
+                step, prompt, /*discoveryContext*/ "", /*planSoFar*/ new List<PlanStep>(),
+                /*projectRoot*/ projectRoot, /*emitSse*/ false, CancellationToken.None, /*skipLlm*/ skipLlm, /*lastStepCompletionNote*/ null, /*attachedFiles*/ attachedFiles
+            })!;
+            var result = task.GetAwaiter().GetResult();
+            return (result.valid, result.reason);
+        }
+        finally
+        {
+            try { Directory.Delete(projectRoot, true); } catch { }
+        }
+    }
+
+    /// <summary>Creates a temp project root containing the step's target file (as an empty
+    /// file) so the file-existence gate in the validator sees a real file and the guard under
+    /// test — the anchor-size guard — is what decides.</summary>
+    private static string MaterializeSandbox(string? targetFile)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "weaver_anchor_guard_" + Guid.NewGuid().ToString("N"));
+        if (!string.IsNullOrWhiteSpace(targetFile))
+        {
+            var full = Path.GetFullPath(Path.Combine(root, targetFile.Replace('/', Path.DirectorySeparatorChar)));
+            if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                File.WriteAllText(full, "");
+            }
+        }
+        return root;
     }
 
     private static string HugeBlock(int lines)

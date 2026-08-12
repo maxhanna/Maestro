@@ -27,7 +27,8 @@ public class WebResultsNudgePromptTests
             null,
             new List<string>(),
             null,  // extendedReasoning
-            null   // atomicStepEstimate
+            null,  // atomicStepEstimate
+            null   // requirementChecklist (threaded separately — never appended to the task)
         })!;
 
     private static List<PlanStep> WebPlanSoFar() => new()

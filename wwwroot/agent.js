@@ -283,6 +283,47 @@ angular.module('kanbanApp')
                     }
                     return String(detail);
                 };
+                // Sends the steering input's current value to the RUNNING agent via
+                // POST api/agent/steer — the live-steer path the server drains before the
+                // next planner turn (vs run-start steeringContext, which is fixed when the
+                // run begins). Only meaningful mid-run; Enter in the input also triggers it.
+                // The server reports whether the card was actually executing at the moment
+                // of the post, which we surface as feedback in the log.
+                vm.steerNow = function () {
+                    var msg = (vm.steeringContext || '').trim();
+                    var cardId = vm.activeCardId;
+                    if (!msg) return;
+                    if (!cardId) {
+                        pushAgentLog(vm, 'warn', 'Steer now: no active card is running — start a run first (or post before starting to use run-start steering).');
+                        return;
+                    }
+                    return fetch('/api/agent/steer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ cardId: cardId, message: msg })
+                    })
+                        .then(function (resp) {
+                            if (!resp.ok) {
+                                return resp.text().then(function (t) {
+                                    pushAgentLog(vm, 'warn', '⚡ Steer now failed: HTTP ' + resp.status + ' ' + (t || ''));
+                                });
+                            }
+                            return resp.json().then(function (data) {
+                                if (data && data.active) {
+                                    pushAgentLog(vm, 'info', '⚡ Steer sent — the running agent will see it on its next planner turn.');
+                                } else {
+                                    pushAgentLog(vm, 'warn', '⚡ Steer queued, but the card is not executing right now — it will be dropped if no run consumes it (or picked up by the next run of this card).');
+                                }
+                                // Consumed: clear the box so it cannot be re-sent as run-start
+                                // steering on the next run by accident.
+                                vm.steeringContext = '';
+                                $scope.$applyAsync();
+                            });
+                        })
+                        .catch(function (err) {
+                            pushAgentLog(vm, 'warn', '⚡ Steer now failed: ' + (err && err.message ? err.message : String(err)));
+                        });
+                };
                 // A step whose output is web data (search results or a fetched page) renders in a
                 // dedicated collapsible '🌐 Web results' block instead of the generic output box.
                 // Matches both plan-marker types (_web_search/_web_fetch) and the command-pipeline
@@ -604,6 +645,57 @@ angular.module('kanbanApp')
                                                                 if (parsed && parsed.contextChars) { vm.streamingContextChars = parsed.contextChars; }
                                                                 if (parsed && Array.isArray(parsed.contextBreakdown)) { vm.streamingContextBreakdown = parsed.contextBreakdown; }
                                                                 break;
+                                                            case 'context':
+                                                                // Live context counter updates during orchestration — no phase change, no log entry.
+                                                                if (parsed && parsed.contextSize) { vm.streamingContextSize = parsed.contextSize; }
+                                                                if (parsed && parsed.contextChars) { vm.streamingContextChars = parsed.contextChars; }
+                                                                if (parsed && Array.isArray(parsed.contextBreakdown)) { vm.streamingContextBreakdown = parsed.contextBreakdown; }
+                                                                // Final run-end context: persist the PEAK size onto the card (like _groundTruth /
+                                                                // _verification) so completed cards keep showing it after the live section closes,
+                                                                // surviving reloads — instead of the counter vanishing/resetting once the run ends.
+                                                                if (parsed && parsed.final && vm.findCardById && vm.activeCardId) {
+                                                                    var ctxCard = vm.findCardById(vm.activeCardId);
+                                                                    if (ctxCard) {
+                                                                        ctxCard._context = { size: vm.streamingContextSize, chars: vm.streamingContextChars, breakdown: vm.streamingContextBreakdown };
+                                                                        if (vm.saveCards) vm.saveCards();
+                                                                    }
+                                                                }
+                                                                break;
+                                                            case 'groundTruth':
+                                                                // Computed ground truth — the deterministic expectations the run is being checked
+                                                                // against (e.g. a new CSS class must be wired into the template). Surfaced live on
+                                                                // the card and persisted to boarddata so it survives a reload.
+                                                                if (parsed && Array.isArray(parsed.items) && parsed.items.length) {
+                                                                    var gtCard = vm.findCardById ? vm.findCardById(parsed.cardId || vm.activeCardId) : null;
+                                                                    if (gtCard) {
+                                                                        gtCard._groundTruth = parsed.items;
+                                                                        if (vm.saveCards) vm.saveCards();
+                                                                    }
+                                                                }
+                                                                break;
+                                                            case 'verification':
+                                                                // Final verification verdict — the reason the run was (or wasn't) verified
+                                                                // complete. Surfaced live on the card and persisted to boarddata so it
+                                                                // survives a reload (mirrors the ground-truth section).
+                                                                if (parsed && typeof parsed.complete === 'boolean' && parsed.reason) {
+                                                                    var verCard = vm.findCardById ? vm.findCardById(parsed.cardId || vm.activeCardId) : null;
+                                                                    if (verCard) {
+                                                                        verCard._verification = { complete: parsed.complete, reason: parsed.reason, at: parsed.at };
+                                                                        if (vm.saveCards) vm.saveCards();
+                                                                    }
+                                                                }
+                                                                break;
+                                                            case 'steerDelivered':
+                                                                // A live steer was injected into the planner — persisted as a card transcript
+                                                                // (_steers) so it survives a reload and shows what was injected at which turn.
+                                                                if (parsed && Array.isArray(parsed.items)) {
+                                                                    var steerCard = vm.findCardById ? vm.findCardById(parsed.cardId || vm.activeCardId) : null;
+                                                                    if (steerCard) {
+                                                                        steerCard._steers = parsed.items;
+                                                                        if (vm.saveCards) vm.saveCards();
+                                                                    }
+                                                                }
+                                                                break;
                                                             case 'status':
                                                                 if (parsed && parsed.message) vm.streamingPhase = parsed.message;
                                                                 break;
@@ -668,7 +760,7 @@ angular.module('kanbanApp')
                                                                         var change = item.Change || item.change || '';
                                                                         var key = file + '|' + change;
                                                                         var prev = existingState[key] || {};
-                                                                        return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '' };
+                                                                        return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '', groundTruth: item.GroundTruth || item.groundTruth || [] };
                                                                     });
                                                                     preservedRejected.forEach(function (ri) { ri.index = vm.planItems.length; vm.planItems.push(ri); });
                                                                     vm.verifyDiffs(vm.planItems);
@@ -703,14 +795,16 @@ angular.module('kanbanApp')
                                                                          var pi = vm.planItems.find(function (x) { return x.index === parsed.planItemIndex; });
                                                                          if (pi && (!pi.diffs || pi.diffs.length !== parsed.diffs.length)) { pi.diffs = parsed.diffs; pi._diffStepStatus = parsed.status; }
                                                                      }
-                                                                     // When the agent finishes a step that produced diffs, those diffs
-                                                                     // are applied by the agent during the run — record them so the
-                                                                     // Apply button stays hidden across reloads (and other tabs).
+                                                                     // When the agent finishes a step that produced diffs, only the
+                                                                     // NEWEST diff (diffs[0], newest-first from the server) is the live
+                                                                     // applied edit — record just it so the Apply button stays hidden
+                                                                     // across reloads (and other tabs), while older diffs for the same
+                                                                     // file remain swappable alternatives.
                                                                      if (parsed.status === 'done' && parsed.diffs && parsed.diffs.length) {
                                                                          var appliedCard = vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
                                                                          if (appliedCard) {
                                                                              if (!appliedCard._appliedDiffs) appliedCard._appliedDiffs = {};
-                                                                             parsed.diffs.forEach(function (d) { appliedCard._appliedDiffs[d] = true; });
+                                                                             appliedCard._appliedDiffs[parsed.diffs[0]] = true;
                                                                              if (vm.saveCards) vm.saveCards();
                                                                          }
                                                                      }
@@ -1594,15 +1688,26 @@ angular.module('kanbanApp')
                 };
                 vm.diffIsApplied = function (holder, diffPath, card) {
                     if (!holder) return false;
-                    if (holder._diffApplied) return true;
-                    var status = holder.status || holder._diffStepStatus || '';
-                    if (status === 'done') return true;
-                    if (holder.done === true && status === '') return true;
+                    var c = vm._diffResolveCard(card);
+                    var tracked = !!(c && c._appliedDiffs && Object.keys(c._appliedDiffs).length);
+                    // Legacy cards without the per-diff map: the whole step counts as
+                    // applied once the user applied anything.
+                    if (!tracked && holder._diffApplied) return true;
                     // Real per-diff applied flag persisted in board data — survives
                     // reload and is consistent across tabs (source of truth is the
                     // backend git apply response, recorded in card._appliedDiffs).
-                    var c = vm._diffResolveCard(card);
                     if (c && c._appliedDiffs && diffPath && c._appliedDiffs[diffPath]) return true;
+                    // Legacy fallback: for cards completed BEFORE per-diff tracking
+                    // existed (no _appliedDiffs at all), only the NEWEST diff of a
+                    // done step is the live applied one — older diffs are alternatives
+                    // that can still be swapped in. Newer cards rely solely on the
+                    // per-diff flag so a swap updates exactly which diff is live.
+                    if (!tracked) {
+                        var status = holder.status || holder._diffStepStatus || '';
+                        if ((status === 'done' || (holder.done === true && status === '')) && holder.diffs && holder.diffs.length) {
+                            return holder.diffs[0] === diffPath;
+                        }
+                    }
                     return false;
                 };
                 // True when the diff is applied but NOT via an explicit user Apply
@@ -1610,12 +1715,18 @@ angular.module('kanbanApp')
                 // Drives the "already applied" tooltip on the ✓ marker.
                 vm.diffAppliedByAgent = function (holder, diffPath, card) {
                     if (!holder || !diffPath) return false;
-                    if (holder._diffApplied) return false;
-                    var status = holder.status || holder._diffStepStatus || '';
-                    var looksApplied = (status === 'done') || (holder.done === true && status === '');
-                    if (looksApplied) return true;
+                    // A diff the USER applied via the Apply button is not agent-applied.
+                    if (holder._diffApplied && holder._diffPath === diffPath) return false;
                     var c = vm._diffResolveCard(card);
+                    var tracked = !!(c && c._appliedDiffs && Object.keys(c._appliedDiffs).length);
                     if (c && c._appliedDiffs && c._appliedDiffs[diffPath]) return true;
+                    // Legacy: only the newest diff of a done step was agent-applied
+                    // (cards predating per-diff tracking).
+                    if (!tracked) {
+                        var status = holder.status || holder._diffStepStatus || '';
+                        var looksApplied = (status === 'done') || (holder.done === true && status === '');
+                        if (looksApplied && holder.diffs && holder.diffs.length) return holder.diffs[0] === diffPath;
+                    }
                     return false;
                 };
                 vm.applyDiff = function (diffPath, step, card) {
@@ -1627,6 +1738,14 @@ angular.module('kanbanApp')
                     var proj = (card && card.filePath) || vm.selectedProject;
                     if (!proj) return;
                     if (vm.diffIsApplied(step, diffPath, card)) return;
+                    // Swap mode: when the step already has a live applied diff (the
+                    // newest, diffs[0]) and the user applies a DIFFERENT (older) diff,
+                    // tell the backend to reverse the current one first so the edit is
+                    // swapped in place rather than stacked on top.
+                    var swapFrom = null;
+                    if (step && step.diffs && step.diffs.length && step.diffs[0] && step.diffs[0] !== diffPath && vm.diffIsApplied(step, step.diffs[0], card)) {
+                        swapFrom = step.diffs[0];
+                    }
                     var wasRunning = vm.streamingActive;
                     var savedCardId = vm.activeCardId;
                     var savedPrompt = vm.activeCardText;
@@ -1634,22 +1753,24 @@ angular.module('kanbanApp')
                         vm.stopAgent();
                     }
                     step._applyingDiff = true;
-                    $http.post('/api/agent/apply-diff', { project: proj, diffPath: diffPath }).then(function (resp) {
+                    $http.post('/api/agent/apply-diff', { project: proj, diffPath: diffPath, swapFrom: swapFrom }).then(function (resp) {
                         step._applyingDiff = false;
                         if (resp.data && resp.data.success) {
                             step._diffApplied = true;
                             step.status = 'done';
                             step._diffPath = diffPath;
                             // Persist the applied diff path in board data so Apply stays
-                            // correct across reloads and consistent across tabs.
+                            // correct across reloads and consistent across tabs. On a
+                            // swap, the previous live diff is no longer applied.
                             var appliedPath = (resp.data && resp.data.diffPath) || diffPath;
                             var c = vm._diffResolveCard(card);
                             if (c && appliedPath) {
                                 if (!c._appliedDiffs) c._appliedDiffs = {};
+                                if (swapFrom && c._appliedDiffs[swapFrom]) delete c._appliedDiffs[swapFrom];
                                 c._appliedDiffs[appliedPath] = true;
                                 if (vm.saveCards) vm.saveCards();
                             }
-                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '✓ Diff applied: ' + appliedPath + ' — halting agent' });
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: (swapFrom ? '⇄ Diff swapped: ' : '✓ Diff applied: ') + appliedPath + (swapFrom ? ' (replaced ' + swapFrom.split('/').pop() + ')' : '') + ' — halting agent' });
                             if (wasRunning && savedCardId && savedPrompt) {
                                 vm.activeCardId = savedCardId;
                                 if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '↻ Restarting agent to continue plan…' });
@@ -1717,6 +1838,171 @@ angular.module('kanbanApp')
                         p.deleteError = 'HTTP error';
                     });
                 };
+                // Collect every diff file referenced by a card (plan items + applied-diff
+                // records), deduplicated. Used by the "delete all diffs" cleanup for done
+                // cards so the card leaves no stray data/undo snapshots behind.
+                vm.cardDiffPaths = function (card) {
+                    if (!card) return [];
+                    var seen = {};
+                    var out = [];
+                    function add(p) {
+                        if (!p || seen[p]) return;
+                        seen[p] = true;
+                        out.push(p);
+                    }
+                    if (card._plan && card._plan.items) {
+                        card._plan.items.forEach(function (item) {
+                            if (item && item.diffs && item.diffs.length) item.diffs.forEach(add);
+                        });
+                    }
+                    if (card._appliedDiffs) Object.keys(card._appliedDiffs).forEach(add);
+                    return out;
+                };
+                vm.deleteAllCardDiffs = function (card, $event) {
+                    if ($event) $event.stopPropagation();
+                    if (!card) return;
+                    var paths = vm.cardDiffPaths(card);
+                    if (!paths.length) return;
+                    var proj = (card && card.filePath) || vm.selectedProject;
+                    if (!proj) return;
+                    if (!window.confirm('Delete ' + paths.length + ' diff file(s) for this card? This cannot be undone.')) return;
+                    card._deletingAllDiffs = true;
+                    $http.post('/api/agent/delete-diffs', { project: proj, diffPaths: paths }).then(function (resp) {
+                        card._deletingAllDiffs = false;
+                        var deleted = (resp.data && resp.data.deleted) || [];
+                        if (deleted.length) {
+                            var gone = {};
+                            deleted.forEach(function (d) { gone[d] = true; });
+                            if (card._plan && card._plan.items) {
+                                card._plan.items.forEach(function (item) {
+                                    if (item && item.diffs && item.diffs.length) {
+                                        item.diffs = item.diffs.filter(function (d) { return !gone[d]; });
+                                    }
+                                });
+                            }
+                            if (card._appliedDiffs) {
+                                Object.keys(card._appliedDiffs).forEach(function (d) { if (gone[d]) delete card._appliedDiffs[d]; });
+                            }
+                            if (vm.saveCards) vm.saveCards();
+                            if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '🗑 Deleted ' + deleted.length + ' diff file(s) for card' });
+                        } else if (vm.addLogEntry) {
+                            vm.addLogEntry({ type: 'warn', message: '⚠ No diff files deleted for card' });
+                        }
+                    }, function () {
+                        card._deletingAllDiffs = false;
+                        if (vm.addLogEntry) vm.addLogEntry({ type: 'error', message: '✕ Failed to delete diffs — HTTP error' });
+                    });
+                };
+                // ── Card feedback → bughosted (weaver admins review these) ──────────
+                vm.feedbackCard = null;
+                vm.feedbackText = '';
+                vm.feedbackError = '';
+                vm.feedbackSending = false;
+                vm.openFeedback = function (card) {
+                    if (!card) return;
+                    vm.feedbackCard = card;
+                    vm.feedbackText = '';
+                    vm.feedbackError = '';
+                    // Preview of previously submitted feedback for this card, so the user
+                    // knows what was already reported before writing a new message.
+                    // _feedbackSent is an array of {at, message} entries; legacy cards
+                    // carry a single object, normalized to an array here.
+                    var prev = card._feedbackSent;
+                    vm.feedbackPrevious = Array.isArray(prev) ? prev.slice() : (prev ? [prev] : []);
+                };
+                vm.closeFeedback = function () {
+                    if (vm.feedbackSending) return;
+                    vm.feedbackCard = null;
+                    vm.feedbackText = '';
+                    vm.feedbackError = '';
+                    vm.feedbackPrevious = [];
+                };
+                vm.sendFeedback = function () {
+                    if (!vm.feedbackCard || vm.feedbackSending) return;
+                    var text = (vm.feedbackText || '').trim();
+                    if (!text) return;
+                    if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') {
+                        vm.feedbackError = 'Not connected to bughosted — connect under Settings → Bughosted to send feedback.';
+                        return;
+                    }
+                    var cardId = vm.feedbackCard.id;
+                    var cardText = vm.feedbackCard.text;
+                    // The card's run outcome, so weaver admins see what the run actually did:
+                    // the plan summary and the list of files the run edited.
+                    var feedbackAnalysis = vm.feedbackCard.agentAnalysis || {};
+                    var feedbackFilesEdited = [];
+                    if (Array.isArray(feedbackAnalysis.filesEdited)) {
+                        feedbackFilesEdited = feedbackAnalysis.filesEdited.map(function (f) {
+                            return typeof f === 'string' ? f : (f && f.path) || '';
+                        }).filter(function (p) { return !!p; });
+                    }
+                    // Per-step outcomes (what each planned step was and how it landed) so
+                    // weaver admins see the run at step granularity, not just the summary.
+                    var feedbackSteps = [];
+                    if (Array.isArray(feedbackAnalysis.steps)) {
+                        feedbackSteps = feedbackAnalysis.steps.map(function (s) {
+                            return {
+                                type: (s && s.type) || '',
+                                change: (s && (s.description || s.path || s.command || s.url)) || '',
+                                status: (s && s.status) || ''
+                            };
+                        }).filter(function (s) { return s.type || s.change; });
+                    }
+                    vm.feedbackSending = true;
+                    vm.feedbackError = '';
+                    $http.post('/api/bughosted/feedback', {
+                        clientId: vm.bughostedClientId,
+                        cardId: cardId,
+                        cardText: cardText,
+                        message: text,
+                        planSummary: feedbackAnalysis.summary || '',
+                        filesEdited: feedbackFilesEdited,
+                        steps: feedbackSteps
+                    }).then(function (resp) {
+                        vm.feedbackSending = false;
+                        // Record the successful submission on the card so done/archived cards
+                        // show a small ✓ indicator (survives reloads — same _field + saveCards
+                        // pattern as _context/_verification/_steers).
+                        var sentCard = vm.findCardById ? vm.findCardById(cardId) : null;
+                        if (sentCard) {
+                            // Append to the _feedbackSent array (one entry per successful
+                            // submission); legacy cards carry a single object, normalized
+                            // to an array here so the count chip works for both shapes.
+                            var sentEntries = Array.isArray(sentCard._feedbackSent)
+                                ? sentCard._feedbackSent
+                                : (sentCard._feedbackSent ? [sentCard._feedbackSent] : []);
+                            sentEntries.push({ at: new Date().toISOString(), message: text.slice(0, 120) });
+                            sentCard._feedbackSent = sentEntries;
+                            if (vm.saveCards) vm.saveCards();
+                        }
+                        vm.feedbackCard = null;
+                        vm.feedbackText = '';
+                        if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '💬 Feedback sent for card #' + cardId });
+                    }, function (resp) {
+                        vm.feedbackSending = false;
+                        vm.feedbackError = (resp && resp.data && resp.data.error) ? resp.data.error : 'Failed to send feedback — HTTP ' + (resp && resp.status);
+                    });
+                };
+
+                // ✓ Sent chip helpers — count/label for the feedback indicator on done/archived
+                // cards. _feedbackSent is an array of {at, message} entries (one per successful
+                // submission); legacy cards carry a single object, normalized here.
+                vm.feedbackSentEntries = function (card) {
+                    if (!card || !card._feedbackSent) return [];
+                    return Array.isArray(card._feedbackSent) ? card._feedbackSent : [card._feedbackSent];
+                };
+                vm.feedbackSentCount = function (card) {
+                    return vm.feedbackSentEntries(card).length;
+                };
+                vm.feedbackSentLast = function (card) {
+                    var entries = vm.feedbackSentEntries(card);
+                    return entries.length ? entries[entries.length - 1] : null;
+                };
+                vm.feedbackSentLabel = function (card) {
+                    var n = vm.feedbackSentCount(card);
+                    return n > 1 ? '✓ ' + n + ' sent' : '✓ Sent';
+                };
+
                 // Open an undo diff in the IDE. The diff path is relative to the CARD's
                 // project (which for a benchmark is the sandbox folder — an absolute path
                 // that may live OUTSIDE the workspace root), so the card's filePath is

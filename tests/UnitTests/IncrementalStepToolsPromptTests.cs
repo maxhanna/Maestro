@@ -82,6 +82,25 @@ public class IncrementalStepToolsPromptTests
     }
 
     [Fact]
+    public void SystemPrompt_WebChainExample_NeverTeachesUrlInvention()
+    {
+        // Regression: the tool-use example previously showed a concrete fake URL
+        // (https://example.com/ai-article) as the step-2 _web_fetch target — and the model
+        // copied the pattern, inventing "www.example.com/latest-ai-breakthrough" in the field
+        // (the exact failure in the web-task run). The example must demand a REAL URL copied
+        // verbatim from the search results and never present a fetchable invented URL.
+        var prompt = Build("all", new List<string> { "_command", "_web_search", "_web_fetch" });
+        Assert.Contains("### TOOL USE EXAMPLE", prompt);
+        Assert.Contains("copy it verbatim, NEVER invent one", prompt);
+        Assert.Contains("Inventing a URL (e.g. www.example.com/...)", prompt);
+        // The example must not contain a fetchable invented URL pattern that a model could
+        // lift into its own step (the exact trap the field failure exposed).
+        Assert.DoesNotContain("example.com/ai-article", prompt);
+        Assert.DoesNotContain("example.com/api", prompt);
+        Assert.DoesNotContain("\"_web_fetch\",\"change\":\"https://example.com", prompt);
+    }
+
+    [Fact]
     public void SystemPrompt_EditMode_HasNoWebChainExample()
     {
         Assert.DoesNotContain("### TOOL USE EXAMPLE", Build("edit"));

@@ -146,7 +146,7 @@ partial class AgentController
     }
     private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRaw(
         string systemPrompt, string userMessage, CancellationToken ct = default,
-        TimeSpan? requestTimeout = null, int? maxTokens = null)
+        TimeSpan? requestTimeout = null, int? maxTokens = null, string? llmRoundLabel = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
         var model = await GetLlamaModel();
@@ -176,11 +176,13 @@ partial class AgentController
             EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
             await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), "non-streaming retry", ct: ct);
         }
+        try { await RecordLlmRoundMetricsAsync(llmRoundLabel, systemPrompt, userMessage, first.raw, false, ct); }
+        catch { /* metrics must never break the pipeline */ }
         return first;
     }
     private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRawStreaming(
         string systemPrompt, string userMessage, bool emitSse, CancellationToken ct = default,
-        TimeSpan? requestTimeout = null, int? maxTokens = null)
+        TimeSpan? requestTimeout = null, int? maxTokens = null, string? llmRoundLabel = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
         var model = await GetLlamaModel();
@@ -239,6 +241,8 @@ partial class AgentController
             EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
             await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), retryKind, emitSse, ct);
         }
+        try { await RecordLlmRoundMetricsAsync(llmRoundLabel, systemPrompt, userMessage, first.raw, emitSse, ct); }
+        catch { /* metrics must never break the pipeline */ }
         return first;
     }
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
@@ -605,13 +609,14 @@ partial class AgentController
     }
     private async Task<(string raw, string? error)> CallLlmRawText(
         string systemPrompt, string userMessage, bool emitSse, CancellationToken ct = default,
-        TimeSpan? requestTimeout = null, int? maxTokens = null)
+        TimeSpan? requestTimeout = null, int? maxTokens = null, bool appendTruncationMarker = false,
+        string? llmRoundLabel = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
         var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-        var first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, linkedCts.Token, maxTokens);
+        var first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, linkedCts.Token, maxTokens, appendTruncationMarker);
         EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
         // Same recovery as CallLlmRawStreaming: a dropped connection or max-token cut must
         // not discard a good partial response — retry once with the partial as a hint.
@@ -629,14 +634,17 @@ partial class AgentController
                 detail: RecoveryDetail(first.raw), ct: ct);
             using var retryTimeoutCts = new CancellationTokenSource(timeout);
             using var retryLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, retryTimeoutCts.Token);
-            first = await CallLlmRawTextOnce(systemPrompt, AppendPartialContinuationHint(userMessage, first.raw), emitSse: false, retryLinkedCts.Token, maxTokens);
+            first = await CallLlmRawTextOnce(systemPrompt, AppendPartialContinuationHint(userMessage, first.raw), emitSse: false, retryLinkedCts.Token, maxTokens, appendTruncationMarker);
             EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
             await RecordRecoveryOutcomeAsync(baseUrl, string.IsNullOrWhiteSpace(first.error), "prose retry", emitSse, ct);
         }
+        try { await RecordLlmRoundMetricsAsync(llmRoundLabel, systemPrompt, userMessage, first.raw, emitSse, ct); }
+        catch { /* metrics must never break the pipeline */ }
         return first;
     }
     private async Task<(string raw, string? error)> CallLlmRawTextOnce(
-        string systemPrompt, string userMessage, bool emitSse, CancellationToken ct, int? maxTokens = null)
+        string systemPrompt, string userMessage, bool emitSse, CancellationToken ct, int? maxTokens = null,
+        bool appendTruncationMarker = false)
     {
         var baseUrl = await GetLlamaBaseUrl();
         var model = await GetLlamaModel();
@@ -663,6 +671,7 @@ partial class AgentController
         using var progressCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         if (emitSse) _ = PollLlamaProgressAsync(baseUrl, progressCts.Token);
         var sb = new StringBuilder();
+        var truncatedByTokenLimit = false;
         try
         {
             var request = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/chat/completions") { Content = httpContent };
@@ -687,6 +696,12 @@ partial class AgentController
                     if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
                     {
                         var choice = choices[0];
+                        // Mirror CallLlmStreaming: a finish_reason of "length" means max_tokens
+                        // cut the response — without this, a budget-capped cut is silent.
+                        if (choice.TryGetProperty("finish_reason", out var finishReason) &&
+                            finishReason.ValueKind == JsonValueKind.String &&
+                            string.Equals(finishReason.GetString(), "length", StringComparison.OrdinalIgnoreCase))
+                            truncatedByTokenLimit = true;
                         if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var content))
                         {
                             var token = content.GetString();
@@ -723,8 +738,13 @@ partial class AgentController
             if (hallError != null) return (raw, hallError);
             // NOTE: max_tokens truncation on the PROSE path is intentionally NOT an error —
             // pre-plan thinking and compaction are budget-capped and their partial output is
-            // still usable reasoning. Only the JSON path (CallLlmStreaming) treats a truncated
-            // response as an error, because an unparseable step/edit is genuinely unrecoverable.
+            // still usable reasoning (the partial is returned as-is, no retry). Only the JSON
+            // path treats a truncated response as an error, because an unparseable step/edit
+            // is genuinely unrecoverable. Callers that WANT the cut visible (pre-plan reasoning
+            // streamed to the panel) opt in and get an explicit marker instead of a silent
+            // mid-sentence stop that looks like a transport bug.
+            if (truncatedByTokenLimit && appendTruncationMarker)
+                return (raw + "\n\n…[reasoning truncated — hit the per-response token budget]…", null);
             return (raw, null);
         }
         catch (TaskCanceledException) { return (sb.ToString(), "LLM request timed out"); }

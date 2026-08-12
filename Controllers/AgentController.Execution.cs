@@ -105,6 +105,50 @@ partial class AgentController
         replanBudget ??= new[] { 1 };
         var alreadyDecoupled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var completedStepSignatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // CLASSIC-ROUTE INVENTED-DIRECTORY GATE: the classic full-plan route has no per-step
+        // validation (ValidateIncrementalStepAsync only runs in the interleaved route), so a
+        // _create_file whose directory prefix is nonsense would silently materialize the whole
+        // invented path at execution time. Reject the plan BEFORE executing ANY step, mirroring
+        // the incremental guard's closest-real-directory steer; each rejection is recorded as a
+        // failed step so post-execution verification and the repair replanner see the reason
+        // (and steer the correction at the real directory). A plan that legitimately creates
+        // the directory via an earlier _create_directory step, or a path the task names, or an
+        // OS path, all pass — the exemptions are identical to the incremental guard.
+        var inventedCreates = FindInventedCreateDirectories(plan, prompt, projectRoot);
+        if (inventedCreates.Count > 0)
+        {
+            foreach (var (badStep, badReason) in inventedCreates)
+            {
+                await EmitLog(emitSse, "error", badReason, ct: ct);
+                if (!string.IsNullOrWhiteSpace(cardId))
+                    await PersistRejectedPlanStepAsync(cardId, badStep, badReason, emitSse, ct);
+                // path = the invented candidate path (not the "_create_file" marker), so the
+                // failure context and repair steering name the actual file the planner invented.
+                var badPath = CreateCandidatePath(badStep) ?? badStep.File;
+                allResults.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "rejected_step",
+                    ["status"] = "error",
+                    ["path"] = badPath,
+                    ["change"] = badStep.Change,
+                    ["error"] = badReason
+                });
+                if (emitSse)
+                {
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex++,
+                        type = "plan",
+                        description = badStep.Change,
+                        path = badStep.File,
+                        status = "rejected",
+                        planItemIndex = planItems.IndexOf(badStep),
+                        message = badReason
+                    }, ct);
+                }
+            }
+            return;
+        }
         for (var itemIdx = 0; itemIdx < planItems.Count; itemIdx++)
         {
             ct.ThrowIfCancellationRequested();
@@ -216,7 +260,7 @@ partial class AgentController
                     System.IO.File.Delete(fullPath);
                     await EmitLog(emitSse, "success", $"Deleted {target}", ct: ct);
                     allResults.Add(new Dictionary<string, object?> { ["type"] = "rename", ["status"] = "done", ["path"] = target, ["editAction"] = "deleted" });
-                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 }
                 else await EmitLog(emitSse, "warn", $"Delete target not found: {target}", ct: ct);
                 continue;
@@ -224,7 +268,7 @@ partial class AgentController
             if (planFile.Equals("_git", StringComparison.OrdinalIgnoreCase))
             {
                 stepIndex = await ExecuteGitStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
             if (planFile.Equals("_show", StringComparison.OrdinalIgnoreCase) ||
@@ -266,7 +310,7 @@ partial class AgentController
                     };
                     if (emitSse) await SendSse(Response, "step", createResult, ct);
                     allResults.Add(createResult);
-                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 }
                 catch (Exception ex)
                 {
@@ -282,7 +326,7 @@ partial class AgentController
                     };
                     if (emitSse) await SendSse(Response, "step", errResult, ct);
                     allResults.Add(errResult);
-                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 }
                 stepIndex++;
                 continue;
@@ -339,7 +383,7 @@ partial class AgentController
                 };
                 if (emitSse) await SendSse(Response, "step", migResult, ct);
                 allResults.Add(migResult);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 stepIndex++;
                 continue;
             }
@@ -380,7 +424,7 @@ partial class AgentController
                         };
                         if (emitSse) await SendSse(Response, "step", errResult, ct);
                         allResults.Add(errResult);
-                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                         stepIndex++;
                         continue;
                     }
@@ -426,7 +470,7 @@ partial class AgentController
                         };
                         if (emitSse) await SendSse(Response, "step", dirSkip, ct);
                         allResults.Add(dirSkip);
-                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                         stepIndex++;
                         continue;
                     }
@@ -444,7 +488,7 @@ partial class AgentController
                         };
                         if (emitSse) await SendSse(Response, "step", existResult, ct);
                         allResults.Add(existResult);
-                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                         stepIndex++;
                         continue;
                     }
@@ -466,7 +510,7 @@ partial class AgentController
                         };
                         if (emitSse) await SendSse(Response, "step", dupResult, ct);
                         allResults.Add(dupResult);
-                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                         stepIndex++;
                         continue;
                     }
@@ -484,7 +528,7 @@ partial class AgentController
                     };
                     if (emitSse) await SendSse(Response, "step", createResult, ct);
                     allResults.Add(createResult);
-                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 }
                 catch (Exception ex)
                 {
@@ -500,7 +544,7 @@ partial class AgentController
                     };
                     if (emitSse) await SendSse(Response, "step", errResult, ct);
                     allResults.Add(errResult);
-                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 }
                 stepIndex++;
                 continue;
@@ -523,7 +567,7 @@ partial class AgentController
                         planItemIndex = itemIdx,
                         message = $"Discovery added {addedChars} chars to context"
                     }, ct);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 var remainingAfterDiscover = planItems.Skip(itemIdx + 1).ToList();
                 if (remainingAfterDiscover.Count > 0)
                 {
@@ -541,13 +585,13 @@ partial class AgentController
             if (planFile.Equals("_ping", StringComparison.OrdinalIgnoreCase))
             {
                 stepIndex = await ExecutePingStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
             if (planFile.Equals("_package_install", StringComparison.OrdinalIgnoreCase))
             {
                 stepIndex = await ExecutePackageInstallStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
             if (planFile.Equals("_command", StringComparison.OrdinalIgnoreCase))
@@ -562,7 +606,7 @@ partial class AgentController
                     var prevCount = allResults.Count;
                     var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += cr.Count; allResults.AddRange(cr);
-                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                     planItems = await TryReplanAfterStep(prompt, allResults, plan,
                         steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                         stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
@@ -574,7 +618,7 @@ partial class AgentController
             {
                 (stepIndex, discoveryContext) = await ExecuteWebPlanStep(planFile, changeDesc, prompt, projectRoot, emitSse, ct,
                     allResults, planItems, itemIdx, stepIndex, discoveryContext, webCtx);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
             if (planFile.Equals("_move_file", StringComparison.OrdinalIgnoreCase))
@@ -586,7 +630,7 @@ partial class AgentController
                     var rr = await ExecuteSteps(new List<AgentStep> { rs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += rr.Count; allResults.AddRange(rr);
                 }
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
             if (AgentProjectUtilities.IsRelativePath(planFile))
@@ -1082,6 +1126,10 @@ partial class AgentController
             ["status"] = err == null ? "done" : "error",
             ["output"] = outp // FULL output — allResults feeds the agent's context
         };
+        // Carry the failure reason on the result so the interleaved loop's web-failure
+        // feedback can quote it (e.g. "the fetch to <url> failed: <DNS/timeout/HTTP error>"),
+        // steering the planner to retry with a real URL instead of halting blind.
+        if (err != null) wr["error"] = err;
         allResults.Add(wr);
         if (emitSse)
         {

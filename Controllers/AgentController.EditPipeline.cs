@@ -234,7 +234,8 @@ partial class AgentController
         var deterministicPlaceholderReject = false;
         for (int r = 0; r < VerificationRounds; r++)
         {
-                    if (r == 0 && !string.IsNullOrWhiteSpace(newStr) && AgentEditHeuristics.LooksLikePlaceholderStub(newStr))
+                    if (r == 0 && !string.IsNullOrWhiteSpace(newStr) &&
+                        AgentEditHeuristics.LooksLikePlaceholderStub(newStr, preExisting: oldStr))
                     {
                         deterministicPlaceholderReject = true;
                         await EmitLog(emitSse, "warn",
@@ -267,6 +268,8 @@ partial class AgentController
                     //         break;
                     //     }
                     // }
+                    // Labeled per round so the panel shows each verification round's prompt +
+                    // response token spend, and the step result aggregates it as llmTokens.
                     var (d, reason, score, needsEs) = await LlmVerifyEditStepAsync(
                         relPath, prompt ?? stepChange ?? "", stepChange ?? "",
                         oldStr!, newStr!, preEditContent ?? "", newContent, emitSse, ct,
@@ -278,7 +281,8 @@ partial class AgentController
                         currentStepIndex: planItemIndex,
                         causalContext: sqlMigrationNote == null
                             ? causalContext
-                            : (causalContext ?? "") + "\n\n" + sqlMigrationNote);
+                            : (causalContext ?? "") + "\n\n" + sqlMigrationNote,
+                        llmRoundLabel: $"verify step {planItemIndex + 1} round {r + 1}/{VerificationRounds}");
                     decisions.Add(d);
                     reasons.Add(reason);
                     scores.Add(score);
@@ -405,7 +409,7 @@ partial class AgentController
             result["diffs"] = stepDiffs;
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
-            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, stepDiffs);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, stepDiffs, projectRoot: projectRoot);
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
             {
                 stepIndex = await HandleMethodSignatureChange(
@@ -481,7 +485,7 @@ partial class AgentController
             };
             if (emitSse) await SendSse(Response, "step", failDepth, ct);
             allResults.Add(failDepth);
-            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
             throw new StepFatalException(
                 $"Replan step failed after {history.Count} attempts: {relPath} — {lastErr}",
                 relPath,
@@ -569,7 +573,7 @@ partial class AgentController
                 await EmitLog(emitSse, "success",
                     $"✓ Replan cycle {replanAttempts} succeeded for {relPath}", ct: ct);
                 allResults.AddRange(replanResults.Skip(seededWebCount));
-                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
                 return stepIndex + replanResults.Count - seededWebCount;
             }
             failureContext = $"Replan attempt {replanAttempts} also failed.\n" + failureContext;
@@ -595,7 +599,7 @@ partial class AgentController
         };
         if (emitSse) await SendSse(Response, "step", fail, ct);
         allResults.Add(fail);
-        await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+        await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
         throw new StepFatalException(
             $"Step failed after {history.Count} attempts and {MaxReplanAttempts} replan cycles: {relPath} — {lastErr}",
             relPath,

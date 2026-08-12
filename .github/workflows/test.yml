@@ -1,0 +1,31 @@
+# Runs the full test suite on push/PR — the audit's §4.2 gap (no CI, so the JS
+# suites only ran when someone remembered the manual loop). The JS aggregator
+# (tests/js/run-all.js) exits non-zero on any failing file, and dotnet test fails
+# on any failing xUnit test, so a red commit fails the job.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: C# suite
+        run: dotnet test --nologo
+
+      - name: JS client-logic suite
+        run: node tests/js/run-all.js

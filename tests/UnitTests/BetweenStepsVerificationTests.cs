@@ -47,15 +47,27 @@ public class BetweenStepsVerificationTests
     }
 
     private static (bool declare, string reason, bool failed) InvokeShouldDeclare(
-        bool isComplete, string? assessReason)
+        bool isComplete, string? assessReason, bool requireAssessment = false)
     {
         var method = typeof(AgentController).GetMethod(
             "ShouldDeclarePlanCompleteAfterAssessment", BindingFlags.NonPublic | BindingFlags.Static)
             ?? throw new InvalidOperationException("ShouldDeclarePlanCompleteAfterAssessment not found");
-        var args = new object?[] { isComplete, assessReason, null, null };
+        var args = new object?[] { isComplete, assessReason, requireAssessment, null, null };
         var result = (bool)method.Invoke(null, args)!;
-        return (result, (string)args[2]!, (bool)args[3]!);
+        return (result, (string)args[3]!, (bool)args[4]!);
     }
+
+    private static bool InvokeIsLastWebStepComplete(List<object> results)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "IsLastWebStepComplete", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("IsLastWebStepComplete not found");
+        var typed = results.OfType<Dictionary<string, object?>>().ToList();
+        return (bool)(method.Invoke(null, new object?[] { typed }) ?? false);
+    }
+
+    private static Dictionary<string, object?> WebResult(string status, string type = "_web_search")
+        => new() { ["type"] = type, ["status"] = status, ["query"] = "AI research breakthroughs latest", ["output"] = "results" };
 
     /// <summary>
     /// The gate: a needsExtraStep=false edit/create result must trigger
@@ -91,6 +103,65 @@ public class BetweenStepsVerificationTests
             new Dictionary<string, object?> { ["type"] = "edit", ["status"] = "done", ["path"] = "a.ts" }
         };
         Assert.False(InvokeIsLastEditVerifiedComplete(results));
+    }
+
+    /// <summary>
+    /// The web-only gate: a successful _web_search/_web_fetch result must trigger
+    /// between-steps whole-task verification even though it is NOT an edit — the
+    /// exact gap this feature closes (IsLastEditVerifiedComplete requires an edit).
+    /// </summary>
+    [Fact]
+    public void IsLastWebStepComplete_SuccessfulWebStep_ReturnsTrue()
+    {
+        Assert.True(InvokeIsLastWebStepComplete(new List<object> { WebResult("done") }));
+        Assert.True(InvokeIsLastWebStepComplete(new List<object> { WebResult("done", "_web_fetch") }));
+        Assert.True(InvokeIsLastWebStepComplete(new List<object> { WebResult("done", "web_search") }));
+    }
+
+    /// <summary>
+    /// The web-only gate must NOT fire when the web step failed, or when the last
+    /// result is not a web step at all (a plain command, a list step).
+    /// </summary>
+    [Theory]
+    [InlineData("error")]
+    [InlineData("skipped")]
+    public void IsLastWebStepComplete_FailedOrNonWeb_ReturnsFalse(string status)
+    {
+        Assert.False(InvokeIsLastWebStepComplete(new List<object> { WebResult(status) }));
+        Assert.False(InvokeIsLastWebStepComplete(new List<object>
+        {
+            new Dictionary<string, object?> { ["type"] = "command", ["status"] = "done", ["command"] = "dir" }
+        }));
+    }
+
+    /// <summary>
+    /// The web-only mirror of the core regression: assessment LLM unavailable after a
+    /// SUCCESSFUL WEB STEP must NOT declare the plan complete. A web step has no
+    /// per-step verifier confirmation (unlike a needsExtraStep=false edit), so
+    /// "assessment unavailable" must keep planning — otherwise a multi-step web
+    /// chain (search → fetch → write) would prematurely end after step 1.
+    /// </summary>
+    [Fact]
+    public void AssessmentTimedOut_AfterWebStep_KeepsPlanning()
+    {
+        var gate = InvokeIsLastWebStepComplete(new List<object> { WebResult("done") });
+        Assert.True(gate);
+
+        var (declare, reason, failed) = InvokeShouldDeclare(
+            isComplete: true, assessReason: "Assessment timed out", requireAssessment: true);
+        Assert.False(declare);
+        Assert.True(failed);
+        Assert.Contains("continuing instead of declaring complete", reason);
+    }
+
+    [Fact]
+    public void AssessmentComplete_AfterWebStep_DeclaresComplete()
+    {
+        var (declare, reason, failed) = InvokeShouldDeclare(
+            isComplete: true, assessReason: "task satisfied by the gathered results", requireAssessment: true);
+        Assert.True(declare);
+        Assert.False(failed);
+        Assert.Equal("task satisfied by the gathered results", reason);
     }
 
     /// <summary>
@@ -200,7 +271,8 @@ public class BetweenStepsVerificationTests
             {
                 "Make the button work", executedSteps, projectRoot,
                 CancellationToken.None, new AgentPlan(), new List<string>(),
-                /* atomicStepEstimate */ null
+                /* atomicStepEstimate */ null,
+                /* steeringContext */ null
             })!;
         return await task;
     }

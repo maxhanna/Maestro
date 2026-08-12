@@ -1,0 +1,106 @@
+[
+  {
+    "name": "Edit_AddMethod",
+    "prompt": "In the demo component, add a public getItems() method that returns a copy of the items array.",
+    "file": "maxhanna.client/src/app/demo/demo.component.ts",
+    "change": "Add getItems() to the demo component",
+    "oldString": "  constructor() { }",
+    "newString": "  constructor() { }\n  getItems() { return this.items.slice(); }",
+    "attached": ["maxhanna.client/src/app/demo/demo.component.ts"],
+    "assertToken": "getItems()"
+  },
+  {
+    "name": "Edit_FixTitle",
+    "prompt": "Fix the demo component so the title field reads 'demo-renamed' instead of 'demo'.",
+    "file": "maxhanna.client/src/app/demo/demo.component.ts",
+    "change": "Rename the title to demo-renamed",
+    "oldString": "  title = 'demo';",
+    "newString": "  title = 'demo-renamed';",
+    "attached": ["maxhanna.client/src/app/demo/demo.component.ts"],
+    "assertToken": "title = 'demo-renamed';"
+  },
+  {
+    "name": "Edit_AppendReleaseNote",
+    "prompt": "Append a v2.0 note for the agent version bump to NOTES.md.",
+    "file": "NOTES.md",
+    "change": "Add the version note to the release notes",
+    "oldString": "- v1.0: initial release",
+    "newString": "- v1.0: initial release\n- v2.0: agent version bump",
+    "assertToken": "v2.0: agent version bump"
+  },
+  {
+    "name": "WebSearch_LatestDotNet",
+    "prompt": "Search the web for the latest release notes of .NET 10.",
+    "file": "_web_search",
+    "change": "latest .NET 10 release notes"
+  },
+  {
+    "name": "WebSearch_LondonWeather",
+    "prompt": "Search the web for the current weather in London.",
+    "file": "_web_search",
+    "change": "London weather today"
+  },
+  {
+    "name": "WebFetch_Pricing",
+    "prompt": "Fetch the URL https://example.com/pricing from the internet and summarize the Pro plan price.",
+    "file": "_web_fetch",
+    "change": "https://example.com/pricing"
+  },
+  {
+    "name": "WebFetch_Docs",
+    "prompt": "Fetch the URL https://example.com/api/docs online and note the rate limits.",
+    "file": "_web_fetch",
+    "change": "https://example.com/api/docs"
+  },
+  {
+    "name": "CreateFile_FormatHelper",
+    "prompt": "Create a new file src/utils/format.ts containing an exported formatNumber function.",
+    "file": "_create_file",
+    "change": "src/utils/format.ts",
+    "newString": "export function formatNumber(n: number): string { return n.toLocaleString(); }\n"
+  },
+  {
+    "name": "CreateFile_RootReadme",
+    "prompt": "Write a new file docs/README.md with a short project description.",
+    "file": "_create_file",
+    "change": "docs/README.md",
+    "newString": "# Demo project\n\nA sandbox fixture used by tool-selection tests.\n"
+  },
+  {
+    "name": "CreateDirectory_Assets",
+    "prompt": "Create a folder called sandbox-assets in the project.",
+    "file": "_create_directory",
+    "change": "sandbox-assets"
+  },
+  {
+    "name": "DeleteFile_Obsolete",
+    "prompt": "Delete the file src/obsolete.txt from the project.",
+    "file": "_delete_file",
+    "change": "src/obsolete.txt"
+  },
+  {
+    "name": "RenameFile_OldToNew",
+    "prompt": "Rename src/old.txt to src/new.txt.",
+    "file": "_rename_file",
+    "change": "src/old.txt → src/new.txt"
+  },
+  {
+    "name": "Command_EchoToFile",
+    "prompt": "Run a command that writes 'hello' to a file named hello-from-command.txt in the project.",
+    "file": "_command",
+    "change": "echo hello > hello-from-command.txt"
+  },
+  {
+    "name": "Command_Pwd",
+    "prompt": "Run the pwd command and report the working directory.",
+    "file": "_command",
+    "change": "pwd"
+  },
+  {
+    "name": "SqlMigration_PrefsTable",
+    "prompt": "Create a new database table for storing user preferences.",
+    "file": "_sql_migration",
+    "change": "user_preferences table",
+    "newString": "CREATE TABLE IF NOT EXISTS user_preferences (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  name VARCHAR(64) NOT NULL\n);"
+  }
+]

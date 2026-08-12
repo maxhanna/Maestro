@@ -23,6 +23,16 @@ public class ApplyDiffRequest
 {
     public string Project { get; set; } = "";
     public string DiffPath { get; set; } = "";
+    // When set, the currently-applied diff is reversed FIRST (git apply --reverse)
+    // before the target DiffPath is applied — this "swaps" the live edit on the
+    // file to a different (e.g. earlier proposed or previously rejected) diff.
+    public string SwapFrom { get; set; } = "";
+}
+
+public class DeleteDiffsRequest
+{
+    public string Project { get; set; } = "";
+    public List<string> DiffPaths { get; set; } = new();
 }
 
 public class VerifyDiffsRequest

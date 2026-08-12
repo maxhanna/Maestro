@@ -260,6 +260,162 @@ using static Weaver.Services.AgentJsonUtilities;    /// <summary>Part of the spl
         return null;
     }
 
+    /// <summary>
+    /// Returns the RELATIVE path (normalized to '/') of the closest REAL directory for a
+    /// proposed _create_file path: the proposed directory itself when it already exists
+    /// (the guard must NOT fire), otherwise the deepest existing ancestor, otherwise (when
+    /// the ancestor is just the project root) an existing directory with the same leaf name
+    /// elsewhere in the project — the "invented path" steer. Returns null when only the
+    /// project root itself is real (the file would land at the root).
+    /// </summary>
+    public static string? FindClosestRealDirectory(string targetRelPath, string projectRoot)
+    {
+        var norm = (targetRelPath ?? string.Empty).Replace('\\', '/').TrimStart('/');
+        var dir = Path.GetDirectoryName(norm);
+        if (string.IsNullOrWhiteSpace(dir)) return null;
+        // Path.GetDirectoryName returns OS separators (backslashes on Windows) — normalize.
+        var dirNorm = dir.Replace('\\', '/').TrimStart('/').TrimEnd('/');
+        var dirFull = Path.GetFullPath(Path.Combine(projectRoot, dirNorm.Replace('/', Path.DirectorySeparatorChar)));
+        // The proposed directory already exists — its parent is real, nothing to steer to.
+        if (Directory.Exists(dirFull) && IsPathUnderRoot(dirFull, projectRoot))
+            return dirNorm;
+
+        // Deepest existing ancestor, walking up segment by segment.
+        var parts = dirNorm.Split('/');
+        string? ancestor = null;
+        for (var i = parts.Length - 1; i >= 1; i--)
+        {
+            var candidate = string.Join('/', parts[..i]);
+            var candidateFull = Path.GetFullPath(Path.Combine(projectRoot, candidate.Replace('/', Path.DirectorySeparatorChar)));
+            if (Directory.Exists(candidateFull) && IsPathUnderRoot(candidateFull, projectRoot))
+            {
+                ancestor = candidate;
+                break;
+            }
+        }
+        // A directory with the SAME leaf name elsewhere (e.g. the planner wrote
+        // "src/app/demo/weaver/" but the real "maxhanna.client/src/app/weaver" exists).
+        // Prefer the one sharing the longest trailing path-suffix with the proposal.
+        var leaf = parts[^1];
+        string? leafMatch = null;
+        var bestScore = -1;
+        var bestLen = int.MaxValue;
+        foreach (var d in Directory.EnumerateDirectories(projectRoot, "*", SearchOption.AllDirectories))
+        {
+            if (!IsPathUnderRoot(d, projectRoot)) continue;
+            var rel = Path.GetRelativePath(projectRoot, d).Replace('\\', '/');
+            if (rel.Equals(dirNorm, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(Path.GetFileName(d), leaf, StringComparison.OrdinalIgnoreCase)) continue;
+            var score = SharedSegmentScore(dirNorm, rel);
+            if (score > bestScore || (score == bestScore && rel.Length < bestLen))
+            {
+                bestScore = score;
+                bestLen = rel.Length;
+                leafMatch = rel;
+            }
+        }
+        return leafMatch ?? ancestor;
+    }
+
+    /// <summary>
+    /// Proposes the closest REAL sibling file for an invented edit path (an anchored edit whose
+    /// file does not exist): (1) any existing file with the SAME leaf name anywhere in the
+    /// project (e.g. invented "src/app/services/card.service.ts" when the real file lives at
+    /// "src/shared/card.service.ts"), else (2) a near-miss leaf — a typo/plural/case variant,
+    /// Levenshtein distance ≤ 2 — inside the closest REAL directory to the invented path
+    /// (e.g. "card.service.ts" when the real "cards.service.ts" sits in that folder). Returns
+    /// the existing relative path, or null when no sibling is plausible.
+    /// </summary>
+    public static string? FindRealSiblingForInventedFile(string inventedRelPath, string projectRoot)
+    {
+        var norm = (inventedRelPath ?? string.Empty).Replace('\\', '/').TrimStart('/');
+        if (string.IsNullOrWhiteSpace(norm)) return null;
+        var leaf = Path.GetFileName(norm.Replace('/', Path.DirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(leaf)) return null;
+
+        // 1) Same leaf name anywhere in the project (a DIFFERENT real directory than the
+        // invented one — same-dir same-name was already ruled out by FindSameDirectoryFile).
+        foreach (var f in FindSimilarFiles(norm, projectRoot))
+        {
+            var fNorm = f.Replace('\\', '/');
+            if (Path.GetFileName(fNorm).Equals(leaf, StringComparison.OrdinalIgnoreCase))
+                return f;
+        }
+
+        // 2) Near-miss leaf inside the closest real directory (typo/plural/case variant).
+        var closest = FindClosestRealDirectory(norm, projectRoot);
+        if (string.IsNullOrWhiteSpace(closest)) return null;
+        var closestFull = Path.GetFullPath(Path.Combine(projectRoot, closest.Replace('/', Path.DirectorySeparatorChar)));
+        if (!Directory.Exists(closestFull)) return null;
+        string? best = null;
+        var bestDist = int.MaxValue;
+        foreach (var file in Directory.EnumerateFiles(closestFull, "*.*", SearchOption.TopDirectoryOnly))
+        {
+            var name = Path.GetFileName(file);
+            if (string.Equals(name, leaf, StringComparison.OrdinalIgnoreCase)) continue;
+            var dist = LevenshteinDistance(leaf.ToLowerInvariant(), name.ToLowerInvariant());
+            if (dist <= 2 && dist < bestDist)
+            {
+                bestDist = dist;
+                best = closest + "/" + name;
+            }
+        }
+        return best;
+    }
+
+    /// <summary>Classic Levenshtein edit distance (small strings — file leaves).</summary>
+    private static int LevenshteinDistance(string a, string b)
+    {
+        if (a.Length == 0) return b.Length;
+        if (b.Length == 0) return a.Length;
+        var prev = new int[b.Length + 1];
+        var cur = new int[b.Length + 1];
+        for (var j = 0; j <= b.Length; j++) prev[j] = j;
+        for (var i = 1; i <= a.Length; i++)
+        {
+            cur[0] = i;
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            }
+            (prev, cur) = (cur, prev);
+        }
+        return prev[b.Length];
+    }
+
+    /// <summary>Scores how structurally close two normalized paths are: the shared leading
+    /// segments (the proposal kept the real prefix but invented a subdir) PLUS the shared
+    /// trailing segments (both end in the same leaf). Case-insensitive.</summary>
+    private static int SharedSegmentScore(string a, string b)
+    {
+        var aa = a.Split('/');
+        var bb = b.Split('/');
+        var n = 0;
+        for (int i = 0, j = 0; i < aa.Length && j < bb.Length; i++, j++)
+        {
+            if (!string.Equals(aa[i], bb[j], StringComparison.OrdinalIgnoreCase)) break;
+            n++;
+        }
+        for (int i = aa.Length - 1, j = bb.Length - 1; i >= 0 && j >= 0; i--, j--)
+        {
+            if (!string.Equals(aa[i], bb[j], StringComparison.OrdinalIgnoreCase)) break;
+            n++;
+        }
+        return n;
+    }
+
+    /// <summary>True when <paramref name="path"/> is inside or equal to <paramref name="dir"/>
+    /// (segment-aware and case-insensitive, normalized to '/'); an empty dir (root) covers everything.</summary>
+    public static bool IsPathAncestorOrEqual(string dir, string path)
+    {
+        var d = (dir ?? string.Empty).Replace('\\', '/').TrimStart('/').TrimEnd('/');
+        var p = (path ?? string.Empty).Replace('\\', '/').TrimStart('/').TrimEnd('/');
+        if (d.Length == 0) return true;
+        return string.Equals(d, p, StringComparison.OrdinalIgnoreCase) ||
+               p.StartsWith(d + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static string? ExtractTargetPath(string changeDesc, string currentRelPath, string projectRoot)
     {
         if (string.IsNullOrWhiteSpace(changeDesc)) return null;

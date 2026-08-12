@@ -56,6 +56,15 @@ partial class AgentController
         // of one-after-another. The LLM connectivity probe (started in Orchestrate)
         // overlaps them too and is awaited before any LLM call below.
         var allSteps = new List<object>();
+        // The requirement checklist is per-run: reset it here so a reused controller instance
+        // (tests) never leaks a previous run's checklist into a run that did not extract one.
+        _requirementChecklist = null;
+        _taskPromptContextChars = 0;
+        // Per-step LLM token accounting is per-run: reset here so a reused controller instance
+        // (tests) never leaks a previous run's spend into the first step result of a new run.
+        _stepLlmPromptTokens = 0;
+        _stepLlmResponseTokens = 0;
+        _stepLlmCalls = 0;
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         // These disk/DB tasks deliberately start before the connectivity probe is
         // awaited: on the rare probe failure their results are discarded, which is
@@ -83,6 +92,7 @@ partial class AgentController
             throw new InvalidOperationException("LLM connectivity check failed.");
 
         var (discoveryContext, ds) = await bootstrapTask;
+        _discoverySteps = ds;
         allSteps.AddRange(ds);
         string? editKnowledgeHeader = editKnowledgeTask != null ? await editKnowledgeTask : null;
         AgentSkeleton.SkeletonResult? skeleton = skeletonTask != null ? await skeletonTask : null;
@@ -140,6 +150,10 @@ partial class AgentController
                     skeletonSection.AppendLine($"### PROJECT ARCHITECTURE NOTE ###\n{note}\n");
                 skeletonSection.AppendLine(trimmed);
                 discoveryContext = skeletonSection.ToString() + "\n" + discoveryContext;
+                // Track how much of the discovery context is the skeleton (layout + note) so
+                // the context-breakdown pop can show it as its own row instead of burying it
+                // in the "headers / steering" residual.
+                _skeletonContextChars = skeletonSection.Length;
                 await EmitLog(emitSse, "info",
                     $"Skeleton trimmed from {skeleton!.Paths.Count} paths to {trimmed.Length} chars {(string.IsNullOrWhiteSpace(note) ? "" : "— " + note)}", ct: ct);
             }
@@ -150,15 +164,23 @@ partial class AgentController
         }
 
         string? requirementChecklist = (await checklistTask).Trim();
-        if (!string.IsNullOrWhiteSpace(requirementChecklist))
-        {
-            prompt = prompt + "\n\n" + requirementChecklist;
+        // The checklist NEVER goes into the task `prompt`. The prompt feeds the web-need
+        // detectors (TaskHintsWebNeed / ConfirmWebNeedAsync), the OS-task classifier and the
+        // fetch-in-command guard — an appended "search / fetch / current / latest" phrase from
+        // a checklist item can trip the deliberately-broad web hints and hijack a plain code
+        // run into a web task. Instead the checklist is threaded into the PLANNER prompts
+        // separately (BuildIncrementalStepUserPrompt, AnalyzePromptAndPlanCodeChanges,
+        // BuildReplanPrompt) so the planner still verifies each requirement without polluting
+        // task classification.
+        _requirementChecklist = string.IsNullOrWhiteSpace(requirementChecklist) ? null : requirementChecklist;
+        // The context-breakdown "task prompt + requirements" row: the raw task text plus the
+        // checklist share (the checklist is threaded into the planner, never the discovery
+        // context, so it is accounted for here, not in the scaffolding residual).
+        _taskPromptContextChars = prompt.Length + (_requirementChecklist?.Length ?? 0);
+        if (_requirementChecklist != null)
             await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist }, ct: ct);
-        }
         else
-        {
             await EmitLog(emitSse, "warn", "Requirement checklist was empty.", ct: ct);
-        }
         if (attachedFiles != null && attachedFiles.Count > 0)
         {
             var attachedSteering = "The user has explicitly attached one or more files for editing " +
@@ -608,10 +630,15 @@ partial class AgentController
             r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
             r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
 
-        if (anyEditsApplied || planCompleteDeclared)
+        // An OS-output demand ("write the data into a text file on my desktop") must be
+        // verified even when the run applied zero repo edits — a web-only run that declares
+        // complete without writing the file must be caught by the deterministic check and
+        // driven into the repair loop.
+        var hasOsOutputDemand = AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out _);
+        if (anyEditsApplied || planCompleteDeclared || hasOsOutputDemand)
         {
-            (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues) =
-                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots);
+            (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues, _) =
+                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
         }
         else
         {
@@ -627,8 +654,8 @@ partial class AgentController
                 await EmitLog(emitSse, "warn",
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
-                var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots);
+                var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative, _) =
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
                 if (reverifyComplete)
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
@@ -694,6 +721,52 @@ partial class AgentController
                 await EmitLog(emitSse, "warn",
                     $"Post-execution verification incomplete (repair pass {repairIteration}/{MaxPostVerifyRepairIterations}): " +
                     $"{verificationDetails}", ct: ct);
+                // Deterministic OS-output finalization (mirror of the interleaved planComplete
+                // gate): when the task demands an OS output file and the run harvested web
+                // results but never wrote the file (e.g. its _web_fetch failed and the loop
+                // halted before planComplete), dump the results straight to the demanded path —
+                // no LLM planning round. A pre-fix run landed here with its search results still
+                // in hand and the replanner — given no web results and no OS-write guidance —
+                // invented a Node fs writeArticleToFile() in an Angular service, satisfying
+                // nothing. Dump first, re-verify, and only replan if other issues remain.
+                if (AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out var osDemand) &&
+                    !AgentOsOutputVerifier.IsOsOutputWritten(osDemand, allSteps.OfType<Dictionary<string, object?>>()))
+                {
+                    var (dumped, dumpPath, dumpError) = AgentOsOutputVerifier.TryAutoDumpWebResults(
+                        prompt, osDemand, allSteps.OfType<Dictionary<string, object?>>());
+                    if (dumped && dumpPath != null)
+                    {
+                        allSteps.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "command",
+                            ["status"] = "done",
+                            ["command"] = $"Auto-dumped web results → {dumpPath}",
+                            ["path"] = dumpPath,
+                            ["output"] = $"Web results written to {dumpPath} (auto-dump — the task demanded an OS output file)"
+                        });
+                        await EmitLog(emitSse, "success",
+                            $"💾 Repair auto-dumped web results to {dumpPath} — the task asked to write a file to {osDemand.DirectoryPath}", ct: ct);
+                        var (dumpVerified, dumpDetails, dumpIssues, dumpSpeculative, _) =
+                            await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext,
+                                atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                        taskComplete = dumpVerified;
+                        verificationDetails = dumpDetails;
+                        verificationIssues = dumpIssues;
+                        speculativeVerificationIssues = dumpSpeculative;
+                        if (taskComplete)
+                        {
+                            await EmitLog(emitSse, "success",
+                                $"Repair pass {repairIteration}: deterministic OS-output dump satisfied verification.", ct: ct);
+                            break;
+                        }
+                        continue; // other issues remain — next pass replans with fresh verification state
+                    }
+                    else if (dumpError != null)
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"Repair: no OS-output auto-dump available ({dumpError}) — replanning the write.", ct: ct);
+                    }
+                }
                 if (speculativeVerificationIssues is { Count: > 0 })
                 {
                     await EmitLog(emitSse, "bypass",
@@ -817,7 +890,16 @@ partial class AgentController
                         continue;
                     }
                 }
-                var originalStepCount = plan?.Plan?.Count ?? 0;
+                // Identity of the original (already-executed) plan steps, captured BEFORE the
+                // merge+prune: pruning re-evaluates the WHOLE merged plan against the current
+                // file and can drop an original step (e.g. "add method X" pruned as 'already
+                // exists' once X landed), which SHIFTS the repair step's index into the
+                // completed range. mergedDone must therefore be computed by plan-step identity
+                // (a key present in the ORIGINAL plan) AFTER pruning — not by index range — or
+                // the repair step gets silently skipped and the churn breaker completes the
+                // run with the original defect intact.
+                var originalPlanKeys = plan?.Plan?.Select(p => $"{p.File}|{NormalizeChangeForDedup(p.Change)}")
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 plan = MergePlans(plan ?? new AgentPlan(),
                     new AgentPlan { Plan = new List<PlanStep> { singleStep }, Summary = "Repair: " + singleStep.Change, Score = 0 });
                 if (plan?.Plan?.Count > 0)
@@ -829,14 +911,25 @@ partial class AgentController
                     await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
                         summary: plan.Summary ?? ("Repair: " + singleStep.Change), score: plan.Score, append: false);
                 var mergedDone = new HashSet<int>();
-                for (var i = 0; i < originalStepCount && i < (plan?.Plan?.Count ?? 0); i++)
-                    mergedDone.Add(i);
+                if (plan != null)
+                {
+                    for (var i = 0; i < plan.Plan.Count; i++)
+                    {
+                        var step = plan.Plan[i];
+                        if (originalPlanKeys.Contains($"{step.File}|{NormalizeChangeForDedup(step.Change)}"))
+                            mergedDone.Add(i);
+                    }
+                }
                 var successfulEditsBefore = CountSuccessfulEditResults(allSteps);
                 if (plan != null)
                 {
+                    // A repair step carrying a concrete oldString/newString (deterministic
+                    // repairs, scripted replans) is applied directly — no LLM pre-resolution
+                    // round-trip, mirroring the interleaved loop's ShouldApplyDirectly path.
                     await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
                         steeringContext: enhancedSteering, attachedFiles: attachedFiles,
-                        completedStepIndices: mergedDone, cardId: cardId);
+                        completedStepIndices: mergedDone, cardId: cardId,
+                        skipLlmPreResolution: ShouldApplyDirectly(singleStep));
                 }
                 // If repair step was "already done", the verifier issue was a phantom —
                 // remove it and skip re-verify so the next pass tries the next issue.
@@ -881,8 +974,8 @@ partial class AgentController
                         $"Repair pass {repairIteration}: repair changed NO files ({zeroChangeRepairs}/{MaxZeroChangeRepairs} consecutive) — " +
                         $"verifier issue likely false-positive; next no-change pass trips the circuit breaker.", ct: ct);
                 }
-                var (reVerified, reDetails, reIssues, reSpeculative) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots);
+                var (reVerified, reDetails, reIssues, reSpeculative, _) =
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
                 taskComplete = reVerified;
                 verificationDetails = reDetails;
                 verificationIssues = reIssues;
@@ -901,16 +994,31 @@ partial class AgentController
             }
             else if (exhaustedWithNoSteps)
             {
-                await EmitLog(emitSse, "info",
-                    "Repair replanner proposed no further steps — treating verification as complete (nothing left to fix). " +
-                    "Changes are kept and the task finishes; no fresh plan will be generated.", ct: ct);
-                taskComplete = true;
-                allSteps.Add(new Dictionary<string, object?>
+                // The demanded OS output file must still exist before this fallback can declare
+                // completion — otherwise a run that never wrote the file (and whose replanner
+                // refused to plan the write) would be marked done, exactly the false-completion
+                // the OS-output gate exists to stop.
+                var osStillMissing = AgentOsOutputVerifier.CheckOsOutputWritten(
+                    prompt, allSteps.OfType<Dictionary<string, object?>>()) != null;
+                if (osStillMissing)
                 {
-                    ["type"] = "verified_complete",
-                    ["status"] = "done",
-                    ["reason"] = verificationDetails + " — replanner proposed no further steps, treating as complete"
-                });
+                    await EmitLog(emitSse, "warn",
+                        "Repair replanner proposed no further steps BUT the demanded OS output file was never written — " +
+                        "keeping the task incomplete instead of falsely marking it complete.", ct: ct);
+                }
+                else
+                {
+                    await EmitLog(emitSse, "info",
+                        "Repair replanner proposed no further steps — treating verification as complete (nothing left to fix). " +
+                        "Changes are kept and the task finishes; no fresh plan will be generated.", ct: ct);
+                    taskComplete = true;
+                    allSteps.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "verified_complete",
+                        ["status"] = "done",
+                        ["reason"] = verificationDetails + " — replanner proposed no further steps, treating as complete"
+                    });
+                }
             }
             else
             {
@@ -919,6 +1027,23 @@ partial class AgentController
                     $"{string.Join("; ", verificationIssues ?? [])}", ct: ct);
             }
         }
+        // Persist the final verification verdict onto the card so the reason the run was (or
+        // wasn't) verified complete is visible after the run, not just in the log. The reason
+        // is the last verified_complete entry's text (set at every completion path above); an
+        // incomplete run has no such entry and gets the deterministic fallback.
+        if (!string.IsNullOrWhiteSpace(cardId))
+        {
+            var verifiedEntry = allSteps.OfType<Dictionary<string, object?>>()
+                .LastOrDefault(s => s.GetValueOrDefault("type")?.ToString() == "verified_complete");
+            await PublishVerificationAsync(cardId, taskComplete,
+                verifiedEntry?.GetValueOrDefault("reason")?.ToString(), emitSse, ct);
+        }
+        // Final context event at run end: the discovery context is at its PEAK now (all
+        // execution-time reads/exploration and web results are in), so the counter keeps
+        // showing the peak size on the completed card instead of whatever mid-run value
+        // was last streamed. Marked final so the frontend persists it to the card.
+        if (emitSse)
+            await EmitContextUpdateAsync(discoveryContext, true, ct, final: true);
         return (allSteps, plan ?? new AgentPlan(), taskComplete);
     }
     private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default, Object? additionalData = null)
@@ -952,47 +1077,100 @@ partial class AgentController
     /// <summary>
     /// Builds a per-file breakdown of the discovery context for the agent-panel token
     /// counter: each discovery read step contributes its file size (chars + estimated
-    /// tokens), and everything else (headers, skeleton note, edit-knowledge header,
-    /// web results, steering) is rolled up as "scaffolding". Lets users see WHY the
-    /// counter is N tokens instead of guessing — e.g. two 31k-token attached files
-    /// showing as ~130k because the old counter sent character counts labeled tokens.
+    /// tokens), the project skeleton (layout + architecture note) gets its own row, and
+    /// everything else (headers, edit-knowledge header, web results, steering) is rolled
+    /// up as "headers / steering / other". Lets users see WHY the counter is N tokens
+    /// instead of guessing — e.g. two 31k-token attached files showing as ~130k because
+    /// the old counter sent character counts labeled tokens.
+    ///
+    /// Non-file rows estimate at the UI's documented ~chars/4 rate (the counter tooltip
+    /// says exactly that), so a row never shows 0 tokens while it has content — the old
+    /// residual-by-subtraction approach collapsed to 0 because the token estimator is
+    /// non-additive (file tokens can exceed the whole-context estimate).
     /// </summary>
-    private static List<object> BuildContextBreakdown(List<object> ds, string discoveryContext)
+    private List<object> BuildContextBreakdown(List<object> ds, string discoveryContext)
     {
         var rows = new List<object>();
         var accountedChars = 0;
-        var accountedTokens = 0;
         foreach (var item in ds.OfType<Dictionary<string, object?>>())
         {
             if (item.GetValueOrDefault("type")?.ToString() != "read") continue;
             var path = item.GetValueOrDefault("path")?.ToString();
             var output = item.GetValueOrDefault("output")?.ToString();
             if (string.IsNullOrEmpty(path) || output == null) continue;
-            var fileTokens = AgentTokenMetrics.EstimateTokens(output);
             rows.Add(new
             {
                 name = path,
                 kind = "file",
                 chars = output.Length,
-                tokens = fileTokens
+                tokens = AgentTokenMetrics.EstimateTokens(output)
             });
             accountedChars += output.Length;
-            accountedTokens += fileTokens;
         }
-        var scaffoldingChars = Math.Max(0, discoveryContext.Length - accountedChars);
-        if (scaffoldingChars > 0)
+        var remainingChars = Math.Max(0, discoveryContext.Length - accountedChars);
+        var skeletonChars = Math.Min(_skeletonContextChars, remainingChars);
+        if (skeletonChars > 0)
         {
             rows.Add(new
             {
-                name = "headers / skeleton / steering",
+                name = "skeleton (file layout + note)",
+                kind = "skeleton",
+                chars = skeletonChars,
+                tokens = CharsToTokens(skeletonChars)
+            });
+            remainingChars -= skeletonChars;
+        }
+        // The planner's TASK input (raw prompt + requirement checklist) as its own row. This
+        // share lives OUTSIDE the discovery context (it is the planner's other input), so it
+        // is NOT subtracted from the scaffolding residual — the categories now cover every
+        // part of what the LLM sees: files, skeleton, task prompt + requirements, and the
+        // discovery scaffolding (headers / steering / plan-so-far).
+        if (_taskPromptContextChars > 0)
+        {
+            rows.Add(new
+            {
+                name = _requirementChecklist != null ? "task prompt + requirements checklist" : "task prompt",
+                kind = "task",
+                chars = _taskPromptContextChars,
+                tokens = CharsToTokens(_taskPromptContextChars)
+            });
+        }
+        if (remainingChars > 0)
+        {
+            rows.Add(new
+            {
+                name = "headers / steering / other",
                 kind = "scaffolding",
-                chars = scaffoldingChars,
-                // Same estimator as the file rows — derived as the residual so the rows
-                // always sum to the reported contextSize.
-                tokens = Math.Max(0, AgentTokenMetrics.EstimateTokens(discoveryContext) - accountedTokens)
+                chars = remainingChars,
+                tokens = CharsToTokens(remainingChars)
             });
         }
         return rows;
+    }
+
+    /// <summary>UI-consistent char→token estimate (the counter tooltip documents chars/4).</summary>
+    private static int CharsToTokens(int chars) => (int)Math.Ceiling(chars / 4.0);
+
+    /// <summary>
+    /// Live context counter: sends a dedicated "context" SSE event (no phase change, no log
+    /// spam) carrying the CURRENT discovery-context size + breakdown, so the agent-panel
+    /// token counter grows as the run reads files / fetches web results during execution
+    /// instead of freezing at the Phase-2-start snapshot. When <paramref name="final"/> is
+    /// set (run end) the payload is marked final:true so the frontend persists the PEAK
+    /// size onto the card — the last mid-run value is often NOT the peak, because execution
+    /// keeps reading files and fetching web results after the final context update fires.
+    /// </summary>
+    private async Task EmitContextUpdateAsync(string discoveryContext, bool emitSse, CancellationToken ct,
+        bool final = false)
+    {
+        if (!emitSse) return;
+        await SendSse(Response, "context", new
+        {
+            contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext),
+            contextChars = discoveryContext.Length,
+            contextBreakdown = BuildContextBreakdown(_discoverySteps, discoveryContext),
+            final
+        }, ct);
     }
     private async Task<string> RunContextReview(
         List<object> ds, string discoveryContext, List<object> allSteps, CancellationToken ct)
@@ -1374,11 +1552,12 @@ partial class AgentController
         return snap;
     }
 
-    private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues)> PostExecuteVerify(
+    private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues, List<string> groundTruth)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct,
         string? discoveryContext = null, int? atomicStepEstimate = null,
-        Dictionary<string, string>? preEditSnapshots = null)
+        Dictionary<string, string>? preEditSnapshots = null,
+        string? cardId = null, string? steeringContext = null)
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
@@ -1391,6 +1570,11 @@ partial class AgentController
             .Select(p => p!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+        // A task demanding an OS output file ("write the data into a text file on my
+        // desktop") must be verified even when nothing in the repo was touched — the
+        // deterministic check below reports the missing file so the repair loop writes it.
+        var osOutputIssue = AgentOsOutputVerifier.CheckOsOutputWritten(
+            originalPrompt, allResults.OfType<Dictionary<string, object?>>());
         if (modifiedPaths.Count == 0)
         {
             var exploredPaths = allResults
@@ -1403,7 +1587,28 @@ partial class AgentController
                 .ToList();
             if (exploredPaths.Count == 0)
             {
-                return (true, "", new List<string>(), new List<string>());
+                if (osOutputIssue == null)
+                {
+                    // A clean web/OS run with no repo edits still had a deterministic check to
+                    // run: the demanded OS output. Record its pass on the card so the ground-truth
+                    // section renders on this clean pass too — the user sees that the file write
+                    // was verified, not just "nothing happened". (No other check ran: there were
+                    // no templates, stylesheets, or edits to evaluate.)
+                    if (cardId != null && AgentOsOutputVerifier.TryGetOsFileOutputDemand(originalPrompt, out var demand))
+                    {
+                        var osTarget = string.IsNullOrWhiteSpace(demand.FileNameHint)
+                            ? Path.Combine(demand.DirectoryPath, AgentOsOutputVerifier.DefaultDumpFileName)
+                            : Path.Combine(demand.DirectoryPath, demand.FileNameHint);
+                        await PublishGroundTruthAsync(cardId,
+                            new List<string> { $"✓ OS output: the demanded file at \"{osTarget}\" was written by the run" },
+                            emitSse, ct);
+                    }
+                    return (true, "", new List<string>(), new List<string>(), new List<string>());
+                }
+                await EmitLog(emitSse, "warn",
+                    $"🔧 Deterministic checks: 1 CONFIRMED issue(s): {osOutputIssue}", ct: ct);
+                if (cardId != null) await PublishGroundTruthAsync(cardId, new List<string> { osOutputIssue }, emitSse, ct);
+                return (false, osOutputIssue, new List<string> { osOutputIssue }, new List<string>(), new List<string> { osOutputIssue });
             }
             modifiedPaths = exploredPaths;
         }
@@ -1420,19 +1625,134 @@ partial class AgentController
         var unrenderedIssues = TemplateBindingValidator.CheckUnrenderedComponentLogic(
             originalPrompt, projectRoot, modifiedPaths, allResults);
         var cssIssues = CssSelectorRepair.CheckModifiedCss(projectRoot, modifiedPaths, preEditSnapshots);
+        // A CSS class/variable DEFINED by this run must be used by the file the stylesheet
+        // affects (the connected template/component) — a newly created class that nothing
+        // references is dead code, so the run cannot be marked complete until it's wired up.
+        var cssUsageIssues = CssSelectorRepair.CheckUnwiredCssDefinitions(projectRoot, modifiedPaths, preEditSnapshots);
+        // The mirror: a class REMOVED by this run must not stay referenced by the connected
+        // template/component — deleting the rule while the template keeps the class leaves the
+        // element pointing at a class that no longer exists (styling silently breaks), so
+        // verification fails until the template reference is cleaned up. Like the unwired
+        // check, only removals between the pre-edit snapshot and the current file are
+        // attributed to the run.
+        var cssRemovalIssues = CssSelectorRepair.CheckOrphanedTemplateReferences(projectRoot, modifiedPaths, preEditSnapshots);
+        // A RENAME-ALL task ("rename every occurrence of X to Y") is complete only when the old
+        // name is GONE from every edited file — a partial rename (one of N occurrences) is a
+        // plausible-looking edit that silently corrupts the data. Scans the CURRENT files for
+        // word-boundary occurrences of the old name; each file that still contains it is a
+        // CONFIRMED issue so the repair loop replaces the rest. Deterministic: a pure function
+        // of the task text and the on-disk contents, so it can never hallucinate a pass.
+        var renameDemand = AgentRenameVerifier.TryParseRenameAllRequest(originalPrompt, out var renameOld, out var renameNew);
+        var renameIssues = renameDemand
+            ? AgentRenameVerifier.CheckRenameAllCompleteness(originalPrompt, projectRoot, modifiedPaths)
+            : new List<string>();
         var deterministicIssues = new List<string>();
         deterministicIssues.AddRange(bindingIssues);
         deterministicIssues.AddRange(unrenderedIssues);
         deterministicIssues.AddRange(cssIssues);
+        deterministicIssues.AddRange(cssUsageIssues);
+        deterministicIssues.AddRange(cssRemovalIssues);
+        deterministicIssues.AddRange(renameIssues);
+        if (osOutputIssue != null) deterministicIssues.Add(osOutputIssue);
+        // Deterministic ground truth about the applied edits themselves: every edit this run
+        // reports as applied must actually be present in the CURRENT file on disk. Confirmed
+        // edits are injected into the verifier prompt below so it can never claim "the change
+        // was not made" for a change that provably landed (the verifier is an LLM and can
+        // hallucinate that a landed edit is missing — see the popupUserTagUser?.username case
+        // where the title-line edit applied but the verifier reported it as not made). Edits
+        // whose newString is NOT on disk are CONFIRMED issues — the change genuinely did not
+        // land or was reverted, and that must fail verification deterministically.
+        var (confirmedEdits, missingEditIssues) = AgentTextUtilities.CheckAppliedEditsPresent(projectRoot, allResults);
+        deterministicIssues.AddRange(missingEditIssues);
         if (deterministicIssues.Count > 0)
         {
             await EmitLog(emitSse, "warn",
                 $"🔧 Deterministic checks: {deterministicIssues.Count} CONFIRMED issue(s): {string.Join("; ", deterministicIssues)}", ct: ct);
         }
+        if (confirmedEdits.Count > 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"🔧 Applied edits confirmed on disk: {string.Join("; ", confirmedEdits)}", ct: ct);
+        }
+        // Positive deterministic passes — each check that RAN and found nothing is recorded so
+        // the ground-truth section renders (and shows the verified expectation) EVEN on a fully
+        // clean pass, instead of disappearing the moment there is nothing to fail. A pass is
+        // recorded only when the check actually evaluated something: modified templates for the
+        // binding check, modified stylesheets for the CSS checks, a UI-scoped .ts edit for the
+        // unrendered-logic check, and an OS-output demand for the OS check. A pass that fires
+        // alongside issues is still published — the section shows exactly what was verified.
+        var modifiedTemplates = modifiedPaths.Count(p =>
+            string.Equals(Path.GetExtension(p), ".html", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(Path.GetExtension(p), ".htm", StringComparison.OrdinalIgnoreCase));
+        var modifiedCss = modifiedPaths.Count(p =>
+            string.Equals(Path.GetExtension(p), ".css", StringComparison.OrdinalIgnoreCase));
+        var modifiedTs = modifiedPaths.Count(p =>
+            string.Equals(Path.GetExtension(p), ".ts", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(Path.GetExtension(p), ".tsx", StringComparison.OrdinalIgnoreCase));
+        var deterministicPasses = new List<string>();
+        if (modifiedTemplates > 0 && bindingIssues.Count == 0)
+            deterministicPasses.Add(
+                $"✓ Template bindings: {modifiedTemplates} edited template(s) — every binding/expression introduced by the run resolves to a member the component exposes");
+        if (modifiedCss > 0 && cssIssues.Count == 0)
+            deterministicPasses.Add(
+                $"✓ CSS selector scan: {modifiedCss} modified stylesheet(s) — no bare class-like selector tokens introduced by the run");
+        if (modifiedCss > 0 && cssUsageIssues.Count == 0)
+            deterministicPasses.Add(
+                "✓ CSS wiring: every class/variable defined by the run is referenced by the connected template/component (or the stylesheet is standalone with no wiring surface)");
+        if (modifiedCss > 0 && cssRemovalIssues.Count == 0)
+            deterministicPasses.Add(
+                "✓ CSS removal cleanup: no class removed by the run is still referenced by a connected template/component");
+        if (modifiedTs > 0 && unrenderedIssues.Count == 0 && TemplateBindingValidator.IsUiTargetTask(originalPrompt))
+            deterministicPasses.Add(
+                "✓ Component wiring: no unrendered component logic — the UI task's edited components have their templates in place");
+        if (osOutputIssue == null && AgentOsOutputVerifier.TryGetOsFileOutputDemand(originalPrompt, out var osDemand))
+        {
+            var osTarget = string.IsNullOrWhiteSpace(osDemand.FileNameHint)
+                ? Path.Combine(osDemand.DirectoryPath, AgentOsOutputVerifier.DefaultDumpFileName)
+                : Path.Combine(osDemand.DirectoryPath, osDemand.FileNameHint);
+            deterministicPasses.Add($"✓ OS output: the demanded file at \"{osTarget}\" was written by the run");
+        }
+        if (renameDemand && renameIssues.Count == 0)
+        {
+            deterministicPasses.Add(
+                $"✓ Rename-all: every occurrence of '{renameOld}' in the edited file(s) was replaced with '{renameNew}'");
+        }
+        if (deterministicPasses.Count > 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"🔧 Deterministic checks passed: {string.Join("; ", deterministicPasses)}", ct: ct);
+        }
+        // The deterministic expectations ARE the run's computed ground truth — surface them
+        // on the card (live + persisted) so a human can see the known-correct answer the
+        // run is being checked against. Set-on-fire: once computed they stay on the card,
+        // even after a repair pass satisfies them. Confirmed applied edits are the positive
+        // half: "this exact change is provably on disk", which a human can verify instantly;
+        // the deterministic passes are the "these checks ran and passed" half, so the section
+        // shows the verified expectations even on a fully clean pass.
+        if (cardId != null)
+        {
+            var groundTruthItems = new List<string>();
+            groundTruthItems.AddRange(confirmedEdits.Select(e => $"✓ Applied edit confirmed on disk: {e}"));
+            groundTruthItems.AddRange(deterministicPasses);
+            groundTruthItems.AddRange(deterministicIssues);
+            if (groundTruthItems.Count > 0)
+                await PublishGroundTruthAsync(cardId, groundTruthItems, emitSse, ct);
+        }
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
+        // The user's mid-run steering is their LATEST intent: the verifier must judge against
+        // it exactly like the planner does, or a run that honored a "ignore the rename" steer
+        // gets flagged incomplete for skipping the (now-cancelled) rename and the repair loop
+        // churns back toward the wrong target. Judge against original + steering, steering
+        // winning on conflict.
+        if (!string.IsNullOrWhiteSpace(steeringContext))
+        {
+            sb.AppendLine("### USER STEERING — LATEST INTENT (OVERRIDES ORIGINAL TASK ON CONFLICT) ###");
+            sb.AppendLine(steeringContext);
+            sb.AppendLine();
+        }
         var doneEdits = allResults
             .OfType<Dictionary<string, object?>>()
             .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
@@ -1444,7 +1764,7 @@ partial class AgentController
                 $"{doneEdits.Count} edit step(s) were executed. Classify every issue CONFIRMED vs SPECULATIVE " +
                 $"strictly against the ORIGINAL TASK — do NOT invent follow-up work, refactors, or best-practice " +
                 $"improvements the user never asked for, and do NOT flag 'might/could/maybe' risks as repairs. " +
-                $"If the explicit request is satisfied, complete=true even if you can imagine more.");
+                $"If the explicit request (as modified by any USER STEERING above) is satisfied, complete=true even if you can imagine more.");
             sb.AppendLine();
         }
         var editResults = allResults
@@ -1466,6 +1786,24 @@ partial class AgentController
                           "ONLY authoritative view of the code.");
             sb.AppendLine("Never conclude a defect exists because of text from an earlier stage of the run — judge correctness " +
                           "EXCLUSIVELY against CURRENT STATE.");
+            sb.AppendLine();
+        }
+        // Deterministically verified facts about which edits this run actually landed.
+        // The verifier is an LLM and CAN hallucinate that an applied edit is missing ("the
+        // change was not made") even when the new text is provably on disk — the title-line
+        // edit in the popupUserTagUser?.username case was applied, yet the verifier reported
+        // it as not made and a repair pass re-attempted it. These confirmed facts are
+        // non-negotiable: an edit listed here IS present in the CURRENT STATE below.
+        if (confirmedEdits.Count > 0)
+        {
+            sb.AppendLine("### CONFIRMED APPLIED EDITS (deterministically verified present on disk — do NOT report these as missing) ###");
+            sb.AppendLine("The following edits were applied by this run and their new content is PROVABLY present in the " +
+                          "CURRENT STATE OF MODIFIED FILES below (verified against disk programmatically, no LLM involved).");
+            sb.AppendLine("NEVER report any of these as 'not made', 'not applied', 'not present', or 'missing'. " +
+                          "If the original task is still unmet, the remaining defect is at a DIFFERENT location than " +
+                          "these confirmed edits — point at the actual file content that is still wrong.");
+            foreach (var c in confirmedEdits)
+                sb.AppendLine($"  - {c}");
             sb.AppendLine();
         }
         if (!string.IsNullOrWhiteSpace(discoveryContext))
@@ -1646,9 +1984,9 @@ partial class AgentController
             {
                 return (false,
                     $"Verification LLM call failed: {error}. Deterministic checks found: {string.Join("; ", deterministicIssues)}",
-                    deterministicIssues, new List<string>());
+                    deterministicIssues, new List<string>(), deterministicIssues);
             }
-            return (false, $"Verification LLM call failed: {error}", new List<string>(), new List<string>());
+            return (false, $"Verification LLM call failed: {error}", new List<string>(), new List<string>(), new List<string>());
         }
         try
         {
@@ -1682,7 +2020,13 @@ partial class AgentController
                     await EmitLog(emitSse, "bypass",
                         $"🔎 Speculative verifier concern(s) — logged, NOT acted on: {string.Join("; ", speculativeIssues)}", ct: ct);
                 }
-                return (isComplete, details, confirmedIssues, speculativeIssues);
+                // Ground truth = the confirmed applied edits (positive facts, provably on disk)
+                // plus any deterministic expectations. Confirmed edits are the positive half of
+                // the known-correct answer: "this exact change landed".
+                var groundTruthItems = new List<string>();
+                groundTruthItems.AddRange(confirmedEdits.Select(e => $"✓ Applied edit confirmed on disk: {e}"));
+                groundTruthItems.AddRange(deterministicIssues);
+                return (isComplete, details, confirmedIssues, speculativeIssues, groundTruthItems);
             }
         }
         catch { }
@@ -1691,9 +2035,9 @@ partial class AgentController
         {
             return (false,
                 "Verification LLM output unparseable. Deterministic checks found: " + string.Join("; ", deterministicIssues),
-                deterministicIssues, new List<string>());
+                deterministicIssues, new List<string>(), deterministicIssues);
         }
-        return (true, "", new List<string>(), new List<string>());
+        return (true, "", new List<string>(), new List<string>(), new List<string>());
     }
     private async Task<List<PlanStep>> TryReplanAfterStep(
         string prompt, List<object> allResults, AgentPlan plan,

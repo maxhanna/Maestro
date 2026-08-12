@@ -285,6 +285,53 @@ public class TemplateBindingValidatorTests
         Assert.Empty(TemplateBindingValidator.ValidateTemplateBindings("crawler.component.html", html, HardenedComponent));
     }
 
+    // ─── Check A: binding-attribute shapes ([(ngModel)], [class], (event)) ────
+
+    [Fact]
+    public void BananaBoxNgModel_DeclaredMember_NoIssue()
+    {
+        // [(ngModel)]="title" — the two-way binding attribute name ([(...)]) must parse
+        // and its value must resolve like any other binding.
+        var html = """<input [(ngModel)]="title" />""";
+        Assert.Empty(TemplateBindingValidator.ValidateTemplateBindings("x.component.html", html, Component));
+    }
+
+    [Fact]
+    public void BananaBoxNgModel_UndeclaredMember_IssueReported()
+    {
+        var html = """<input [(ngModel)]="modelTitle" />""";
+        var issues = TemplateBindingValidator.ValidateTemplateBindings("x.component.html", html, Component);
+        Assert.Single(issues);
+        Assert.Contains("modelTitle", issues[0]);
+    }
+
+    [Fact]
+    public void ClassBinding_DeclaredMember_NoIssue()
+    {
+        // [class.active]="isActive" — class-property binding on a declared member.
+        var html = """<div [class.active]="isActive"></div>""";
+        Assert.Empty(TemplateBindingValidator.ValidateTemplateBindings("x.component.html", html, Component));
+    }
+
+    [Fact]
+    public void ClassBinding_UndeclaredMember_IssueReported()
+    {
+        var html = """<div [class.active]="isActve"></div>""";
+        var issues = TemplateBindingValidator.ValidateTemplateBindings("x.component.html", html, Component);
+        Assert.Single(issues);
+        Assert.Contains("isActve", issues[0]);
+    }
+
+    [Fact]
+    public void StyleAndEventBindings_Resolve_NoIssue()
+    {
+        // [style.color] on a declared member and (click) handler on a declared method.
+        var html = """
+            <div [style.color]="isActive ? 'green' : 'red'" (click)="load()">Go</div>
+            """;
+        Assert.Empty(TemplateBindingValidator.ValidateTemplateBindings("x.component.html", html, Component));
+    }
+
     // ─── Check A: snapshot-based validation (only symbols the edit introduced) ─
     // The crawler-component false-positive regression: whole-template validation flags
     // PRE-EXISTING bindings that the regex extractor can't resolve (template refs like

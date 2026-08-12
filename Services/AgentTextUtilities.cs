@@ -15,6 +15,19 @@ using static Weaver.Services.AgentSkeleton;
 using static Weaver.Services.AgentDiffUtilities;
 using static Weaver.Services.AgentJsonUtilities;
 
+/// <summary>
+/// One deterministic expected-outcome entry attached to a plan step: what the file must
+/// contain after the step lands. Computed from the step's own old/new content (pure
+/// function — no LLM, no disk); verified against disk when the step completes and the
+/// card's plan item is marked done.
+/// </summary>
+public sealed record StepGroundTruth
+{
+    [System.Text.Json.Serialization.JsonPropertyName("text")] public string Text { get; init; } = "";
+    [System.Text.Json.Serialization.JsonPropertyName("file")] public string? File { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("anchor")] public string? Anchor { get; init; }
+}
+
 /// <summary>Part of the split of the former AgentUtilities monolith.</summary>
 public static class AgentTextUtilities
 {
@@ -115,15 +128,46 @@ public static class AgentTextUtilities
     public static string NormalizeLineEndings(string s) => s.Replace("\r\n", "\n");
 
     /// <summary>
+    /// Locates an anchor (typically the newString of an applied edit) inside normalized file
+    /// content. Matches verbatim first; when that fails (an edit later reformatted or merged),
+    /// falls back to the anchor's longest distinctive line (selector/method-signature lines
+    /// survive reformatting). Returns the char offset or -1. Shared by the verifier file view
+    /// (windowing) and the deterministic applied-edit disk check so both agree on what
+    /// "present in the file" means.
+    /// </summary>
+    public static int FindAnchorOffset(string normalizedContent, string anchor)
+    {
+        if (string.IsNullOrWhiteSpace(anchor) || normalizedContent == null) return -1;
+        var normAnchor = NormalizeLineEndings(anchor).Trim('\r', '\n');
+        if (normAnchor.Length == 0) return -1;
+        var idx = normalizedContent.IndexOf(normAnchor, StringComparison.Ordinal);
+        if (idx >= 0) return idx;
+        // An edit that was later reformatted/merged may no longer match verbatim — retry with
+        // its distinctive lines (selector/method-signature lines survive reformatting), the
+        // longest first. Trying EACH line, not just the longest, matters: the longest line is
+        // often the very one the formatter touched (an added attribute), while a shorter
+        // class-bearing line survived untouched.
+        foreach (var line in normAnchor.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length >= 20 && !l.StartsWith("//") && !l.StartsWith("/*") && !l.StartsWith("*"))
+            .OrderByDescending(l => l.Length))
+        {
+            var lineIdx = normalizedContent.IndexOf(line, StringComparison.Ordinal);
+            if (lineIdx >= 0) return lineIdx;
+        }
+        return -1;
+    }
+
+    /// <summary>
     /// Builds a bounded view of a large file for the post-execution verifier. When the file
     /// fits within <paramref name="maxChars"/> the whole content is returned unchanged.
     /// When it doesn't, the view keeps a bounded head, a window around each located anchor
     /// (the newString of each applied edit — so the verifier ALWAYS sees the region this run
     /// changed, even in a 40k-char stylesheet), and a bounded tail, each with explicit
-    /// truncation markers. Anchors are matched verbatim after line-ending normalization,
-    /// with a fallback to the anchor's longest distinctive line so an edit that was later
-    /// reformatted or merged is still located. Falls back to head+tail when no anchor can be
-    /// located (e.g. a full-file rewrite superseded the snippet).
+    /// truncation markers. Anchors are matched via <see cref="FindAnchorOffset"/> — verbatim
+    /// after line-ending normalization, with a fallback to the anchor's longest distinctive
+    /// line so an edit that was later reformatted or merged is still located. Falls back to
+    /// head+tail when no anchor can be located (e.g. a full-file rewrite superseded the snippet).
     /// </summary>
     public static string BuildVerifierFileView(string content, IReadOnlyList<string>? anchors, int maxChars = 12000)
     {
@@ -136,23 +180,9 @@ public static class AgentTextUtilities
             foreach (var anchor in anchors)
             {
                 if (string.IsNullOrWhiteSpace(anchor)) continue;
+                var idx = FindAnchorOffset(normalized, anchor);
                 var normAnchor = NormalizeLineEndings(anchor).Trim('\r', '\n');
-                if (normAnchor.Length == 0) continue;
-                var idx = normalized.IndexOf(normAnchor, StringComparison.Ordinal);
-                if (idx < 0)
-                {
-                    // An edit that was later reformatted/merged may no longer match verbatim —
-                    // retry with its longest distinctive line (selector/method signature lines
-                    // survive reformatting).
-                    var bestLine = normAnchor.Split('\n')
-                        .Select(l => l.Trim())
-                        .Where(l => l.Length >= 20 && !l.StartsWith("//") && !l.StartsWith("/*") && !l.StartsWith("*"))
-                        .OrderByDescending(l => l.Length)
-                        .FirstOrDefault();
-                    if (bestLine != null)
-                        idx = normalized.IndexOf(bestLine, StringComparison.Ordinal);
-                }
-                if (idx >= 0)
+                if (idx >= 0 && normAnchor.Length > 0)
                 {
                     var windowStart = Math.Max(0, idx - 400);
                     var windowEnd = Math.Min(normalized.Length, idx + normAnchor.Length + 400);
@@ -224,6 +254,176 @@ public static class AgentTextUtilities
         for (var i = 0; i < lines.Length; i++)
             lines[i] = lines[i].TrimStart();
         return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// Deterministic ground truth for the post-execution verifier: for every edit this run
+    /// reports as applied (type edit/create, status done/modified/created) on a real file,
+    /// verifies that the edit's newString is actually present in the CURRENT file on disk
+    /// (via <see cref="FindAnchorOffset"/>, so reformatted/merged edits still count).
+    /// Returns two lists:
+    ///   • <paramref name="confirmedEdits"/> — "path → newString" facts the verifier MUST NOT
+    ///     contradict (e.g. claim 'the change was not made' when the new text is provably on
+    ///     disk). These are the known-correct answers shown on the card. Every applied edit
+    ///     whose newString is found is listed, so a card that fixed multiple occurrences shows
+    ///     each one confirmed.
+    ///   • <paramref name="missingEditIssues"/> — CONFIRMED issues for applied edits whose
+    ///     newString is NOT found on disk (edit never landed / was reverted / path moved).
+    ///     These fail verification deterministically instead of relying on the LLM to notice.
+    ///     To stay churn-free across repair passes (a later pass may legitimately rewrite a
+    ///     region an earlier edit touched), the MISSING side checks only the LAST applied
+    ///     edit per path — the file's final claimed state — while the confirmed side lists all.
+    /// Pure function of disk state — no LLM, so findings cannot hallucinate.
+    /// </summary>
+    public static (List<string> confirmedEdits, List<string> missingEditIssues) CheckAppliedEditsPresent(
+        string projectRoot, IEnumerable<object> allResults)
+    {
+        var confirmedEdits = new List<string>();
+        var missingEditIssues = new List<string>();
+        // Preserve run order so the LAST applied edit per path is identifiable.
+        var lastEditPerPath = new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in allResults.OfType<Dictionary<string, object?>>())
+        {
+            var type = r.GetValueOrDefault("type")?.ToString();
+            if (type is not ("edit" or "create")) continue;
+            var status = r.GetValueOrDefault("status")?.ToString();
+            if (status is not ("done" or "modified" or "created")) continue;
+            var path = r.GetValueOrDefault("path")?.ToString();
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            lastEditPerPath[path] = r;
+            var newString = r.GetValueOrDefault("newStringPreview")?.ToString();
+            if (string.IsNullOrWhiteSpace(newString)) continue;
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) continue;
+            var normalized = NormalizeLineEndings(System.IO.File.ReadAllText(fullPath));
+            if (FindAnchorOffset(normalized, newString) >= 0)
+                confirmedEdits.Add($"{path.Replace('/', Path.DirectorySeparatorChar)} — {OneLineSnippet(newString)}");
+        }
+        foreach (var (path, last) in lastEditPerPath)
+        {
+            var newString = last.GetValueOrDefault("newStringPreview")?.ToString();
+            if (string.IsNullOrWhiteSpace(newString)) continue;
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath))
+            {
+                missingEditIssues.Add(
+                    $"Applied edit for {path} is missing on disk — the target file no longer exists after the run.");
+                continue;
+            }
+            var normalized = NormalizeLineEndings(System.IO.File.ReadAllText(fullPath));
+            if (FindAnchorOffset(normalized, newString) < 0)
+                missingEditIssues.Add(
+                    $"Applied edit for {path} is NOT present in the current file — the change did not land " +
+                    $"(or was overwritten/reverted). Expected: {OneLineSnippet(newString)}");
+        }
+        return (confirmedEdits, missingEditIssues);
+    }
+
+    /// <summary>
+    /// Computes the deterministic expected outcomes for a plan step — the known-correct answer
+    /// THAT STEP is checked against, e.g.:
+    ///   • a literal swap: the new literal must be present ("rename 'Details' to 'Open'" →
+    ///     "Expected: \"Open\" present in the file");
+    ///   • a 'did you mean' typo fix: the corrected token must be what's on disk
+    ///     ("fix opnCard" → "Expected: \"openCard\" replaces \"opnCard\"").
+    /// The new-content entry is derived from whichever content form the step carries
+    /// (NewString, FullFile, NewCode, or multi-edit pairs); the typo-fix entries come from a
+    /// token diff of OldString vs NewString using the same plausible-typo/plural heuristics as
+    /// the hallucinated-property guard. Pure function — no LLM, no disk — so the expectations
+    /// can be attached at plan time and verified against the file when the step completes.
+    /// </summary>
+    public static List<StepGroundTruth> ComputeStepGroundTruth(
+        string relPath, string? oldStr, string? newStr,
+        string? fullFile = null, List<string>? newCode = null, List<EditPair>? edits = null)
+    {
+        var items = new List<StepGroundTruth>();
+        var newContent = !string.IsNullOrWhiteSpace(newStr) ? newStr
+            : !string.IsNullOrWhiteSpace(fullFile) ? fullFile
+            : newCode is { Count: > 0 } ? string.Join("\n", newCode)
+            : edits is { Count: > 0 } ? string.Join("\n", edits.Where(e => !string.IsNullOrWhiteSpace(e.NewString)).Select(e => e.NewString))
+            : null;
+        if (!string.IsNullOrWhiteSpace(newContent))
+        {
+            var snippet = OneLineSnippet(newContent);
+            items.Add(new StepGroundTruth
+            {
+                Text = $"Expected: \"{snippet}\" present in {relPath}",
+                File = relPath,
+                // The on-disk anchor is the last substantial line (survives the apply
+                // pipeline's paren-spacing self-heal via NormalizeParenSpacing at verify time).
+                Anchor = AnchorFor(newContent)
+            });
+        }
+        // 'did you mean' typo-fix expectations: a token REMOVED by the edit that is a
+        // plausible typo/plural variant of a token INTRODUCED by it — the corrected form
+        // must be what's on disk after the step (mirrors the guard's heuristic, applied in
+        // the fix direction: old `opnCard` → new `openCard`, or old `estimated` → new
+        // `ested` when the step is the one introducing the hallucination).
+        if (!string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr) && items.Count < 3)
+        {
+            var removed = TokenWords(oldStr).Except(TokenWords(newStr)).ToList();
+            var introduced = TokenWords(newStr).Except(TokenWords(oldStr)).ToList();
+            foreach (var intro in introduced.OrderByDescending(t => t.Length))
+            {
+                if (items.Count >= 3) break;
+                if (intro.Length < 4) continue;
+                var removedMatch = removed.FirstOrDefault(r => SimilarWord(r, intro));
+                if (removedMatch == null) continue;
+                items.Add(new StepGroundTruth
+                {
+                    Text = $"Expected: \"{intro}\" replaces \"{removedMatch}\" in {relPath}",
+                    File = relPath,
+                    Anchor = intro
+                });
+            }
+        }
+        return items;
+    }
+
+    /// <summary>Plausible-typo OR plural/Array/List variant relation — the two families the
+    /// hallucinated-property guard uses to suggest "did you mean".</summary>
+    private static bool SimilarWord(string a, string b) =>
+        IsPlausibleTypo(a, b) || IsPlausibleTypo(b, a) ||
+        PluralVariants(a).Contains(b) || PluralVariants(b).Contains(a);
+
+    private static IEnumerable<string> PluralVariants(string w)
+    {
+        yield return w + "s";
+        yield return w + "es";
+        yield return w + "Array";
+        yield return w + "List";
+        if (w.EndsWith("es", StringComparison.Ordinal)) yield return w[..^2];
+        else if (w.EndsWith("s", StringComparison.Ordinal)) yield return w[..^1];
+    }
+
+    /// <summary>Distinct identifier-like tokens in a string (the guard's word-extraction shape).</summary>
+    private static IEnumerable<string> TokenWords(string s) =>
+        Regex.Matches(s, @"[A-Za-z_][A-Za-z0-9_]*").Cast<Match>().Select(m => m.Value).Distinct();
+
+    /// <summary>The on-disk search anchor for a step's new content: the last substantial line of
+    /// the new content (the changed line survives later reformatting better than a flattened
+    /// snippet; a multi-line edit's flattened text never appears verbatim). Falls back to the
+    /// one-line snippet for content with no substantial line.</summary>
+    private static string AnchorFor(string content)
+    {
+        var lines = content.Replace("\r\n", "\n").Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length >= 8 && !l.StartsWith("//") && !l.StartsWith("/*") && !l.StartsWith("*"))
+            .ToList();
+        if (lines.Count == 0) return OneLineSnippet(content);
+        return lines[^1];
+    }
+
+    /// <summary>Normalizes `word (` → `word(` — mirrors the apply pipeline's HTML style
+    /// self-heal (the whole changed line is rewritten), so per-step ground-truth verification
+    /// matches what actually landed on disk instead of false-negativing on the paren spacing.</summary>
+    public static string NormalizeParenSpacing(string s) =>
+        s == null ? "" : Regex.Replace(s, @"\b(\w+)\s+\(", "$1(");
+
+    private static string OneLineSnippet(string s)
+    {
+        var flat = string.Join(" ", s.Replace("\r\n", "\n").Replace('\n', ' ').Split(' ').Where(w => w.Length > 0));
+        return flat.Length <= 160 ? flat : flat[..160] + "…";
     }
 
     public static string Truncate(string s, int max) => s.Length <= max ? s : s.Substring(0, max) + "\n[Preview ended; omitted remainder is not code.]";

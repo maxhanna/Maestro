@@ -21,6 +21,12 @@ public class BughostedController : ControllerBase
     private readonly IHostApplicationLifetime _hostLifetime;
     private readonly DatabaseService _db;
     private const string DefaultBugHostedUrl = "https://bughosted.com";
+    /// <summary>Max chars for the forwarded plan summary (a run summary, not a doc).</summary>
+    private const int MaxPlanSummaryChars = 2000;
+    /// <summary>Max files-edited entries forwarded (first N wins, run order preserved).</summary>
+    private const int MaxFilesEditedEntries = 100;
+    /// <summary>Max chars per forwarded file path.</summary>
+    private const int MaxFilePathChars = 300;
     private static readonly Dictionary<string, BughostedSession> _sessions = new();
     private static string _updateStage = "idle";
     private static long _updateBytesDownloaded;
@@ -451,6 +457,67 @@ start """" ""{currentExe}"" --no-open-browser
         {
             var client = _clientFactory.CreateClient();
             var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/weaver/commands?token={session.Token}");
+            var httpRes = await client.SendAsync(httpReq);
+            var body = await httpRes.Content.ReadAsStringAsync();
+            if (!httpRes.IsSuccessStatusCode)
+                return StatusCode((int)httpRes.StatusCode, body);
+            return Content(body, "application/json");
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Submit card feedback to the bughosted server. The user is identified by
+    /// the weaver session token (from login), so no PII is sent beyond the card
+    /// id/text and the message itself.
+    /// </summary>
+    [HttpPost("feedback")]
+    public async Task<IActionResult> Feedback([FromBody] BughostedFeedbackRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGetValue(req.ClientId, out var session))
+            return Unauthorized(new { error = "Not logged in" });
+        if (string.IsNullOrWhiteSpace(req.Message))
+            return BadRequest(new { error = "Feedback message required" });
+
+        // Fixed caps so a huge run can never bloat the forwarded payload: the plan
+        // summary is truncated to MaxPlanSummaryChars, and the files-edited list is
+        // trimmed to MaxFilesEditedEntries (first N kept, each path truncated to
+        // MaxFilePathChars). Applied BEFORE forwarding — the receiving hub trusts it.
+        var planSummary = req.PlanSummary;
+        if (planSummary != null && planSummary.Length > MaxPlanSummaryChars)
+            planSummary = planSummary[..MaxPlanSummaryChars];
+        var filesEdited = req.FilesEdited;
+        if (filesEdited != null)
+        {
+            filesEdited = filesEdited
+                .Take(MaxFilesEditedEntries)
+                .Select(p => (p ?? "").Length > MaxFilePathChars ? p![..MaxFilePathChars] : p)
+                .ToList();
+        }
+
+        try
+        {
+            var client = _clientFactory.CreateClient();
+            // camelCase so the nested BughostedFeedbackStep DTO serializes as
+            // type/change/status — matching the rest of the payload (token/cardId/…) and
+            // what the front end sends.
+            var payload = JsonSerializer.Serialize(new
+            {
+                token = session.Token,
+                cardId = req.CardId,
+                cardText = req.CardText,
+                message = req.Message,
+                planSummary = planSummary,
+                filesEdited = filesEdited,
+                steps = req.Steps
+            }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/feedback")
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
             if (!httpRes.IsSuccessStatusCode)
@@ -1015,6 +1082,29 @@ public class BenchmarkDataDTO
     public string? UserName { get; set; }
 }
 
+
+public class BughostedFeedbackRequest
+{
+    public string ClientId { get; set; } = "";
+    public string? CardId { get; set; }
+    public string? CardText { get; set; }
+    public string Message { get; set; } = "";
+    /// <summary>The card's run plan summary (what the run was supposed to do).</summary>
+    public string? PlanSummary { get; set; }
+    /// <summary>Relative paths of the files the run actually edited (what it did).</summary>
+    public List<string>? FilesEdited { get; set; }
+    /// <summary>Per-step outcomes: each planned step's type, change (description/path/
+    /// command/url), and status — so weaver admins see the run at step granularity.</summary>
+    public List<BughostedFeedbackStep>? Steps { get; set; }
+}
+
+/// <summary>One planned step's outcome, as rendered in the card's AI analysis steps view.</summary>
+public class BughostedFeedbackStep
+{
+    public string Type { get; set; } = "";
+    public string? Change { get; set; }
+    public string? Status { get; set; }
+}
 
 public class BughostedLoginRequest
 {

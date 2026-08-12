@@ -320,6 +320,56 @@ public class PipelineTests
         Assert.Equal(expected, AgentProjectUtilities.LooksLikeShellCommand(command));
     }
 
+    // ── Shell-command gate: the Set-Content / Out-File / Add-Content write cmdlets ──
+    // A _command step whose change is not a recognizable shell command is rejected
+    // (ValidateIncrementalStepAsync). The OS-filesystem discovery section and the
+    // web-chain tool example TEACH desktop writes that lead with these three cmdlets
+    // ("Set-Content -Path \"<desktop>\file.txt\" -Value \"<content>\" -Encoding UTF8").
+    // If any of them ever drops out of the gate's knownCommands set, a planned desktop
+    // write is rejected — these tests lock all three from the front of the command.
+
+    [Theory]
+    [InlineData("Set-Content -Path \"C:\\Users\\Saint\\Desktop\\ai_article.txt\" -Value \"hello world\" -Encoding UTF8")]
+    [InlineData("Set-Content -Path C:\\Users\\Saint\\Desktop\\notes.txt -Value \"line\"")]
+    [InlineData("Out-File -FilePath \"C:\\Users\\Saint\\Desktop\\results.txt\" -InputObject \"line one\"")]
+    [InlineData("Out-File -FilePath C:\\Users\\Saint\\Desktop\\log.txt -Append")]
+    [InlineData("Add-Content -Path \"C:\\Users\\Saint\\Desktop\\notes.txt\" -Value \"appended\"")]
+    [InlineData("Add-Content -Path C:\\Users\\Saint\\Desktop\\journal.txt -Value \"entry\"")]
+    public void LooksLikeShellCommand_WriteCmdletLeading_PlannedDesktopWritePasses(string command)
+    {
+        Assert.True(AgentProjectUtilities.LooksLikeShellCommand(command),
+            $"planned desktop write was rejected by the shell-command gate: {command}");
+    }
+
+    // The exact write chains the prompts TEACH for OS/web tasks (discovery section +
+    // web-chain tool-use example + CommandPipeline working example) — every one must
+    // pass the gate so the planner's desktop write is never rejected mid-run.
+
+    [Theory]
+    [InlineData("Invoke-RestMethod https://example.com/api | Set-Content -Path \"C:\\Users\\Saint\\Desktop\\file.txt\"")]
+    [InlineData("Invoke-RestMethod https://pokeapi.co/api/v2/pokemon?limit=1000 | Select-Object -ExpandProperty results | ForEach-Object { $_.name } | Set-Content C:\\Users\\Saint\\Desktop\\pokemon.csv")]
+    [InlineData("Get-Content \"C:\\Users\\Saint\\Desktop\\data.txt\" | Add-Content -Path \"C:\\Users\\Saint\\Desktop\\notes.txt\"")]
+    [InlineData("Get-ChildItem C:\\Users\\Saint\\Desktop\\*.log | Out-File -FilePath \"C:\\Users\\Saint\\Desktop\\log-list.txt\"")]
+    [InlineData("Write-Output \"article summary\" | Set-Content -Path \"C:\\Users\\Saint\\Desktop\\ai_article.txt\" -Encoding UTF8")]
+    [InlineData("Invoke-WebRequest https://example.com/page | Select-Object -ExpandProperty Content | Out-File -FilePath \"C:\\Users\\Saint\\Desktop\\page.html\"")]
+    public void LooksLikeShellCommand_TaughtDesktopWriteChains_PassTheGate(string command)
+    {
+        Assert.True(AgentProjectUtilities.LooksLikeShellCommand(command),
+            $"taught desktop-write chain was rejected by the shell-command gate: {command}");
+    }
+
+    // Precision guard: the additions must not turn prose that merely mentions the
+    // write verbs into an accepted command.
+
+    [Theory]
+    [InlineData("Set the content of the desktop file to the article summary")]
+    [InlineData("Write the fetched results into a text file on the desktop")]
+    public void LooksLikeShellCommand_WriteVerbProse_StillRejected(string command)
+    {
+        Assert.False(AgentProjectUtilities.LooksLikeShellCommand(command),
+            $"prose mentioning a write verb passed the shell-command gate: {command}");
+    }
+
     // ── LooksLikeContentFetchCommand (the "api.current.ai" failure mode) ──
     // A _command step that fetches content from an http(s) URL with a download tool
     // must be steered to _web_search/_web_fetch. Legit URL-using commands (clone /

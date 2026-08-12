@@ -32,6 +32,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Tool-selection corpus data (tests/tool-selection-corpus.json): copied to the test
+         output so the data-driven ToolCorpus MemberData loads from disk (new cases = a JSON
+         edit, no C# change). CopyToPublishDirectory=Never keeps the test data out of the
+         published single-file EXE. -->
+    <None Include="tests/tool-selection-corpus.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="Never"
+          TargetPath="tool-selection-corpus.json" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="wwwroot\**\*.*" />
     <!-- appsettings.json is bundled into the single-file exe; Program.cs loads it
          from this embedded copy when the on-disk file is missing. -->

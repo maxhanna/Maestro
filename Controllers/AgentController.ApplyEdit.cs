@@ -25,6 +25,38 @@ namespace Weaver.Controllers;
 
 partial class AgentController
 {
+    /// <summary>For a template (.html/.htm) edit, resolves the sibling Angular component
+    /// (.component.ts) content so the hallucinated-property guard can judge bound members
+    /// against the component's declared members — a template alone never contains them.
+    /// Follows Angular's `x.component.html` ↔ `x.component.ts` convention (with a plain
+    /// `x.html` → `x.ts` fallback); returns null when no sibling exists.</summary>
+    private static string? TryReadComponentTsContent(string relPath, string projectRoot)
+    {
+        var ext = Path.GetExtension(relPath)?.ToLowerInvariant();
+        if (ext is not (".html" or ".htm")) return null;
+        var candidates = new List<string>
+        {
+            Path.ChangeExtension(relPath, ".ts")
+        };
+        // Belt-and-suspenders: also try the explicit .component.ts name in case the template
+        // name is odd (e.g. index.html for a component).
+        if (relPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+            candidates.Add(relPath[..^5] + ".component.ts");
+        else if (relPath.EndsWith(".htm", StringComparison.OrdinalIgnoreCase))
+            candidates.Add(relPath[..^4] + ".component.ts");
+        foreach (var cand in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, cand.Replace('/', Path.DirectorySeparatorChar)));
+            try
+            {
+                if (System.IO.File.Exists(full))
+                    return System.IO.File.ReadAllText(full);
+            }
+            catch { }
+        }
+        return null;
+    }
+
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -75,7 +107,7 @@ partial class AgentController
                 };
                 if (emitSse) await SendSse(Response, "step", skip, ct);
                 allResults.Add(skip);
-                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
                 return stepIndex + 1;
             }
         }
@@ -414,7 +446,7 @@ partial class AgentController
                 };
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
-                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
                 return stepIndex + 1;
             }
             if (fullFile && fullContent != null)
@@ -884,7 +916,7 @@ partial class AgentController
                     };
                     if (emitSse) await SendSse(Response, "step", r2, ct);
                     allResults.Add(r2);
-                    await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
                     return stepIndex + 1;
                 }
                 await EmitLog(emitSse, "warn", $"No-op edit for {relPath}: LLM produced no change. Retrying.", ct: ct);
@@ -928,7 +960,20 @@ partial class AgentController
                 }
                 if (wipeReason == null)
                 {
-                    wipeReason = AgentEditHeuristics.DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath);
+                    // The mirror of the duplicate-key guard: an aggregation edit (the change
+                    // description names a grouping verb) whose grouped output has FEWER entries
+                    // than the flat input silently dropped rows — reject before it lands.
+                    wipeReason = AgentEditHeuristics.DetectDroppedEntriesInGroupedOutput(oldStr!, newStr!, step.Change);
+                }
+                if (wipeReason == null)
+                {
+                    // For template edits, resolve bound properties against the sibling component
+                    // (.component.ts) as well as the HTML itself: a binding referencing a member
+                    // genuinely declared in the component must never false-positive as a typo of
+                    // a similar template token, and a typo of a real TS member is caught even
+                    // when the real name appears nowhere in the template.
+                    var relatedTsContent = TryReadComponentTsContent(relPath, projectRoot);
+                    wipeReason = AgentEditHeuristics.DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath, relatedTsContent);
                 }
                 if (wipeReason == null)
                 {
@@ -974,7 +1019,7 @@ partial class AgentController
                             };
                             if (emitSse) await SendSse(Response, "step", r, ct);
                             allResults.Add(r);
-                            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
                             return stepIndex + 1;
                         }
                     }

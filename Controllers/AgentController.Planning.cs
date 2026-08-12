@@ -318,16 +318,35 @@ partial class AgentController
                         continue;
                     var existingItems = cardObj["_plan"]?.AsObject()?["items"] as JsonArray;
                     var doneLookup = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    // Per-step ground truth verified flags, keyed by (file|change) → (anchor → verified):
+                    // a rebuild recomputes the expectation texts from the steps but must keep the
+                    // verified=true/false marks already stamped at step completion (PersistBoardDataPlanStepAsync),
+                    // or an already-completed step would silently drop back to unverified.
+                    var gtVerifiedLookup = new Dictionary<string, Dictionary<string, bool>>(StringComparer.OrdinalIgnoreCase);
                     if (existingItems != null)
                     {
                         foreach (var existing in existingItems)
                         {
-                            if (existing is JsonObject eo &&
-                                eo["done"]?.GetValue<bool>() == true &&
+                            if (existing is not JsonObject eo) continue;
+                            if (eo["done"]?.GetValue<bool>() == true &&
                                 eo["file"]?.GetValue<string>() is string ef &&
                                 eo["change"]?.GetValue<string>() is string ec)
                             {
                                 doneLookup.Add(ef + "|" + ec);
+                            }
+                            if (eo["groundTruth"] is JsonArray gtArr &&
+                                eo["file"]?.GetValue<string>() is string gtf &&
+                                eo["change"]?.GetValue<string>() is string gtc)
+                            {
+                                var byAnchor = new Dictionary<string, bool>(StringComparer.Ordinal);
+                                foreach (var n in gtArr.OfType<JsonObject>())
+                                {
+                                    if (n["anchor"]?.GetValue<string>() is string a &&
+                                        n["verified"] is JsonValue v && v.TryGetValue<bool>(out var vb))
+                                        byAnchor[a] = vb;
+                                }
+                                if (byAnchor.Count > 0)
+                                    gtVerifiedLookup[gtf + "|" + gtc] = byAnchor;
                             }
                         }
                     }
@@ -348,6 +367,23 @@ partial class AgentController
                     {
                         var s = planSteps[i];
                         var wasDone = doneLookup.Contains((s.File ?? "") + "|" + (s.Change ?? ""));
+                        // Per-step computed ground truth: the deterministic expected outcome
+                        // for THIS step (e.g. a literal swap's new text must be present; a
+                        // 'did you mean' typo fix's corrected token must be what's on disk).
+                        // Attached so each plan item shows its own expected outcome; verified
+                        // against disk when the step completes (PersistBoardDataPlanStepAsync
+                        // sets verified=true/false per entry).
+                        var stepGt = s.GroundTruth;
+                        JsonNode? stepGtNode = stepGt is { Count: > 0 } ? JsonSerializer.SerializeToNode(stepGt) : null;
+                        if (stepGtNode is JsonArray gtArr &&
+                            gtVerifiedLookup.TryGetValue((s.File ?? "") + "|" + (s.Change ?? ""), out var prevByAnchor))
+                        {
+                            foreach (var n in gtArr.OfType<JsonObject>())
+                            {
+                                if (n["anchor"]?.GetValue<string>() is string a && prevByAnchor.TryGetValue(a, out var vb))
+                                    n["verified"] = vb;
+                            }
+                        }
                         planItems.Add(new JsonObject
                         {
                             ["index"] = planItems.Count,
@@ -356,7 +392,8 @@ partial class AgentController
                             ["priority"] = s.Priority,
                             ["line"] = s.LineNumber,
                             ["metaGroup"] = s.MetaGroup,
-                            ["done"] = wasDone
+                            ["done"] = wasDone,
+                            ["groundTruth"] = stepGtNode
                         });
                     }
                     // Preserve rejected step records (web-gate vetoes) across plan rebuilds
@@ -630,8 +667,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         var cfg = await LoadConfigAsync();
         var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct), atomicStepEstimate);
-        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning, atomicStepEstimate);
-        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 4096);
+        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning, atomicStepEstimate, _requirementChecklist);
+        // Labeled so the agent panel shows the token spend of this planning round (prompt +
+        // response) right in the run's log, and the step result aggregates it as llmTokens.
+        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout,
+            maxTokens: 4096, llmRoundLabel: $"planner step {planSoFar.Count + 1}");
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Incremental step proposal returned empty: {err}", ct: ct);
@@ -853,6 +893,88 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             @"\b(create|make|generate|write|scaffold|init)\s+(?:a|an|the|another)\s+" + artifact + @"\b");
     }
 
+    /// <summary>
+    /// The invented-directory check shared by the incremental per-step guard and the classic
+    /// whole-plan pre-execution gate: returns the rejection reason for a _create_file path
+    /// whose directory prefix does not exist anywhere in the project, steering to the closest
+    /// real directory, or null when the directory is legitimate. Exemptions (the guard only
+    /// fires on PLANNER-INVENTED directories): an earlier _create_directory step in the plan
+    /// makes the directory real, the USER's task explicitly names the path (legit "write
+    /// docs/README.md" into a brand-new folder), and OS paths (rejected by the OS-task veto,
+    /// never here). Path.GetDirectoryName returns OS separators (backslashes on Windows) —
+    /// normalized so the comparison against FindClosestRealDirectory's '/' paths works.
+    /// </summary>
+    private static string? InventedCreateDirectoryReason(
+        string createCandidate, string originalPrompt, IEnumerable<PlanStep> priorSteps, string projectRoot)
+    {
+        var createDir = (Path.GetDirectoryName(createCandidate) ?? "").Replace('\\', '/');
+        var dirMadeByPriorStep = priorSteps.Any(p =>
+            string.Equals(p.File, "_create_directory", StringComparison.OrdinalIgnoreCase) &&
+            AgentDiscovery.IsPathAncestorOrEqual(p.Change ?? "", createDir));
+        var pathNamedByPrompt = originalPrompt.IndexOf(createCandidate, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                originalPrompt.IndexOf(createDir, StringComparison.OrdinalIgnoreCase) >= 0;
+        var createCandidateIsOsPath = createCandidate.StartsWith("/")
+            || createCandidate.StartsWith("~")
+            || createCandidate.StartsWith("\\\\")
+            || Regex.IsMatch(createCandidate, @"^[A-Za-z]:[\\/]");
+        if (string.IsNullOrWhiteSpace(createDir) || dirMadeByPriorStep || pathNamedByPrompt || createCandidateIsOsPath)
+            return null;
+        var closest = AgentDiscovery.FindClosestRealDirectory(createCandidate, projectRoot);
+        if (closest == null)
+            return $"_create_file directory '{createDir}' does not exist in the project — the file would land at the project root. " +
+                   "Put the file under an existing directory instead of inventing a new path.";
+        if (!string.Equals(closest, createDir, StringComparison.OrdinalIgnoreCase))
+            return $"_create_file directory '{createDir}' does not exist anywhere in the project. " +
+                   $"Retarget the file under the closest real directory '{closest}' (or any existing directory) — NEVER invent directory paths.";
+        return null;
+    }
+
+    /// <summary>The candidate path of a step that CREATES a file: the path in the Change of a
+    /// _create_file marker step (dotted path extracted whole so maxhanna.client/src/… prefixes
+    /// are captured), or the plain relative File of the create-eligible shape (newString content,
+    /// no oldString anchor). Returns null for non-create steps / unparseable paths.</summary>
+    private static string? CreateCandidatePath(PlanStep step)
+    {
+        if (step.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
+        {
+            var m = Regex.Match(step.Change ?? "", @"([\w.\-/\\]+\.\w{1,10})");
+            return m.Success ? m.Groups[1].Value : null;
+        }
+        if (!AgentProjectUtilities.IsSpecialMarker(step.File) &&
+            AgentProjectUtilities.IsRelativePath(step.File) &&
+            !string.IsNullOrWhiteSpace(step.NewString) &&
+            string.IsNullOrWhiteSpace(step.OldString))
+        {
+            return step.File.Replace('\\', '/');
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Classic-route mirror of the incremental invented-directory guard: scans a WHOLE plan
+    /// (the classic route has no per-step validation) for _create_file steps whose directory
+    /// prefix is nonsense, evaluated against the steps BEFORE each create (so an earlier
+    /// _create_directory step in the same plan legitimately makes the directory real).
+    /// </summary>
+    private static List<(PlanStep Step, string Reason)> FindInventedCreateDirectories(
+        AgentPlan plan, string originalPrompt, string projectRoot)
+    {
+        var violations = new List<(PlanStep, string)>();
+        if (plan?.Plan == null) return violations;
+        var prior = new List<PlanStep>();
+        foreach (var step in plan.Plan)
+        {
+            var candidate = CreateCandidatePath(step);
+            if (candidate != null &&
+                InventedCreateDirectoryReason(candidate, originalPrompt, prior, projectRoot) is string reason)
+            {
+                violations.Add((step, reason));
+            }
+            prior.Add(step);
+        }
+        return violations;
+    }
+
     private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
         PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string projectRoot, bool emitSse, CancellationToken ct,
@@ -896,7 +1018,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase) &&
                                    string.Equals(s.Change, step.Change, StringComparison.OrdinalIgnoreCase)))
                 return (false, $"File '{step.Change}' was already created by a prior _create_file step — target the existing file instead.");
-            var createPathMatch = Regex.Match(step.Change, @"([\w\-/\\]+\.\w{1,10})");
+            // '.' is in the path class so dotted prefixes (maxhanna.client/src/…) are captured
+            // whole — the old [\w\-/\\]+ stopped at the first dot and matched only
+            // "maxhanna.client", blindfolding both the same-dir conflict check and this guard.
+            var createPathMatch = Regex.Match(step.Change, @"([\w.\-/\\]+\.\w{1,10})");
             if (createPathMatch.Success)
             {
                 var createCandidate = createPathMatch.Groups[1].Value.Replace('\\', '/');
@@ -912,6 +1037,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         return (false, $"File '{createFileName}' ALREADY EXISTS at '{existingFile}' — do NOT create it. " +
                                         "Target the existing file path in a normal edit step instead.");
                 }
+                // INVENTED-DIRECTORY GUARD: a _create_file under a directory prefix that does
+                // not exist anywhere in the project (e.g. "src/helpers/weaver/util.ts" when no
+                // such folder exists) would silently materialize the whole invented path on
+                // disk — the directory counterpart of the edit-to-a-nonexistent-file guard.
+                // Reject and steer to the CLOSEST REAL directory (deepest existing ancestor,
+                // or an existing folder with the same leaf name). The check (and its three
+                // exemptions: earlier _create_directory step, path named by the task, OS paths)
+                // is shared with the classic route's whole-plan gate.
+                if (InventedCreateDirectoryReason(createCandidate, originalPrompt, planSoFar, projectRoot) is string createDirReason)
+                    return (false, createDirReason);
             }
         }
         if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
@@ -993,8 +1128,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // query/URL. The web-need gate decides whether web steps are allowed, not this guard;
         // rejecting them here deadlocks web-needing tasks (the model proposes the right tool
         // and the loop bounces it, exactly like the "Search the web…" run).
+        // _create_file is exempt too: its change field is a RELATIVE PATH, and legit paths
+        // can start with research verbs ("README.md", "findings.txt", "search_results.json").
         if (!step.File.Equals("_discover", StringComparison.OrdinalIgnoreCase) &&
             !IsWebStep(step.File) &&
+            !step.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) &&
             researchVerbs.Any(v => changeLower.StartsWith(v)))
         {
             return (false, $"Research step rejected — '{changeLower.Split(' ')[0]}' is not an actionable edit. " +
@@ -1058,6 +1196,32 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     step.File = "_create_file";
                     step.Change = origPath;
                     return (true, null);
+                }
+                // INVENTED-FILE GUARD: an edit step that is NOT create-eligible (it carries an
+                // oldString anchor, or no content at all) targets a file that does not exist.
+                // The resolver would "resolve" it into a full-file CREATION — the planner's
+                // invented path silently materializes on disk — and the executor's own
+                // "File does not exist" refusal is unreachable because the AST pre-resolution
+                // drops the anchor first. Reject deterministically so the next proposal
+                // re-grounds: use _create_file if the file is genuinely new, or target an
+                // existing file. A file an earlier committed step creates (willBeCreatedEarlier)
+                // is exempt — that edit is a legit follow-up, not an invention.
+                if (!willBeCreatedEarlier)
+                {
+                    // EXTENDED STEERING: instead of a bare rejection, propose the closest REAL
+                    // sibling path — the existing file the planner most likely meant (same leaf
+                    // name in a different real directory, or a typo/plural/case variant in the
+                    // closest real directory) — so the next proposal re-grounds in a real file
+                    // instead of retrying the same fiction.
+                    var sibling = AgentDiscovery.FindRealSiblingForInventedFile(step.File, projectRoot);
+                    return (false,
+                        sibling != null
+                            ? $"Cannot edit '{step.File}' — the file does not exist in the project. " +
+                              $"The closest real sibling is '{sibling}' — retarget this step to that existing file. " +
+                              $"If the file should genuinely be created, use a _create_file step with the full file content in newString. NEVER invent file paths."
+                            : $"Cannot edit '{step.File}' — the file does not exist in the project. " +
+                              $"If the file should be created, use a _create_file step with the full file content in newString. " +
+                              $"Otherwise target an existing file. NEVER invent file paths.");
                 }
             }
             if (fileExists)
@@ -1307,6 +1471,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         await EmitLog(emitSse, "info", "Planner requested _discover — running project-wide search…", ct: ct);
                         discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                        await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                         regenAttempts = 0;
                         continue;
                     }
@@ -1346,6 +1511,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
+                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
@@ -1399,6 +1565,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
+                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
@@ -1430,6 +1597,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await EmitLog(emitSse, "info", "Incremental planning: _discover step — running project-wide search…", ct: ct);
                     discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                     regenAttempts = 0;
                     continue;
                 }
@@ -2154,6 +2322,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var planCompleteDeclared = false;
         var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var thinkingLog = new StringBuilder();
+        // Set when the between-steps completion assessment said the task is NOT done yet; used
+        // by the planComplete gate below so a planner that declares completion right after an
+        // "incomplete" verdict is re-assessed instead of blindly trusted (the wrong-target
+        // class: the assessment now judges the user's LATEST intent, steering included).
+        var lastAssessIncomplete = false;
+        var lastAssessReason = "";
         // Bounded accumulator for the "CHANGES FROM PREVIOUS STEP" section: instead of stacking
         // every step's raw diff forever, we keep ONE section and LLM-summarize it once it passes
         // cfg.diffContextSummaryChars (when cfg.summarizeDiffContext is on).
@@ -2172,6 +2346,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var osTaskGuard = IsExternalFilesystemTask(prompt);
         var osTaskPure = osTaskGuard && !OsPromptHintsRepoWork(prompt);
         var osRepoEditVerdicts = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        // Failed _web_fetch/_web_search steps are retried with feedback instead of halting the
+        // run (the pre-fix behavior: an invented URL fails, the loop halts, and the repair
+        // replanner — which has no web-results context — invents application code to "write"
+        // the demanded file). Bounded so a persistently-broken URL can't loop forever; after
+        // the cap the run halts into post-execution verification like any other failure.
+        var webStepFailures = 0;
+        const int MaxWebStepRetries = 2;
         if (emitSse)
         {
             await SendSse(Response, "plan", new
@@ -2211,6 +2392,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
             ct.ThrowIfCancellationRequested();
+            // Live steer: a message posted to POST api/agent/steer while this card is running
+            // is drained HERE, before the next planner turn, and merged ONCE into the
+            // persistent steering context — so a mid-run instruction ("stop, don't add what
+            // you just proposed") overrides the model's trajectory from the next turn onward,
+            // exactly like run-start steering. TryRemove consumes it: it never re-applies or
+            // duplicates on later turns (the merged text stays via steeringContext itself).
+            if (!string.IsNullOrWhiteSpace(cardId) && _liveSteer.TryRemove(cardId, out var liveSteer))
+            {
+                var deliveredTurn = planSoFar.Count + 1;
+                steeringContext = string.IsNullOrWhiteSpace(steeringContext)
+                    ? liveSteer
+                    : $"{steeringContext}\n\n### LIVE STEER ###\n{liveSteer}";
+                await EmitLog(emitSse, "info",
+                    $"⚡ Live steer injected — visible to the next planner turn (step {deliveredTurn})",
+                    new { message = liveSteer }, ct: ct);
+                // Persist the delivered steer onto the card as _steers (transcript: what was
+                // injected, at which turn) so it survives a reload — mirrors the ground-truth
+                // persistence. Display-only: a persistence failure is logged, never fatal.
+                await PublishDeliveredSteerAsync(cardId, liveSteer, deliveredTurn, emitSse, ct);
+            }
             if (emitSse && pendingSteps.Count == 0 && !planCompleteDeclared)
             {
                 await SendSse(Response, "phase", new { message = $"Thinking about Step {planSoFar.Count + 1}…" }, ct);
@@ -2270,6 +2471,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "info",
                     $"DIAG: After queued step — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}", ct: ct);
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
+                await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
                 {
@@ -2277,7 +2479,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (emitSse && r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
                         await SendSse(Response, "step", r, ct);
                 }
-                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct, projectRoot: projectRoot);
                 if (!stepSucceeded) { break; }
                 continue;
             }
@@ -2375,6 +2577,83 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         continue;
                     }
                 }
+                // ── OS output-file gate ─────────────────────────────────────────────────────
+                // A task that explicitly demands a file be written to the OS filesystem
+                // ("write the data into a text file on my desktop") is NOT complete while that
+                // file is missing — even when the model claims it is (the observed failure
+                // declared planComplete=true with the reason "Now I need only create the final
+                // output file"). When the run gathered web content but never wrote it, dump the
+                // harvested results straight to the target path (a deterministic server-side
+                // finalization — no planning round). Otherwise reject the completion so the
+                // planner is steered to plan the write.
+                if (AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out var osDemand) &&
+                    !AgentOsOutputVerifier.IsOsOutputWritten(osDemand, allResults.OfType<Dictionary<string, object?>>()))
+                {
+                    var (dumped, dumpPath, dumpError) = AgentOsOutputVerifier.TryAutoDumpWebResults(
+                        prompt, osDemand, allResults.OfType<Dictionary<string, object?>>());
+                    if (dumped && dumpPath != null)
+                    {
+                        planSoFar.Add(new PlanStep { File = "_command", Change = $"Auto-dump web results to {dumpPath}" });
+                        var dumpResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = allResults.Count,
+                            ["type"] = "command",
+                            ["status"] = "done",
+                            ["command"] = $"Auto-dumped web results → {dumpPath}",
+                            ["path"] = dumpPath,
+                            ["output"] = $"Web results written to {dumpPath} (auto-dump — the task demanded an OS output file)"
+                        };
+                        allResults.Add(dumpResult);
+                        if (emitSse)
+                            await SendSse(Response, "step", dumpResult, ct);
+                        await EmitLog(emitSse, "success",
+                            $"💾 Auto-dumped web results to {dumpPath} — the task asked to write a file to {osDemand.DirectoryPath}", ct: ct);
+                    }
+                    else
+                    {
+                        var targetName = string.IsNullOrWhiteSpace(osDemand.FileNameHint)
+                            ? AgentOsOutputVerifier.DefaultDumpFileName
+                            : osDemand.FileNameHint!;
+                        var fb = $"The task explicitly asks to write a file to \"{Path.Combine(osDemand.DirectoryPath, targetName)}\" " +
+                            $"on the OS filesystem, but the run ended without creating it{(dumpError != null ? $" ({dumpError})" : "")}. " +
+                            $"Plan a _command step that writes the output file there with an absolute path, e.g. " +
+                            $"Set-Content -Path \"{Path.Combine(osDemand.DirectoryPath, targetName)}\" -Value \"<content>\" -Encoding UTF8. " +
+                            $"Do NOT declare the plan complete until the file exists.";
+                        await EmitRejectedLog(emitSse,
+                            "Interleaved execution: rejected plan-complete — the task demanded an OS output file that was never created",
+                            fb, ct);
+                        rejectionFeedback.Add(fb);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
+                        continue;
+                    }
+                }
+                // ── Incomplete-assessment gate ──────────────────────────────────────────────
+                // The planner declared the plan complete right after the completion assessment
+                // said the task is NOT done (judged against the user's LATEST intent, steering
+                // included). Accepting that blindly lets a run complete with the wrong target —
+                // the planner refusing the remaining work. Re-assess BEFORE accepting; if the
+                // ground truth still says incomplete, reject the planComplete with the specific
+                // unmet requirement as feedback so the next proposal addresses it.
+                if (lastAssessIncomplete && !string.IsNullOrWhiteSpace(lastAssessReason))
+                {
+                    var (recheckComplete, recheckReason) = await AssessCompletion(
+                        prompt, allResults, projectRoot, ct,
+                        new AgentPlan { Plan = planSoFar.ToList(), Summary = "Plan-complete recheck", Score = 90 },
+                        attachedFiles: attachedFiles, atomicStepEstimate: atomicStepEstimate,
+                        steeringContext: steeringContext);
+                    if (!recheckComplete)
+                    {
+                        var fb = $"You declared the plan complete, but the completion assessment still says the task is " +
+                            $"NOT complete: {recheckReason}. Do NOT declare the plan complete — propose the step that " +
+                            $"satisfies that remaining requirement, then the assessment will re-run.";
+                        await EmitRejectedLog(emitSse,
+                            "Interleaved execution: rejected plan-complete — the completion assessment still reports unmet requirements", fb, ct);
+                        rejectionFeedback.Add(fb);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
+                        continue;
+                    }
+                    lastAssessIncomplete = false;
+                }
                 if (emitSse)
                 {
                     await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
@@ -2389,7 +2668,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             Line = s.LineNumber,
                             OldString = s.OldString,
                             NewString = s.NewString,
-                            done = true
+                            done = true,
+                            GroundTruth = s.GroundTruth
                         }).ToList(),
                         incremental = true
                     }, ct);
@@ -2411,6 +2691,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         await EmitLog(emitSse, "info", "Planner requested _discover — running project-wide search…", ct: ct);
                         discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                        await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                         regenAttempts = 0;
                         continue;
                     }
@@ -2443,6 +2724,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
+                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                     if (!string.IsNullOrWhiteSpace(cardId))
                         await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
                     regenAttempts = 0;
@@ -2475,6 +2757,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
+                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                     if (!string.IsNullOrWhiteSpace(cardId))
                         await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
                     regenAttempts = 0;
@@ -2495,6 +2778,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await EmitLog(emitSse, "info", "Planner proposed _discover step — running project-wide search…", ct: ct);
                     discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                     regenAttempts = 0;
                     continue;
                 }
@@ -2510,16 +2794,46 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // the "File" field is always the marker name — use Change for identity.
                 // Two _create_file steps are only duplicates if they target the exact same path.
                 var isSpecialStep = AgentProjectUtilities.IsSpecialMarker(proposal.Step.File);
-                var duplicateOf = planSoFar.FirstOrDefault(s =>
+                PlanStep? duplicateOf = null;
+                if (isSpecialStep)
                 {
-                    if (!string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase))
-                        return false;
-                    if (isSpecialStep)
-                        // Special markers: duplicate only if the Change (=path/command) is identical
-                        return string.Equals(s.Change, proposal.Step.Change, StringComparison.OrdinalIgnoreCase);
-                    // Regular file steps: use token overlap on the change description
-                    return TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35;
-                });
+                    // Special markers: duplicate only if the Change (=path/command) is identical
+                    duplicateOf = planSoFar.FirstOrDefault(s =>
+                        string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(s.Change, proposal.Step.Change, StringComparison.OrdinalIgnoreCase));
+                }
+                else if (!string.IsNullOrEmpty(proposal.Step.OldString))
+                {
+                    // Content-truth duplicate check for concrete edits: a step is a duplicate
+                    // ONLY when its target text is no longer present in the current file — i.e.
+                    // the same edit already landed (a re-proposal of the same oldString→newString
+                    // finds its oldString already replaced). A step whose oldString IS still
+                    // present is actionable follow-up work — including steering-driven REVERSALS
+                    // that edit ON TOP of a previous step (their oldString is the earlier step's
+                    // NEW content). The old description-token-overlap heuristic (> 0.35) rejected
+                    // those legitimate reversals with "STEP ALREADY DONE", after which the
+                    // planner declared planComplete and the run completed with the wrong target.
+                    string? current = null;
+                    try
+                    {
+                        var fp = Path.GetFullPath(Path.Combine(projectRoot,
+                            proposal.Step.File.Replace('/', Path.DirectorySeparatorChar)));
+                        if (System.IO.File.Exists(fp))
+                            current = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                    }
+                    catch { }
+                    if (current != null && !current.Contains(proposal.Step.OldString, StringComparison.Ordinal))
+                        // The target text is gone — the identical edit already landed.
+                        duplicateOf = planSoFar.FirstOrDefault(s =>
+                            string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase));
+                }
+                else
+                {
+                    // No oldString (full-file / FORMAT C/D style): fall back to the token-overlap proxy.
+                    duplicateOf = planSoFar.FirstOrDefault(s =>
+                        string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
+                        TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35);
+                }
                 if (duplicateOf != null)
                 {
                     var dupFb =
@@ -2771,7 +3085,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             Line = s.LineNumber,
                             OldString = s.OldString,
                             NewString = s.NewString,
-                            done = true
+                            done = true,
+                            GroundTruth = s.GroundTruth
                         }).ToList(),
                         incremental = true
                     }, ct);
@@ -2830,6 +3145,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             await EmitLog(emitSse, "info", "Additional _discover step — running project-wide search…", ct: ct);
                             discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+                            await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                         }
                         continue;
                     }
@@ -2917,6 +3233,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     $"DIAG: After ExecutePlan — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}, newResults.Count={newResults.Count}",
                     ct: ct);
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
+                await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
                 {
@@ -2924,7 +3241,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (emitSse && r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
                         await SendSse(Response, "step", r, ct);
                 }
-                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
+                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct, projectRoot: projectRoot);
                 if (singleStepPlan.Plan.Count > 1)
                 {
                     var chainIntact = true;
@@ -2978,7 +3295,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 r["planItemIndex"] = synthGlobalIdx;
                             }
                         }
-                        await PersistBoardDataPlanStepAsync(cardId, synthGlobalIdx, emitSse, ct);
+                        await PersistBoardDataPlanStepAsync(cardId, synthGlobalIdx, emitSse, ct, projectRoot: projectRoot);
                         if (synthPlan.Plan.Count > 1)
                             anyNestedGeneration = true;
                         if (synthStep!.File != null)
@@ -3114,25 +3431,53 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
                         continue;
                     }
-                    else
+                    // A FAILED _web_fetch/_web_search is a retryable failure, not a reason to halt
+                    // the run: the URL was likely invented (the search results in the discovery
+                    // context list real ones) or the site was transiently unreachable. Remove the
+                    // failed step and feed the error back to the planner — it can retry with a
+                    // REAL URL from the harvested ### WEB RESULTS section, or (for an OS-output
+                    // task) plan the _command write directly. The pre-fix behavior halted here and
+                    // the repair replanner — with no web results and no OS-write guidance —
+                    // invented application code to "write" the demanded file. Bounded so a
+                    // persistently-broken URL eventually falls through to the halt below.
+                    var failedWebStep = IsWebStep(stepToRun?.File) && webStepFailures < MaxWebStepRetries;
+                    if (failedWebStep)
                     {
-                        await EmitLog(emitSse, "warn",
-                            $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
-                            "so post-execution verification can assess what genuinely remains.", ct: ct);
+                        webStepFailures++;
+                        var failedWebResult = newResults.FirstOrDefault(r =>
+                            r.GetValueOrDefault("type")?.ToString() is "_web_search" or "_web_fetch" or "web_search" or "web_fetch" &&
+                            r.GetValueOrDefault("status")?.ToString() == "error");
+                        var webErr = failedWebResult?.GetValueOrDefault("error")?.ToString()
+                                     ?? failedWebResult?.GetValueOrDefault("output")?.ToString() ?? "";
                         if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
-                        await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
-                            summary: $"Execution halted at step {planSoFar.Count + 1} — step failed", score: 0,
-                            append: false);
-                        if (emitSse)
-                            await SendSse(Response, "plan-halted", new
-                            {
-                                reason = "Step produced an error",
-                                failedStep = stepToRun?.File,
-                                failedChange = stepToRun?.Change,
-                                remainingSteps = 0
-                            }, ct);
-                        break;
+                        var fb = $"The _web_fetch step to '{stepToRun?.Change}' failed" +
+                                 $"{(string.IsNullOrWhiteSpace(webErr) ? "" : $": {TruncateForLlm(webErr, 300)}")}. " +
+                                 $"Do NOT retry the same URL and do NOT invent a URL. Use a REAL URL from the " +
+                                 $"### WEB RESULTS section in the discovery context (copy it verbatim from the search results), " +
+                                 $"or if the task demands an OS output file, plan a _command step that writes the " +
+                                 $"already-gathered search results to the demanded path instead of fetching.";
+                        await EmitRejectedLog(emitSse,
+                            $"Web step failed ({webStepFailures}/{MaxWebStepRetries} retries used) — feeding the failure back to the planner",
+                            fb, ct);
+                        rejectionFeedback.Add(fb);
+                        continue;
                     }
+                    await EmitLog(emitSse, "warn",
+                        $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
+                        "so post-execution verification can assess what genuinely remains.", ct: ct);
+                    if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                    await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                        summary: $"Execution halted at step {planSoFar.Count + 1} — step failed", score: 0,
+                        append: false);
+                    if (emitSse)
+                        await SendSse(Response, "plan-halted", new
+                        {
+                            reason = "Step produced an error",
+                            failedStep = stepToRun?.File,
+                            failedChange = stepToRun?.Change,
+                            remainingSteps = 0
+                        }, ct);
+                    break;
                 }
                 var needsExtraResult = newResults
                     .OfType<Dictionary<string, object?>>()
@@ -3229,14 +3574,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                 }
                 // ── Between-steps completion verification ──────────────────────────────────
-                // The per-step edit verifier marked the last edit complete (needsExtraStep=false).
-                // Before proposing yet ANOTHER step, verify whether the WHOLE task is now satisfied
-                // by the original prompt + all applied changes. If it is, declare the plan complete
-                // instead of blindly planning a redundant follow-up step.
-                if (stepSucceeded && !hadFailure && IsLastEditVerifiedComplete(newResults))
+                // The per-step edit verifier marked the last edit complete (needsExtraStep=false),
+                // OR the last step was a successful web step (_web_search/_web_fetch). Before
+                // proposing yet ANOTHER step, verify whether the WHOLE task is now satisfied by
+                // the original prompt + all applied changes. If it is, declare the plan complete
+                // instead of blindly planning a redundant follow-up step. The web arm is the
+                // web-only mirror: IsLastEditVerifiedComplete requires an edit result, so a
+                // web-only run never triggered this gate and the whole-task assessment never ran
+                // for it — the planner could declare planComplete after a fetch (with the
+                // demanded write still missing) and the run would end unassessed.
+                var lastEditVerified = IsLastEditVerifiedComplete(newResults);
+                var lastWebVerified = IsLastWebStepComplete(newResults);
+                var webGated = lastWebVerified && !lastEditVerified;
+                if (stepSucceeded && !hadFailure && (lastEditVerified || lastWebVerified))
                 {
                     await EmitLog(emitSse, "info",
-                        "🔍 Between-steps verification: last edit verified complete — checking whether the whole task is done…", ct: ct);
+                        webGated
+                            ? "🔍 Between-steps verification: last web step completed — checking whether the whole task is done…"
+                            : "🔍 Between-steps verification: last edit verified complete — checking whether the whole task is done…", ct: ct);
                     if (emitSse)
                         await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
                             "_verifying", $"Verifying whole task — checking if the plan is complete after Step {planSoFar.Count}…",
@@ -3244,7 +3599,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var (isComplete, assessReason) = await AssessCompletion(
                         prompt, allResults, projectRoot, ct,
                         new AgentPlan { Plan = planSoFar.ToList(), Summary = "Interleaved verification", Score = 90 },
-                        attachedFiles: attachedFiles, atomicStepEstimate: atomicStepEstimate);
+                        attachedFiles: attachedFiles, atomicStepEstimate: atomicStepEstimate,
+                        steeringContext: steeringContext);
+                    lastAssessIncomplete = !isComplete;
+                    lastAssessReason = assessReason ?? "";
                     // AssessCompletion now uses the configurable LLM timeout and retries once,
                     // so a slow local model can actually finish the assessment. If the assessment
                     // is STILL unavailable (LLM down / unparseable response), do NOT treat that
@@ -3252,8 +3610,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     // the per-step verifier already confirmed the last edit is complete
                     // (needsExtraStep=false) and no step failed — declare the plan complete
                     // instead of planning a meaningless step 2.
+                    // Web-gated assessments require a REAL verdict: a web step has no per-step
+                    // verifier confirmation, so an unavailable LLM must NOT be read as
+                    // "verified complete" (that would prematurely end a multi-step web chain).
                     var shouldDeclareComplete = ShouldDeclarePlanCompleteAfterAssessment(
-                        isComplete, assessReason, out var completeReason, out var assessFailed);
+                        isComplete, assessReason, requireAssessment: webGated, out var completeReason, out var assessFailed);
                     if (shouldDeclareComplete)
                     {
                         planCompleteDeclared = true;
@@ -3272,7 +3633,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 items = planSoFar.Select((s, idx) => new
                                 {
                                     File = s.File, Change = s.Change, Line = s.LineNumber,
-                                    OldString = s.OldString, NewString = s.NewString, done = true
+                                    OldString = s.OldString, NewString = s.NewString, done = true,
+                                    GroundTruth = s.GroundTruth
                                 }).ToList(),
                                 incremental = true
                             }, ct);

@@ -50,6 +50,8 @@
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
               title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
+            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
           </div>
 
           <div class="card-text">
@@ -120,6 +122,15 @@
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
                     <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
+                    <!-- Per-step computed ground truth — this step's own deterministic expected outcome -->
+                    <div class="plan-item-gt" ng-if="item.groundTruth && item.groundTruth.length">
+                      <div ng-repeat="gt in item.groundTruth track by $index" class="plan-item-gt-entry"
+                        ng-class="{'gt-verified': gt.verified === true, 'gt-missed': gt.verified === false}"
+                        title="Deterministic expected outcome for this step — {{gt.verified === true ? 'verified on disk' : (gt.verified === false ? 'NOT found on disk after this step' : 'checked when the step completes')}}">
+                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' : '🎯')}}</span>
+                        <span>{{gt.text}}</span>
+                      </div>
+                    </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
                         <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
@@ -136,10 +147,10 @@
                              title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#e06c75;" title="Delete this diff file">🗑</button>
                           <button ng-click="vm.openDiffInIde(d, item, card, $event)"
-                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
                           <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>
@@ -155,6 +166,52 @@
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </details>
+
+          <!-- Computed ground truth — the known-correct answer the run is checked against -->
+          <details class="card-section" ng-attr-open="{{vm.isCardActive(card.id) ? 'open' : undefined}}"
+            ng-if="card._groundTruth && card._groundTruth.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">🎯 Ground truth</span>
+            </summary>
+            <div class="section-body">
+              <div ng-repeat="gt in card._groundTruth track by $index" class="ground-truth-item"
+                title="Known-correct answer this run is being checked against">{{gt}}</div>
+            </div>
+          </details>
+
+          <!-- Final verification verdict — the reason the run was (or wasn't) verified complete -->
+          <details class="card-section" ng-if="card._verification">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title" ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
+                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
+              </span>
+            </summary>
+            <div class="section-body">
+              <div class="verification-reason"
+                ng-class="{'verification-reason-ok': card._verification.complete, 'verification-reason-fail': !card._verification.complete}"
+                title="Final post-execution verification reason">{{card._verification.reason}}</div>
+              <div class="verification-at" ng-if="card._verification.at">at {{card._verification.at}}</div>
+            </div>
+          </details>
+
+          <!-- Delivered steers — the live-steer transcript: what was injected, at which turn -->
+          <details class="card-section" ng-if="card._steers && card._steers.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">⚡ Delivered steers</span>
+              <span class="section-badge">{{card._steers.length}}</span>
+            </summary>
+            <div class="section-body">
+              <div ng-repeat="st in card._steers track by $index" class="steer-item"
+                title="Live steer injected before this planner turn">
+                <span class="steer-turn">turn {{st.turn}}</span>
+                <span class="steer-message">{{st.message}}</span>
+                <span class="steer-at" ng-if="st.at">{{st.at}}</span>
               </div>
             </div>
           </details>
@@ -243,6 +300,8 @@
                       <span class="step-title"
                         ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
+                        <span ng-if="s.type==='verified_complete' && s.reason" class="step-verification-reason"
+                          title="Final post-execution verification reason">— {{s.reason}}</span>
                         <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
                       </span>
                       <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
@@ -314,6 +373,8 @@
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
               title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
+            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
             <span class="card-tag tag-ready" ng-if="vm.isCardActive(card.id)" style="margin-left:auto;">▶ ACTIVE</span>
             <span class="card-tag tag-interrupted" ng-if="!vm.isCardActive(card.id) && vm.cardRunInterrupted(card)" style="margin-left:auto;" title="This card's run is no longer live — the stream ended without a done event (page reload or connection drop).">⚠ INTERRUPTED</span>
           </div>
@@ -362,10 +423,14 @@
                 <span class="step-title"
                   ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                   <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
+                  <span ng-if="s.type==='verified_complete' && s.reason" class="step-verification-reason"
+                    title="Final post-execution verification reason">— {{s.reason}}</span>
                   <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
                   <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
                     ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
                     title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
+                  <span class="step-llm-tokens" ng-if="s.llmTokens && s.llmTokens.calls"
+                    title="LLM token spend for this step — {{s.llmTokens.calls}} call(s): ~{{s.llmTokens.promptTokens}} prompt + ~{{s.llmTokens.responseTokens}} response">⚡ ~{{s.llmTokens.totalTokens}} tok</span>
                 </span>
                 <details class="step-web-inline" ng-if="vm.isWebStep(s) && s.output" style="flex-basis:100%;"
                   ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
@@ -412,6 +477,15 @@
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
                     <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
+                    <!-- Per-step computed ground truth — this step's own deterministic expected outcome -->
+                    <div class="plan-item-gt" ng-if="item.groundTruth && item.groundTruth.length">
+                      <div ng-repeat="gt in item.groundTruth track by $index" class="plan-item-gt-entry"
+                        ng-class="{'gt-verified': gt.verified === true, 'gt-missed': gt.verified === false}"
+                        title="Deterministic expected outcome for this step — {{gt.verified === true ? 'verified on disk' : (gt.verified === false ? 'NOT found on disk after this step' : 'checked when the step completes')}}">
+                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' : '🎯')}}</span>
+                        <span>{{gt.text}}</span>
+                      </div>
+                    </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
                         <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
@@ -427,10 +501,10 @@
                              title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#e06c75;" title="Delete this diff file">🗑</button>
                           <button ng-click="vm.openDiffInIde(d, item, card, $event)"
-                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
                           <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>
@@ -462,6 +536,52 @@
                     <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail" style="color:#e06c75;">{{s.error}}</div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </details>
+
+          <!-- Computed ground truth — the known-correct answer the run is checked against -->
+          <details class="card-section" ng-attr-open="{{vm.isCardActive(card.id) ? 'open' : undefined}}"
+            ng-if="card._groundTruth && card._groundTruth.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">🎯 Ground truth</span>
+            </summary>
+            <div class="section-body">
+              <div ng-repeat="gt in card._groundTruth track by $index" class="ground-truth-item"
+                title="Known-correct answer this run is being checked against">{{gt}}</div>
+            </div>
+          </details>
+
+          <!-- Final verification verdict — the reason the run was (or wasn't) verified complete -->
+          <details class="card-section" ng-if="card._verification">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title" ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
+                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
+              </span>
+            </summary>
+            <div class="section-body">
+              <div class="verification-reason"
+                ng-class="{'verification-reason-ok': card._verification.complete, 'verification-reason-fail': !card._verification.complete}"
+                title="Final post-execution verification reason">{{card._verification.reason}}</div>
+              <div class="verification-at" ng-if="card._verification.at">at {{card._verification.at}}</div>
+            </div>
+          </details>
+
+          <!-- Delivered steers — the live-steer transcript: what was injected, at which turn -->
+          <details class="card-section" ng-if="card._steers && card._steers.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">⚡ Delivered steers</span>
+              <span class="section-badge">{{card._steers.length}}</span>
+            </summary>
+            <div class="section-body">
+              <div ng-repeat="st in card._steers track by $index" class="steer-item"
+                title="Live steer injected before this planner turn">
+                <span class="steer-turn">turn {{st.turn}}</span>
+                <span class="steer-message">{{st.message}}</span>
+                <span class="steer-at" ng-if="st.at">{{st.at}}</span>
               </div>
             </div>
           </details>
@@ -559,6 +679,8 @@
                       <span class="step-title"
                         ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
+                        <span ng-if="s.type==='verified_complete' && s.reason" class="step-verification-reason"
+                          title="Final post-execution verification reason">— {{s.reason}}</span>
                         <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
                       </span>
                       <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
@@ -658,10 +780,10 @@
                                title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                             <button ng-click="vm.deleteDiff(d, item, card, $event)"
                               ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                              ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                              ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                               style="color:#e06c75;" title="Delete this diff file">🗑</button>
                             <button ng-click="vm.openDiffInIde(d, item, card, $event)"
-                              ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                              ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                               style="color:#61afef;" title="Open diff in IDE">📄</button>
                             <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                           </span>
@@ -744,6 +866,8 @@
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
               title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
+            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
           </div>
 
           <div class="card-text card-text-readonly">
@@ -783,6 +907,15 @@
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
                     <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
+                    <!-- Per-step computed ground truth — this step's own deterministic expected outcome -->
+                    <div class="plan-item-gt" ng-if="item.groundTruth && item.groundTruth.length">
+                      <div ng-repeat="gt in item.groundTruth track by $index" class="plan-item-gt-entry"
+                        ng-class="{'gt-verified': gt.verified === true, 'gt-missed': gt.verified === false}"
+                        title="Deterministic expected outcome for this step — {{gt.verified === true ? 'verified on disk' : (gt.verified === false ? 'NOT found on disk after this step' : 'checked when the step completes')}}">
+                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' : '🎯')}}</span>
+                        <span>{{gt.text}}</span>
+                      </div>
+                    </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
                         <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
@@ -799,10 +932,10 @@
                              title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#e06c75;" title="Delete this diff file">🗑</button>
                           <button ng-click="vm.openDiffInIde(d, item, card, $event)"
-                            ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
                           <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>
@@ -818,6 +951,52 @@
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </details>
+
+          <!-- Computed ground truth — the known-correct answer the run is checked against -->
+          <details class="card-section" ng-attr-open="{{vm.isCardActive(card.id) ? 'open' : undefined}}"
+            ng-if="card._groundTruth && card._groundTruth.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">🎯 Ground truth</span>
+            </summary>
+            <div class="section-body">
+              <div ng-repeat="gt in card._groundTruth track by $index" class="ground-truth-item"
+                title="Known-correct answer this run is being checked against">{{gt}}</div>
+            </div>
+          </details>
+
+          <!-- Final verification verdict — the reason the run was (or wasn't) verified complete -->
+          <details class="card-section" ng-if="card._verification">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title" ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
+                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
+              </span>
+            </summary>
+            <div class="section-body">
+              <div class="verification-reason"
+                ng-class="{'verification-reason-ok': card._verification.complete, 'verification-reason-fail': !card._verification.complete}"
+                title="Final post-execution verification reason">{{card._verification.reason}}</div>
+              <div class="verification-at" ng-if="card._verification.at">at {{card._verification.at}}</div>
+            </div>
+          </details>
+
+          <!-- Delivered steers — the live-steer transcript: what was injected, at which turn -->
+          <details class="card-section" ng-if="card._steers && card._steers.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">⚡ Delivered steers</span>
+              <span class="section-badge">{{card._steers.length}}</span>
+            </summary>
+            <div class="section-body">
+              <div ng-repeat="st in card._steers track by $index" class="steer-item"
+                title="Live steer injected before this planner turn">
+                <span class="steer-turn">turn {{st.turn}}</span>
+                <span class="steer-message">{{st.message}}</span>
+                <span class="steer-at" ng-if="st.at">{{st.at}}</span>
               </div>
             </div>
           </details>
@@ -947,6 +1126,8 @@
                       <span class="step-title"
                         ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
+                        <span ng-if="s.type==='verified_complete' && s.reason" class="step-verification-reason"
+                          title="Final post-execution verification reason">— {{s.reason}}</span>
                         <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
                       </span>
                       <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
@@ -989,10 +1170,10 @@
                                title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                             <button ng-click="vm.deleteDiff(d, item, card, $event)"
                               ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
-                              ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                              ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                               style="color:#e06c75;" title="Delete this diff file">🗑</button>
                             <button ng-click="vm.openDiffInIde(d, item, card, $event)"
-                              ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)"
+                              ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                               style="color:#61afef;" title="Open diff in IDE">📄</button>
                             <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                           </span>
@@ -1036,6 +1217,13 @@
           <div class="card-actions">
             <button ng-if="!card._benchmark && !card._fromCron" ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
             <button ng-if="card._benchmark || card._fromCron" ng-click="vm.deleteCard(card.id, 'done')" class="small" style="color:#e5c07b;">🗑 Delete</button>
+            <button ng-if="vm.cardDiffPaths(card).length" ng-click="vm.deleteAllCardDiffs(card, $event)" class="small ghost"
+              ng-disabled="card._deletingAllDiffs"
+              title="Delete all diff files for this card">{{card._deletingAllDiffs ? '🗑 Deleting…' : '🗑 Diffs (' + vm.cardDiffPaths(card).length + ')'}}</button>
+            <button ng-click="vm.openFeedback(card); $event.stopPropagation()" class="small ghost"
+              title="Send feedback to bughosted about what went wrong with this run">💬 Feedback</button>
+            <span ng-if="vm.feedbackSentCount(card)" class="feedback-sent-indicator"
+              title="Bughosted feedback submitted{{vm.feedbackSentLast(card).at ? ' — ' + (vm.feedbackSentLast(card).at | date:'short') : ''}}">{{vm.feedbackSentLabel(card)}}</span>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card"
               ng-if="(!card._benchmark && !card._fromCron) || vm.activeCardId === card.id">✕ Delete</button>
@@ -1063,6 +1251,8 @@
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
               title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
+            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
           </div>
 
           <div class="card-text">
@@ -1141,6 +1331,8 @@
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
               title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
+            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
           </div>
           <div class="card-text card-text-readonly">{{card.text}}</div>
           <div class="card-tags" ng-if="card.priority">
@@ -1160,9 +1352,42 @@
           <div class="card-actions">
             <button ng-click="vm.unarchiveCard(card.id)" class="small">↩ Unarchive</button>
             <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
+            <button ng-click="vm.openFeedback(card); $event.stopPropagation()" class="small ghost"
+              title="Send feedback to bughosted about what went wrong with this run">💬 Feedback</button>
+            <span ng-if="vm.feedbackSentCount(card)" class="feedback-sent-indicator"
+              title="Bughosted feedback submitted{{vm.feedbackSentLast(card).at ? ' — ' + (vm.feedbackSentLast(card).at | date:'short') : ''}}">{{vm.feedbackSentLabel(card)}}</span>
           </div>
         </div>
       </div>
     </div>
+
+  <!-- CARD FEEDBACK POPUP — sent to the bughosted server for weaver admins -->
+  <div class="popup-overlay" ng-if="vm.feedbackCard" ng-click="vm.closeFeedback()">
+    <div class="popup-panel" ng-click="$event.stopPropagation()">
+      <div class="popup-body">
+        <h3 style="margin-top:0;">💬 Card Feedback</h3>
+        <div class="smallFont secondaryFontColor" style="margin-bottom:8px;">
+          Sends a note to the bughosted server about what went wrong with this card's execution — weaver admins review these messages.
+        </div>
+        <div class="smallFont" style="margin-bottom:8px;">Card: {{vm.feedbackCard.text | limitTo:120}}{{vm.feedbackCard.text.length > 120 ? '…' : ''}}</div>
+        <div ng-if="vm.feedbackPrevious.length" class="feedback-previous">
+          <div class="feedback-previous-title">Previously reported:</div>
+          <div ng-repeat="entry in vm.feedbackPrevious" class="feedback-previous-entry">
+            <span class="feedback-previous-time">{{entry.at | date:'short'}}</span> — {{entry.message}}
+          </div>
+        </div>
+        <textarea ng-model="vm.feedbackText" rows="5"
+          style="width:100%;box-sizing:border-box;"
+          placeholder="What went wrong during this run? (e.g. the agent ignored a requirement, edited the wrong file, stopped early…)"></textarea>
+        <div ng-if="vm.feedbackError" style="color:#e06c75;margin-top:6px;">{{vm.feedbackError}}</div>
+        <div ng-if="vm.feedbackSending" class="smallFont" style="margin-top:6px;">Sending…</div>
+      </div>
+      <div class="popup-footer">
+        <button ng-click="vm.closeFeedback()" ng-disabled="vm.feedbackSending">Cancel</button>
+        <button ng-click="vm.sendFeedback()" class="primary"
+          ng-disabled="vm.feedbackSending || !vm.feedbackText || !vm.feedbackText.trim()">Send Feedback</button>
+      </div>
+    </div>
+  </div>
   </div>
 </div>

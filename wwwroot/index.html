@@ -262,6 +262,9 @@
           </div>
           <div class="agent-status idle span-full" ng-if="vm.selectedCardId && !vm.streamingActive && vm.agentResult">
             <span style="font-size:12px;color:var(--muted);">Agent completed</span>
+            <span ng-if="vm.streamingContextSize" class="phase-tag context-tag"
+              ng-mouseenter="vm.showContextBreakdown = true" ng-mouseleave="vm.showContextBreakdown = false"
+              title="Peak context size at run end (~{{vm.streamingContextChars | formatNumber}} chars)">⚡ {{vm.streamingContextSize | formatNumber}} tokens</span>
           </div>
 
           <!-- Streaming state -->
@@ -353,12 +356,19 @@
             </div>
           </div>
 
-          <!-- Steering input (always visible) -->
+          <!-- Steering input (always visible): at run start its value is sent as
+               steeringContext; while a run is ACTIVE the Steer now button POSTs it to
+               api/agent/steer so the user can steer the agent mid-flight. -->
           <div class="steering-section" ng-if="vm.agentActivityLogLength > 0">
             <input type="text" class="steering-input" ng-model="vm.steeringContext"
-              placeholder="Steer the agent (optional)..." />
+              placeholder="Steer the agent (optional)..."
+              ng-keydown="$event.key === 'Enter' ? vm.steerNow() : null" />
             <button class="steering-clear-btn" ng-click="vm.steeringContext = ''"
               title="Clear steering">&times;</button>
+            <button class="steering-now-btn" ng-if="vm.streamingActive"
+              ng-click="vm.steerNow()" title="Send this steer to the running agent now (POST api/agent/steer)">
+              ⚡ Steer now
+            </button>
           </div>
 
           <div class="agent-latest-log agent-activity-log" ng-if="vm.agentActivityLog.length">
@@ -520,14 +530,23 @@
                          <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;">Apply</button>
                          <span ng-if="vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);font-size:0.9em;"
                            title="{{vm.diffAppliedByAgent(item, d) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
-                         <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
-                         <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
+                         <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                         <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.8em;padding:0 3px;color:#61afef;" title="Open diff in IDE">📄</button>
                         <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
                         <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg2);border-radius:3px;max-height:120px;overflow-y:auto;font-family:monospace;font-size:0.9em;white-space:pre-wrap;word-break:break-all;">
                           <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
                         </div>
                         <div ng-if="item._previews && item._previews[d] && item._previews[d].error" style="color:#e06c75;font-size:0.9em;">{{item._previews[d].error}}</div>
                       </span>
+                    </div>
+                    <!-- Per-step computed ground truth — this step's own deterministic expected outcome -->
+                    <div ng-if="item.groundTruth && item.groundTruth.length" style="margin:2px 0 0 18px;font-size:0.85em;">
+                      <div ng-repeat="gt in item.groundTruth track by $index" class="plan-item-gt-entry"
+                        ng-class="{'gt-verified': gt.verified === true, 'gt-missed': gt.verified === false}"
+                        title="Deterministic expected outcome for this step — {{gt.verified === true ? 'verified on disk' : (gt.verified === false ? 'NOT found on disk after this step' : 'checked when the step completes')}}">
+                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' : '🎯')}}</span>
+                        <span>{{gt.text}}</span>
+                      </div>
                     </div>
                     <div ng-if="item._showDetail" class="plan-item-detail"
                       style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
@@ -546,8 +565,8 @@
                            <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item)" ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;">Apply</button>
                            <span ng-if="vm.diffIsApplied(item, d) || (item._previews && item._previews[d] && item._previews[d].deleted)" style="color:var(--green);"
                              title="{{vm.diffAppliedByAgent(item, d) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
-                           <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
-                           <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!vm.diffIsApplied(item, d) && !(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
+                           <button ng-click="vm.deleteDiff(d, item, $event)" ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)" ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#e06c75;" title="Delete this diff file">🗑</button>
+                           <button ng-click="vm.openDiffInIde(d, item, $event)" ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)" style="font-size:0.9em;padding:1px 4px;color:#61afef;" title="Open diff in IDE">📄</button>
                           <span ng-if="item._previews && item._previews[d] && item._previews[d].deleting" style="color:#e06c75;font-size:0.9em;">deleting…</span>
                           <div ng-if="item._previews && item._previews[d] && item._previews[d].show" style="margin-top:2px;padding:2px 4px;background:var(--bg);border-radius:3px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:1em;white-space:pre-wrap;word-break:break-all;">
                             <pre style="margin:0;line-height:1.3;">{{item._previews[d].content}}</pre>
@@ -621,9 +640,13 @@
                     <span
                       class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
                     <span class="step-summary-title"><strong>{{s.type}}</strong> {{s.path || ''}}</span>
+                    <span class="step-verification-reason" ng-if="s.type==='verified_complete' && s.reason"
+                      title="Final post-execution verification reason">— {{s.reason}}</span>
                     <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
                       ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
                       title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
+                    <span class="step-llm-tokens" ng-if="s.llmTokens && s.llmTokens.calls"
+                      title="LLM token spend for this step — {{s.llmTokens.calls}} call(s): ~{{s.llmTokens.promptTokens}} prompt + ~{{s.llmTokens.responseTokens}} response">⚡ ~{{s.llmTokens.totalTokens}} tok</span>
                     <span class="step-summary-desc" title="{{s.description || s.command || s.url || ''}}">
                       {{s.description || s.command || s.url || '' | limitTo:60}}</span>
                   </summary>

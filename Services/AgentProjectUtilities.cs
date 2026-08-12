@@ -156,7 +156,14 @@ public static class AgentProjectUtilities
             "rg", "grep", "findstr", "curl", "wget", "powershell", "pwsh",
             "cmd", "msbuild", "nuget", "Invoke-RestMethod", "Invoke-WebRequest",
             "Get-ChildItem", "Get-Content", "Set-Location", "New-Item", "Remove-Item",
-            "Move-Item", "Copy-Item", "Start-Process"
+            "Move-Item", "Copy-Item", "Start-Process",
+            // PowerShell file-write cmdlets — the exact commands the OS-filesystem discovery
+            // section and the web-chain example TEACH for writing results to the desktop
+            // ("… | Set-Content -Path \"<desktop-path>\file.txt\" -Encoding UTF8"). They
+            // must pass the shell-command gate or a planned desktop write is rejected.
+            "Set-Content", "Add-Content", "Out-File", "Export-Csv", "ConvertTo-Json",
+            "Write-Output", "Test-Path", "Join-Path", "Split-Path", "Select-Object",
+            "ForEach-Object", "Where-Object", "Measure-Object"
         };
 
         return knownCommands.Contains(exe) ||

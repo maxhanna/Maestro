@@ -207,6 +207,29 @@ public static class VerifierIssueTriage
         }
     }
 
+    /// <summary>English prose words that never name code symbols. Applied to BARE tokens and
+    /// METHOD-CALL matches so natural-language parentheticals ("the component (see above)",
+    /// "should style (via …)") can never masquerade as code references — otherwise the
+    /// hallucinated-reference rule drops genuine issues that merely mention a word followed by
+    /// '('. Backticked / vm.-qualified / #ref symbols are unambiguous and never filtered.</summary>
+    public static readonly HashSet<string> CommonProseWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "this", "that", "with", "from", "have", "has", "been", "should", "would",
+        "could", "might", "will", "there", "their", "which", "when", "where", "what", "does",
+        "not", "but", "also", "only", "code", "file", "files", "method", "function", "class",
+        "button", "task", "card", "issue", "issues", "error", "reason", "missing", "found",
+        "expected", "location", "review", "check", "verify", "verifier", "reference", "referenced",
+        "style", "styles", "component", "template", "element", "css", "rule", "rules", "wire",
+        "remove", "apply", "applies", "add", "use", "used", "panel", "list", "item", "row", "div",
+        // Pronouns/function words that commonly precede a natural-language parenthetical —
+        // "still references it (class=\"...\")" must NOT read 'it' as a method call, or the
+        // hallucinated-reference rule drops a genuine issue whose symbol is absent from the
+        // files (the orphaned-template-reference case). Real 'it(...)' calls in code still
+        // resolve: the symbol is present in the file, so no drop happens either way.
+        "it", "its", "they", "them", "we", "you", "our", "your", "he", "she", "him", "her",
+        "his", "who", "whom", "as", "like", "such", "via", "into", "onto", "over", "under"
+    };
+
     /// <summary>Extracts code-shaped identifiers from an issue (backticked, vm./this.-qualified,
     /// #template-refs, method calls, and — when <paramref name="includeBareTokens"/> is set —
     /// bare camelCase/PascalCase tokens).</summary>
@@ -220,22 +243,18 @@ public static class VerifierIssueTriage
         foreach (Match m in Regex.Matches(issue, @"#([A-Za-z_$][\w$]*)"))
             symbols.Add(m.Groups[1].Value);
         foreach (Match m in Regex.Matches(issue, @"\b([A-Za-z_$][\w$]*)\s*\("))
-            symbols.Add(m.Groups[1].Value);
+        {
+            var name = m.Groups[1].Value;
+            if (CommonProseWords.Contains(name)) continue;
+            symbols.Add(name);
+        }
         if (includeBareTokens)
         {
             // Bare code-shaped tokens (camelCase/PascalCase/snake_case), excluding common prose words.
-            var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "the", "this", "that", "with", "from", "have", "has", "been", "should", "would",
-                "could", "might", "will", "there", "their", "which", "when", "where", "what", "does",
-                "not", "but", "also", "only", "code", "file", "files", "method", "function", "class",
-                "button", "task", "card", "issue", "issues", "error", "reason", "missing", "found",
-                "expected", "location", "review", "check", "verify", "verifier", "reference", "referenced"
-            };
             foreach (Match m in CodeSymbolTokenRegex.Matches(issue))
             {
                 var tok = m.Value;
-                if (tok.Length >= 3 && !stopwords.Contains(tok))
+                if (tok.Length >= 3 && !CommonProseWords.Contains(tok))
                     symbols.Add(tok);
             }
         }

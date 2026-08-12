@@ -56,11 +56,43 @@ public partial class AgentController : ControllerBase
     }
     private bool _lastConnectionCheckResult = true;
     private bool _gracefulStop;
+    // Chars of the discovery context occupied by the project skeleton (layout + architecture
+    // note), captured when the skeleton section is built so the context-breakdown pop can show
+    // the skeleton as its own row with a real token estimate.
+    private int _skeletonContextChars;
+    // The extracted EXPLICIT REQUIREMENTS CHECKLIST for the current run. NEVER appended to the
+    // task `prompt` — the prompt feeds TaskHintsWebNeed / ConfirmWebNeedAsync / the OS-task
+    // classifier and the fetch-in-command guard, and checklist wording ("search", "fetch",
+    // "current", "latest") can trip the broad web hints and hijack a plain code run into a
+    // web task. Threaded into the PLANNER prompts only (incremental user prompt, classic plan
+    // user prompt, replan prompt) so the planner still verifies each requirement.
+    private string? _requirementChecklist;
+    // Chars of the planner's TASK input (the raw user prompt + the extracted requirement
+    // checklist, when present) — shown as its own row in the context-breakdown pop so the
+    // categories cover every part of what the LLM sees, instead of the task being swallowed
+    // by the "headers / steering / other" residual (the checklist itself never enters the
+    // discovery context, so neither does its share). Set once per run in StepResolutionPipeline.
+    private int _taskPromptContextChars;
+    // Estimated token spend of LABELED LLM rounds (planner, verify, replan, assessment,
+    // command steps) accumulated since the last step result was emitted. Attached to step
+    // results as "llmTokens" so the agent panel shows per-step spend (planning + verification
+    // rounds), not just the discovery context. Reset at run start in StepResolutionPipeline.
+    private int _stepLlmPromptTokens;
+    private int _stepLlmResponseTokens;
+    private int _stepLlmCalls;
+    // Phase-1 discovery steps (read results), used to build the live context breakdown as the
+    // discovery context grows during execution.
+    private List<object> _discoverySteps = new();
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
     private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
     private static readonly ConcurrentDictionary<string, HashSet<int>> _cancelledSteps = new();
+    // Live steering messages posted to POST api/agent/steer while a card is RUNNING, keyed
+    // by cardId. The incremental planner drains the pending message on its next turn and
+    // merges it into the persistent steering context (consumed once, never re-applied). The
+    // latest message wins — repeated steers overwrite, they never queue.
+    private static readonly ConcurrentDictionary<string, string> _liveSteer = new();
     private static readonly ConcurrentDictionary<string, StringBuilder> _stepThinkingStore = new();
     private static readonly ConcurrentDictionary<string, int> _complexityScores = new();
     private static readonly ConcurrentDictionary<string, int> _atomicStepEstimates = new();
@@ -124,6 +156,50 @@ public partial class AgentController : ControllerBase
     {
         if (!emit) return;
         await SendSse(Response, "log", new { ts = DateTime.UtcNow.ToString("o"), level, message, detail }, ct);
+    }
+
+    /// <summary>
+    /// Records the estimated token spend of one labeled LLM round (planner step, verification
+    /// round, replan, completion assessment, command step) and emits a 📊 metric log row so the
+    /// agent panel shows per-round prompt+response sizes — the discovery-context counter alone
+    /// hides the biggest chunk of what the LLM actually sees (the per-step prompts) and what it
+    /// returns. Uses the same estimator as the context counter (AgentTokenMetrics.EstimateTokens).
+    /// Called by the LLM wrappers after a labeled call completes; never throws (metrics must not
+    /// break the pipeline).
+    /// </summary>
+    private async Task RecordLlmRoundMetricsAsync(string? label, string systemPrompt, string userMessage,
+        string? raw, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(label)) return;
+        var promptTokens = AgentTokenMetrics.EstimateTokens(systemPrompt) + AgentTokenMetrics.EstimateTokens(userMessage);
+        var responseTokens = AgentTokenMetrics.EstimateTokens(raw ?? "");
+        _stepLlmPromptTokens += promptTokens;
+        _stepLlmResponseTokens += responseTokens;
+        _stepLlmCalls++;
+        await EmitLog(emitSse, "metric",
+            $"📊 LLM round [{label}]: ~{promptTokens:N0} prompt + ~{responseTokens:N0} response = ~{(promptTokens + responseTokens):N0} tokens",
+            ct: ct);
+    }
+
+    /// <summary>
+    /// Snapshots and clears the per-step LLM token accumulator, for attaching to the step
+    /// result the panel renders ("llmTokens": { calls, promptTokens, responseTokens,
+    /// totalTokens }). Returns null when no labeled LLM rounds happened since the last step.
+    /// </summary>
+    private object? TakeStepLlmMetrics()
+    {
+        if (_stepLlmCalls == 0) return null;
+        var metrics = new
+        {
+            calls = _stepLlmCalls,
+            promptTokens = _stepLlmPromptTokens,
+            responseTokens = _stepLlmResponseTokens,
+            totalTokens = _stepLlmPromptTokens + _stepLlmResponseTokens
+        };
+        _stepLlmCalls = 0;
+        _stepLlmPromptTokens = 0;
+        _stepLlmResponseTokens = 0;
+        return metrics;
     }
 
     /// <summary>
@@ -210,12 +286,62 @@ public partial class AgentController : ControllerBase
             return NotFound(new { error = "Diff file not found", path = fullDiffPath });
         try
         {
+            // Swap mode: when a different diff is currently applied to the same file,
+            // reverse it first so the target diff can replace the edit in place.
+            if (!string.IsNullOrWhiteSpace(req.SwapFrom))
+            {
+                var swapPath = Path.GetFullPath(Path.Combine(projectRoot, req.SwapFrom.TrimStart('/', '\\')));
+                if (System.IO.File.Exists(swapPath) && swapPath != fullDiffPath)
+                {
+                    var reverse = await RunGitCommandAsync(projectRoot, $"apply --reverse \"{swapPath}\"");
+                    if (!reverse.success)
+                        return Ok(new { success = false, error = $"git apply --reverse of current diff failed: {reverse.error}", diffPath = req.DiffPath, swapFrom = req.SwapFrom });
+                }
+            }
+            var apply = await RunGitCommandAsync(projectRoot, $"apply \"{fullDiffPath}\"");
+            if (!apply.success)
+                return Ok(new { success = false, error = $"git apply failed: {apply.error}", output = apply.output, diffPath = req.DiffPath });
+            return Ok(new { success = true, output = apply.output, diffPath = req.DiffPath });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
+        }
+    }
+
+    [HttpPost("delete-diffs")]
+    public async Task<IActionResult> DeleteDiffs([FromBody] DeleteDiffsRequest req)
+    {
+        if (req.DiffPaths == null || req.DiffPaths.Count == 0)
+            return Ok(new { success = true, deleted = new List<string>(), missing = new List<string>() });
+        var projectRoot = AgentProjectUtilities.GetProjectRoot(req.Project, _config, _env);
+        var deleted = new List<string>();
+        var missing = new List<string>();
+        foreach (var diffPath in req.DiffPaths.Distinct())
+        {
+            if (string.IsNullOrWhiteSpace(diffPath)) continue;
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, diffPath.TrimStart('/', '\\')));
+            if (!System.IO.File.Exists(fullPath)) { missing.Add(diffPath); continue; }
+            try
+            {
+                System.IO.File.Delete(fullPath);
+                deleted.Add(diffPath);
+            }
+            catch (Exception ex) { Console.WriteLine($"[DeleteDiffs] FAILED {diffPath}: {ex.Message}"); }
+        }
+        return Ok(new { success = true, deleted, missing });
+    }
+
+    private async Task<(bool success, string output, string error)> RunGitCommandAsync(string projectRoot, string arguments)
+    {
+        try
+        {
             var proc = new System.Diagnostics.Process
             {
                 StartInfo = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "git",
-                    Arguments = $"apply \"{fullDiffPath}\"",
+                    Arguments = arguments,
                     WorkingDirectory = projectRoot,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
@@ -227,13 +353,11 @@ public partial class AgentController : ControllerBase
             var output = await proc.StandardOutput.ReadToEndAsync();
             var error = await proc.StandardError.ReadToEndAsync();
             proc.WaitForExit(10000);
-            if (proc.ExitCode != 0)
-                return Ok(new { success = false, error = $"git apply failed: {error}", output, diffPath = req.DiffPath });
-            return Ok(new { success = true, output, diffPath = req.DiffPath });
+            return (proc.ExitCode == 0, output, error);
         }
         catch (Exception ex)
         {
-            return Ok(new { success = false, error = ex.Message });
+            return (false, "", ex.Message);
         }
     }
 
@@ -434,11 +558,23 @@ public partial class AgentController : ControllerBase
             _runBaseUrl = null;
             _runModel = null;
             if (!string.IsNullOrWhiteSpace(req.CardId))
-            {
-                _cancelledSteps.TryRemove(req.CardId, out _);
-                _stepThinkingStore.TryRemove(req.CardId, out _);
-            }
+                ClearRunStateForCard(req.CardId);
         }
+    }
+
+    /// <summary>
+    /// Per-card cleanup at run end: removes cancelled-step sets, accumulated pre-plan
+    /// thinking, and any UNCONSUMED live steer so a stale message can never leak into the
+    /// card's next run. A steer posted while the card was NOT executing (reported
+    /// active:false by POST api/agent/steer) sits in _liveSteer until a run drains it; if
+    /// the run ends without draining it, this drops it — the next run starts clean.
+    /// </summary>
+    private void ClearRunStateForCard(string cardId)
+    {
+        if (string.IsNullOrWhiteSpace(cardId)) return;
+        _cancelledSteps.TryRemove(cardId, out _);
+        _stepThinkingStore.TryRemove(cardId, out _);
+        _liveSteer.TryRemove(cardId, out _);
     }
     [HttpGet("questions/pending")]
     public IActionResult GetPendingQuestions()
@@ -471,6 +607,23 @@ public partial class AgentController : ControllerBase
         var steps = _cancelledSteps.GetOrAdd(req.CardId, _ => new HashSet<int>());
         lock (steps) { steps.Add(req.StepIndex); }
         return Ok(new { status = "cancelled", cardId = req.CardId, stepIndex = req.StepIndex });
+    }
+
+    /// <summary>Live steering for a RUNNING card: the message is picked up by the incremental
+    /// planner before its next turn (RunInterleavedPlanExecutionLoop drains _liveSteer and
+    /// merges it into the persistent steering context), so a mid-run instruction overrides
+    /// the model's own trajectory from the next turn onward. Reports whether the card was
+    /// actually executing at the moment of the post.</summary>
+    [HttpPost("steer")]
+    public IActionResult SteerRun([FromBody] SteerRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.CardId))
+            return BadRequest("cardId is required");
+        if (string.IsNullOrWhiteSpace(req.Message))
+            return BadRequest("message is required");
+        _liveSteer[req.CardId] = req.Message;
+        var active = _executingCards.ContainsKey("card:" + req.CardId);
+        return Ok(new { status = "steered", cardId = req.CardId, active });
     }
 
     // ── Per-endpoint stream health for the endpoint picker ───────────────

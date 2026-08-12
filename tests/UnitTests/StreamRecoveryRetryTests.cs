@@ -1,4 +1,9 @@
+using System.Net;
+using System.Net.Http;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
@@ -167,6 +172,122 @@ public class StreamRecoveryRetryTests
         Assert.Contains(new string('x', 4000), hint);
         // The head must survive too.
         Assert.StartsWith("task\n\n### YOUR PREVIOUS RESPONSE", hint);
+    }
+
+    // ── Visible truncation marker on the prose path (pre-plan thinking) ──
+    // CallLlmRawText deliberately returns a budget-capped cut as-is (partial reasoning is
+    // still usable), so the cap used to be SILENT — a mid-sentence stop that looked like a
+    // transport hang. Callers opt in via appendTruncationMarker:true (the pre-plan thinking
+    // call does) and get an explicit marker instead. These tests drive the real transport
+    // against a scripted fake LLM that returns finish_reason:"length" and assert the marker
+    // appears exactly when (a) the response was token-capped AND (b) the caller opted in.
+
+    private static async Task<(string raw, string? error)> CallRawText(
+        string system, string user, bool emitSse, int? maxTokens, bool appendTruncationMarker)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "CallLlmRawText", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(method);
+        var task = (Task<(string raw, string? error)>)method!.Invoke(
+            RawTextController(), new object?[]
+            {
+                system, user, emitSse, CancellationToken.None,
+                TimeSpan.FromSeconds(30), maxTokens, appendTruncationMarker, /*llmRoundLabel*/ null
+            })!;
+        return await task;
+    }
+
+    private const string TruncationMarker = "reasoning truncated — hit the per-response token budget";
+
+    private sealed class RawTextHandler : HttpMessageHandler
+    {
+        public string FinishReason { get; init; } = "length";
+        public string Content { get; init; } = "The plan is to add a getItems method to the demo component and also wire it into the template and then…";
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.Method == HttpMethod.Get)
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("{}", Encoding.UTF8, "application/json") });
+            var data = JsonSerializer.Serialize(new
+            {
+                choices = new[] { new { delta = new { content = Content }, finish_reason = FinishReason } }
+            });
+            var body = $"data: {data}\n\n\ndata: [DONE]\n";
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "text/event-stream")
+            });
+        }
+    }
+
+    private sealed class RawTextFactory : IHttpClientFactory, IDisposable
+    {
+        public string FinishReason { get; init; } = "length";
+        public HttpClient CreateClient(string name) => new(new RawTextHandler { FinishReason = FinishReason });
+        public HttpClient CreateClient() => CreateClient("default");
+        public void Dispose() { }
+    }
+
+    private static AgentController? _rawTextController;
+
+    private static AgentController RawTextController()
+    {
+        if (_rawTextController != null) return _rawTextController;
+        var baseDir = Path.Combine(Path.GetTempPath(), "weaver_marker_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(baseDir, "data"));
+        var db = new DatabaseService(
+            Path.Combine(baseDir, "data", "weaver.db"),
+            Path.Combine(baseDir, "data"),
+            Path.Combine(baseDir, "data", "weaverconfig.json"));
+        var controller = (AgentController)RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
+        typeof(AgentController).GetField("_configFile", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(controller, new ConfigFileService(db));
+        _rawTextController = controller;
+        return controller;
+    }
+
+    [Fact]
+    public async Task TokenCappedResponse_WithOptInMarker_AppendsExplicitMarker()
+    {
+        var factory = new RawTextFactory { FinishReason = "length" };
+        typeof(AgentController).GetField("_clientFactory", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(RawTextController(), factory);
+
+        var (raw, error) = await CallRawText("sys", "user", false, 64, appendTruncationMarker: true);
+
+        Assert.Null(error);
+        Assert.Contains(TruncationMarker, raw);
+        Assert.Contains("getItems", raw); // partial reasoning survives, marker is appended after it
+        Assert.EndsWith("…[reasoning truncated — hit the per-response token budget]…", raw.TrimEnd());
+    }
+
+    [Fact]
+    public async Task TokenCappedResponse_WithoutOptIn_StaysSilent()
+    {
+        var factory = new RawTextFactory { FinishReason = "length" };
+        typeof(AgentController).GetField("_clientFactory", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(RawTextController(), factory);
+
+        var (raw, error) = await CallRawText("sys", "user", false, 64, appendTruncationMarker: false);
+
+        Assert.Null(error);
+        Assert.DoesNotContain(TruncationMarker, raw);
+        Assert.Contains("getItems", raw);
+    }
+
+    [Fact]
+    public async Task CompleteResponse_WithOptIn_DoesNotAppendMarker()
+    {
+        var factory = new RawTextFactory { FinishReason = "stop" };
+        typeof(AgentController).GetField("_clientFactory", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(RawTextController(), factory);
+
+        var (raw, error) = await CallRawText("sys", "user", false, 64, appendTruncationMarker: true);
+
+        Assert.Null(error);
+        Assert.DoesNotContain(TruncationMarker, raw);
+        Assert.Contains("getItems", raw);
     }
 
     // ── "Finish this" continuation (max-token truncation of an oversized edit) ──

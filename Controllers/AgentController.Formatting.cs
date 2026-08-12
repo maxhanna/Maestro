@@ -25,7 +25,8 @@ namespace Weaver.Controllers;
 
 partial class AgentController
 {
-    private async Task PersistBoardDataPlanStepAsync(string? cardId, int planItemIndex, bool emitSse, CancellationToken ct, List<string>? diffs = null)
+    private async Task PersistBoardDataPlanStepAsync(string? cardId, int planItemIndex, bool emitSse, CancellationToken ct,
+        List<string>? diffs = null, string? projectRoot = null)
     {
         if (string.IsNullOrWhiteSpace(cardId) || planItemIndex < 0)
             return;
@@ -53,6 +54,45 @@ partial class AgentController
                         stepObj["done"] = true;
                         if (diffs != null && diffs.Count > 0)
                             stepObj["diffs"] = new JsonArray(diffs.Select(d => JsonValue.Create(d)).ToArray());
+                        // Per-step ground truth verification: each expectation carries the
+                        // file + anchor it was computed from — re-read the CURRENT file and
+                        // mark verified=true/false so the plan item shows whether the step's
+                        // own expected outcome held. Root comes from the caller (the run's
+                        // projectRoot) or falls back to the configured workspace root;
+                        // unresolvable/absent files are skipped silently (entry stays
+                        // unverified rather than claiming a miss).
+                        if (stepObj["groundTruth"] is JsonArray gtArray && gtArray.Count > 0)
+                        {
+                            var rootDir = string.IsNullOrWhiteSpace(projectRoot) ? null : Path.GetFullPath(projectRoot);
+                            if (rootDir == null)
+                            {
+                                try { rootDir = AgentProjectUtilities.ResolveWorkspaceRoot(_config, _env); }
+                                catch { rootDir = null; }
+                            }
+                            if (rootDir != null)
+                            {
+                                foreach (var gtNode in gtArray)
+                                {
+                                    if (gtNode is not JsonObject gt) continue;
+                                    var gtFile = gt["file"]?.GetValue<string>();
+                                    var anchor = gt["anchor"]?.GetValue<string>();
+                                    if (string.IsNullOrWhiteSpace(gtFile) || string.IsNullOrWhiteSpace(anchor)) continue;
+                                    try
+                                    {
+                                        var full = Path.GetFullPath(Path.Combine(rootDir, gtFile.Replace('/', Path.DirectorySeparatorChar)));
+                                        if (!System.IO.File.Exists(full)) continue;
+                                        var content = AgentTextUtilities.NormalizeLineEndings(System.IO.File.ReadAllText(full));
+                                        // Normalize paren spacing on BOTH sides: the apply pipeline
+                                        // rewrites the whole changed line (`button (` → `button(`), so
+                                        // the raw anchor would false-negative on a landing edit.
+                                        gt["verified"] = AgentTextUtilities.FindAnchorOffset(
+                                            AgentTextUtilities.NormalizeParenSpacing(content),
+                                            AgentTextUtilities.NormalizeParenSpacing(anchor)) >= 0;
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
                         var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
                         await _boardData.SaveRawAsync(saved);
                         if (emitSse)
@@ -143,6 +183,168 @@ partial class AgentController
         catch (Exception ex)
         {
             await EmitLog(emitSse, "warn", "Failed to persist rejected plan step to card", new { cardId, error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Persists the run's COMPUTED GROUND TRUTH onto the card as _groundTruth — the
+    /// deterministic expectations the post-execution verification checks the run against
+    /// (e.g. "Newly created CSS class '.flight-detail-body' must be referenced in the
+    /// template") — and emits a live 'groundTruth' SSE event so the card shows the
+    /// known-correct answer DURING the run. Set-on-fire semantics: once an expectation is
+    /// computed it stays on the card, so a human can see what the run was being checked
+    /// against even after a repair pass satisfies it. Display-only: failures are logged,
+    /// never fatal (unlike plan persistence, which halts to prevent data loss).
+    /// </summary>
+    private async Task PublishGroundTruthAsync(string cardId, List<string> items, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || items.Count == 0)
+            return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    cardObj["_groundTruth"] = new JsonArray(items.Select(i => JsonValue.Create(i)).ToArray());
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "groundTruth", new { items, cardId }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn", "Failed to persist ground truth to card", new { cardId, error = ex.Message });
+        }
+    }
+    /// <summary>
+    /// Persists the run's FINAL VERIFICATION VERDICT onto the card as _verification —
+    /// { complete, reason, at } — so the reason the run was (or wasn't) verified complete
+    /// is visible on the card after the run instead of only in the log. Mirrors
+    /// <see cref="PublishGroundTruthAsync"/>: display-only, failures are logged never
+    /// fatal, and it emits a live 'verification' SSE event so the active card updates
+    /// immediately. The reason is the final <c>verified_complete</c> entry's text when the
+    /// run completed; for an incomplete run it is the deterministic fallback passed in.
+    /// </summary>
+    private async Task PublishVerificationAsync(string cardId, bool complete, string? reason, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId))
+            return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    var resolvedReason = string.IsNullOrWhiteSpace(reason)
+                        ? (complete
+                            ? "Run completed and passed post-execution verification."
+                            : "Post-execution verification did not pass — review the run log for the remaining issue(s).")
+                        : reason;
+                    cardObj["_verification"] = new JsonObject
+                    {
+                        ["complete"] = complete,
+                        ["reason"] = resolvedReason,
+                        ["at"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                    };
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "verification", new { complete, reason = resolvedReason, cardId }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn", "Failed to persist verification to card", new { cardId, error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Persists a DELIVERED live steer onto the card as _steers — a running transcript of
+    /// what was injected into the planner, and at which turn — and emits a live
+    /// 'steerDelivered' SSE event so the card shows it DURING the run. Mirrors
+    /// <see cref="PublishGroundTruthAsync"/>: set-on-fire append semantics (each delivered
+    /// steer is appended in order and survives a reload via boarddata), display-only
+    /// (failures are logged, never fatal). The turn number is the step the steer became
+    /// visible to — the planner turn it was drained before, so a human can correlate
+    /// "turn 3 steer" with the turn-3 proposal in the transcript.
+    /// </summary>
+    private async Task PublishDeliveredSteerAsync(string cardId, string message, int turn, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || string.IsNullOrWhiteSpace(message))
+            return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    var steers = cardObj["_steers"] as JsonArray ?? new JsonArray();
+                    steers.Add(new JsonObject
+                    {
+                        ["turn"] = turn,
+                        ["message"] = message,
+                        ["at"] = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
+                    });
+                    cardObj["_steers"] = steers;
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        var items = steers.Select(s => (JsonObject)s).Select(s => new
+                        {
+                            turn = s["turn"]?.GetValue<int>() ?? 0,
+                            message = s["message"]?.GetValue<string>() ?? "",
+                            at = s["at"]?.GetValue<string>() ?? ""
+                        }).ToList();
+                        await SendSse(Response, "steerDelivered", new { items, cardId }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn", "Failed to persist delivered steer to card", new { cardId, error = ex.Message });
         }
     }
     private async Task<string> PostEditStyleFixAsync(
@@ -844,7 +1046,7 @@ partial class AgentController
         string preEditContent, string postEditContent, bool emitSse, CancellationToken ct,
         List<(int score, string reason, string failedNew)>? priorAttempts = null,
         string? explorationContext = null, AgentPlan? fullPlan = null,
-        int currentStepIndex = -1, string? causalContext = null)
+        int currentStepIndex = -1, string? causalContext = null, string? llmRoundLabel = null)
     {
         var anchor = newStr.Split('\n')
             .Select(l => l.Trim())
@@ -914,7 +1116,7 @@ partial class AgentController
             var (raw, _, error) = await CallLlmRawStreaming(
                 sysPrompt, userMsg, emitSse, ct,
                 requestTimeout: _infiniteTimeout,
-                maxTokens: 256);
+                maxTokens: 256, llmRoundLabel: llmRoundLabel);
             if (string.IsNullOrWhiteSpace(raw))
                 return ("error", $"LLM returned empty response. {error}", 0, false);
             var cleaned = raw.Trim();
