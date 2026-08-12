@@ -502,7 +502,11 @@ start """" ""{currentExe}"" --no-open-browser
         {
             filesEdited = filesEdited
                 .Take(MaxFilesEditedEntries)
-                .Select(p => (p ?? "").Length > MaxFilePathChars ? p![..MaxFilePathChars] : p)
+                .Select(p =>
+                {
+                    var s = p ?? "";
+                    return s.Length > MaxFilePathChars ? s[..MaxFilePathChars] : s;
+                })
                 .ToList();
         }
 

@@ -489,7 +489,7 @@ public class AdversarialUserScenarioTests : IDisposable
             // Empty/whitespace user steering must add NOTHING: exactly one steering section
             // (the attached-files instruction the pipeline injects itself), and no classic-
             // planner "USER STEERING" marker.
-            Assert.Equal(1, Regex.Matches(prompt, "### STEERING ###").Count);
+            Assert.Single(Regex.Matches(prompt, "### STEERING ###"));
             Assert.Contains("The user has explicitly attached one or more files", prompt);
             Assert.DoesNotContain("### USER STEERING ###", prompt);
         }
@@ -781,8 +781,8 @@ public class AdversarialUserScenarioTests : IDisposable
         await execTask;
 
         // NOT rejected: the plan executed and both steps landed.
-        Assert.Empty(results.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() == "rejected_step"));
+        Assert.DoesNotContain(results.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "rejected_step");
         var utilFull = Path.Combine(_projectRoot, UtilRel.Replace('/', Path.DirectorySeparatorChar));
         Assert.True(File.Exists(utilFull), "the create after an earlier _create_directory must land");
         Assert.Contains("export class Util", File.ReadAllText(utilFull));

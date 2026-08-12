@@ -724,6 +724,23 @@ public partial class AgentController : ControllerBase
             foreach (var p in piEl.EnumerateArray())
                 if (p.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(p.GetString()))
                     planLog.Add(p.GetString()!);
+        // Run outcome: the final verification verdict + problem signals (warn/error/rejected
+        // log events, repair passes, deterministic-check misses) extracted client-side. Lets
+        // the suggestion LLM see what ACTUALLY went wrong instead of only the happy summary.
+        bool hasVerification = false, verificationComplete = false;
+        string verificationReason = "";
+        if (payload.TryGetProperty("verification", out var vEl) && vEl.ValueKind == JsonValueKind.Object &&
+            vEl.TryGetProperty("complete", out var cEl) && (cEl.ValueKind == JsonValueKind.True || cEl.ValueKind == JsonValueKind.False))
+        {
+            hasVerification = true;
+            verificationComplete = cEl.ValueKind == JsonValueKind.True;
+            if (vEl.TryGetProperty("reason", out var rEl)) verificationReason = rEl.GetString() ?? "";
+        }
+        List<string> runSignals = new();
+        if (payload.TryGetProperty("runSignals", out var rsEl) && rsEl.ValueKind == JsonValueKind.Array)
+            foreach (var s in rsEl.EnumerateArray())
+                if (s.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(s.GetString()))
+                    runSignals.Add(s.GetString()!);
         // "More like this" top-up: the card already has suggestions and the user
         // asked for more. topup=true routes into the topping-up branch; existing
         // is the front-end's live copy of the current suggestions, used as
@@ -821,81 +838,14 @@ public partial class AgentController : ControllerBase
             // "full" (default) = skeleton + board history + git, "board" = skeleton + board
             // history, "skeleton" = file layout only. Resolved from the project's config entry.
             var contextDepth = await ResolveSuggestionContextDepthAsync(project, projectRoot);
-            var sb = new StringBuilder();
-            if (topup)
-            {
-                sb.AppendLine("A kanban card's Suggestions section is being topped up by a \"More like this\" request.");
-                sb.AppendLine($"The card already has {existingDescs.Count} suggestion(s). Generate up to {slots} NEW, DISTINCT follow-up suggestion(s) that the existing set missed — same spirit and grounding, but NOT repeats or paraphrases of what is already listed.");
-                sb.AppendLine("Ground every suggestion in what the agent actually did, thought, and the real files it touched ");
-                sb.AppendLine("— prefer the single most valuable next increment over generic advice. Do NOT suggest work that ");
-                sb.AppendLine("the card already completed or that is unrelated to its task.");
-                sb.AppendLine("Each suggestion MUST include file attachments (existing project-relative paths) that would serve as ");
-                sb.AppendLine("discovery context for implementing it — pick real files that actually exist in the project.");
-                if (existingDescs.Count > 0)
-                {
-                    sb.AppendLine();
-                    sb.AppendLine("EXISTING SUGGESTIONS (do not repeat or paraphrase these):");
-                    foreach (var d in existingDescs) sb.AppendLine("  - " + d);
-                }
-            }
-            else
-            {
-                sb.AppendLine("A card on the kanban board was just completed successfully.");
-                sb.AppendLine($"Generate up to {maxSuggestions} tightly-scoped, on-point follow-up suggestions for THIS card's work.");
-                sb.AppendLine("Ground every suggestion in what the agent actually did, thought, and the real files it touched ");
-                sb.AppendLine("— prefer the single most valuable next increment over generic advice. Do NOT suggest work that ");
-                sb.AppendLine("the card already completed or that is unrelated to its task.");
-                sb.AppendLine();
-                sb.AppendLine("Think about the APPLICATION AS A WHOLE, not just this card. The PROJECT CONTEXT block below ");
-                var effDepth = NormalizeSuggestionDepth(contextDepth);
-                if (effDepth == "skeleton")
-                {
-                    sb.AppendLine("contains the project's file/directory skeleton — use it to ground file-attachment suggestions ");
-                    sb.AppendLine("in real files that exist in the project.");
-                }
-                else if (effDepth == "board")
-                {
-                    sb.AppendLine("contains the full project skeleton and every other kanban card on the board (their tasks, ");
-                    sb.AppendLine("summaries and the files they touched) — use it to spot cross-feature integration ");
-                    sb.AppendLine("opportunities. Example: if an earlier card built a notification system and this card ");
-                    sb.AppendLine("added admin banning, a high-value suggestion is 'make banning notify the banned user ");
-                    sb.AppendLine("via the notification system'.");
-                }
-                else
-                {
-                    sb.AppendLine("contains the full project skeleton, every other kanban card on the board (their tasks, summaries ");
-                    sb.AppendLine("and the files they touched), and recent git history — use it to spot cross-feature integration ");
-                    sb.AppendLine("opportunities. Example: if an earlier card built a notification system and this card added admin ");
-                    sb.AppendLine("banning, a high-value suggestion is 'make banning notify the banned user via the notification ");
-                    sb.AppendLine("system'. Prefer such connective, whole-app suggestions over isolated polish whenever the context ");
-                    sb.AppendLine("supports them.");
-                }
-                sb.AppendLine("Each suggestion MUST include file attachments (existing project-relative paths) that would serve as ");
-                sb.AppendLine("discovery context for implementing it — pick real files that actually exist in the project.");
-            }
-            sb.AppendLine();
-            sb.AppendLine($"CARD TASK:\n{cardText}");
-            if (!string.IsNullOrWhiteSpace(thinking)) sb.AppendLine($"\nAGENT THINKING (reasoning that drove the work):\n{thinking}");
-            if (planLog.Count > 0) sb.AppendLine($"\nPLAN ITEMS:\n{string.Join("\n", planLog.Select(x => "  - " + x))}");
-            if (stepLog.Count > 0) sb.AppendLine($"\nSTEPS EXECUTED:\n{string.Join("\n", stepLog.Select(x => "  - " + x))}");
-            if (!string.IsNullOrWhiteSpace(summary)) sb.AppendLine($"\nCOMPLETION SUMMARY:\n{summary}");
-            if (filesEdited.Count > 0) sb.AppendLine($"\nFILES CHANGED:\n{string.Join("\n", filesEdited.Select(f => "  - " + f))}");
-            // Broader application context: full project skeleton, every other card on
-            // the board, recent git history, and files touched by other cards. Gives the
-            // suggestion LLM a whole-app view so it can propose cross-feature
-            // integrations (e.g. "banning should notify via the notification system")
-            // instead of only card-local follow-ups.
             var projectContext = await BuildProjectContextBlockAsync(projectRoot, cardId, contextDepth);
-            if (!string.IsNullOrWhiteSpace(projectContext))
-                sb.AppendLine("\n" + projectContext);
-            sb.AppendLine();
-            sb.AppendLine($"Reply ONLY with a JSON array of 0-{(topup ? slots : maxSuggestions)} objects, each shaped:");
-            sb.AppendLine(@"[{""description"": ""<suggestion text>"", ""files"": [""rel/path/file.ts"", ""rel/path/other.cs""], ""connection"": ""<which other card/feature this builds on — e.g. 'notification system built in card #a1b2c3'; empty string if it stands alone>""}]
-If nothing meaningful remains, reply with an empty array [] — never invent work.");
+            var prompt = BuildSuggestionPrompt(cardText, thinking, planLog, stepLog, summary, filesEdited,
+                projectContext, slots, maxSuggestions, topup, existingDescs, contextDepth,
+                hasVerification, verificationComplete, verificationReason, runSignals);
 
             var (raw, _, err) = await CallLlmRaw(
                 "You are an expert product engineer. Output ONLY valid JSON. No markdown, no explanation.",
-                sb.ToString(), suggestionCts.Token, requestTimeout: _infiniteTimeout, maxTokens: 1024);
+                prompt, suggestionCts.Token, requestTimeout: _infiniteTimeout, maxTokens: 1024);
             var suggestions = new List<object>();
             // NOTE: CallLlmRaw's ParseAgentResponse mangles JSON arrays (it slices
             // from first { to last }, destroying the array wrapper), so it reports
@@ -1011,6 +961,119 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
             }
             suggestionCts.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Builds the full suggestion-generation prompt. Extracted from the endpoint so the
+    /// guidance (value ladder, spread rule, specificity rules, anti-patterns) and the
+    /// RUN OUTCOME block are unit-testable. The prompt deliberately mirrors how a strong
+    /// suggestion engine thinks: fix the run's real problems first, then open new
+    /// directions, harden/test what was built, and connect to the rest of the app.
+    /// </summary>
+    internal static string BuildSuggestionPrompt(
+        string cardText, string thinking, List<string> planLog, List<string> stepLog,
+        string summary, List<string> filesEdited, string projectContext,
+        int slots, int maxSuggestions, bool topup, List<string> existingDescs, string contextDepth,
+        bool hasVerification, bool verificationComplete, string verificationReason, List<string> runSignals)
+    {
+        var sb = new StringBuilder();
+        var effDepth = NormalizeSuggestionDepth(contextDepth);
+        if (topup)
+        {
+            sb.AppendLine("A kanban card's Suggestions section is being topped up by a \"More like this\" request.");
+            sb.AppendLine($"The card already has {existingDescs.Count} suggestion(s). Generate up to {slots} NEW, DISTINCT follow-up suggestion(s) that the existing set missed — same spirit and grounding, but NOT repeats or paraphrases of what is already listed.");
+            if (existingDescs.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("EXISTING SUGGESTIONS (do not repeat or paraphrase these):");
+                foreach (var d in existingDescs) sb.AppendLine("  - " + d);
+            }
+        }
+        else
+        {
+            sb.AppendLine("A card on the kanban board was just completed successfully.");
+            sb.AppendLine($"Generate up to {slots} follow-up suggestions for THIS card's work.");
+        }
+        sb.AppendLine();
+        sb.AppendLine("WHAT MAKES A GREAT SUGGESTION (ranked by value):");
+        sb.AppendLine("1. FIX THE RUN'S ACTUAL PROBLEMS — if the RUN OUTCOME block below shows verification failures, repair");
+        sb.AppendLine("   passes, rejected steps, or deterministic-check misses, the TOP suggestion must address the root");
+        sb.AppendLine("   cause: name what failed and the concrete fix. This outranks everything else.");
+        sb.AppendLine("2. OPEN A NEW DIRECTION — a surprising feature, a bold architectural improvement, a clever");
+        sb.AppendLine("   simplification, an ambitious capability, or a natural next milestone that builds on this work.");
+        sb.AppendLine("   Branch away from the obvious follow-up instead of just extending the same thread.");
+        sb.AppendLine("3. HARDEN OR TEST WHAT WAS JUST BUILT — a deterministic check, the edge case the run missed, or the");
+        sb.AppendLine("   test that would have caught the bug the run nearly shipped.");
+        sb.AppendLine("4. CONNECT TO THE REST OF THE APP — compose this card's feature with another card's feature when the");
+        sb.AppendLine("   project context shows they fit (e.g. 'make banning notify the banned user via the notification system').");
+        sb.AppendLine();
+        sb.AppendLine("SPREAD: aim for variety — mix one tightly-scoped next step with at least one bolder, more expansive");
+        sb.AppendLine("bet. Prefer a few strong, varied suggestions over a long list of weak ones.");
+        sb.AppendLine();
+        sb.AppendLine("SPECIFICITY: name the exact file(s) and function/component; state the concrete end state in ONE");
+        sb.AppendLine("sentence (the outcome), not the steps to reach it; make each suggestion self-contained so it works");
+        sb.AppendLine("as a future card title. Every suggestion MUST include real existing project-relative file paths as");
+        sb.AppendLine("attachments (discovery context for implementing it).");
+        sb.AppendLine();
+        sb.AppendLine("NEVER suggest:");
+        sb.AppendLine("- Vague polish ('improve', 'clean up', 'make better') without a named outcome.");
+        sb.AppendLine("- Generic advice ('add tests', 'handle errors') without naming what to test/handle and why.");
+        sb.AppendLine("- Work the card already completed, or repeats/paraphrases of the existing suggestions.");
+        sb.AppendLine("- Anything not grounded in the card's task, the files it touched, or the project context below.");
+        sb.AppendLine();
+        // Depth pointer: what the PROJECT CONTEXT block below contains, so the model grounds
+        // file attachments and cross-feature connections in real, existing material.
+        if (effDepth == "skeleton")
+        {
+            sb.AppendLine("The PROJECT CONTEXT block below contains the project's file/directory skeleton — use it to ground");
+            sb.AppendLine("file-attachment suggestions in real files that exist in the project.");
+        }
+        else if (effDepth == "board")
+        {
+            sb.AppendLine("The PROJECT CONTEXT block below contains the full project skeleton and every other kanban card on");
+            sb.AppendLine("the board (their tasks, summaries and the files they touched) — use it to spot cross-feature");
+            sb.AppendLine("integration opportunities.");
+        }
+        else
+        {
+            sb.AppendLine("The PROJECT CONTEXT block below contains the full project skeleton, every other kanban card on the");
+            sb.AppendLine("board (their tasks, summaries and the files they touched), and recent git history — use it to spot");
+            sb.AppendLine("cross-feature integration opportunities. Prefer connective, whole-app suggestions over isolated");
+            sb.AppendLine("polish whenever the context supports them.");
+        }
+        sb.AppendLine();
+        sb.AppendLine($"CARD TASK:\n{cardText}");
+        if (!string.IsNullOrWhiteSpace(thinking)) sb.AppendLine($"\nAGENT THINKING (reasoning that drove the work):\n{thinking}");
+        if (planLog.Count > 0) sb.AppendLine($"\nPLAN ITEMS:\n{string.Join("\n", planLog.Select(x => "  - " + x))}");
+        if (stepLog.Count > 0) sb.AppendLine($"\nSTEPS EXECUTED:\n{string.Join("\n", stepLog.Select(x => "  - " + x))}");
+        if (!string.IsNullOrWhiteSpace(summary)) sb.AppendLine($"\nCOMPLETION SUMMARY:\n{summary}");
+        if (filesEdited.Count > 0) sb.AppendLine($"\nFILES CHANGED:\n{string.Join("\n", filesEdited.Select(f => "  - " + f))}");
+        // RUN OUTCOME — what actually happened during the run. The highest-value suggestions
+        // fix these root causes, so the block is fed verbatim even when the summary is rosy.
+        if (hasVerification || runSignals.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("### RUN OUTCOME (what actually happened during the run — the highest-value suggestions fix these) ###");
+            if (hasVerification)
+                sb.AppendLine($"- VERIFICATION: {(verificationComplete ? "COMPLETE" : "INCOMPLETE")} — {verificationReason}");
+            else
+                sb.AppendLine("- VERIFICATION: not reported");
+            if (runSignals.Count > 0)
+            {
+                sb.AppendLine("- PROBLEM SIGNALS (things that went wrong or needed repair):");
+                foreach (var s in runSignals) sb.AppendLine("    - " + s);
+            }
+            else
+            {
+                sb.AppendLine("- PROBLEM SIGNALS: none");
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(projectContext)) sb.AppendLine("\n" + projectContext);
+        sb.AppendLine();
+        sb.AppendLine($"Reply ONLY with a JSON array of 0-{slots} objects, each shaped:");
+        sb.AppendLine(@"[{""description"": ""<suggestion text>"", ""files"": [""rel/path/file.ts"", ""rel/path/other.cs""], ""connection"": ""<which other card/feature this builds on — e.g. 'notification system built in card #a1b2c3'; empty string if it stands alone>""}]
+If nothing meaningful remains, reply with an empty array [] — never invent work.");
+        return sb.ToString();
     }
 
     /// <summary>

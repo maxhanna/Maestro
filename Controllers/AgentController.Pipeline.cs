@@ -467,6 +467,7 @@ partial class AgentController
             planAlreadyExecuted = true;
             planCompleteDeclared = interleavedComplete;
         }
+        plan ??= new AgentPlan();
         if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
             await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
         await EmitLog(emitSse, "info",

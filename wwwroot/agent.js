@@ -1170,6 +1170,33 @@ angular.module('kanbanApp')
                     return 'This card was created by a scheduled calendar job' + mid + '.';
                 };
 
+                // Extracts the run's PROBLEM SIGNALS from the agent log — warn/error/rejected
+                // entries plus info entries that mention verification, repair, guards, or
+                // failure markers — so the suggestion LLM sees what actually went wrong, not
+                // just the happy summary. Pure function (tested via
+                // tests/js/suggestion-signals.test.js). Dedupes near-identical lines
+                // (numbers normalized) and caps at 30 so the payload stays bounded.
+                function collectRunSignals(log) {
+                    if (!log || !log.length) return [];
+                    var signals = [];
+                    var seen = {};
+                    var markers = /verification|deterministic|repair|rejected|incomplete|circuit breaker|veto|guard|error|fail|warn/i;
+                    for (var i = 0; i < log.length; i++) {
+                        var e = log[i] || {};
+                        var msg = (e.message || '').trim();
+                        if (!msg) continue;
+                        var noteworthy = e.level === 'error' || e.level === 'warn' || e.level === 'rejected' ||
+                            (e.level === 'info' && markers.test(msg));
+                        if (!noteworthy) continue;
+                        var line = msg.length > 220 ? msg.slice(0, 220) + '…' : msg;
+                        var key = line.replace(/\d+/g, '#');
+                        if (seen[key]) continue;
+                        seen[key] = true;
+                        signals.push(line);
+                        if (signals.length >= 30) break;
+                    }
+                    return signals;
+                }
                 vm.suggestImprovements = function (card, summary, project, opts) {
                     if (!card) return false;
                     var proj = project || card.filePath || vm.selectedProject;
@@ -1217,7 +1244,13 @@ angular.module('kanbanApp')
                         thinking: (analysis.thinking || '').slice(0, 6000),
                         steps: stepLog,
                         planItems: planLog,
-                        filesEdited: filesEdited
+                        filesEdited: filesEdited,
+                        // What actually happened during the run: the final verification verdict
+                        // and the log's problem signals. Fed into the RUN OUTCOME block so the
+                        // suggestion LLM can propose fixing real failures instead of only
+                        // building on the rosy summary.
+                        verification: card._verification || null,
+                        runSignals: collectRunSignals(card.agentLog)
                     };
                     payload.maxSuggestions = maxSuggestions;
                     if (topup) { payload.topup = true; payload.existing = card._suggestions; }

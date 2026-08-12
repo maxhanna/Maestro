@@ -92,7 +92,10 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
         // The target is an absolute temp path (quoted so spaces are safe) — the auto-dump
         // must write HERE, never to the real desktop.
-        var prompt = $"Search the web for an interesting and relevant AI article and write the data into a text file at \"{_dumpTarget}\".";
+        // Deliberately NOT a news-marked prompt ("…interesting and relevant AI article and
+        // write the data into a text file…" now routes to the news digest via rule C) — this
+        // test locks the DuckDuckGo harvest → steer → command-dump machinery.
+        var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\".";
 
         var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
 
@@ -195,9 +198,9 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.NotNull(plan);
         Assert.Equal(new[] { "_web_search", "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
         Assert.Equal("https://example.com/alphafold3", plan.Plan[1].Change);
-        var doneFetch = Assert.Single(allSteps.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() == "_web_fetch" &&
-                        r.GetValueOrDefault("status")?.ToString() == "done"));
+        var doneFetch = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "_web_fetch" &&
+                 r.GetValueOrDefault("status")?.ToString() == "done");
         Assert.Equal("https://example.com/alphafold3", doneFetch.GetValueOrDefault("url")?.ToString());
         Assert.Contains(_clientFactory.FetchedUrls, u => u.Contains("https://example.com/alphafold3", StringComparison.Ordinal));
         // The invented example-domain pattern was never fetched — only the carried URL.
@@ -382,7 +385,9 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // keeps the chain planning until the OS-output gate auto-dumps the fetched data.
         _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
         var controller = BuildController();
-        var prompt = $"Search the web for an interesting and relevant AI article and write the data into a text file at \"{_dumpTarget}\".";
+        // Non-news phrasing — rule C routes "interesting and relevant AI article … write the
+        // data into a text file" to the news digest, which is not what this test exercises.
+        var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\".";
 
         var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
 
@@ -437,7 +442,8 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         _clientFactory.Mode = PlannerMode.FetchAlwaysFails;
         _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
         var controller = BuildController();
-        var prompt = $"Search the web for an interesting and relevant AI article and write the data into a text file at \"{_dumpTarget}\".";
+        // Non-news phrasing — the news-marked variant routes to the digest, not DuckDuckGo.
+        var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\".";
 
         var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
 

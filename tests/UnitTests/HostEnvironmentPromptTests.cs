@@ -16,7 +16,7 @@ public class HostEnvironmentPromptTests
         "BuildIncrementalStepSystemPrompt", BindingFlags.NonPublic | BindingFlags.Static)!;
 
     private static string Build(string stepMode = "all")
-        => (string)BuildPromptMethod.Invoke(null, new object[] { stepMode, null, null })!;
+        => (string)BuildPromptMethod.Invoke(null, new object?[] { stepMode, null, null })!;
 
     private static string ExpectedOsName()
     {

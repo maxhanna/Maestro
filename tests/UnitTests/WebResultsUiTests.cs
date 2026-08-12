@@ -25,7 +25,7 @@ public class WebResultsUiTests
 
     private static (string capped, bool truncated) Cap(string? output)
     {
-        var result = ((string, bool))CapMethod.Invoke(null, new object[] { output })!;
+        var result = ((string, bool))CapMethod.Invoke(null, new object?[] { output })!;
         return result;
     }
 

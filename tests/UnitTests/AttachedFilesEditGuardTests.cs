@@ -138,7 +138,7 @@ public class AttachedFilesEditGuardTests
     }
 
     [Fact]
-    public void CreateFile_NoAttachedFiles_IsAllowed()
+    public async Task CreateFile_NoAttachedFiles_IsAllowed()
     {
         // Guard only applies when the user attached files to scope the task.
         var controller = RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
@@ -148,7 +148,7 @@ public class AttachedFilesEditGuardTests
             /*discoveryContext*/ "", /*planSoFar*/ new List<PlanStep>(), /*projectRoot*/ ".",
             /*emitSse*/ false, CancellationToken.None, /*skipLlm*/ false, /*lastStepCompletionNote*/ null, /*attachedFiles*/ null
         })!;
-        var (valid, _) = task.GetAwaiter().GetResult();
+        var (valid, _) = await task;
         Assert.True(valid);
     }
 

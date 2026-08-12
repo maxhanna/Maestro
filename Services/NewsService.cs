@@ -34,9 +34,10 @@ namespace Weaver.Services;
 ///      discovery context, so the next step (e.g. _create_file ai_news.md, or a _command
 ///      write) pastes REAL content.
 ///
-/// X/Twitter and Facebook are deliberately absent: both require OAuth credentials and have
-/// no public, keyless search API. Reddit, Hacker News and arXiv cover the social/discussion
-/// surface without keys.
+/// X/Twitter, Facebook and Reddit are deliberately absent: all three require OAuth
+/// credentials and Reddit additionally blocks keyless server-side requests (search.json
+/// returns 403 to datacenter IPs). Lobsters, Hacker News and arXiv cover the
+/// social/discussion surface without keys.
 /// </summary>
 public sealed class NewsService
 {
@@ -57,14 +58,16 @@ public sealed class NewsService
         ("Wired", "https://www.wired.com/feed/rss")
     };
 
-    private enum ApiKind { HackerNews, Reddit, Arxiv }
+    private enum ApiKind { HackerNews, Lobsters, Arxiv }
 
-    // API sources interpolate the query server-side ({q}), so their returned items are
-    // pre-filtered by the provider — no client-side relevance filter needed.
+    // HN/arXiv interpolate the query server-side ({q}), so their items are pre-filtered by
+    // the provider. Lobsters has NO public search API (its search endpoint 400s), so it
+    // serves its newest-stories feed and gets the same client-side relevance filter the
+    // RSS feeds use (see FetchApiAsync).
     private static readonly (string Feed, ApiKind Kind, string Url)[] ApiSources =
     {
         ("Hacker News", ApiKind.HackerNews, "https://hn.algolia.com/api/v1/search?query={q}&tags=story&hitsPerPage=15"),
-        ("Reddit", ApiKind.Reddit, "https://www.reddit.com/search.json?q={q}&sort=new&limit=15"),
+        ("Lobsters", ApiKind.Lobsters, "https://lobste.rs/newest.json"),
         ("arXiv", ApiKind.Arxiv, "https://export.arxiv.org/api/query?search_query=all:{q}&sortBy=submittedDate&sortOrder=descending&max_results=10")
     };
 
@@ -94,13 +97,17 @@ public sealed class NewsService
     }
 
     /// <summary>
-    /// The "news marker": true for news-y phrasing, false for generic web searches. Two rules:
+    /// The "news marker": true for news-y phrasing, false for generic web searches. Three rules:
     /// (A) a strong news word outright (news/headline/breaking/trending/top stories/front page);
     /// (B) a recency word (latest/today's/fresh) + a tech topic (ai/tech/startup/…) + a news
-    /// noun (stories/articles/headlines/updates). Rule B's news-noun requirement is what keeps
-    /// "AI research breakthroughs latest" and "latest release notes of .NET 10" on the plain
-    /// search path — they have "latest" and a topic but no news noun. Kept deliberately
-    /// conservative: the web-task integration tests rely on generic prompts staying put.
+    /// noun (stories/articles/headlines/updates);
+    /// (C) a tech topic + a news noun + a persist intent (write/save/paste/dump … to a
+    /// file/desktop/document) — catches the exact failure class the digest was built for:
+    /// "Search the web for an interesting and relevant AI article and write the data into a
+    /// text file on my desktop" has an AI topic and "article" but NO recency word, so rules
+    /// A/B both miss it and the agent ends up inventing a headline + fake URL. The topic + noun
+    /// requirement is what keeps "release notes", "weather", "pricing" and bare research
+    /// prompts ("recent AI breakthroughs … verify each result") on the plain search path.
     /// </summary>
     public static bool LooksLikeNewsQuery(string? text)
     {
@@ -110,6 +117,10 @@ public sealed class NewsService
         if (Regex.IsMatch(t, @"\b(latest|today's|todays|fresh)\b") &&
             Regex.IsMatch(t, @"\b(ai|a\.i\.|artificial intelligence|tech|technology|startups?|crypto|blockchain|security|software|gadgets?|science|research|papers?)\b") &&
             Regex.IsMatch(t, @"\b(stories?|articles?|headlines?|updates?)\b"))
+            return true;
+        if (Regex.IsMatch(t, @"\b(ai|a\.i\.|artificial intelligence|tech|technology|startups?|crypto|blockchain|security|software|gadgets?|science|research|papers?)\b") &&
+            Regex.IsMatch(t, @"\b(stories?|articles?|headlines?|updates?)\b") &&
+            Regex.IsMatch(t, @"\b(write|save|paste|dump|put|create|copy|fetch)\b.{0,60}\b(file|desktop|document|notes?\.md)\b"))
             return true;
         return false;
     }
@@ -127,7 +138,7 @@ public sealed class NewsService
             foreach (var (feed, url) in RssSources)
                 tasks.Add(FetchRssAsync(feed, url, query, ct));
             foreach (var (feed, kind, url) in ApiSources)
-                tasks.Add(FetchApiAsync(feed, kind, url.Replace("{q}", Uri.EscapeDataString(query)), ct));
+                tasks.Add(FetchApiAsync(feed, kind, url.Replace("{q}", Uri.EscapeDataString(query)), query, ct));
 
             var perSource = await Task.WhenAll(tasks).WaitAsync(ct);
             var all = perSource.SelectMany(x => x).ToList();
@@ -168,15 +179,7 @@ public sealed class NewsService
                 if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(link)) continue;
                 items.Add(new NewsItem(title, link, pub, feed, Cap(snippet, MaxSnippetChars)));
             }
-            // RSS feeds are static — filter to items that mention a significant query token;
-            // a feed with zero matches still contributes its newest item so it isn't lost.
-            var tokens = QueryTokens(query);
-            var relevant = items
-                .Where(i => tokens.Any(tok =>
-                    i.Title.Contains(tok, StringComparison.OrdinalIgnoreCase) ||
-                    i.Snippet.Contains(tok, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-            return relevant.Count > 0 ? relevant : items.Take(1).ToList();
+            return FilterRelevant(items, query);
         }
         catch
         {
@@ -184,18 +187,22 @@ public sealed class NewsService
         }
     }
 
-    private async Task<List<NewsItem>> FetchApiAsync(string feed, ApiKind kind, string url, CancellationToken ct)
+    private async Task<List<NewsItem>> FetchApiAsync(string feed, ApiKind kind, string url, string query, CancellationToken ct)
     {
         try
         {
             var body = await GetStringAsync(url, ct);
-            return kind switch
+            var items = kind switch
             {
                 ApiKind.HackerNews => ParseHackerNews(body, feed),
-                ApiKind.Reddit => ParseReddit(body, feed),
+                ApiKind.Lobsters => ParseLobsters(body, feed),
                 ApiKind.Arxiv => ParseArxiv(body, feed),
                 _ => new List<NewsItem>()
             };
+            // Lobsters' feed is static (no query search API) — apply the same client-side
+            // relevance filter the RSS feeds use so the newest-stories list narrows to the
+            // query instead of flooding the digest with unrelated items.
+            return kind == ApiKind.Lobsters ? FilterRelevant(items, query) : items;
         }
         catch
         {
@@ -228,32 +235,43 @@ public sealed class NewsService
         return list;
     }
 
-    private static List<NewsItem> ParseReddit(string json, string feed)
+    private static List<NewsItem> ParseLobsters(string json, string feed)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
-        if (!root.TryGetProperty("data", out var data) ||
-            !data.TryGetProperty("children", out var children) || children.ValueKind != JsonValueKind.Array) return new();
+        if (root.ValueKind != JsonValueKind.Array) return new();
         var list = new List<NewsItem>();
-        foreach (var child in children.EnumerateArray().Take(15))
+        foreach (var item in root.EnumerateArray().Take(25))
         {
-            if (!child.TryGetProperty("data", out var d)) continue;
-            var title = d.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "";
-            var permalink = d.TryGetProperty("permalink", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : "";
-            var external = d.TryGetProperty("url", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() ?? "" : "";
-            var url = !string.IsNullOrWhiteSpace(external) && Uri.TryCreate(external, UriKind.Absolute, out _)
-                ? external
-                : "https://www.reddit.com" + permalink;
-            var selftext = d.TryGetProperty("selftext", out var st) && st.ValueKind == JsonValueKind.String
-                ? Regex.Replace(Regex.Replace(st.GetString() ?? "", "<[^>]+>", " "), @"\s+", " ").Trim()
+            var title = item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "";
+            var url = item.TryGetProperty("url", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() ?? "" : "";
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                var sid = item.TryGetProperty("short_id_url", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() ?? "" : "";
+                url = sid;
+            }
+            var created = item.TryGetProperty("created_at", out var ca) && ca.ValueKind == JsonValueKind.String ? ca.GetString() : null;
+            var desc = item.TryGetProperty("description", out var d) && d.ValueKind == JsonValueKind.String
+                ? Regex.Replace(Regex.Replace(d.GetString() ?? "", "<[^>]+>", " "), @"\s+", " ").Trim()
                 : "";
-            var created = d.TryGetProperty("created_utc", out var cu) && cu.ValueKind == JsonValueKind.Number
-                ? DateTimeOffset.FromUnixTimeSeconds((long)cu.GetDouble()).ToString("yyyy-MM-dd")
-                : null;
             if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(url)) continue;
-            list.Add(new NewsItem(title, url, created, feed, Cap(selftext, MaxSnippetChars)));
+            list.Add(new NewsItem(title, url, created, feed, Cap(desc, MaxSnippetChars)));
         }
         return list;
+    }
+
+    /// <summary>Static feeds (RSS, Lobsters) — filter to items that mention a significant
+    /// query token; a feed with zero matches still contributes its newest item so it isn't
+    /// lost.</summary>
+    private static List<NewsItem> FilterRelevant(List<NewsItem> items, string query)
+    {
+        var tokens = QueryTokens(query);
+        var relevant = items
+            .Where(i => tokens.Any(tok =>
+                i.Title.Contains(tok, StringComparison.OrdinalIgnoreCase) ||
+                i.Snippet.Contains(tok, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        return relevant.Count > 0 ? relevant : items.Take(1).ToList();
     }
 
     private static List<NewsItem> ParseArxiv(string xml, string feed)

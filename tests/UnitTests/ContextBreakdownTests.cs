@@ -109,7 +109,7 @@ public class ContextBreakdownTests
 
         var skeletonRow = rowList.Single(r => (string)r.kind == "skeleton");
         Assert.Equal(300, (int)skeletonRow.chars); // capped, never exceeds the context
-        Assert.Empty(rowList.Where(r => (string)r.kind == "scaffolding"));
+        Assert.DoesNotContain(rowList, r => (string)r.kind == "scaffolding");
     }
 
     [Fact]
@@ -156,7 +156,7 @@ public class ContextBreakdownTests
         // Without a checklist the row is still shown, named plainly.
         var controller = NewController();
         SetField(controller, "_taskPromptContextChars", 300);
-        SetField(controller, "_requirementChecklist", null);
+        SetField(controller, "_requirementChecklist", null!);
         var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(controller, new List<object>(), "HHH");
         var taskRow = rows.Cast<dynamic>().Single(r => (string)r.kind == "task");
         Assert.Equal("task prompt", (string)taskRow.name);

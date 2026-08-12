@@ -24,7 +24,7 @@ public class NewsServiceTests
     private const string NewsPrompt =
         "Get a latest AI news article from the web and paste the article in a text file on the desktop.";
     private const string PlainPrompt =
-        "Search the web for an interesting and relevant AI article and write the data into a text file on the desktop.";
+        "Search the web for recent AI breakthroughs and verify each result is a real published paper.";
     private const string Query = "latest AI news";
 
     // ── The routing marker: news-y phrasing routes to the digest, generic web prompts stay put ──
@@ -35,13 +35,17 @@ public class NewsServiceTests
     [InlineData("Show me the latest AI headlines", true)]
     [InlineData("Breaking news in technology", true)]
     [InlineData("Show HN: top trending stories this week", true)]
+    // The exact "invented article" failure class — topic + "article" + persist-to-file, with
+    // NO recency word and NO literal "news", so only rule C catches it.
+    [InlineData("Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.", true)]
+    [InlineData("Search the web for an AI article and write it to a text file on my desktop.", true)]
     // Every non-news web prompt already in the suite must stay on the plain search path.
-    [InlineData("Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.", false)]
     [InlineData("Search the web for the current weather in London.", false)]
     [InlineData("Search the web for the latest release notes of .NET 10.", false)]
     [InlineData("Check the latest weaver release version online and save the version to a file", false)]
     [InlineData("Fetch the URL https://example.com/pricing from the internet and summarize the Pro plan price.", false)]
     [InlineData("Search for recent AI articles about machine learning advancements", false)]
+    [InlineData("Search for recent AI articles about machine learning advancements and summarize the top three", false)]
     [InlineData("Search the web for recent AI breakthroughs and verify each result is a real published paper", false)]
     [InlineData("Search the web for the latest release notes for weaver and add a summary line to NOTES.md.", false)]
     public void LooksLikeNewsQuery_Marker(string prompt, bool expected)
@@ -51,7 +55,7 @@ public class NewsServiceTests
 
     // ── Digest pipeline: parallel sources → dedup → round-robin → snippets → markdown ──
     // VB: [V1, V2, V3] · TC: [T1 (SAME TITLE as V1 → deduped away), T2] · HN: [H1] ·
-    // arXiv: [A1] · Reddit: [R1] — the other four RSS feeds return empty.
+    // arXiv: [A1] · Lobsters: [L1] — the other four RSS feeds return empty.
     [Fact]
     public async Task FetchNewsAsync_ParsesDedupsInterleaves_AndAssemblesDigest()
     {
@@ -62,7 +66,7 @@ public class NewsServiceTests
 
         Assert.Contains("# AI News — ", digest);
         Assert.Contains("\"AI news\"", digest);
-        Assert.Contains("7 item(s) from VentureBeat, TechCrunch, Hacker News, Reddit, arXiv.", digest);
+        Assert.Contains("7 item(s) from VentureBeat, TechCrunch, Hacker News, Lobsters, arXiv.", digest);
         // Every source parsed into the digest.
         Assert.Contains("AI Startup Raises $200M", digest);
         Assert.Contains("New AI Model Beats Benchmarks", digest);
@@ -70,15 +74,15 @@ public class NewsServiceTests
         Assert.Contains("AI Robot Vacuum Review", digest);
         Assert.Contains("Show HN: Local AI News Reader", digest);
         Assert.Contains("An Efficient Transformer for Multi-Task Policy Learning", digest);
-        Assert.Contains("r/MachineLearning thread on AI news", digest);
+        Assert.Contains("Lobsters: AI News Thread", digest);
         // Dedup: T1 ("AI Startup Raises $200M") was the same story as V1 → collapsed, and the
         // kept copy is V1's (richer snippet, VentureBeat URL) — never the tracker's URL.
         Assert.Contains("https://vb.example.com/1", digest);
         Assert.DoesNotContain("https://tc.example.com/1", digest);
-        // Interleave order is round-robin by feed: V1, T2, H1, R1, A1, V2, V3.
+        // Interleave order is round-robin by feed: V1, T2, H1, L1, A1, V2, V3.
         AssertOrder(digest,
             "AI Startup Raises $200M", "AI Robot Vacuum Review", "Show HN: Local AI News Reader",
-            "r/MachineLearning thread on AI news", "An Efficient Transformer for Multi-Task Policy Learning",
+            "Lobsters: AI News Thread", "An Efficient Transformer for Multi-Task Policy Learning",
             "New AI Model Beats Benchmarks", "AI Chip Design News");
         // Long feed descriptions (>200 chars) become the summary — no LLM call needed.
         Assert.Contains("VentureBeat long-form description", digest);
@@ -86,7 +90,7 @@ public class NewsServiceTests
         Assert.Contains("https://arxiv.org/abs/2406.07539", digest);
         Assert.Contains("Feed: Hacker News", digest);
         Assert.Contains("Feed: arXiv", digest);
-        Assert.Contains("Feed: Reddit", digest);
+        Assert.Contains("Feed: Lobsters", digest);
     }
 
     [Fact]
@@ -99,7 +103,7 @@ public class NewsServiceTests
 
         // TechCrunch vanished; every other source still contributed.
         Assert.Contains("AI Startup Raises $200M", digest);
-        Assert.Contains("6 item(s) from VentureBeat, Hacker News, Reddit, arXiv.", digest);
+        Assert.Contains("6 item(s) from VentureBeat, Hacker News, Lobsters, arXiv.", digest);
         Assert.DoesNotContain("TechCrunch", digest);
     }
 
@@ -144,6 +148,26 @@ public class NewsServiceTests
         // A REAL title + REAL URL from the live feed — exactly what the pre-fix run invented.
         Assert.Contains("AI Startup Raises $200M", outp);
         Assert.Contains("https://vb.example.com/1", outp);
+        Assert.DoesNotContain("example.com/fakearticle", outp);
+    }
+
+    [Fact]
+    public async Task ExecuteWebPlanStep_ArticleWritePrompt_ReturnsFreshDigest_NotInventedHeadline()
+    {
+        // The exact run that produced the "invented headline + fake URL" failure: an AI
+        // article must be written to a desktop file, with NO "news" word and NO recency
+        // word — only the persist-intent rule C routes it to the digest.
+        var factory = new NewsScriptedClientFactory();
+        var controller = BuildRoutingController(factory, Path.GetTempPath());
+
+        var wr = await RunWebSearchStep(controller,
+            "Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.",
+            "AI research breakthroughs latest");
+
+        Assert.Equal("done", wr.GetValueOrDefault("status")?.ToString());
+        var outp = wr.GetValueOrDefault("output")?.ToString() ?? "";
+        Assert.Contains("# AI News — ", outp);
+        Assert.Contains("AI Startup Raises $200M", outp);
         Assert.DoesNotContain("example.com/fakearticle", outp);
     }
 
@@ -252,18 +276,11 @@ public class NewsServiceTests
                                   created_at = "2026-08-11T10:00:00Z", objectID = "1", story_text = "" }
                         }
                     }));
-                if (host.Contains("reddit"))
-                    return Task.FromResult(Json(new
+                if (host.Contains("lobste.rs"))
+                    return Task.FromResult(Json(new[]
                     {
-                        data = new
-                        {
-                            children = new[]
-                            {
-                                new { data = new { title = "r/MachineLearning thread on AI news",
-                                    permalink = "/r/MachineLearning/comments/1/x/",
-                                    url = "", selftext = "", created_utc = 1789000000.0 } }
-                            }
-                        }
+                        new { title = "Lobsters: AI News Thread", url = "https://lobste.rs/s/ai123",
+                              created_at = "2026-08-11T10:00:00Z", description = "Discussion of the latest AI news." }
                     }));
                 if (host.Contains("export.arxiv"))
                     return Task.FromResult(Text(ArxivAtom));

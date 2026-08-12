@@ -588,7 +588,7 @@ public class ToolSelectionEvalTests : IDisposable
         // rejection), followed by the repo edit — no _command step ever made the plan.
         Assert.NotNull(plan);
         Assert.Equal(new[] { "_web_search", NotesRel }, plan!.Plan.Select(s => s.File).ToArray());
-        Assert.Single(plan.Plan.Where(s => s.File == "_web_search"));
+        Assert.Single(plan.Plan, s => s.File == "_web_search");
 
         // SIDE EFFECTS: the injected search REALLY ran (duckduckgo GET — the wrong
         // path would show ZERO web GETs since the commands were rejected), its output
@@ -653,7 +653,7 @@ public class ToolSelectionEvalTests : IDisposable
 
         // The corrected tool is what got planned and executed — exactly one _command.
         Assert.NotNull(plan);
-        var cmd = Assert.Single(plan!.Plan.Where(s => s.File == "_command"));
+        var cmd = Assert.Single(plan!.Plan, s => s.File == "_command");
         Assert.Equal("echo v2.1 > release-version.txt", cmd.Change);
         Assert.False(File.Exists(Path.Combine(_projectRoot, "out.json")), "the URL-fetch command must never run");
         Assert.Contains("release-version.txt", Directory.GetFiles(_projectRoot).Select(Path.GetFileName));

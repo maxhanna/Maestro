@@ -1135,7 +1135,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             string.Equals(s.File, step.File, StringComparison.OrdinalIgnoreCase));
         if (sameTargetCount >= 3)
             return (false, $"Already committed {sameTargetCount} steps targeting '{step.TargetSymbol}' in {step.File}. Further edits to the same symbol suggest a hallucination loop — the task is likely complete.");
-        var changeLower = step.Change.ToLowerInvariant();
+        var changeLower = (step.Change ?? "").ToLowerInvariant();
         var rejectedActions = new[] { "move ", "reorder ", "restructure ", "refactor " };
         if (rejectedActions.Any(v => changeLower.StartsWith(v)))
         {
@@ -1160,7 +1160,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         if (changeLower.StartsWith("remove") || changeLower.StartsWith("delete"))
         {
-            var targetMatch = Regex.Match(step.Change, @"remove\s+(?:the\s+)?(\w+)", RegexOptions.IgnoreCase);
+            var targetMatch = Regex.Match(step.Change ?? "", @"remove\s+(?:the\s+)?(\w+)", RegexOptions.IgnoreCase);
             if (targetMatch.Success)
             {
                 var target = targetMatch.Groups[1].Value;
@@ -1816,8 +1816,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var skipLlm = regenAttempts > 0;
             if (!skipLlm && proposal.Step != null && !AgentProjectUtilities.IsSpecialMarker(proposal.Step.File))
             {
+                var stepFile = proposal.Step?.File ?? "";
                 var fullPath = Path.GetFullPath(Path.Combine(projectRoot,
-                    proposal.Step.File.Replace('/', Path.DirectorySeparatorChar)));
+                    stepFile.Replace('/', Path.DirectorySeparatorChar)));
                 if (System.IO.File.Exists(fullPath))
                     skipLlm = true;
             }
@@ -3904,7 +3905,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var (valid, reason) = await ValidateSubPlanAsync(proposal.SubPlan, prompt, subPlansSoFar, ct);
             if (!valid)
             {
-                await EmitRejectedLog(emitSse, $"Meta-plan: rejected stage '{proposal.SubPlan.Title}' — {reason}", reason, ct);
+                await EmitRejectedLog(emitSse, $"Meta-plan: rejected stage '{proposal.SubPlan.Title}' — {reason}", reason ?? "", ct);
                 rejectionFeedback.Add($"REJECTED — '{proposal.SubPlan.Title}' → {reason}");
                 if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) { rejectionFeedback.Clear(); attempts = 0; }
                 continue;

@@ -84,9 +84,9 @@ partial class AgentController
             var ep = cfg.llamaEndpoints.FirstOrDefault(e => e.id == endpointId);
             if (ep != null)
             {
-                var baseUrl = (string.IsNullOrWhiteSpace(ep.url) ? cfg.llamaUrl : ep.url).TrimEnd('/');
-                var model = string.IsNullOrWhiteSpace(ep.model) ? cfg.llamaModel : ep.model;
-                return (baseUrl, model, string.IsNullOrWhiteSpace(ep.name) ? ep.url : ep.name);
+                var baseUrl = (string.IsNullOrWhiteSpace(ep.url) ? cfg.llamaUrl : ep.url)?.TrimEnd('/') ?? "";
+                var model = (string.IsNullOrWhiteSpace(ep.model) ? cfg.llamaModel : ep.model) ?? "";
+                return (baseUrl, model, string.IsNullOrWhiteSpace(ep.name) ? (ep.url ?? "Default") : ep.name);
             }
         }
         return (defaultBaseUrl, defaultModel, "Default");

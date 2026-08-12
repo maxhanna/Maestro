@@ -1621,7 +1621,7 @@ partial class AgentController
                            new List<int> { 100, 100, 100 },
                            new List<bool> { false, false, false }, false)
                         : await RunLlmVerifyRoundsAsync(newStr, oldStr, relPath, prompt, step.Change,
-                            preEditContent, newContent, emitSse, ct, attemptScores, explorationContext,
+                            preEditContent, newContent, emitSse, ct, attemptScores, explorationContext ?? "",
                             plan, planItemIndex, sqlMigrationNote, causalContext);
                 stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
                 stepExtraStepReason = reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));

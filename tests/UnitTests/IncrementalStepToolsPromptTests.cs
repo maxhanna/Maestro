@@ -18,7 +18,7 @@ public class IncrementalStepToolsPromptTests
         "BuildIncrementalStepSystemPrompt", BindingFlags.NonPublic | BindingFlags.Static)!;
 
     private static string Build(string stepMode = "all", List<string>? enabledTools = null)
-        => (string)BuildPromptMethod.Invoke(null, new object[] { stepMode, enabledTools, null })!;
+        => (string)BuildPromptMethod.Invoke(null, new object?[] { stepMode, enabledTools, null })!;
 
     [Fact]
     public void SystemPrompt_IncludesAvailableSteps_WithToolDescriptions()

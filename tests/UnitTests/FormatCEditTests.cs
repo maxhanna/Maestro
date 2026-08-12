@@ -92,10 +92,10 @@ public class FormatCEditTests : IDisposable
         var sourceText = WriteFile(ext, crlf);
         var (block, _, _) = AstCodeEditorService.FindFunctionSource(sourceText, "toggleRecipeDetails", ext)!;
 
-        Assert.Equal(-1, sourceText.IndexOf(block, StringComparison.Ordinal));
+        Assert.Equal(-1, sourceText.IndexOf(block!, StringComparison.Ordinal));
 
         var searchText = sourceText.Contains("\r\n") ? sourceText.Replace("\r\n", "\n") : sourceText;
-        Assert.True(searchText.IndexOf(block, StringComparison.Ordinal) >= 0,
+        Assert.True(searchText.IndexOf(block!, StringComparison.Ordinal) >= 0,
             "LF-normalized search text must find the AST block (the applied fix)");
     }
 

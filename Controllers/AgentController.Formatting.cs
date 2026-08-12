@@ -330,7 +330,7 @@ partial class AgentController
                     await _boardData.SaveRawAsync(saved);
                     if (emitSse)
                     {
-                        var items = steers.Select(s => (JsonObject)s).Select(s => new
+                        var items = steers.OfType<JsonObject>().Select(s => new
                         {
                             turn = s["turn"]?.GetValue<int>() ?? 0,
                             message = s["message"]?.GetValue<string>() ?? "",

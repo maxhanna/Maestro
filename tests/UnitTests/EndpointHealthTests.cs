@@ -215,7 +215,7 @@ public class EndpointHealthTests
             Assert.Equal(1L, h.StreamErrors);
             // Success timestamps survived the round-trip too.
             Assert.True((DateTime.UtcNow - h.LastSuccessUtc).TotalMinutes < 5);
-            Assert.True(blob!.Contains("http://roundtrip:1"));
+            Assert.Contains("http://roundtrip:1", blob!);
         }
         finally { EndpointHealthService.Reset(); }
     }

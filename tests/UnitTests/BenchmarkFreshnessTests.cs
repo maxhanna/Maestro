@@ -74,7 +74,7 @@ public class BenchmarkFreshnessTests
     }
 
     [Fact]
-    public void StaleCachedContent_Fails()
+    public async Task StaleCachedContent_Fails()
     {
         // The realistic cache-reuse case: an untouched old file — old embedded date AND
         // old write time. The write-date match passes but the freshness window catches it.
@@ -92,7 +92,7 @@ public class BenchmarkFreshnessTests
             var task = (Task<BenchmarkCheckResult>)typeof(BenchmarkService)
                 .GetMethod("EvaluateCheckAsync", BindingFlags.NonPublic | BindingFlags.Instance)!
                 .Invoke(service, new object[] { check, tmp, CancellationToken.None })!;
-            var result = task.GetAwaiter().GetResult();
+            var result = await task;
             Assert.False(result.Passed);
             // The embedded date matches the (old) write date, so the failure must come
             // from the freshness window — the message names the stale date.
