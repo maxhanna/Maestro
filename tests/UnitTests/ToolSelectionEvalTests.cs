@@ -618,7 +618,13 @@ public class ToolSelectionEvalTests : IDisposable
         // preempts BOTH guards). ClassifierNeedsWeb=false keeps the gate quiet so the
         // fetch-in-command guard (keyword+shape deterministic) rejects proposal 1 and
         // the OS-task veto (pure OS task — no repo hints) rejects proposal 2.
-        const string prompt = "Check the latest weaver release version online and save the version to a file on my Desktop.";
+        // The demanded OS output pins an ABSOLUTE path under this test's temp root (the
+        // file the corrected command writes into the project dir). Pinning the real Desktop
+        // would make the deterministic OS-output check depend on real-world state — the run
+        // only completes when Desktop\ai_article_data.txt (DefaultDumpFileName) happens to
+        // exist on the machine, which made this test pass/fail on desktop contents.
+        var osTarget = Path.Combine(_projectRoot, "release-version.txt");
+        var prompt = $"Check the latest weaver release version online and save the version to a file at \"{osTarget}\".";
         var factory = new ToolSelectionScriptedClientFactory { ClassifierNeedsWeb = false };
         // 1) Wrong tool #1: URL-fetching _command → fetch-in-command veto.
         factory.Proposals.Add(new StepSpec("_command",

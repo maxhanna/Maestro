@@ -39,8 +39,14 @@ public class EndpointHealthTests
         EndpointHealthService.Reset();
         EndpointHealthService.RecordCall("HTTP://GPU2:8080", "partial", "The read operation failed.");
         EndpointHealthService.RecordCall("http://gpu2:8080/", "ok", null);
-        // Same logical endpoint (case + trailing slash) must share one counter.
-        Assert.Single(EndpointHealthService.Entries);
+        // Same logical endpoint (case + trailing slash) must share one counter. NOT
+        // Assert.Single(Entries) — EndpointHealthService is static and xUnit runs test
+        // classes in parallel, so a concurrent controller test recording its own endpoint
+        // can make the whole dictionary non-empty here. The collapse is locked by the
+        // keyed counter asserts (2 calls / 1 stream error on the single normalized key).
+        // ContainsKey (not Keys.Contains — the dictionary is case-INSENSITIVE, so the stored
+        // key keeps its original case while lookups are case-insensitive).
+        Assert.True(EndpointHealthService.Entries.ContainsKey("http://gpu2:8080"));
         var h = EndpointHealthService.Entries["http://gpu2:8080"];
         Assert.Equal(2L, h.Calls);
         Assert.Equal(1L, h.StreamErrors);
@@ -96,7 +102,11 @@ public class EndpointHealthTests
     {
         EndpointHealthService.Reset();
         EndpointHealthService.RecordCall("", "partial", "The read operation failed.");
-        Assert.Empty(EndpointHealthService.Entries);
+        // NOT Assert.Empty(Entries): EndpointHealthService is static and xUnit runs test
+        // classes in parallel, so a concurrent test recording its own endpoint can make the
+        // whole dictionary non-empty at this instant. The guarantee being locked is that an
+        // empty base URL never creates an entry.
+        Assert.DoesNotContain("", EndpointHealthService.Entries.Keys);
     }
 
     // ── Persistence (SQLite round-trip) ────────────────────────────────────
@@ -152,7 +162,7 @@ public class EndpointHealthTests
             EndpointHealthService.ResetHydration();
             EndpointHealthService.HydrateFromDisk();
 
-            Assert.Single(EndpointHealthService.Entries);
+            Assert.True(EndpointHealthService.Entries.ContainsKey("http://recover:1"));
             var h = EndpointHealthService.Entries["http://recover:1"];
             Assert.Equal(2L, h.Recovered);
             Assert.Equal(1L, h.RecoveryFailed);
@@ -173,7 +183,7 @@ public class EndpointHealthTests
                            "\"lastStreamErrorUtc\":\"" + DateTime.UtcNow.AddMinutes(-10).ToString("o") +
                            "\",\"lastSuccessUtc\":\"" + DateTime.UtcNow.AddMinutes(-2).ToString("o") + "\"}]";
             EndpointHealthService.HydrateFromDisk(); // must not throw
-            Assert.Single(EndpointHealthService.Entries);
+            Assert.True(EndpointHealthService.Entries.ContainsKey("http://legacy:1"));
             var h = EndpointHealthService.Entries["http://legacy:1"];
             Assert.Equal(0L, h.Recovered);
             Assert.Equal(0L, h.RecoveryFailed);
@@ -199,7 +209,7 @@ public class EndpointHealthTests
             EndpointHealthService.ResetHydration();
             EndpointHealthService.HydrateFromDisk();
 
-            Assert.Single(EndpointHealthService.Entries);
+            Assert.True(EndpointHealthService.Entries.ContainsKey("http://roundtrip:1"));
             var h = EndpointHealthService.Entries["http://roundtrip:1"];
             Assert.Equal(3L, h.Calls);
             Assert.Equal(1L, h.StreamErrors);
@@ -239,7 +249,8 @@ public class EndpointHealthTests
                            "\"lastStreamErrorUtc\":\"" + DateTime.UtcNow.AddDays(-2).ToString("o") +
                            "\",\"lastSuccessUtc\":\"" + DateTime.UtcNow.AddDays(-3).ToString("o") + "\"}]";
             EndpointHealthService.HydrateFromDisk();
-            Assert.Empty(EndpointHealthService.Entries);
+            // The stale entry must be skipped — keyed assert, race-free vs parallel writers.
+            Assert.DoesNotContain("http://ancient:1", EndpointHealthService.Entries.Keys);
         }
         finally { EndpointHealthService.Reset(); }
     }
@@ -252,8 +263,11 @@ public class EndpointHealthTests
         try
         {
             _persistBlob = "{ this is not valid json [";
+            // Corrupt JSON must hydrate into NOTHING: entry-count delta stays 0 even if a
+            // parallel test class records its own endpoints concurrently.
+            var before = EndpointHealthService.Entries.Count;
             EndpointHealthService.HydrateFromDisk(); // must not throw
-            Assert.Empty(EndpointHealthService.Entries);
+            Assert.Equal(before, EndpointHealthService.Entries.Count);
         }
         finally { EndpointHealthService.Reset(); }
     }
