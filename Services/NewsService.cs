@@ -71,11 +71,43 @@ public partial class NewsService
     /// the overview, with headroom for formatting/markers.</summary>
     private const int SingleCallMaxTokens = 1500;
 
+    /// <summary>TTL for cached per-item summaries and batch summaries. News articles
+    /// rarely change post-publication; 2h balances freshness vs. reuse value.</summary>
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(2);
+
+    /// <summary>Number of leading body chars to hash for the content fingerprint. The
+    /// lead paragraph is stable; page chrome/ads/footer vary between fetches, so
+    /// hashing the full body would detect false changes. 200 chars is enough to
+    /// distinguish genuinely different articles at the same URL (an updated article
+    /// almost always changes the lead).</summary>
+    private const int ContentHashChars = 200;
+
     /// <summary>Hosts whose article pages are JS-rendered (no server-side text) — skip the page fetch.</summary>
     private static readonly HashSet<string> JsRenderedHosts = new(StringComparer.OrdinalIgnoreCase)
     {
         "news.google.com"
     };
+
+    // ── Summary cache (in-memory, process-lifetime) ─────────────────────────
+    //
+    // NewsService is a singleton (Program.cs), so these dictionaries persist across
+    // requests. Per-item summaries are query-agnostic (factual article summaries),
+    // so a summary cached for "quantum" is reused for "AI". Batch summaries are
+    // query-specific (they synthesize an overview for a particular query), so they
+    // are keyed on (query, url-set). Filtered-out items are NOT cached — they have
+    // no summary and must be re-evaluated on the next run.
+
+    /// <summary>Per-item summary cache: URL → (summary, contentHash, cachedAt, model).</summary>
+    private readonly ConcurrentDictionary<string, SummaryCacheEntry> _summaryCache = new();
+
+    /// <summary>Batch summary cache: (query, url-fingerprint) → (summary, cachedAt).</summary>
+    private readonly ConcurrentDictionary<string, BatchCacheEntry> _batchCache = new();
+
+    /// <summary>One cached per-item summary with its content fingerprint and metadata.</summary>
+    private sealed record SummaryCacheEntry(string Summary, string ContentHash, DateTime CachedAt, string Model);
+
+    /// <summary>One cached batch summary for a (query, url-set) pair.</summary>
+    private sealed record BatchCacheEntry(string Summary, DateTime CachedAt);
 
     // Compiled regexes — avoids recompiling the same pattern on every call (StripHtml
     // runs per item, CleanExtractedText runs per fetched page).
@@ -181,33 +213,154 @@ public partial class NewsService
         });
         var bodies = (await Task.WhenAll(bodyTasks)).ToList();
 
-        // Phase 2: summarize. Try a single consolidated LLM call first (one round-trip
-        // instead of N+1); fall back to per-item + batch when the single call isn't
-        // feasible (too many items, too much text) or the model's response doesn't
-        // follow the marker format. For 1 item, the fallback is optimal (1 call, no
-        // batch), so skip the single-call path entirely.
-        var combinedChars = bodies.Sum(b => Math.Min((b.body ?? "").Length, MaxArticleCharsForSummary));
+        // Phase 2: summarize with caching. Three branches:
+        //   (a) All items cached → check batch cache → 0 or 1 LLM call (batch only)
+        //   (b) All items miss → single-call (if feasible) or fallback, then cache results
+        //   (c) Partial hit → fallback for misses only, reuse cached hits, then cache misses
+        var now = DateTime.UtcNow;
+        var cacheKeys = bodies.Select(b => NormalizeUrl(b.item.Url)).ToList();
+        var contentHashes = bodies.Select(b => HashBody(b.body)).ToList();
+
+        // Check per-item cache.
+        var cached = new string?[bodies.Count];
+        var missIndices = new List<int>();
+        for (var i = 0; i < bodies.Count; i++)
+        {
+            if (_summaryCache.TryGetValue(cacheKeys[i], out var entry)
+                && entry.ContentHash == contentHashes[i]
+                && entry.Model == model
+                && (now - entry.CachedAt) < CacheTtl)
+            {
+                cached[i] = entry.Summary;
+            }
+            else
+            {
+                cached[i] = null;
+                missIndices.Add(i);
+            }
+        }
+        var allHit = missIndices.Count == 0;
+        var allMiss = missIndices.Count == bodies.Count;
+
         string batchSummary;
         List<string> itemSummaries;
 
-        if (interleaved.Count >= 2 && interleaved.Count <= MaxItemsForSingleCall
-            && combinedChars <= MaxCombinedCharsForSingleCall)
+        if (allHit)
         {
-            var (ok, summary, summaries) = await TrySummarizeAllAsync(q, bodies, model, baseUrl, ct);
-            if (ok) { batchSummary = summary; itemSummaries = summaries; }
+            // (a) All per-item summaries are cached. Check batch cache.
+            var batchKey = MakeBatchKey(q, cacheKeys);
+            itemSummaries = cached.Select(s => s!).ToList();
+
+            if (_batchCache.TryGetValue(batchKey, out var batchEntry)
+                && (now - batchEntry.CachedAt) < CacheTtl)
+            {
+                batchSummary = batchEntry.Summary;
+                _logger.LogDebug("News cache: all items + batch hit — zero LLM calls");
+            }
+            else
+            {
+                // Per-items cached, batch needs refresh — one batch call over cached summaries.
+                var summariesWithItems = bodies.Select((b, i) => (b.item, cached[i]!)).ToList();
+                batchSummary = await SummarizeBatchAsync(q, summariesWithItems, model, baseUrl, ct);
+                _batchCache[batchKey] = new BatchCacheEntry(batchSummary, now);
+                _logger.LogDebug("News cache: all items hit, batch refreshed — 1 LLM call");
+            }
+        }
+        else if (allMiss)
+        {
+            // (b) Cold cache — try single-call (with relevance filtering) or fallback.
+            var combinedChars = bodies.Sum(b => Math.Min((b.body ?? "").Length, MaxArticleCharsForSummary));
+
+            if (interleaved.Count >= 2 && interleaved.Count <= MaxItemsForSingleCall
+                && combinedChars <= MaxCombinedCharsForSingleCall)
+            {
+                var (ok, summary, summaries) = await TrySummarizeAllAsync(q, bodies, model, baseUrl, ct);
+                if (ok)
+                {
+                    batchSummary = summary;
+                    itemSummaries = summaries;
+                    // Cache only non-empty summaries (filtered-out items have empty strings
+                    // and must be re-evaluated on the next run).
+                    for (var i = 0; i < bodies.Count; i++)
+                    {
+                        if (!string.IsNullOrWhiteSpace(itemSummaries[i]))
+                            _summaryCache[cacheKeys[i]] = new SummaryCacheEntry(itemSummaries[i], contentHashes[i], now, model);
+                    }
+                }
+                else
+                {
+                    (batchSummary, itemSummaries) = await SummarizeAllFallbackAsync(q, bodies, model, baseUrl, ct);
+                    for (var i = 0; i < bodies.Count; i++)
+                        _summaryCache[cacheKeys[i]] = new SummaryCacheEntry(itemSummaries[i], contentHashes[i], now, model);
+                }
+            }
             else
             {
                 (batchSummary, itemSummaries) = await SummarizeAllFallbackAsync(q, bodies, model, baseUrl, ct);
+                for (var i = 0; i < bodies.Count; i++)
+                    _summaryCache[cacheKeys[i]] = new SummaryCacheEntry(itemSummaries[i], contentHashes[i], now, model);
             }
+
+            // Cache the batch summary.
+            var batchKey = MakeBatchKey(q, cacheKeys);
+            _batchCache[batchKey] = new BatchCacheEntry(batchSummary, now);
         }
         else
         {
-            (batchSummary, itemSummaries) = await SummarizeAllFallbackAsync(q, bodies, model, baseUrl, ct);
+            // (c) Partial cache hit — summarize only the miss items (per-item calls),
+            // reuse cached summaries for hits, then one batch call over all items.
+            var missBodies = missIndices.Select(i => bodies[i]).ToList();
+            var missSemaphore = new SemaphoreSlim(MaxConcurrentItems, MaxConcurrentItems);
+            var missTasks = missBodies.Select(async entry =>
+            {
+                await missSemaphore.WaitAsync(ct);
+                try { return (entry.item, summary: await SummarizeAsync(entry.item.Title, entry.body, model, baseUrl, ct)); }
+                finally { missSemaphore.Release(); }
+            });
+            var missResults = (await Task.WhenAll(missTasks)).ToList();
+
+            // Store miss results in cache.
+            for (var j = 0; j < missBodies.Count; j++)
+            {
+                var idx = missIndices[j];
+                _summaryCache[cacheKeys[idx]] = new SummaryCacheEntry(missResults[j].summary, contentHashes[idx], now, model);
+            }
+
+            // Merge cached + fresh into a single ordered list.
+            itemSummaries = new List<string>(bodies.Count);
+            var mergedForBatch = new List<(NewsItem item, string summary)>(bodies.Count);
+            var missIdx = 0;
+            for (var i = 0; i < bodies.Count; i++)
+            {
+                if (cached[i] != null)
+                {
+                    itemSummaries.Add(cached[i]!);
+                    mergedForBatch.Add((bodies[i].item, cached[i]!));
+                }
+                else
+                {
+                    itemSummaries.Add(missResults[missIdx].summary);
+                    mergedForBatch.Add(missResults[missIdx]);
+                    missIdx++;
+                }
+            }
+
+            batchSummary = await SummarizeBatchAsync(q, mergedForBatch, model, baseUrl, ct);
+            _batchCache[MakeBatchKey(q, cacheKeys)] = new BatchCacheEntry(batchSummary, now);
+            _logger.LogDebug("News cache: {Hit} hits, {Miss} misses — {Miss}+1 LLM calls", bodies.Count - missIndices.Count, missIndices.Count, missIndices.Count);
         }
 
-        // Assemble in the same schema as WebSearchAsync output (## Summary / ## Results)
-        // so the agent's web-results pipeline (### WEB RESULTS [query] ###) treats _news
-        // output identically to _web_search output.
+        // Assemble output. Filter out items with empty summaries (relevance-filtered by
+        // the model in the single-call path). If all items were filtered, the batch
+        // summary already says "no relevant results" — return it alone.
+        var kept = new List<(NewsItem item, string summary)>();
+        for (var i = 0; i < interleaved.Count; i++)
+        {
+            var summary = i < itemSummaries.Count ? itemSummaries[i] : "";
+            if (!string.IsNullOrWhiteSpace(summary))
+                kept.Add((interleaved[i], summary));
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine("# Weaver web results");
         sb.AppendLine($"Task: {q}");
@@ -216,16 +369,17 @@ public partial class NewsService
         sb.AppendLine($"### WEB RESULTS [{q}] ###");
         sb.AppendLine("## Summary");
         sb.AppendLine(batchSummary);
-        // Primary source: the first item's URL (the most recent / top result).
-        sb.AppendLine($"Source: {interleaved[0].Url}");
-        sb.AppendLine();
-        sb.AppendLine("## Results");
-        for (var i = 0; i < interleaved.Count; i++)
+
+        if (kept.Count > 0)
         {
-            var item = interleaved[i];
-            var summary = i < itemSummaries.Count ? itemSummaries[i] : "";
-            var oneLiner = ExtractOneLiner(summary);
-            sb.AppendLine($"  - {item.Title}: {oneLiner} ({item.Url})");
+            sb.AppendLine($"Source: {kept[0].item.Url}");
+            sb.AppendLine();
+            sb.AppendLine("## Results");
+            foreach (var (item, summary) in kept)
+            {
+                var oneLiner = ExtractOneLiner(summary);
+                sb.AppendLine($"  - {item.Title}: {oneLiner} ({item.Url})");
+            }
         }
 
         return (sb.ToString(), null);
@@ -448,6 +602,34 @@ public partial class NewsService
             return u.Host + u.AbsolutePath;
         }
         catch { return url.TrimEnd('/'); }
+    }
+
+    /// <summary>
+    /// Computes a content fingerprint for an article body, used as the cache
+    /// invalidation key. Hashes the first <see cref="ContentHashChars"/> chars
+    /// (after whitespace normalization) so page chrome/footer changes don't
+    /// produce false cache misses. Returns a base16 string.
+    /// </summary>
+    internal static string HashBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return "empty";
+        var slice = body.Length > ContentHashChars ? body[..ContentHashChars] : body;
+        slice = WhitespaceRegex.Replace(slice, " ").Trim();
+        return System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes(slice)) is var b && b.Length > 0
+            ? Convert.ToHexString(b)[..16]
+            : "empty";
+    }
+
+    /// <summary>
+    /// Builds the batch-cache key from the query and the sorted set of normalized
+    /// URLs. The same articles + same query reuses the batch summary regardless of
+    /// item order (URLs are sorted for determinism).
+    /// </summary>
+    internal static string MakeBatchKey(string query, IEnumerable<string> normalizedUrls)
+    {
+        var urls = string.Join("|", normalizedUrls.OrderBy(u => u, StringComparer.Ordinal));
+        return $"{query}::{urls}";
     }
 
     /// <summary>
@@ -696,9 +878,12 @@ public partial class NewsService
         {
             var client = _clientFactory.CreateClient("llama");
             client.Timeout = TimeSpan.FromMinutes(4);
-            var systemPrompt = $"Summarize each article as ### Article 0 through ### Article {bodies.Count - 1} "
-                              + "(≤150 words each, key facts, no opinion). "
-                              + "Then write ### SUMMARY: a ≤200-word overview grouping related stories.";
+            var systemPrompt = $"The user searched for: \"{query}\"\n\n"
+                              + $"For each article [0]-[{bodies.Count - 1}], first judge if it is relevant to the query. "
+                              + "Summarize ONLY relevant articles as ### Article N (≤150 words each, key facts, no opinion). "
+                              + "Skip irrelevant articles entirely (do not write their ### Article N section).\n"
+                              + "Then write ### SUMMARY: a ≤200-word overview of the relevant stories, grouping related topics. "
+                              + "If no articles are relevant, write ### SUMMARY saying no relevant results were found.";
             var req = new
             {
                 model,

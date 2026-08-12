@@ -455,4 +455,77 @@ public class NewsServiceTests
         Assert.Equal(3, items.Count);
         Assert.Equal(0, found);
     }
+
+    // ── HashBody (content fingerprint for cache invalidation) ──────────────
+
+    [Fact]
+    public void HashBody_SameContent_SameHash()
+    {
+        var a = NewsService.HashBody("Scientists discover new AI model for protein folding.");
+        var b = NewsService.HashBody("Scientists discover new AI model for protein folding.");
+        Assert.Equal(a, b);
+    }
+
+    [Fact]
+    public void HashBody_DifferentContent_DifferentHash()
+    {
+        var a = NewsService.HashBody("Scientists discover new AI model for protein folding.");
+        var b = NewsService.HashBody("Quantum computer breaks RSA encryption in record time.");
+        Assert.NotEqual(a, b);
+    }
+
+    [Fact]
+    public void HashBody_WhitespaceOnlyDifference_SameHash()
+    {
+        // The hash normalizes whitespace, so extra spaces/newlines don't cause cache misses.
+        var a = NewsService.HashBody("Lead paragraph text here. More content follows.");
+        var b = NewsService.HashBody("Lead  paragraph\ttext here.\n\nMore content follows.");
+        Assert.Equal(a, b);
+    }
+
+    [Fact]
+    public void HashBody_OnlyFirst200CharsMatter()
+    {
+        // Two bodies with the same first 200 chars but different tails produce the same hash.
+        var head = new string('x', 200);
+        var a = NewsService.HashBody(head + "tail A which is different");
+        var b = NewsService.HashBody(head + "tail B which is different");
+        Assert.Equal(a, b);
+    }
+
+    [Fact]
+    public void HashBody_EmptyOrNull_ReturnsConstant()
+    {
+        Assert.Equal("empty", NewsService.HashBody(""));
+        Assert.Equal("empty", NewsService.HashBody(null));
+        Assert.Equal("empty", NewsService.HashBody("   "));
+    }
+
+    // ── MakeBatchKey (batch cache key) ──────────────────────────────────────
+
+    [Fact]
+    public void MakeBatchKey_SameUrlsDifferentOrder_SameKey()
+    {
+        var urls = new[] { "example.com/a", "example.com/b", "example.com/c" };
+        var k1 = NewsService.MakeBatchKey("AI", urls);
+        var k2 = NewsService.MakeBatchKey("AI", urls.Reverse());
+        Assert.Equal(k1, k2);
+    }
+
+    [Fact]
+    public void MakeBatchKey_DifferentQuery_DifferentKey()
+    {
+        var urls = new[] { "example.com/a", "example.com/b" };
+        var k1 = NewsService.MakeBatchKey("quantum", urls);
+        var k2 = NewsService.MakeBatchKey("AI", urls);
+        Assert.NotEqual(k1, k2);
+    }
+
+    [Fact]
+    public void MakeBatchKey_DifferentUrls_DifferentKey()
+    {
+        var k1 = NewsService.MakeBatchKey("AI", new[] { "example.com/a" });
+        var k2 = NewsService.MakeBatchKey("AI", new[] { "example.com/b" });
+        Assert.NotEqual(k1, k2);
+    }
 }
