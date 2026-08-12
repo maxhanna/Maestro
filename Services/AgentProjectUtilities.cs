@@ -176,6 +176,26 @@ public static class AgentProjectUtilities
     }
 
     /// <summary>
+    /// Strips a single matching pair of wrapping quotes/backticks (a model wrapping a whole
+    /// command in "…", '…' or `…`), but NEVER an unmatched trailing quote — so a command that
+    /// legitimately ends in a quoted path ("echo … &gt; \"/tmp/x/report.txt\"") keeps its closing
+    /// quote. The old Trim('`', '"', '\'') ate the trailing quote of exactly such commands,
+    /// leaving an unterminated quote that hung bash (the steered desktop-write CI failure).
+    /// </summary>
+    public static string UnwrapWrappingQuotes(string text)
+    {
+        var t = text.Trim();
+        if (t.Length >= 2 &&
+            ((t[0] == '"' && t[^1] == '"') ||
+             (t[0] == '\'' && t[^1] == '\'') ||
+             (t[0] == '`' && t[^1] == '`')))
+        {
+            return t[1..^1];
+        }
+        return t;
+    }
+
+    /// <summary>
     /// True when a _command step's text looks like it FETCHES CONTENT from an http(s)
     /// URL with a download tool (curl/wget/Invoke-RestMethod/Invoke-WebRequest,
     /// python urllib/requests, .NET WebClient/HttpClient, JS fetch()). This is the

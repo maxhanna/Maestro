@@ -442,8 +442,8 @@ partial class AgentController
                 sb.Append("Inventing a URL (e.g. www.example.com/...) makes the fetch fail and wastes a step. ");
                 sb.Append("If the search results give no usable URL, do NOT fetch — dump the search results to the demanded file with _command instead.\n");
                 sb.Append(OperatingSystem.IsWindows()
-                    ? "  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"... | Set-Content -Path \\\"<desktop-path>\\ai_article.txt\\\" -Encoding UTF8\"}}\n"
-                    : "  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"echo \\\"<content>\\\" > \\\"<desktop-path>/ai_article.txt\\\"\"}}\n");
+                    ? "  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"... | Set-Content -Path \"<desktop-path>\\ai_article.txt\" -Encoding UTF8\"}}\n"
+                    : "  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"echo \"<content>\" > \"<desktop-path>/ai_article.txt\"\"}}\n");
                 sb.Append("Each step consumes the previous step's output; declare planComplete only after the file is written.\n\n");
             }
         }
@@ -1140,8 +1140,8 @@ partial class AgentController
             sb.AppendLine($"The task demands a file at \"{osTarget}\" on the OS filesystem. ");
             sb.AppendLine($"The ONLY step type that can create it is a _command step with an absolute path, e.g. ");
             var osWriteExample = OperatingSystem.IsWindows()
-                ? $"Set-Content -Path \\\"{osTarget}\\\" -Value \\\"<content>\\\" -Encoding UTF8"
-                : $"echo \\\"<content>\\\" > \\\"{osTarget}\\\"";
+                ? $"Set-Content -Path \"{osTarget}\" -Value \"<content>\" -Encoding UTF8"
+                : $"echo \"<content>\" > \"{osTarget}\"";
             sb.AppendLine($"{{\"file\":\"_command\",\"change\":\"{osWriteExample}\"}}. ");
             sb.AppendLine("Do NOT create or edit application code (a method, service, or script in the repo) to \"write\" this file — ");
             sb.AppendLine("a repo edit cannot touch the OS desktop and will fail verification deterministically. ");

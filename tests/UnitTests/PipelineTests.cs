@@ -370,6 +370,28 @@ public class PipelineTests
             $"prose mentioning a write verb passed the shell-command gate: {command}");
     }
 
+    // ── UnwrapWrappingQuotes (the "steered write never lands on Unix" regression) ──
+    // ExecutePlan's _command handler previously ran Trim().Trim('`', '"', '\''), which
+    // ate the TRAILING quote of a command that legitimately ends in a quoted path —
+    // "echo 'repair data' > \"/tmp/x/report.txt\"" became an unterminated quote that
+    // hung bash, so the steered desktop write never landed (Windows Set-Content commands
+    // happened to end in a non-quote and never showed it). The unwrap must strip ONLY a
+    // matching wrapping pair, never an unbalanced trailing quote.
+
+    [Theory]
+    [InlineData("echo 'repair data' > \"/tmp/x/report.txt\"", "echo 'repair data' > \"/tmp/x/report.txt\"")]
+    [InlineData("echo v2.1 > release-version.txt", "echo v2.1 > release-version.txt")]
+    [InlineData("\"Set-Content -Path C:\\x\\f.txt -Value \"data\" -Encoding UTF8\"", "Set-Content -Path C:\\x\\f.txt -Value \"data\" -Encoding UTF8")]
+    [InlineData("'echo hi'", "echo hi")]
+    [InlineData("`ls -la`", "ls -la")]
+    [InlineData("\"unbalanced trailing quote", "\"unbalanced trailing quote")]
+    [InlineData("unbalanced trailing quote\"", "unbalanced trailing quote\"")]
+    [InlineData("  \"  padded  \"  ", "  padded  ")]
+    public void UnwrapWrappingQuotes_OnlyStripsMatchingPairs(string input, string expected)
+    {
+        Assert.Equal(expected, AgentProjectUtilities.UnwrapWrappingQuotes(input));
+    }
+
     // ── LooksLikeContentFetchCommand (the "api.current.ai" failure mode) ──
     // A _command step that fetches content from an http(s) URL with a download tool
     // must be steered to _web_search/_web_fetch. Legit URL-using commands (clone /

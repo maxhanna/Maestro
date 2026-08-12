@@ -4,9 +4,12 @@ A full inventory of every test in the repository: what each suite covers, how to
 them, what can be improved, and what is missing. Generated from a sweep of all test
 sources in `tests/` — every file and test method is accounted for below.
 
-**Last audited:** August 11, 2026 · **Suite size:** 93 C# test classes
-(1,543 runtime test cases per `dotnet test`) + 12 standalone JS suites (166 tests),
-run together via `node tests/js/run-all.js`.
+**Last audited:** August 12, 2026 · **Suite size:** 93 C# test classes
+(1,553 runtime test cases per `dotnet test` on Windows) + 12 standalone JS suites
+(166 tests), run together via `node tests/js/run-all.js`. The CI workflow builds
+framework-dependent with `-p:RuntimeIdentifier=linux-x64 -p:SelfContained=false`
+and runs the suite on the Linux runner, so OS-branched tests (`OperatingSystem.IsWindows()`)
+must stay green on BOTH hosts.
 
 ---
 
@@ -28,8 +31,12 @@ for f in tests/js/*.test.js; do node "$f" || break; done   # JS suite
 
 Notes:
 
-- **There is no CI.** No `.github/workflows`, no npm `test` script, no aggregator for the
-  JS files. The JS suites only run if someone remembers to loop over them. See §4.
+- **CI runs on every push** (`.github/workflows/test.yml`): `dotnet test --nologo
+  -p:RuntimeIdentifier=linux-x64 -p:SelfContained=false` (the shipped artifact is a
+  self-contained win-x64 exe, so the test build must be framework-dependent + Linux RID
+  or the Linux testhost dies on the missing `libhostpolicy.so`), then `node tests/js/run-all.js`.
+  Because the runner is Linux, any `OperatingSystem.IsWindows()` branch in a test or
+  prompt builder is exercised on BOTH hosts — a Windows-only green suite is not enough.
 - The C# tests live inside the main project (not a separate test project), so
   `dotnet test` builds the whole app first and the tests run against the real code —
   there is no production/test assembly split.
@@ -107,7 +114,7 @@ byte-identical; bad input fails closed.**
 
 | File | Tests | What it covers |
 |---|---|---|
-| `PipelineTests` | 35 | Task classification (command vs edit), skeleton extraction per language, excerpt selection, plan-JSON repair, exploration parsing, token estimation, step parsers, and the **repair-churn breaker** (stops after N consecutive zero-change repair passes). Plus the **shell-command gate locks**: the `Set-Content`/`Out-File`/`Add-Content` write cmdlets leading a command, and every taught desktop-write chain (discovery-section + web-chain example + CommandPipeline working example) pass the gate, while prose mentioning the write verbs stays rejected. |
+| `PipelineTests` | 43 | Task classification (command vs edit), skeleton extraction per language, excerpt selection, plan-JSON repair, exploration parsing, token estimation, step parsers, and the **repair-churn breaker** (stops after N consecutive zero-change repair passes). Plus the **shell-command gate locks**: the `Set-Content`/`Out-File`/`Add-Content` write cmdlets leading a command, and every taught desktop-write chain (discovery-section + web-chain example + CommandPipeline working example) pass the gate, while prose mentioning the write verbs stays rejected. Plus **`UnwrapWrappingQuotes`** (8): strips only a matching wrapping pair, never an unbalanced trailing quote — the regression that ate the closing quote of `echo 'repair data' > "/tmp/x/report.txt"` on Unix and hung bash so the steered desktop write never landed. |
 | `PlanningTokenCapTests` | 3 | The planning/editing thinking cap: never exceeds 840, never below 120, smaller than the overall budget. |
 | `IncrementalStepToolsPromptTests` | 8 | The step-tools prompt: available steps listed, disabled tools omitted, edit mode has no tool section, web-chain example toggles with web search. Plus the **never-invent-a-URL lock** (regression): the web-chain example must demand a REAL URL copied verbatim from the search results and must NOT contain a fetchable invented URL (example.com/ai-article) — the exact trap the field failure exposed (the model lifted the example-domain pattern into `www.example.com/latest-ai-breakthrough` and the fetch failed). |
 | `HostEnvironmentPromptTests` | 5 | System prompt carries the real host environment (desktop path, OS path style) and never invents Unix paths. |
@@ -386,6 +393,29 @@ Ordered by how much they matter.
   frame format the client parses (`event:`/`data:`/blank-line, valid JSON payload,
   multi-frame integrity, verbatim event names). A full phase→context→step→verification→complete
   *sequence* test is still open.
+- **OS-demand determinism rule** (audited — no violations remain): any test that demands an
+  OS-output file, or exercises the OS-output verification layer, must pin an **absolute temp
+  path** in its task text (`Path.Combine(Path.GetTempPath(), …)` — the `weaver_webtask_*` /
+  `weaver_osv_*` roots), never a named location like "my desktop" or a fixed
+  `C:\Users\…\Desktop\…` path. `AgentOsOutputVerifier.TryGetOsFileOutputDemand` maps named
+  locations to the machine's REAL folders, so a prompt saying "my desktop" silently depends on
+  real-world state — and on a headless Linux runner the folder resolves to `""`, a
+  *different-but-equally-real* behavior. This bit exactly once: `ToolSelectionEvalTests`'s
+  guard-interaction trace demanded `Desktop\ai_article_data.txt` (the `DefaultDumpFileName`)
+  and only completed when that file happened to exist on the real machine — it failed at clean
+  HEAD and now pins the demand to the test's own temp root (see its class row). The remaining
+  `Desktop` references in the suite were all swept and are deliberate: the resolver unit tests
+  (`Demand_MyDesktop_ResolvesToDesktopDirectory` et al. assert `demand.DirectoryPath ==
+  GetFolderPath(…)` — identical on both sides, empty==empty on headless Linux); the gate
+  classification strings (`LooksLikeShellCommand` / `LooksLikeContentFetchCommand` /
+  `ExternalFilesystemTaskTests` / `OsMarkerGuardTests` / `PipelineTests` — pure string/reason
+  checks, no writes); the prompt-builder tests (`RequirementChecklistSeparationTests.OsTask`
+  uses a *fake* `C:\Users\Test\Desktop\…` path and never touches disk); `HostEnvironmentPromptTests`
+  asserts the desktop-anchor fallback chain (never writes); and
+  `SyntheticGroundTruthEvalTests.CleanPass_OsOutputDemandSatisfied…` says "my desktop" but its
+  command result is scripted — `IsOsOutputWritten` short-circuits on the command text before any
+  `File.Exists` fallback. **Rule of thumb: if a test's outcome could change based on what is
+  sitting in the machine's real Desktop folder, it violates the rule.**
 
 ### 5.5 Concurrency
 - The suggestion guard (idle vs executing) is unit-tested on both sides, but nothing

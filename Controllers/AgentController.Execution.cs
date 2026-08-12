@@ -597,7 +597,7 @@ partial class AgentController
             if (planFile.Equals("_command", StringComparison.OrdinalIgnoreCase))
             {
                 var stepSkipped = false;
-                var cmd = changeDesc.Trim().Trim('`', '"', '\'');
+                var cmd = UnwrapWrappingQuotes(changeDesc);
                 if (!string.IsNullOrWhiteSpace(cmd))
                 {
                     await EmitLog(emitSse, "info", $"Command: {cmd}", ct: ct);
@@ -1048,7 +1048,7 @@ partial class AgentController
         else if (lower.StartsWith("sync") || lower.Contains("push")) gitCmd = "git pull && git push";
         else
         {
-            gitCmd = changeDesc.Trim().Trim('`', '"', '\'');
+            gitCmd = UnwrapWrappingQuotes(changeDesc);
             if (!gitCmd.StartsWith("git ", StringComparison.OrdinalIgnoreCase)) gitCmd = "git " + gitCmd;
         }
         await EmitLog(emitSse, "info", $"Git: {gitCmd}", ct: ct);
@@ -1062,7 +1062,7 @@ partial class AgentController
         string changeDesc, string projectRoot, bool emitSse, CancellationToken ct,
         List<object> allResults, int stepIndex)
     {
-        var pingCmd = changeDesc.Trim().Trim('`', '"', '\'');
+        var pingCmd = UnwrapWrappingQuotes(changeDesc);
         if (pingCmd.Contains("<llamaUrl>", StringComparison.OrdinalIgnoreCase))
         {
             var baseUrl = await GetLlamaBaseUrl();
@@ -1082,7 +1082,7 @@ partial class AgentController
         string changeDesc, string projectRoot, bool emitSse, CancellationToken ct,
         List<object> allResults, int stepIndex)
     {
-        var installCmd = changeDesc.Trim().Trim('`', '"', '\'');
+        var installCmd = UnwrapWrappingQuotes(changeDesc);
         await EmitLog(emitSse, "info", $"Package install: {installCmd}", ct: ct);
         _terminal.Start();
         var cs = new AgentStep { Index = 0, Type = "command", Command = installCmd, Description = installCmd };
