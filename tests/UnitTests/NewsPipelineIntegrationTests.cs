@@ -55,7 +55,7 @@ public class NewsPipelineIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task NewsStep_ProducesDigestHarvestedIntoContext()
+    public async Task NewsStep_ProducesDigestThenCreateFileWritesIt()
     {
         var controller = BuildController();
         var prompt = "Fetch recent AI news and save the digest to ai_news.md.";
@@ -77,9 +77,21 @@ public class NewsPipelineIntegrationTests : IDisposable
         Assert.Contains("### WEB RESULTS", newsOutput);
         Assert.Contains("## Summary", newsOutput);
         Assert.Contains("## Results", newsOutput);
-        // The scripted feed items appear in the digest.
         Assert.Contains("quantum computing", newsOutput, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("benchmark", newsOutput, StringComparison.OrdinalIgnoreCase);
+
+        // The replan after _news must have added a _create_file step that executed.
+        var createResult = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "create"
+                     && r.GetValueOrDefault("status")?.ToString() is "done" or "created")
+            .ToList();
+        Assert.NotEmpty(createResult);
+
+        // The file must exist on disk with the news content.
+        var newsFile = Path.Combine(_projectRoot, "ai_news.md");
+        Assert.True(File.Exists(newsFile), "ai_news.md should be created by _create_file");
+        var fileContent = await File.ReadAllTextAsync(newsFile);
+        Assert.Contains("### WEB RESULTS", fileContent);
+        Assert.Contains("## Summary", fileContent);
 
         // Every LLM call was accounted for by the script.
         Assert.Empty(_clientFactory.Unmatched);
@@ -240,8 +252,22 @@ public class NewsPipelineIntegrationTests : IDisposable
                     var n = Interlocked.Increment(ref _owner._plannerCalls);
                     if (n == 1)
                         return (PlannerStepJson("_news", "recent AI news"), "planner-step");
-                    return ("{\"planComplete\": true, \"completionReason\": \"news fetched\"}", "planner-step");
+                    // 2nd call: planner sees the harvested _news output and adds _create_file
+                    // with the news digest as newString (what a real planner would generate).
+                    if (n == 2)
+                        return (PlannerStepJson("_create_file", "ai_news.md",
+                            "### WEB RESULTS [recent AI news] ###\n## Summary\nRecent AI developments.\n## Results\n  - Quantum computing story."), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"news saved to file\"}", "planner-step");
                 }
+
+                // Plan-fixer (replan): called after _news executes with no remaining steps.
+                // Must return a _create_file step to save the news digest.
+                if (system.Contains("plan-fixer", StringComparison.OrdinalIgnoreCase))
+                    return ("""{"plan": [{"file": "_create_file", "change": "ai_news.md", "priority": 1}]}""", "plan-fixer");
+
+                // Path extraction for _create_file: return the filename from the change desc.
+                if (system.Contains("extract file paths from instructions", StringComparison.OrdinalIgnoreCase))
+                    return ("ai_news.md", "path-extract");
 
                 // Checklist.
                 if (system.Contains("You extract a short checklist", StringComparison.Ordinal))
@@ -275,17 +301,18 @@ public class NewsPipelineIntegrationTests : IDisposable
 
             private static string PlannerStepJson(string file, string change, string? newString = null)
             {
+                var step = new Dictionary<string, object?>
+                {
+                    ["file"] = file,
+                    ["change"] = change
+                };
+                if (newString != null) step["newString"] = newString;
                 var payload = new Dictionary<string, object?>
                 {
                     ["thinking"] = $"Step: {file} — {change}",
                     ["planComplete"] = false,
-                    ["step"] = new Dictionary<string, object?>
-                    {
-                        ["file"] = file,
-                        ["change"] = change
-                    }
+                    ["step"] = step
                 };
-                if (newString != null) payload["newString"] = newString;
                 return JsonSerializer.Serialize(payload);
             }
 

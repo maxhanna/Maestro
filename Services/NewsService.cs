@@ -41,6 +41,13 @@ public partial class NewsService
     private readonly IHttpClientFactory _clientFactory;
     private readonly ConfigFileService _configFile;
     private readonly ILogger<NewsService> _logger;
+    private readonly DatabaseService? _db;
+
+    /// <summary>SQLite key under which the summary cache is persisted (weaver_config table).
+    /// Allows the cache to survive restarts, preserving the 32x warm-run speedup.</summary>
+    private const string CacheDbKey = "news_summary_cache";
+    private static readonly TimeSpan CachePersistDebounce = TimeSpan.FromSeconds(30);
+    private long _lastPersistTicks;
 
     /// <summary>Feed snippets shorter than this trigger a full-page fetch for a real summary.</summary>
     private const int ThinSnippetThreshold = 200;
@@ -109,6 +116,78 @@ public partial class NewsService
     /// <summary>One cached batch summary for a (query, url-set) pair.</summary>
     private sealed record BatchCacheEntry(string Summary, DateTime CachedAt);
 
+    // ── Per-run token accounting ─────────────────────────────────────────────
+    //
+    // Accumulated across all LLM calls within a single FetchNewsAsync run. Logged at
+    // the end of the run so an operator can see how many tokens _news consumed without
+    // digging through structured logs. Not persisted — it's per-run observability.
+
+    /// <summary>Running total of prompt + completion tokens for the current run.
+    /// Thread-safe because the fallback path runs per-item calls in parallel.</summary>
+    private long _runPromptTokens;
+    private long _runCompletionTokens;
+    private int _runLlmCalls;
+
+    private void ResetTokenCounters()
+    {
+        Interlocked.Exchange(ref _runPromptTokens, 0);
+        Interlocked.Exchange(ref _runCompletionTokens, 0);
+        Interlocked.Exchange(ref _runLlmCalls, 0);
+    }
+
+    private void RecordTokenUsage(string? respJson)
+    {
+        if (string.IsNullOrWhiteSpace(respJson)) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(respJson);
+            if (doc.RootElement.TryGetProperty("usage", out var usage))
+            {
+                if (usage.TryGetProperty("prompt_tokens", out var p) && p.TryGetInt64(out var pt))
+                    Interlocked.Add(ref _runPromptTokens, pt);
+                if (usage.TryGetProperty("completion_tokens", out var c) && c.TryGetInt64(out var ct))
+                    Interlocked.Add(ref _runCompletionTokens, ct);
+            }
+        }
+        catch { }
+    }
+
+    private void LogTokenUsage(string query)
+    {
+        var total = Interlocked.Read(ref _runPromptTokens) + Interlocked.Read(ref _runCompletionTokens);
+        if (total > 0 || _runLlmCalls > 0)
+        {
+            _logger.LogInformation(
+                "News \"{Query}\": {Calls} LLM calls, {Prompt} prompt + {Completion} completion = {Total} tokens",
+                query, _runLlmCalls,
+                Interlocked.Read(ref _runPromptTokens),
+                Interlocked.Read(ref _runCompletionTokens),
+                total);
+        }
+    }
+
+    /// <summary>
+    /// Shared LLM call wrapper: POST to /v1/chat/completions, record endpoint health,
+    /// extract token usage, and return the raw response JSON for content extraction.
+    /// Centralizes health tracking + token accounting so all three call sites
+    /// (SummarizeAsync, SummarizeBatchAsync, TrySummarizeAllAsync) are observable.
+    /// </summary>
+    private async Task<string> CallLlmAsync(
+        string model, string baseUrl, object req, CancellationToken ct, int timeoutMinutes = 3)
+    {
+        var client = _clientFactory.CreateClient("llama");
+        client.Timeout = TimeSpan.FromMinutes(timeoutMinutes);
+        var content = new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json");
+        var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", content, ct);
+        var respText = await resp.Content.ReadAsStringAsync(ct);
+        Interlocked.Increment(ref _runLlmCalls);
+        // Record endpoint health so _news LLM failures are visible in the UI badge.
+        var error = resp.IsSuccessStatusCode ? null : $"HTTP {(int)resp.StatusCode}";
+        EndpointHealthService.RecordCall(baseUrl, respText, error);
+        RecordTokenUsage(respText);
+        return respText;
+    }
+
     // Compiled regexes — avoids recompiling the same pattern on every call (StripHtml
     // runs per item, CleanExtractedText runs per fetched page).
     [GeneratedRegex(@"<[^>]+>")]
@@ -126,11 +205,13 @@ public partial class NewsService
     private static partial Regex MarkerRegex { get; }
 
     public NewsService(IHttpClientFactory clientFactory, ConfigFileService configFile,
-        ILogger<NewsService> logger)
+        ILogger<NewsService> logger, DatabaseService? db = null)
     {
         _clientFactory = clientFactory;
         _configFile = configFile;
         _logger = logger;
+        _db = db;
+        HydrateCacheFromDisk();
     }
 
     /// <summary>
@@ -153,17 +234,17 @@ public partial class NewsService
         var cfg = await _configFile.LoadConfigAsync();
         var baseUrl = (cfg.llamaUrl ?? "http://localhost:8080").TrimEnd('/');
         var model = await ResolveModelAsync(cfg.llamaModel, baseUrl, ct);
+        ResetTokenCounters();
 
         // Parallel feed fetches — sources are independent, so all run concurrently.
         // Each writes to a ConcurrentDictionary (thread-safe — the tasks run on
         // different thread-pool threads and a regular Dictionary can corrupt under
         // concurrent writes, even with different keys).
+        var sources = await GetSourcesAsync(ct);
         var sourceLists = new ConcurrentDictionary<string, List<NewsItem>>();
-        await Task.WhenAll(
-            FetchSourceAsync("VentureBeat AI", TryVentureBeatRssAsync(ct), sourceLists),
-            FetchSourceAsync("TechCrunch AI", TryTechCrunchRssAsync(ct), sourceLists),
-            FetchSourceAsync("Hacker News", TryHackerNewsAsync(q, ct), sourceLists),
-            FetchSourceAsync("arXiv", TryArxivAsync(q, ct), sourceLists));
+        var fetchTasks = sources.Select(s => FetchSourceAsync(s, q, ct)
+            .ContinueWith(t => { if (t.Result.Count > 0) sourceLists[s.Label] = t.Result; }, ct));
+        await Task.WhenAll(fetchTasks);
 
         // Merge all source lists, sorted deterministically (by source name, then date
         // descending) so cross-source dedup is deterministic — g.First() always picks
@@ -388,6 +469,8 @@ public partial class NewsService
             }
         }
 
+        LogTokenUsage(q);
+        PersistCacheToDisk();
         return (sb.ToString(), null);
     }
 
@@ -400,14 +483,6 @@ public partial class NewsService
         if (string.IsNullOrWhiteSpace(summary)) return "";
         var nl = summary.IndexOf('\n');
         return nl >= 0 ? summary[..nl].Trim() : summary.Trim();
-    }
-
-    private static async Task FetchSourceAsync(
-        string name, Task<List<NewsItem>> fetchTask,
-        ConcurrentDictionary<string, List<NewsItem>> dest)
-    {
-        try { dest[name] = await fetchTask; }
-        catch { dest[name] = new List<NewsItem>(); /* source down — skip silently */ }
     }
 
     /// <summary>
@@ -444,93 +519,108 @@ public partial class NewsService
 
     // ── Sources ──────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// VentureBeat AI RSS: provides full-article descriptions (~16K chars), making
-    /// it the richest source — no page fetch is usually needed. Keyless, no auth.
-    /// </summary>
-    private async Task<List<NewsItem>> TryVentureBeatRssAsync(CancellationToken ct)
+    /// <summary>Feed type for config-driven sources.</summary>
+    private enum FeedType { Rss, Atom, JsonApi }
+
+    /// <summary>One news source: URL, parser type, and label. Built-ins are
+    /// hardcoded; custom sources come from config (newsFeedUrls).</summary>
+    private sealed record NewsSource(string Url, FeedType Type, string Label, string QueryParam);
+
+    /// <summary>The 4 built-in sources, always available unless newsReplaceBuiltinSources
+    /// is true. HN and arXiv use query-aware APIs; VB and TC are fixed AI-category feeds.</summary>
+    private static readonly NewsSource[] BuiltinSources = new[]
     {
-        var items = new List<NewsItem>();
-        try
+        new NewsSource("https://venturebeat.com/category/ai/feed/", FeedType.Rss, "VentureBeat AI", ""),
+        new NewsSource("https://techcrunch.com/category/artificial-intelligence/feed/", FeedType.Rss, "TechCrunch AI", ""),
+        new NewsSource("https://hn.algolia.com/api/v1/search?query={q}&tags=story&hitsPerPage=10", FeedType.JsonApi, "Hacker News", "{q}"),
+        new NewsSource("https://export.arxiv.org/api/query?search_query={q}&sortBy=submittedDate&sortOrder=descending&max_results=8", FeedType.Atom, "arXiv", "{q}"),
+    };
+
+    /// <summary>Builds the active source list: built-ins (unless replaced) + custom
+    /// URLs from config. Custom URLs are auto-detected as RSS or Atom based on the
+    /// response content (tried RSS first, then Atom). Returns the merged list.</summary>
+    private async Task<List<NewsSource>> GetSourcesAsync(CancellationToken ct)
+    {
+        var sources = BuiltinSources.ToList();
+        var cfg = await _configFile.LoadConfigAsync();
+        if (cfg.newsReplaceBuiltinSources)
+            sources.Clear();
+
+        foreach (var url in cfg.newsFeedUrls ?? new List<string>())
         {
-            var url = "https://venturebeat.com/category/ai/feed/";
-            var xml = await MakeFeedClient().GetStringAsync(url, ct);
-            ParseRssItems(xml, "VentureBeat AI", items);
+            if (string.IsNullOrWhiteSpace(url)) continue;
+            var u = url.Trim();
+            // Derive a label from the host.
+            string label;
+            try { label = new Uri(u).Host; } catch { label = "Custom"; }
+            // Default to RSS; the fetcher will try Atom if RSS parsing yields nothing.
+            sources.Add(new NewsSource(u, FeedType.Rss, label, ""));
         }
-        catch (Exception ex) { _logger.LogDebug(ex, "VentureBeat AI feed failed — skipping"); }
-        return items;
+        return sources;
     }
 
     /// <summary>
-    /// TechCrunch AI RSS: provides short descriptions (~100 chars) but real
-    /// article URLs that fetch well (non-JS-rendered pages). Keyless, no auth.
+    /// Fetches items from a single source. Dispatches by FeedType: RSS → ParseRssItems,
+    /// Atom → ParseAtomItems, JsonApi → HN-style JSON. Query-aware sources (HN, arXiv)
+    /// substitute {q} in the URL with the escaped query. Custom RSS sources that yield
+    /// zero items get a second try as Atom.
     /// </summary>
-    private async Task<List<NewsItem>> TryTechCrunchRssAsync(CancellationToken ct)
+    private async Task<List<NewsItem>> FetchSourceAsync(NewsSource source, string query, CancellationToken ct)
     {
         var items = new List<NewsItem>();
         try
         {
-            var url = "https://techcrunch.com/category/artificial-intelligence/feed/";
-            var xml = await MakeFeedClient().GetStringAsync(url, ct);
-            ParseRssItems(xml, "TechCrunch AI", items);
-        }
-        catch (Exception ex) { _logger.LogDebug(ex, "TechCrunch AI feed failed — skipping"); }
-        return items;
-    }
-
-    /// <summary>
-    /// Hacker News via Algolia's keyless search API. JSON with hits[] carrying
-    /// title/url/created_at_i. Falls back to the HN item URL when the article URL
-    /// is missing (Show HN / Ask HN posts link to themselves). Filters to AI-relevant
-    /// stories by appending the query term.
-    /// </summary>
-    private async Task<List<NewsItem>> TryHackerNewsAsync(string query, CancellationToken ct)
-    {
-        var items = new List<NewsItem>();
-        try
-        {
-            var url = "https://hn.algolia.com/api/v1/search?query=" + Uri.EscapeDataString(query)
-                      + "&tags=story&hitsPerPage=10";
-            var json = await MakeFeedClient().GetStringAsync(url, ct);
-            using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("hits", out var hits) || hits.ValueKind != JsonValueKind.Array) return items;
-            foreach (var hit in hits.EnumerateArray())
+            var url = source.QueryParam.Length > 0
+                ? source.Url.Replace(source.QueryParam, Uri.EscapeDataString(query))
+                : source.Url;
+            // For arXiv, the {q} placeholder is "all:escapedQuery" or "cat:cs.AI".
+            if (source.Label == "arXiv")
             {
-                var title = hit.TryGetProperty("title", out var t) ? t.GetString() : null;
-                var link = hit.TryGetProperty("url", out var u) ? u.GetString() : null;
-                if (string.IsNullOrWhiteSpace(link) && hit.TryGetProperty("objectID", out var oid))
-                    link = "https://news.ycombinator.com/item?id=" + oid.GetString();
-                if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link)) continue;
-                var pub = hit.TryGetProperty("created_at_i", out var c) && c.TryGetInt64(out var ts)
-                    ? DateTimeOffset.FromUnixTimeSeconds(ts).UtcDateTime : DateTime.UtcNow;
-                var pts = hit.TryGetProperty("points", out var p) && p.TryGetInt32(out var pp) ? pp : 0;
-                items.Add(new NewsItem(title!, link!, pub, "Hacker News",
-                    pts > 0 ? $"Hacker News story ({pts} points)." : "Hacker News story."));
+                var term = string.IsNullOrWhiteSpace(query) ? "cat:cs.AI" : $"all:{Uri.EscapeDataString(query)}";
+                url = source.Url.Replace(source.QueryParam, term);
+            }
+            var xml = await MakeFeedClient().GetStringAsync(url, ct);
+            if (source.Type == FeedType.Rss)
+            {
+                ParseRssItems(xml, source.Label, items);
+                // Custom RSS source that yielded nothing might actually be Atom.
+                if (items.Count == 0 && !IsBuiltinSource(source))
+                    ParseAtomItems(xml, source.Label, items);
+            }
+            else if (source.Type == FeedType.Atom)
+            {
+                ParseAtomItems(xml, source.Label, items);
+            }
+            else if (source.Type == FeedType.JsonApi)
+            {
+                ParseHnJson(xml, source.Label, items);
             }
         }
-        catch (Exception ex) { _logger.LogDebug(ex, "Hacker News API failed — skipping"); }
+        catch (Exception ex) { _logger.LogDebug(ex, "{Source} feed failed — skipping", source.Label); }
         return items;
     }
 
-    /// <summary>
-    /// arXiv API: keyless Atom feed of recent AI research papers. The query is
-    /// used as a search term; when empty it falls back to the cs.AI category.
-    /// Snippets come from the paper abstract, which is usually substantial. Uses
-    /// HTTPS — arXiv supports it and plain HTTP leaks the query to network observers.
-    /// </summary>
-    private async Task<List<NewsItem>> TryArxivAsync(string query, CancellationToken ct)
+    private static bool IsBuiltinSource(NewsSource s)
+        => BuiltinSources.Any(b => b.Url == s.Url);
+
+    /// <summary>Parse HN-style Algolia JSON: hits[] with title/url/created_at_i/points.</summary>
+    private void ParseHnJson(string json, string source, List<NewsItem> items)
     {
-        var items = new List<NewsItem>();
-        try
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("hits", out var hits) || hits.ValueKind != JsonValueKind.Array) return;
+        foreach (var hit in hits.EnumerateArray())
         {
-            var term = string.IsNullOrWhiteSpace(query) ? "cat:cs.AI" : $"all:{Uri.EscapeDataString(query)}";
-            var url = "https://export.arxiv.org/api/query?search_query=" + term
-                      + "&sortBy=submittedDate&sortOrder=descending&max_results=8";
-            var xml = await MakeFeedClient().GetStringAsync(url, ct);
-            ParseAtomItems(xml, "arXiv", items);
+            var title = hit.TryGetProperty("title", out var t) ? t.GetString() : null;
+            var link = hit.TryGetProperty("url", out var u) ? u.GetString() : null;
+            if (string.IsNullOrWhiteSpace(link) && hit.TryGetProperty("objectID", out var oid))
+                link = "https://news.ycombinator.com/item?id=" + oid.GetString();
+            if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link)) continue;
+            var pub = hit.TryGetProperty("created_at_i", out var c) && c.TryGetInt64(out var ts)
+                ? DateTimeOffset.FromUnixTimeSeconds(ts).UtcDateTime : DateTime.UtcNow;
+            var pts = hit.TryGetProperty("points", out var p) && p.TryGetInt32(out var pp) ? pp : 0;
+            items.Add(new NewsItem(title!, link!, pub, source,
+                pts > 0 ? $"{source} story ({pts} points)." : $"{source} story."));
         }
-        catch (Exception ex) { _logger.LogDebug(ex, "arXiv API failed — skipping"); }
-        return items;
     }
 
     // ── Parsing ──────────────────────────────────────────────────────────────
@@ -757,8 +847,6 @@ public partial class NewsService
 
         try
         {
-            var client = _clientFactory.CreateClient("llama");
-            client.Timeout = TimeSpan.FromMinutes(3);
             var req = new
             {
                 model,
@@ -771,9 +859,7 @@ public partial class NewsService
                     new { role = "user", content = text }
                 }
             };
-            var content = new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json");
-            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", content, ct);
-            var respText = await resp.Content.ReadAsStringAsync(ct);
+            var respText = await CallLlmAsync(model, baseUrl, req, ct);
             var summary = ExtractContent(respText);
             return string.IsNullOrWhiteSpace(summary)
                 ? TruncateFallback(text)
@@ -820,8 +906,6 @@ public partial class NewsService
 
         try
         {
-            var client = _clientFactory.CreateClient("llama");
-            client.Timeout = TimeSpan.FromMinutes(3);
             var req = new
             {
                 model,
@@ -834,9 +918,7 @@ public partial class NewsService
                     new { role = "user", content = combined }
                 }
             };
-            var content = new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json");
-            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", content, ct);
-            var respText = await resp.Content.ReadAsStringAsync(ct);
+            var respText = await CallLlmAsync(model, baseUrl, req, ct);
             var overview = ExtractContent(respText);
             return string.IsNullOrWhiteSpace(overview)
                 ? TruncateFallback(combined)
@@ -882,10 +964,8 @@ public partial class NewsService
         if (userContent.Length < MinSummaryBodyLength)
             return (false, "", new List<string>());
 
-        try
+            try
         {
-            var client = _clientFactory.CreateClient("llama");
-            client.Timeout = TimeSpan.FromMinutes(4);
             var systemPrompt = $"Summarize each article as ### Article 0 through ### Article {bodies.Count - 1} "
                               + "(≤150 words each, key facts, no opinion). "
                               + $"Then write ### SUMMARY: a ≤200-word overview focused on stories most relevant "
@@ -902,9 +982,7 @@ public partial class NewsService
                     new { role = "user", content = userContent.ToString() }
                 }
             };
-            var content = new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json");
-            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", content, ct);
-            var respText = await resp.Content.ReadAsStringAsync(ct);
+            var respText = await CallLlmAsync(model, baseUrl, req, ct, timeoutMinutes: 4);
             var responseText = ExtractContent(respText);
 
             if (string.IsNullOrWhiteSpace(responseText))
@@ -1079,14 +1157,104 @@ public partial class NewsService
     internal static string TruncateFallback(string s)
         => s.Length > 400 ? s[..400] + "…" : s;
 
+    // ── Cache persistence ────────────────────────────────────────────────────
+
+    /// <summary>Loads the summary cache from SQLite on startup. Stale entries
+    /// (older than CacheTtl) are dropped during hydration. Safe to call when
+    /// _db is null (unit tests) — just skips persistence.</summary>
+    private void HydrateCacheFromDisk()
+    {
+        if (_db == null) return;
+        try
+        {
+            var json = _db.GetValue(CacheDbKey);
+            if (string.IsNullOrWhiteSpace(json)) return;
+            using var doc = JsonDocument.Parse(json);
+            var now = DateTime.UtcNow;
+            if (doc.RootElement.TryGetProperty("items", out var itemsEl) && itemsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in itemsEl.EnumerateArray())
+                {
+                    var key = el.TryGetProperty("k", out var k) ? k.GetString() : null;
+                    var summary = el.TryGetProperty("s", out var s) ? s.GetString() : null;
+                    var hash = el.TryGetProperty("h", out var h) ? h.GetString() : null;
+                    var model = el.TryGetProperty("m", out var m) ? m.GetString() : null;
+                    var cachedAtStr = el.TryGetProperty("t", out var t) ? t.GetString() : null;
+                    if (key == null || summary == null || hash == null || model == null) continue;
+                    if (!DateTime.TryParse(cachedAtStr, out var cachedAt)) continue;
+                    if ((now - cachedAt) >= CacheTtl) continue;
+                    _summaryCache[key] = new SummaryCacheEntry(summary, hash, cachedAt, model);
+                }
+            }
+            if (doc.RootElement.TryGetProperty("batches", out var batchEl) && batchEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in batchEl.EnumerateArray())
+                {
+                    var key = el.TryGetProperty("k", out var k) ? k.GetString() : null;
+                    var summary = el.TryGetProperty("s", out var s) ? s.GetString() : null;
+                    var cachedAtStr = el.TryGetProperty("t", out var t) ? t.GetString() : null;
+                    if (key == null || summary == null) continue;
+                    if (!DateTime.TryParse(cachedAtStr, out var cachedAt)) continue;
+                    if ((now - cachedAt) >= CacheTtl) continue;
+                    _batchCache[key] = new BatchCacheEntry(summary, cachedAt);
+                }
+            }
+            _logger.LogDebug("News cache hydrated: {Items} items, {Batches} batches from disk",
+                _summaryCache.Count, _batchCache.Count);
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to hydrate news cache from disk"); }
+    }
+
+    /// <summary>Persists the summary cache to SQLite, debounced to avoid writing on
+    /// every cache miss. Only called when _db is non-null. Drops stale entries before
+    /// serializing to keep the blob compact.</summary>
+    private void PersistCacheToDisk()
+    {
+        if (_db == null) return;
+        var now = DateTime.UtcNow;
+        if (now.Ticks - Interlocked.Read(ref _lastPersistTicks) < CachePersistDebounce.Ticks)
+            return;
+        Interlocked.Exchange(ref _lastPersistTicks, now.Ticks);
+        try
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\"items\":[");
+            var first = true;
+            foreach (var kv in _summaryCache)
+            {
+                if ((now - kv.Value.CachedAt) >= CacheTtl) continue;
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append($"{{\"k\":{JsonSerializer.Serialize(kv.Key)},\"s\":{JsonSerializer.Serialize(kv.Value.Summary)},");
+                sb.Append($"\"h\":{JsonSerializer.Serialize(kv.Value.ContentHash)},\"m\":{JsonSerializer.Serialize(kv.Value.Model)},");
+                sb.Append($"\"t\":{JsonSerializer.Serialize(kv.Value.CachedAt.ToString("O"))}}}");
+            }
+            sb.Append("],\"batches\":[");
+            first = true;
+            foreach (var kv in _batchCache)
+            {
+                if ((now - kv.Value.CachedAt) >= CacheTtl) continue;
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append($"{{\"k\":{JsonSerializer.Serialize(kv.Key)},\"s\":{JsonSerializer.Serialize(kv.Value.Summary)},");
+                sb.Append($"\"t\":{JsonSerializer.Serialize(kv.Value.CachedAt.ToString("O"))}}}");
+            }
+            sb.Append("]}");
+            _db.SetValue(CacheDbKey, sb.ToString());
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to persist news cache to disk"); }
+    }
+
     // ── HTTP ─────────────────────────────────────────────────────────────────
 
     private HttpClient MakeFeedClient()
     {
         // A fresh client (not the "llama" one) — these are public feed fetches,
         // independent of the LLM endpoint's long timeout and base URL.
+        // 10s is enough for RSS/JSON feeds; arXiv occasionally hangs at 20s
+        // (the previous default), which blocked the entire pipeline.
         var client = _clientFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(20);
+        client.Timeout = TimeSpan.FromSeconds(10);
         client.DefaultRequestHeaders.UserAgent.ParseAdd("WeaverNews/1.0 (keyless RSS aggregator)");
         client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US");
         return client;

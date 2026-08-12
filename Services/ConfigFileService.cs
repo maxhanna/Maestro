@@ -112,6 +112,15 @@ public class FrontendConfig
     public Dictionary<string, string>? themeColors { get; set; }
     public List<SavedThemeConfig> savedThemes { get; set; } = new();
     public List<string> enabledTools { get; set; } = new();
+    /// <summary>Custom RSS/Atom feed URLs for the _news tool. Each entry is a full
+    /// feed URL; the source label is derived from the feed's channel title. When
+    /// empty, the built-in defaults (VentureBeat AI, TechCrunch AI, Hacker News,
+    /// arXiv) are used. Adding a URL here extends the built-in list; it does not
+    /// replace it unless <see cref="newsReplaceBuiltinSources"/> is true.</summary>
+    public List<string> newsFeedUrls { get; set; } = new();
+    /// <summary>When true, <see cref="newsFeedUrls"/> fully replaces the built-in
+    /// source list. When false (default), custom URLs are appended to the built-ins.</summary>
+    public bool newsReplaceBuiltinSources { get; set; } = false;
     public bool includeProjectSkeleton { get; set; } = true;
     public bool includeEditKnowledge { get; set; } = false;
     public bool extendThinking { get; set; } = true;
