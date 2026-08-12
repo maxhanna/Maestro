@@ -31,6 +31,7 @@ public class NewsServiceTests
     [InlineData("https://example.com/article?utm_source=feed", "example.com/article")]
     [InlineData("https://example.com/article#section", "example.com/article")]
     [InlineData("https://example.com/article/", "example.com/article/")]
+    [InlineData("https://example.com:443/article", "example.com/article")]
     [InlineData("not-a-url", "not-a-url")]
     public void NormalizeUrl_StripsQueryAndFragment(string url, string expected)
     {
@@ -405,12 +406,14 @@ public class NewsServiceTests
     }
 
     [Fact]
-    public void ParseMarkerResponse_LessThanHalfTriggersFallback()
+    public void ParseMarkerResponse_LessThanHalfStillAccepted()
     {
-        // 5 expected, only 2 found → 2*2=4 < 5 → caller should fall back.
+        // With relevance filtering, fewer items is expected behavior, not a parse
+        // failure. The caller should accept this (not fall back) as long as SUMMARY
+        // exists. 5 expected, only 2 found — the model filtered out 3 as irrelevant.
         var resp = """
             [SUMMARY]
-            Overview.
+            Overview of 2 relevant items.
 
             [0]
             First.
@@ -418,33 +421,36 @@ public class NewsServiceTests
             [1]
             Second.
             """;
-        var (_, _, found) = NewsService.ParseMarkerResponse(resp, 5);
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 5);
+        Assert.NotNull(summary);
         Assert.Equal(2, found);
-        Assert.True(found * 2 < 5, "Fewer than half should trigger fallback");
+        // Missing items [2], [3], [4] are padded with empty strings.
+        Assert.Equal("", items[2]);
     }
 
     [Fact]
-    public void ParseMarkerResponse_HalfOrMoreAccepted()
+    public void ParseMarkerResponse_AllItemsFiltered_AcceptedWithSummaryOnly()
     {
-        // 4 expected, 3 found → 3*2=6 >= 4 → caller should accept.
+        // Model filtered ALL items as irrelevant — only wrote a SUMMARY saying
+        // "no relevant results". This is valid relevance-filtering behavior, not a
+        // format failure. The caller should accept it.
         var resp = """
             [SUMMARY]
-            Overview.
+            No relevant results were found for the query.
 
             [0]
-            First.
-
-            [1]
-            Second.
-
-            [3]
-            Fourth.
+            Skip.
             """;
-        var (_, items, found) = NewsService.ParseMarkerResponse(resp, 4);
-        Assert.Equal(3, found);
-        Assert.True(found * 2 >= 4, "Half or more should be accepted");
-        // Missing item [2] is padded with empty string.
-        Assert.Equal("", items[2]);
+        // Note: 0 item markers but SUMMARY exists.
+        var respNoItems = """
+            [SUMMARY]
+            No relevant results were found for the query.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(respNoItems, 5);
+        Assert.NotNull(summary);
+        Assert.Equal(0, found);
+        Assert.Equal(5, items.Count);
+        Assert.All(items, s => Assert.Equal("", s));
     }
 
     [Fact]
@@ -527,5 +533,339 @@ public class NewsServiceTests
         var k1 = NewsService.MakeBatchKey("AI", new[] { "example.com/a" });
         var k2 = NewsService.MakeBatchKey("AI", new[] { "example.com/b" });
         Assert.NotEqual(k1, k2);
+    }
+
+    [Fact]
+    public void MakeBatchKey_EmptyUrlList_ValidKey()
+    {
+        var key = NewsService.MakeBatchKey("AI", new List<string>());
+        Assert.Contains("AI", key);
+        Assert.EndsWith("::", key);
+    }
+
+    // ── ExtractOneLiner (output bullet formatting) ─────────────────────────
+
+    [Theory]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+    [InlineData("   ", "")]
+    [InlineData("Single line summary.", "Single line summary.")]
+    [InlineData("First line.\nSecond line.", "First line.")]
+    [InlineData("First line.\r\nSecond line.", "First line.")]
+    public void ExtractOneLiner_ReturnsFirstLine(string? input, string expected)
+    {
+        Assert.Equal(expected, NewsService.ExtractOneLiner(input));
+    }
+
+    // ── ExtractContent (LLM JSON response parsing) ─────────────────────────
+
+    [Fact]
+    public void ExtractContent_ValidResponse_ReturnsContent()
+    {
+        var json = """{"choices":[{"message":{"content":"Summary text."}}]}""";
+        Assert.Equal("Summary text.", NewsService.ExtractContent(json));
+    }
+
+    [Fact]
+    public void ExtractContent_MissingChoices_ReturnsEmpty()
+    {
+        var json = """{"model":"qwen"}""";
+        Assert.Equal("", NewsService.ExtractContent(json));
+    }
+
+    [Fact]
+    public void ExtractContent_EmptyChoicesArray_ReturnsEmpty()
+    {
+        var json = """{"choices":[]}""";
+        Assert.Equal("", NewsService.ExtractContent(json));
+    }
+
+    [Fact]
+    public void ExtractContent_MissingMessage_ReturnsEmpty()
+    {
+        var json = """{"choices":[{"finish_reason":"stop"}]}""";
+        Assert.Equal("", NewsService.ExtractContent(json));
+    }
+
+    [Fact]
+    public void ExtractContent_MissingContent_ReturnsEmpty()
+    {
+        var json = """{"choices":[{"message":{"role":"assistant"}}]}""";
+        Assert.Equal("", NewsService.ExtractContent(json));
+    }
+
+    [Fact]
+    public void ExtractContent_MalformedJson_ReturnsEmpty()
+    {
+        Assert.Equal("", NewsService.ExtractContent("not json at all"));
+        Assert.Equal("", NewsService.ExtractContent("{broken"));
+    }
+
+    [Fact]
+    public void ExtractContent_EmptyString_ReturnsEmpty()
+    {
+        Assert.Equal("", NewsService.ExtractContent(""));
+    }
+
+    // ── TruncateFallback (degradation path) ─────────────────────────────────
+
+    [Theory]
+    [InlineData("", "")]
+    [InlineData("short", "short")]
+    public void TruncateFallback_ShortString_Unchanged(string input, string expected)
+    {
+        Assert.Equal(expected, NewsService.TruncateFallback(input));
+    }
+
+    [Fact]
+    public void TruncateFallback_Exactly400Chars_Unchanged()
+    {
+        var s = new string('a', 400);
+        Assert.Equal(s, NewsService.TruncateFallback(s));
+    }
+
+    [Fact]
+    public void TruncateFallback_401Chars_TruncatedWithEllipsis()
+    {
+        var s = new string('a', 401);
+        var result = NewsService.TruncateFallback(s);
+        Assert.Equal(401, result.Length); // 400 chars + "…"
+        Assert.EndsWith("…", result);
+        Assert.Equal(400, result.Length - 1);
+    }
+
+    // ── CleanExtractedText (paragraph-aware truncation) ────────────────────
+
+    [Fact]
+    public void CleanExtractedText_EmptyOrNull_ReturnsEmpty()
+    {
+        Assert.Equal("", NewsService.CleanExtractedText(""));
+        Assert.Equal("", NewsService.CleanExtractedText("   "));
+        Assert.Equal("", NewsService.CleanExtractedText(null!));
+    }
+
+    [Fact]
+    public void CleanExtractedText_ShortText_ReturnedAsIs()
+    {
+        var text = "First paragraph.\nSecond paragraph.";
+        var result = NewsService.CleanExtractedText(text);
+        Assert.Equal("First paragraph.\nSecond paragraph.", result);
+    }
+
+    [Fact]
+    public void CleanExtractedText_ExceedingCap_StopsAtLastCompleteLine()
+    {
+        // Build text where the first few lines fit but a later line would exceed the cap.
+        var lineLen = 500;
+        var line = new string('x', lineLen);
+        // MaxArticleCharsForSummary is 3000. 5 lines × 500 = 2500 (fits), 6th would be 3001.
+        var text = string.Join("\n", Enumerable.Repeat(line, 7));
+        var result = NewsService.CleanExtractedText(text);
+        // Should stop at 5 lines (2500 chars + 4 newlines = 2504), not 6 (would be 3005).
+        Assert.True(result.Length <= 3000 + lineLen);
+        Assert.Equal(5, result.Split('\n').Length);
+    }
+
+    [Fact]
+    public void CleanExtractedText_SingleLineExceedingCap_HardTruncated()
+    {
+        // A single line longer than the cap should be hard-truncated with "…".
+        var longLine = new string('y', 5000);
+        var result = NewsService.CleanExtractedText(longLine);
+        Assert.EndsWith("…", result);
+        // 3000 chars + "…" = 3001.
+        Assert.Equal(3001, result.Length);
+    }
+
+    [Fact]
+    public void CleanExtractedText_CollapsesWhitespace()
+    {
+        var text = "  hello   world  \n\n  spaced   out  ";
+        var result = NewsService.CleanExtractedText(text);
+        Assert.Equal("hello world\nspaced out", result);
+    }
+
+    // ── InterleaveBySource edge cases ──────────────────────────────────────
+
+    [Fact]
+    public void InterleaveBySource_LimitZero_ReturnsEmpty()
+    {
+        var items = new List<NewsItem>
+        {
+            new("A", "https://a.com/1", DateTime.UtcNow, "Source A", ""),
+        };
+        var result = NewsService.InterleaveBySource(items, 0);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void InterleaveBySource_LimitExceedsTotal_ReturnsAll()
+    {
+        var items = new List<NewsItem>
+        {
+            new("A1", "https://a.com/1", DateTime.UtcNow, "Source A", ""),
+            new("A2", "https://a.com/2", DateTime.UtcNow.AddDays(-1), "Source A", ""),
+            new("B1", "https://b.com/1", DateTime.UtcNow, "Source B", ""),
+        };
+        var result = NewsService.InterleaveBySource(items, 10);
+        Assert.Equal(3, result.Count);
+    }
+
+    [Fact]
+    public void InterleaveBySource_SingleSource_ReturnsDateDescending()
+    {
+        var items = new List<NewsItem>
+        {
+            new("Old", "https://x.com/1", DateTime.UtcNow.AddDays(-3), "Only Source", ""),
+            new("New", "https://x.com/2", DateTime.UtcNow, "Only Source", ""),
+            new("Mid", "https://x.com/3", DateTime.UtcNow.AddDays(-1), "Only Source", ""),
+        };
+        var result = NewsService.InterleaveBySource(items, 5);
+        Assert.Equal(3, result.Count);
+        Assert.Equal("New", result[0].Title);
+        Assert.Equal("Mid", result[1].Title);
+        Assert.Equal("Old", result[2].Title);
+    }
+
+    // ── ParseRssItems edge cases ───────────────────────────────────────────
+
+    [Fact]
+    public void ParseRssItems_InvalidPubDate_FallsBackToUtcNow()
+    {
+        var rss = """
+            <?xml version="1.0"?>
+            <rss version="2.0">
+              <channel>
+                <title>Test</title>
+                <item>
+                  <title>Bad date item</title>
+                  <link>https://example.com/bad-date</link>
+                  <description>Snippet.</description>
+                  <pubDate>Not a real date</pubDate>
+                </item>
+              </channel>
+            </rss>
+            """;
+        var method = typeof(NewsService).GetMethod("ParseRssItems",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        var items = new List<NewsItem>();
+        method!.Invoke(null, new object[] { rss, "Test", items });
+
+        var single = Assert.Single(items);
+        // Falls back to DateTime.UtcNow — should be within the last minute.
+        Assert.True((DateTime.UtcNow - single.PubDate).TotalSeconds < 60);
+    }
+
+    [Fact]
+    public void ParseRssItems_EmptyFeed_ReturnsNoItems()
+    {
+        var rss = """
+            <?xml version="1.0"?>
+            <rss version="2.0">
+              <channel>
+                <title>Empty Feed</title>
+              </channel>
+            </rss>
+            """;
+        var method = typeof(NewsService).GetMethod("ParseRssItems",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        var items = new List<NewsItem>();
+        method!.Invoke(null, new object[] { rss, "Empty", items });
+        Assert.Empty(items);
+    }
+
+    [Fact]
+    public void ParseRssItems_MalformedXml_ReturnsNoItems()
+    {
+        var rss = "<?xml version=\"1.0\"?><rss><broken>";
+        var method = typeof(NewsService).GetMethod("ParseRssItems",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        var items = new List<NewsItem>();
+        method!.Invoke(null, new object[] { rss, "Broken", items });
+        Assert.Empty(items);
+    }
+
+    // ── ParseAtomItems edge cases ───────────────────────────────────────────
+
+    [Fact]
+    public void ParseAtomItems_MultipleLinks_PicksFirst()
+    {
+        var atom = """
+            <?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <title>Paper with multiple links</title>
+                <link href="https://arxiv.org/abs/1234.5678" rel="alternate"/>
+                <link href="https://arxiv.org/pdf/1234.5678" rel="related"/>
+                <published>2026-01-01T00:00:00Z</published>
+                <summary>Abstract text.</summary>
+              </entry>
+            </feed>
+            """;
+        var method = typeof(NewsService).GetMethod("ParseAtomItems",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        var items = new List<NewsItem>();
+        method!.Invoke(null, new object[] { atom, "arXiv", items });
+
+        var single = Assert.Single(items);
+        // First link element is the alternate (article page), not the PDF.
+        Assert.Equal("https://arxiv.org/abs/1234.5678", single.Url);
+    }
+
+    // ── ParseMarkerResponse: summary after items ───────────────────────────
+
+    [Fact]
+    public void ParseMarkerResponse_SummaryAfterItems_ParsesCorrectly()
+    {
+        // Model puts items first, summary last — the parser should still work.
+        var resp = """
+            [0]
+            First article summary.
+
+            [1]
+            Second article summary.
+
+            [SUMMARY]
+            Overview written last.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 2);
+
+        Assert.Equal("Overview written last.", summary);
+        Assert.Equal(2, found);
+        Assert.Equal("First article summary.", items[0]);
+        Assert.Equal("Second article summary.", items[1]);
+    }
+
+    // ── HashBody boundary ──────────────────────────────────────────────────
+
+    [Fact]
+    public void HashBody_Exactly200Chars_NotTruncated()
+    {
+        // Boundary: 200 chars is NOT truncated (> not >=), so the full 200 chars are hashed.
+        // 200 'a's and 200 'a's + 'b' should produce the SAME hash (first 200 chars match).
+        var exactly200 = new string('a', 200);
+        var _201 = new string('a', 200) + "b";
+        Assert.Equal(NewsService.HashBody(exactly200), NewsService.HashBody(_201));
+    }
+
+    [Fact]
+    public void HashBody_199And200DifferentContent_DifferentHash()
+    {
+        var _199 = new string('a', 199);
+        var _200 = new string('b', 200);
+        Assert.NotEqual(NewsService.HashBody(_199), NewsService.HashBody(_200));
+    }
+
+    // ── NormalizeUrl edge cases ────────────────────────────────────────────
+
+    [Fact]
+    public void NormalizeUrl_WithPort_IncludesPortInHost()
+    {
+        var result = NewsService.NormalizeUrl("https://example.com:8080/path?query=1");
+        Assert.Equal("example.com:8080/path", result);
     }
 }

@@ -389,7 +389,7 @@ public partial class NewsService
     /// Extracts the first line of a summary for the bullet format. Falls back to
     /// the full (trimmed) summary when there's no newline. Safe on empty strings.
     /// </summary>
-    private static string ExtractOneLiner(string? summary)
+    internal static string ExtractOneLiner(string? summary)
     {
         if (string.IsNullOrWhiteSpace(summary)) return "";
         var nl = summary.IndexOf('\n');
@@ -596,10 +596,12 @@ public partial class NewsService
     internal static string NormalizeUrl(string url)
     {
         // Strip query/fragment so the same article reached via different trackers dedupes.
+        // Use Authority (not Host) so non-default ports are preserved — two different
+        // services on the same host:port pair shouldn't collide.
         try
         {
             var u = new Uri(url);
-            return u.Host + u.AbsolutePath;
+            return u.Authority + u.AbsolutePath;
         }
         catch { return url.TrimEnd('/'); }
     }
@@ -691,7 +693,7 @@ public partial class NewsService
         }
     }
 
-    private static string CleanExtractedText(string s)
+    internal static string CleanExtractedText(string s)
     {
         if (string.IsNullOrWhiteSpace(s)) return "";
         // Collapse whitespace runs and trim each line, drop near-empty lines.
@@ -909,8 +911,12 @@ public partial class NewsService
             _logger.LogDebug("Single-call response ({Len} chars): {Response}", responseText.Length, responseText);
             _logger.LogDebug("Parsed: hasSummary={HasSummary}, markers={Found}/{Expected}", summary != null, markersFound, bodies.Count);
 
-            // Fallback if: no [SUMMARY] marker, or fewer than half the item markers present.
-            if (summary == null || markersFound * 2 < bodies.Count)
+            // Fallback only if the model didn't write a [SUMMARY] marker at all (format
+            // failure). We do NOT fall back on few/zero item markers — with relevance
+            // filtering, the model intentionally omits irrelevant articles, so fewer
+            // items is expected behavior, not a parse failure. Zero items + a SUMMARY
+            // means "no relevant results" — that's a valid answer, not a failure.
+            if (summary == null)
                 return (false, "", new List<string>());
 
             // Fill missing items with snippet fallbacks.
@@ -1053,7 +1059,7 @@ public partial class NewsService
         return "medgemma:4b";
     }
 
-    private static string ExtractContent(string respJson)
+    internal static string ExtractContent(string respJson)
     {
         try
         {
@@ -1068,7 +1074,7 @@ public partial class NewsService
         return "";
     }
 
-    private static string TruncateFallback(string s)
+    internal static string TruncateFallback(string s)
         => s.Length > 400 ? s[..400] + "…" : s;
 
     // ── HTTP ─────────────────────────────────────────────────────────────────
