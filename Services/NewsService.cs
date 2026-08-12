@@ -350,13 +350,19 @@ public partial class NewsService
             _logger.LogDebug("News cache: {Hit} hits, {Miss} misses — {Miss}+1 LLM calls", bodies.Count - missIndices.Count, missIndices.Count, missIndices.Count);
         }
 
-        // Assemble output. Filter out items with empty summaries (relevance-filtered by
-        // the model in the single-call path). If all items were filtered, the batch
-        // summary already says "no relevant results" — return it alone.
+        // Assemble output. Fill any missing item summaries with snippet fallbacks
+        // (truncation, not filtering — we no longer ask the model to omit items).
+        // The `kept` filter drops only truly empty entries (no snippet either).
         var kept = new List<(NewsItem item, string summary)>();
         for (var i = 0; i < interleaved.Count; i++)
         {
             var summary = i < itemSummaries.Count ? itemSummaries[i] : "";
+            if (string.IsNullOrWhiteSpace(summary))
+            {
+                // Fallback to the feed snippet so the item isn't lost from output.
+                var body = i < bodies.Count ? bodies[i].body : "";
+                summary = string.IsNullOrWhiteSpace(body) ? interleaved[i].Title : TruncateFallback(body);
+            }
             if (!string.IsNullOrWhiteSpace(summary))
                 kept.Add((interleaved[i], summary));
         }
@@ -880,12 +886,10 @@ public partial class NewsService
         {
             var client = _clientFactory.CreateClient("llama");
             client.Timeout = TimeSpan.FromMinutes(4);
-            var systemPrompt = $"The user searched for: \"{query}\"\n\n"
-                              + $"For each article [0]-[{bodies.Count - 1}], first judge if it is relevant to the query. "
-                              + "Summarize ONLY relevant articles as ### Article N (≤150 words each, key facts, no opinion). "
-                              + "Skip irrelevant articles entirely (do not write their ### Article N section).\n"
-                              + "Then write ### SUMMARY: a ≤200-word overview of the relevant stories, grouping related topics. "
-                              + "If no articles are relevant, write ### SUMMARY saying no relevant results were found.";
+            var systemPrompt = $"Summarize each article as ### Article 0 through ### Article {bodies.Count - 1} "
+                              + "(≤150 words each, key facts, no opinion). "
+                              + $"Then write ### SUMMARY: a ≤200-word overview focused on stories most relevant "
+                              + $"to the query \"{query}\". Group related topics. Mention tangential stories briefly.";
             var req = new
             {
                 model,

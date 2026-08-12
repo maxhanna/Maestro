@@ -323,37 +323,41 @@ public class NewsServiceFaultInjectionTests
         Assert.Contains("D-Wave", output);
     }
 
-    // ── Test: all items relevant-filtered out → summary only, no results ────
+    // ── Test: LLM returns summary only (no item markers) → items filled from snippets ─
 
     [Fact]
-    public async Task AllItemsFiltered_RelevantSummaryOnly()
+    public async Task LlmReturnsSummaryOnly_ItemsFilledFromSnippets()
     {
         using var f = new ScriptedFactory();
         SetupAllFeedsWorking(f);
-        // LLM returns only a SUMMARY saying "no relevant results".
-        var noResults = """{"choices":[{"message":{"content":"### SUMMARY\nNo relevant results were found for the query."}}]}""";
-        f.SetPostResponse("/v1/chat/completions", noResults);
+        // LLM returns only a SUMMARY, no per-item markers. Missing items should
+        // be filled from feed snippets so no item is lost from the output.
+        var summaryOnly = """{"choices":[{"message":{"content":"### SUMMARY\nA brief overview of recent AI developments across several topics."}}]}""";
+        f.SetPostResponse("/v1/chat/completions", summaryOnly);
 
         var svc = BuildNewsService(f);
-        var (output, err) = await svc.FetchNewsAsync("xyz obscure query", limit: 4, CancellationToken.None);
+        var (output, err) = await svc.FetchNewsAsync("AI", limit: 4, CancellationToken.None);
 
         Assert.Null(err);
-        Assert.Contains("No relevant results were found", output);
-        // No ## Results section — all items were filtered out.
-        Assert.DoesNotContain("## Results", output);
+        Assert.Contains("## Summary", output);
+        Assert.Contains("## Results", output);
+        // All items present — filled from feed snippets, not dropped.
+        Assert.Contains("D-Wave", output);
+        Assert.Contains("Accel", output);
     }
 
-    // ── Test: partial filtering — some items kept, some dropped ─────────────
+    // ── Test: partial markers → missing items filled from snippets ──────────
 
     [Fact]
-    public async Task PartialFiltering_KeptItemsInResults()
+    public async Task PartialMarkers_MissingItemsFilledFromSnippets()
     {
         using var f = new ScriptedFactory();
         SetupAllFeedsWorking(f);
-        // LLM returns only Article 2 (D-Wave/VB), filters 3 as irrelevant.
+        // LLM returns only Article 2 (D-Wave/VB). The other 3 items have no marker.
+        // They should be filled from feed snippets, not dropped.
         // Ordinal interleaved order: HN(0), TC(1), VB(2), arXiv(3).
         var partial = """
-            {"choices":[{"message":{"content":"### Article 2\nD-Wave CEO claims Nvidia should be worried about quantum computing.\n\n### SUMMARY\nOnly the D-Wave quantum article is relevant to the query."}}]}
+            {"choices":[{"message":{"content":"### Article 2\nD-Wave CEO claims Nvidia should be worried about quantum computing.\n\n### SUMMARY\nOverview focusing on quantum computing, with brief mentions of other AI topics."}}]}
             """;
         f.SetPostResponse("/v1/chat/completions", partial);
 
@@ -362,11 +366,11 @@ public class NewsServiceFaultInjectionTests
 
         Assert.Null(err);
         Assert.Contains("## Results", output);
-        // Only the relevant item (D-Wave, index 2) is in the results.
+        // The summarized item is present with its LLM summary.
         Assert.Contains("D-Wave", output);
-        // The filtered-out items are NOT in the results.
-        Assert.DoesNotContain("Accel", output);
-        Assert.DoesNotContain("VidForensics", output);
+        // The missing items are filled from snippets — NOT dropped.
+        Assert.Contains("Accel", output);
+        Assert.Contains("VidForensics", output);
     }
 
     // ── Test: cache survives across calls on same instance ──────────────────

@@ -408,12 +408,13 @@ public class NewsServiceTests
     [Fact]
     public void ParseMarkerResponse_LessThanHalfStillAccepted()
     {
-        // With relevance filtering, fewer items is expected behavior, not a parse
-        // failure. The caller should accept this (not fall back) as long as SUMMARY
-        // exists. 5 expected, only 2 found — the model filtered out 3 as irrelevant.
+        // The parser accepts any response with a [SUMMARY] marker, regardless of how
+        // many item markers are present. Missing items are padded with empty strings;
+        // the caller (TrySummarizeAllAsync) fills them from feed snippets. 5 expected,
+        // only 2 found — the model may have truncated, but the summary is still usable.
         var resp = """
             [SUMMARY]
-            Overview of 2 relevant items.
+            Overview of 2 items.
 
             [0]
             First.
@@ -429,22 +430,13 @@ public class NewsServiceTests
     }
 
     [Fact]
-    public void ParseMarkerResponse_AllItemsFiltered_AcceptedWithSummaryOnly()
+    public void ParseMarkerResponse_SummaryOnlyNoItems_Accepted()
     {
-        // Model filtered ALL items as irrelevant — only wrote a SUMMARY saying
-        // "no relevant results". This is valid relevance-filtering behavior, not a
-        // format failure. The caller should accept it.
-        var resp = """
-            [SUMMARY]
-            No relevant results were found for the query.
-
-            [0]
-            Skip.
-            """;
-        // Note: 0 item markers but SUMMARY exists.
+        // Model wrote only a SUMMARY, no item markers at all. The parser accepts this
+        // (summary exists). The caller fills all items from feed snippets — no data lost.
         var respNoItems = """
             [SUMMARY]
-            No relevant results were found for the query.
+            Overview of recent AI developments.
             """;
         var (summary, items, found) = NewsService.ParseMarkerResponse(respNoItems, 5);
         Assert.NotNull(summary);
