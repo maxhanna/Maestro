@@ -38,6 +38,7 @@ public partial class AgentController : ControllerBase
     private readonly EditKnowledgeService _editKnowledge;
     private readonly PushNotificationService _push;
     private readonly DatabaseService _db;
+    private readonly NewsService _newsService;
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
     private async Task<FrontendConfig> LoadConfigAsync()
@@ -84,11 +85,11 @@ public partial class AgentController : ControllerBase
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
         ConfigFileService configFile, EmailService emailService, BoardDataService boardData,
-        PushNotificationService push, DatabaseService db)
+        PushNotificationService push, DatabaseService db, NewsService newsService)
     {
         _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
-        _boardData = boardData; _push = push; _db = db;
+        _boardData = boardData; _push = push; _db = db; _newsService = newsService;
         // Wire the per-endpoint stream-health tracker to SQLite so badges reflect
         // reliability across app restarts, not just the current session. The static
         // hooks capture this controller's DatabaseService (same singleton in DI).

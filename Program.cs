@@ -141,6 +141,7 @@ builder.Services.AddSingleton(new FileHintsManager(dbService));
 builder.Services.AddSingleton(new CalendarService(dbService));
 builder.Services.AddSingleton<GitService>();
 builder.Services.AddSingleton<PushNotificationService>(sp => new PushNotificationService(dbService));
+builder.Services.AddSingleton<NewsService>();
 builder.Services.AddHttpClient("llama", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(30);

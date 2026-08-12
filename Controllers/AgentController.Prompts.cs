@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Weaver.Services;
@@ -372,6 +372,7 @@ partial class AgentController
             if (enabled == null || enabled.Contains("_command")) markers.Add("_command");
             if (enabled == null || enabled.Contains("_web_search")) markers.Add("_web_search");
             if (enabled == null || enabled.Contains("_web_fetch")) markers.Add("_web_fetch");
+            if (enabled == null || enabled.Contains("_news")) markers.Add("_news");
             if (enabled == null || enabled.Contains("_discover")) markers.Add("_discover");
             if (enabled == null || enabled.Contains("_git")) markers.Add("_git");
             if (enabled == null || enabled.Contains("_rename_file")) markers.Add("_rename_file");
@@ -430,6 +431,17 @@ partial class AgentController
             // _command Set-Content) so the planner sees the tools used end to end. Gated on
             // _web_search being available (the chain starts with it); the tool classifier
             // decides whether web tools belong to this task at all.
+            if (enabled == null || enabled.Contains("_news"))
+            {
+                sb.Append("### TOOL USE EXAMPLE — news digest (compose the step tools end to end) ###\n");
+                sb.Append("_news is a one-shot keyless news fetcher: it returns a markdown digest of recent AI ");
+                sb.Append("headlines (summarized via the local LLM). Use it instead of chaining _web_search → _web_fetch ");
+                sb.Append("when the task asks for \"recent AI news\" — _news does the fetch+summarize in one step.\n");
+                sb.Append("Example — \"fetch recent AI news and save it to a file\":\n");
+                sb.Append("  1. {\"planComplete\":false,\"step\":{\"file\":\"_news\",\"change\":\"AI research breakthroughs\"}}\n");
+                sb.Append("  2. {\"planComplete\":false,\"step\":{\"file\":\"_create_file\",\"change\":\"ai_news.md\",\"newString\":\"<paste the _news digest output here>\"}}\n");
+                sb.Append("Each step consumes the previous step's output; declare planComplete only after the file is written.\n\n");
+            }
             if (enabled == null || enabled.Contains("_web_search"))
             {
                 sb.Append("### TOOL USE EXAMPLE (compose the step tools end to end) ###\n");
@@ -473,7 +485,7 @@ partial class AgentController
         sb.Append("    \"change\": \"SHORT natural-language description — e.g. 'Add ElementRef import' or 'Add escape key handler in ngOnInit'. ");
         sb.Append("For a single-variable/expression swap, name BOTH tokens explicitly (e.g. 'Replace `b` with `group` in the benchmark-item ngFor' or 'change the loop variable from `b` to `group`'). ");
         sb.Append("NEVER put code here. For markers: the path (_create_directory/_create_file/_delete_file), SQL table (_sql_migration), command (_command/_git), ");
-        sb.Append("query (_web_search), or URL (_web_fetch) — not a description.\",\n");
+        sb.Append("query (_web_search/_news), or URL (_web_fetch) — not a description.\",\n");
         sb.Append("    \"targetSymbol\": \"getTimedGreetingMessage\",\n");
         sb.Append("    \"oldString\": \"EXACT text to replace — KEEP THIS SHORT (1-3 lines MAX). See RULE 17 below.\",\n");
         sb.Append("    \"newString\": \"replacement content (for _create_file and edit steps)\",\n");
@@ -768,6 +780,7 @@ partial class AgentController
         ["_sql_migration"] = "\"_sql_migration\"      — Write a SQL migration file for a NEW database table: put a short description in \"change\" (e.g. \"benchmark_scores table\"), put the full CREATE TABLE IF NOT EXISTS statement in \"newString\". The system writes migrations/<timestamp>_create_<table>.sql so the user can apply the table to their database manually, then delete the file. Do NOT inline CREATE TABLE in method bodies.",
         ["_web_search"] = "\"_web_search\"         — Search the web; put the query in \"change\"",
         ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
+        ["_news"] = "\"_news\"              — Fetch and summarize recent AI news (keyless RSS); put the topic/query in \"change\". Returns a markdown digest the agent can save to a file with _create_file.",
         ["_git"] = "\"_git\"                — Git operation (commit/pull/push/branch/revert)",
         ["_rename_file"] = "\"_rename_file\"        — Rename: put \"oldpath → newpath\" in \"change\"",
         ["_delete_file"] = "\"_delete_file\"        — Delete a file path in \"change\"",

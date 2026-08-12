@@ -1893,7 +1893,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         return file != null &&
             (file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
-             file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase));
+             file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
+             file.Equals("_news", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

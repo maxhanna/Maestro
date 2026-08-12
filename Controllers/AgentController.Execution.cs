@@ -570,7 +570,8 @@ partial class AgentController
                 continue;
             }
             if (planFile.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
-                planFile.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase))
+                planFile.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
+                planFile.Equals("_news", StringComparison.OrdinalIgnoreCase))
             {
                 (stepIndex, discoveryContext) = await ExecuteWebPlanStep(planFile, changeDesc, prompt, projectRoot, emitSse, ct,
                     allResults, planItems, itemIdx, stepIndex, discoveryContext, webCtx);
@@ -1068,17 +1069,20 @@ partial class AgentController
         int stepIndex, string discoveryContext, StringBuilder webCtx)
     {
         var isSearch = planFile.Equals("_web_search", StringComparison.OrdinalIgnoreCase);
+        var isNews = planFile.Equals("_news", StringComparison.OrdinalIgnoreCase);
         var query = changeDesc.Trim();
         if (string.IsNullOrWhiteSpace(query))
             return (stepIndex, discoveryContext);
-        await EmitLog(emitSse, "info", $"Web {(isSearch ? "search" : "fetch")}: {query}", ct: ct);
-        var (outp, err) = isSearch ? await WebSearchAsync(query, ct) : await WebFetchAsync(query, ct);
+        await EmitLog(emitSse, "info", $"{(isNews ? "News" : "Web " + (isSearch ? "search" : "fetch"))}: {query}", ct: ct);
+        var (outp, err) = isNews
+            ? await _newsService.FetchNewsAsync(query, ct: ct)
+            : isSearch ? await WebSearchAsync(query, ct) : await WebFetchAsync(query, ct);
         var curIdx = stepIndex;
         var wr = new Dictionary<string, object?>
         {
             ["index"] = curIdx,
             ["type"] = planFile,
-            [isSearch ? "query" : "url"] = query,
+            [isNews ? "query" : isSearch ? "query" : "url"] = query,
             ["status"] = err == null ? "done" : "error",
             ["output"] = outp // FULL output — allResults feeds the agent's context
         };
@@ -1097,7 +1101,8 @@ partial class AgentController
             webCtx.AppendLine($"\n## Web [{query}]\n{outp}");
         var nextIsWeb = itemIdx + 1 < planItems.Count &&
             (planItems[itemIdx + 1].File.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
-             planItems[itemIdx + 1].File.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase));
+             planItems[itemIdx + 1].File.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
+             planItems[itemIdx + 1].File.Equals("_news", StringComparison.OrdinalIgnoreCase));
         if (!nextIsWeb && webCtx.Length > 0)
         {
             var remaining = planItems.Skip(itemIdx + 1).ToList();

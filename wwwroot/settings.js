@@ -321,6 +321,7 @@ angular.module('kanbanApp')
                     { key: '_sql_migration', label: 'SQL migration files', enabled: true },
                     { key: '_web_search', label: 'Web search', enabled: true },
                     { key: '_web_fetch', label: 'Fetch URLs', enabled: true },
+                    { key: '_news', label: 'Fetch AI news (keyless RSS)', enabled: true },
                     { key: '_git', label: 'Git operations', enabled: true },
                     { key: '_rename_file', label: 'Rename files', enabled: true },
                     { key: '_delete_file', label: 'Delete files', enabled: true },
