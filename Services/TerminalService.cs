@@ -27,6 +27,11 @@ public class TerminalService : IDisposable
         if (IsRunning) return;
         shell ??= OperatingSystem.IsWindows() ? "powershell.exe" : "/bin/bash";
         if (OperatingSystem.IsWindows() && args == "/K") args = "-NoExit";
+        // "/K" is a cmd.exe flag ("keep the window open"). Non-Windows shells need
+        // nothing: bash/pwsh on Unix read stdin interactively with no arguments, and
+        // passing "/K" to /bin/bash makes it exit immediately with
+        // "/bin/bash: /K: No such file or directory" — killing every later command.
+        if (!OperatingSystem.IsWindows() && args == "/K") args = "";
         _shellName = Path.GetFileNameWithoutExtension(shell).ToLowerInvariant();
         var psi = new ProcessStartInfo
         {

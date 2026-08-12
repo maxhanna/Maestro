@@ -102,9 +102,37 @@ public static class AgentOsOutputVerifier
         {
             var full = ExpandTilde(absPath).TrimEnd('/', '\\');
             var isFile = LooksLikeFilePath(full);
-            var dir = isFile ? (Path.GetDirectoryName(full) ?? Path.GetPathRoot(full) ?? "") : full;
+            // Parse the parent directory and file name using whichever separator the
+            // prompt actually used. Never Path.GetDirectoryName here: it is
+            // platform-dependent — a Windows-style C:\ path in a prompt yields an
+            // empty directory when running on Linux because \ is not a separator.
+            string dir;
+            string? fileName = null;
+            if (isFile)
+            {
+                var sep = full.Contains('\\') ? '\\' : (full.Contains('/') ? '/' : Path.DirectorySeparatorChar);
+                var idx = full.LastIndexOf(sep);
+                if (idx > 0)
+                {
+                    dir = full[..idx];
+                    fileName = full[(idx + 1)..];
+                }
+                else if (idx == 0)
+                {
+                    dir = "/";
+                    fileName = full[1..];
+                }
+                else
+                {
+                    dir = full;
+                }
+            }
+            else
+            {
+                dir = full;
+            }
             if (string.IsNullOrWhiteSpace(dir)) return false;
-            demand = new OsOutputDemand("absolute", dir, isFile ? Path.GetFileName(full) : null);
+            demand = new OsOutputDemand("absolute", dir, fileName);
             return true;
         }
 
@@ -122,8 +150,11 @@ public static class AgentOsOutputVerifier
         }
         if (locationKind == null) return false;
 
+        // Detection is platform-independent: write verb + file artifact + OS location is a
+        // demand even when the special folder can't be resolved on this platform (headless
+        // Linux runners have no Desktop/Documents folder — GetFolderPath returns "").
+        // Callers treat an empty directory as unresolvable but still report/steer.
         var dir2 = ResolveOsLocation(locationKind);
-        if (string.IsNullOrWhiteSpace(dir2)) return false;
         demand = new OsOutputDemand(locationKind, dir2, ExtractFileNameHint(prompt));
         return true;
     }
@@ -135,21 +166,30 @@ public static class AgentOsOutputVerifier
     /// </summary>
     public static bool IsOsOutputWritten(OsOutputDemand demand, IEnumerable<Dictionary<string, object?>> results)
     {
-        if (string.IsNullOrWhiteSpace(demand.DirectoryPath)) return false;
-        string dir;
-        try { dir = Path.GetFullPath(demand.DirectoryPath); }
-        catch { return false; }
-        var normDir = dir.Replace('\\', '/');
+        var fileName = string.IsNullOrWhiteSpace(demand.FileNameHint) ? DefaultDumpFileName : demand.FileNameHint!;
+        var normDir = "";
+        if (!string.IsNullOrWhiteSpace(demand.DirectoryPath))
+        {
+            try { normDir = Path.GetFullPath(demand.DirectoryPath).Replace('\\', '/'); }
+            catch { normDir = ""; }
+        }
         foreach (var r in results)
         {
             if (r.GetValueOrDefault("type")?.ToString() is not ("command" or "_command")) continue;
             if (r.GetValueOrDefault("status")?.ToString() != "done") continue;
             var cmd = r.GetValueOrDefault("command")?.ToString() ?? r.GetValueOrDefault("change")?.ToString() ?? "";
-            if (cmd.Length > 0 && cmd.Replace('\\', '/').Contains(normDir, StringComparison.OrdinalIgnoreCase))
+            if (cmd.Length == 0) continue;
+            // A successful command referencing the demanded directory counts as written.
+            if (normDir.Length > 0 && cmd.Replace('\\', '/').Contains(normDir, StringComparison.OrdinalIgnoreCase))
+                return true;
+            // Fallback when the directory couldn't be resolved on this platform (headless
+            // Linux has no Desktop/Documents folder): a done command that names the target
+            // file still proves the write happened.
+            if (fileName.Length > 0 && cmd.Contains(fileName, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
-        var fileName = string.IsNullOrWhiteSpace(demand.FileNameHint) ? DefaultDumpFileName : demand.FileNameHint!;
-        try { return System.IO.File.Exists(Path.Combine(dir, fileName)); }
+        if (normDir.Length == 0) return false;
+        try { return System.IO.File.Exists(Path.Combine(demand.DirectoryPath, fileName)); }
         catch { return false; }
     }
 
@@ -224,12 +264,30 @@ public static class AgentOsOutputVerifier
 
     private static string? ExtractAbsolutePath(string prompt)
     {
+        // Windows drive paths (C:\...) and any Unix absolute path (/tmp/..., /home/...).
         var quoted = Regex.Match(prompt,
-            @"[""']([a-zA-Z]:[\\/][^""']+|~/[^""']+|/home/[^""']+|/Users/[^""']+)[""']");
-        if (quoted.Success) return quoted.Groups[1].Value.Trim();
+            @"[""']((?:[a-zA-Z]:[\\/]|~/|/)[^""']+)[""']");
+        if (quoted.Success)
+        {
+            var p = quoted.Groups[1].Value.Trim();
+            return LooksLikePathRoot(p) ? p : null;
+        }
         var bare = Regex.Match(prompt,
-            @"([a-zA-Z]:[\\/][^\s""';]+|~/[^\s""';]+|/home/[^\s""';]+|/Users/[^\s""';]+)");
-        return bare.Success ? bare.Groups[1].Value.Trim() : null;
+            @"((?:[a-zA-Z]:[\\/]|~/|/)[^\s""';]+)");
+        if (!bare.Success) return null;
+        var b = bare.Groups[1].Value.Trim();
+        return LooksLikePathRoot(b) ? b : null;
+    }
+
+    /// <summary>True when the candidate path has a directory separator beyond the root
+    /// marker ("~/x", "/tmp/x", "C:\x\y"), so a lone "/word" phrase is not a path.</summary>
+    private static bool LooksLikePathRoot(string path)
+    {
+        if (path.StartsWith("~/", StringComparison.Ordinal)) return true;
+        var rest = path.StartsWith('/')
+            ? path[1..]
+            : (path.Length > 2 ? path[2..] : "");
+        return rest.Contains('\\') || rest.Contains('/');
     }
 
     private static bool LooksLikeFilePath(string path)
