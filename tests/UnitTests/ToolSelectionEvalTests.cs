@@ -497,7 +497,10 @@ public class ToolSelectionEvalTests : IDisposable
     [Fact]
     public async Task Trace_MissingWebSearchAutoInjects_AndSearchActuallyRuns()
     {
-        const string prompt = "Search the web for the latest AI news and add a summary line to NOTES.md.";
+        // Deliberately NOT a news-y prompt ("latest AI news" would route the search to the
+        // NewsService digest) — this trace tests the missing-web-search auto-inject guard, so
+        // the query stays on the plain DuckDuckGo path the scripted factory serves.
+        const string prompt = "Search the web for the latest release notes for weaver and add a summary line to NOTES.md.";
         var factory = new ToolSelectionScriptedClientFactory();
         // 3× refusals (non-web steps) → missing-web-search guard → auto-inject.
         factory.Proposals.Add(new StepSpec("_command", "echo nothing"));

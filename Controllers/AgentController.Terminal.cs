@@ -312,7 +312,7 @@ partial class AgentController
             {
                 var search = !string.IsNullOrWhiteSpace(query) ? query : target;
                 if (string.IsNullOrWhiteSpace(search)) { result["status"] = "error"; result["error"] = "web_search requires query"; return; }
-                var (searchOut, _) = await WebSearchAsync(search, CancellationToken.None);
+                var (searchOut, _) = await ExecuteWebSearchAsync(search, null, CancellationToken.None);
                 result["status"] = "done"; result["query"] = search; result["output"] = searchOut;
             }
         }

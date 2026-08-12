@@ -1105,6 +1105,37 @@ partial class AgentController
         return (output[..MaxClientWebChars] + "\n\n… [truncated — full results kept for the agent's context]", true);
     }
 
+    private NewsService? _newsService;
+    private NewsService GetNewsService() => _newsService ??= new NewsService(_clientFactory, SummarizeArticleForNewsAsync);
+
+    /// <summary>Summarizes a fetched article for the news digest (≤150 words). Falls back to
+    /// the feed snippet when llama is unreachable or returns nothing — the digest must never
+    /// hard-depend on the LLM.</summary>
+    private async Task<string?> SummarizeArticleForNewsAsync(string articleText, CancellationToken ct)
+    {
+        var (raw, err) = await CallLlmRawText(
+            "You are a news summarizer. Summarize the article below in at most 150 words, covering the key facts, numbers and names. Output ONLY the summary text.",
+            articleText, emitSse: false, ct, maxTokens: 300);
+        return err == null && !string.IsNullOrWhiteSpace(raw) ? raw.Trim() : null;
+    }
+
+    /// <summary>
+    /// The ONE search entry point for web steps: a news-y prompt or query (headline / breaking
+    /// news / "latest AI …") routes to the fresh-news digest (real, dated, deduped items with
+    /// REAL URLs); anything else goes to the plain DuckDuckGo search. Kept as a single helper so
+    /// the interleaved plan path, the command-pipeline web_search tool and the discovery web step
+    /// all make the same decision.
+    /// </summary>
+    private async Task<(string output, string? error)> ExecuteWebSearchAsync(string query, string? prompt, CancellationToken ct)
+    {
+        if (NewsService.LooksLikeNewsQuery(prompt) || NewsService.LooksLikeNewsQuery(query))
+        {
+            var digest = await GetNewsService().FetchNewsAsync(query, NewsService.DefaultLimit, ct);
+            return (digest, null);
+        }
+        return await WebSearchAsync(query, ct);
+    }
+
     private async Task<(int stepIndex, string discoveryContext)> ExecuteWebPlanStep(
         string planFile, string changeDesc, string prompt,
         string projectRoot, bool emitSse, CancellationToken ct,
@@ -1116,7 +1147,7 @@ partial class AgentController
         if (string.IsNullOrWhiteSpace(query))
             return (stepIndex, discoveryContext);
         await EmitLog(emitSse, "info", $"Web {(isSearch ? "search" : "fetch")}: {query}", ct: ct);
-        var (outp, err) = isSearch ? await WebSearchAsync(query, ct) : await WebFetchAsync(query, ct);
+        var (outp, err) = isSearch ? await ExecuteWebSearchAsync(query, prompt, ct) : await WebFetchAsync(query, ct);
         var curIdx = stepIndex;
         var wr = new Dictionary<string, object?>
         {

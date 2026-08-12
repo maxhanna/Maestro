@@ -355,7 +355,7 @@ partial class AgentController
                 var query = searchEl.GetString() ?? "";
                 if (string.IsNullOrWhiteSpace(query)) { conversation.AppendLine("Empty query."); continue; }
                 if (!usedSearchQueries.Add(query)) { conversation.AppendLine("Already searched for \"" + query + "\". Use the results above."); continue; }
-                var (searchOut, _) = await WebSearchAsync(query, ct);
+                var (searchOut, _) = await ExecuteWebSearchAsync(query, null, ct);
                 var wr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_search", ["query"] = query, ["status"] = "done", ["output"] = searchOut };
                 var wrMetrics = TakeStepLlmMetrics();
                 if (wrMetrics != null) wr["llmTokens"] = wrMetrics;
