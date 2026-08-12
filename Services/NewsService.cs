@@ -797,7 +797,7 @@ public sealed class NewsService
     /// <summary>Parses the batch response: a '## Summary' overview plus 'ITEM n:' markers mapped
     /// back onto the item list. Missing markers are simply absent — the caller backfills from the
     /// feed snippet, so a truncated model response never loses an item.</summary>
-    internal static BatchSummary? ParseBatchSummary(string raw, int itemCount)
+    static BatchSummary? ParseBatchSummary(string raw, int itemCount)
     {
         var byIndex = new Dictionary<int, string>();
         foreach (Match m in Regex.Matches(raw,
