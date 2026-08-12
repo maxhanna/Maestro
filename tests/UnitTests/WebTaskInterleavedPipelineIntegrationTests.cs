@@ -430,6 +430,56 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.Empty(_clientFactory.Unmatched);
     }
 
+    // ── The "loop of searching": the planner re-proposes the SAME query after a ───────────
+    // successful search. The web re-run guard must reject the repeat before it executes so
+    // the search runs EXACTLY once, and the planner must then complete the task from the
+    // results already in context.
+
+    [Fact]
+    public async Task WebTask_RepeatedSearchQuery_IsRejected_SearchRunsOnce()
+    {
+        // After step 1's _web_search succeeds and its results are harvested, the planner
+        // re-proposes the identical query — the deep-reasoning engine re-derived the research
+        // need instead of using the results (the user-observed loop). The web re-run guard
+        // must reject the duplicate with feedback BEFORE it executes, and the planner must
+        // then write the demanded file from the results already in context.
+        _clientFactory.Mode = PlannerMode.RepeatedSearch;
+        _clientFactory.WebAssessComplete = () => File.Exists(_steerTarget);
+        var controller = BuildController();
+        // Non-news phrasing — the news-marked variant routes to the digest, not DuckDuckGo.
+        var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_steerTarget}\".";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        // The run completed AND the commanded write created the demanded file.
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(File.Exists(_steerTarget), $"the commanded write should have created {_steerTarget}");
+        Assert.Contains("AlphaFold 3", File.ReadAllText(_steerTarget, Encoding.UTF8));
+
+        // The search executed EXACTLY ONCE — the repeated proposal never ran. Before the
+        // guard, the identical query slipped past planSoFar dedup as a NEW step and re-ran
+        // the search (the loop).
+        var searchGets = _clientFactory.FetchedUrls.Count(u =>
+            u.Contains("duckduckgo", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, searchGets);
+        Assert.Single(allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "_web_search"));
+
+        // The web re-run rejection reached a LATER planner turn (the rejected duplicate is
+        // fed back), steering the planner to use the results instead of re-searching.
+        Assert.True(_clientFactory.PlannerUserPrompts.Skip(1).Any(p =>
+                p.Contains("already ran _web_search", StringComparison.Ordinal)),
+            $"the web re-run rejection should have reached a later planner prompt; calls=[{string.Join(",", _clientFactory.Calls)}]; plannerCalls={_clientFactory.PlannerUserPrompts.Count}; got:\n{string.Join("\n---\n", _clientFactory.PlannerUserPrompts.Skip(1))}");
+
+        // ZERO repo edits — the run never invented application code to "write" the file.
+        var editResults = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+                        r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
+            .ToList();
+        Assert.Empty(editResults);
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
     // ── Repair loop: deterministic auto-dump before the replanner ─────────────────────────
     // When the fetch retry budget is exhausted (a persistently broken URL), the run halts
     // into post-execution verification, which reports the missing OS output file. The repair
@@ -653,7 +703,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit }
+    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch }
 
     /// <summary>
     /// An <see cref="IHttpClientFactory"/> whose handler answers every LLM request from a
@@ -882,6 +932,29 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                         ), "planner-step");
                     }
                     return ("{\"planComplete\": true, \"completionReason\": \"added the article link from the search results\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.RepeatedSearch)
+                {
+                    // The "loop of searching": after step 1's _web_search succeeds, the planner
+                    // re-proposes a REWORDED variant of the same query ("AI research
+                    // breakthroughs" vs "AI research breakthroughs latest") — its deep reasoning
+                    // re-derived the research need instead of using the harvested results. The
+                    // exact-match "STEP ALREADY DONE" guard cannot catch a reworded query
+                    // (~0.75 Jaccard vs the 0.82 edit threshold), so the web re-run guard must
+                    // reject it BEFORE it executes; step 3 must then write the demanded file
+                    // from the results already in context — the search may run EXACTLY once.
+                    if (n == 1)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_web_search", "AI research breakthroughs"), "planner-step");
+                    if (n == 3)
+                    {
+                        var writeCmd = OperatingSystem.IsWindows()
+                            ? $"Set-Content -Path \"{_owner.SteerTarget}\" -Value \"AlphaFold 3 predicts protein structures with atom-level accuracy\" -Encoding UTF8"
+                            : $"echo 'AlphaFold 3 predicts protein structures with atom-level accuracy' > \"{_owner.SteerTarget}\"";
+                        return (PlannerStepJson("_command", writeCmd), "planner-step");
+                    }
+                    return ("{\"planComplete\": true, \"completionReason\": \"wrote the file from the results already in context\"}", "planner-step");
                 }
                 if (n == 1)
                     return (PlannerStepJson("_web_search", SearchQuery), "planner-step");

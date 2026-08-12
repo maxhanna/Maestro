@@ -178,7 +178,7 @@ public class PrBranchFeatureTests
         return JsonSerializer.SerializeToElement(ok.Value);
     }
 
-    private static async Task<JsonElement> CallFinish(PRController controller, string dir, string branchName, string originalBranch)
+    private static async Task<JsonElement> CallFinish(PRController controller, string dir, string branchName, string originalBranch, string? worktreePath = null)
     {
         var result = await controller.Finish(new PrFinishRequest
         {
@@ -186,7 +186,8 @@ public class PrBranchFeatureTests
             CardId = "card1",
             CardText = "Change",
             BranchName = branchName,
-            OriginalBranch = originalBranch
+            OriginalBranch = originalBranch,
+            WorktreePath = worktreePath
         });
         var ok = Assert.IsType<OkObjectResult>(result);
         return JsonSerializer.SerializeToElement(ok.Value);
@@ -194,13 +195,20 @@ public class PrBranchFeatureTests
 
     private static void TryCleanup(string dir)
     {
-        try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+        try { if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+    }
+
+    // Cleans up BOTH the throwaway repo and any isolated worktree created beside it.
+    private static void TryCleanupAll(params string?[] dirs)
+    {
+        foreach (var d in dirs) TryCleanup(d ?? "");
     }
 
     [GitAvailableFact]
-    public async Task Start_Creates_Weaver_Branch_On_Fresh_Repo()
+    public async Task Start_Creates_Isolated_Worktree_And_Leaves_Shared_Checkout_Put()
     {
         var dir = CreateTempRepo();
+        string? wt = null;
         try
         {
             // A real project has at least one commit — that's the case where the
@@ -212,21 +220,31 @@ public class PrBranchFeatureTests
             var resp = await CallStart(controller, dir, "Test Card 1!");
 
             Assert.True(resp.GetProperty("success").GetBoolean());
+            Assert.Equal("worktree", resp.GetProperty("mode").GetString());
             Assert.Equal("weaver/TestCard1", resp.GetProperty("branchName").GetString());
             Assert.Equal("master", resp.GetProperty("originalBranch").GetString());
-            // The repo is actually on the new branch.
+            wt = resp.GetProperty("worktreePath").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(wt), "worktreePath missing");
+            // The shared checkout was NEVER switched: it is still on the original branch.
             var (exit, outp, _) = RunGit(dir, "rev-parse --abbrev-ref HEAD");
-            Assert.True(exit == 0 && outp.Trim() == "weaver/TestCard1", $"not on branch: {outp}");
+            Assert.True(exit == 0 && outp.Trim() == "master", $"shared checkout moved: {outp}");
+            // The new branch is checked out in the isolated worktree instead.
+            var (exit2, wtOut, _) = RunGit(wt!, "rev-parse --abbrev-ref HEAD");
+            Assert.True(exit2 == 0 && wtOut.Trim() == "weaver/TestCard1", $"worktree not on branch: {wtOut}");
+            // Nothing was stashed — nobody's work was swept out of the shared checkout.
+            Assert.Equal("", RunGit(dir, "stash list").output.Trim());
         }
-        finally { TryCleanup(dir); }
+        finally { TryCleanupAll(dir, wt); }
     }
 
     [GitAvailableFact]
     public async Task Start_On_Unborn_Head_Still_Creates_Branch_And_Reports_Unknown_Original()
     {
         // A repo with no commits: git cannot resolve the current branch name, so the
-        // feature passes through "unknown" — but branch creation must still succeed.
+        // feature passes through "unknown" — but branch creation must still succeed
+        // (in an isolated worktree when git supports it, legacy checkout otherwise).
         var dir = CreateTempRepo();
+        string? wt = null;
         try
         {
             var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
@@ -234,21 +252,32 @@ public class PrBranchFeatureTests
 
             Assert.True(resp.GetProperty("success").GetBoolean());
             Assert.Equal("unknown", resp.GetProperty("originalBranch").GetString());
-            // rev-parse can't resolve an unborn HEAD, so read the symref directly.
-            var (exit, outp, _) = RunGit(dir, "symbolic-ref --short HEAD");
-            Assert.True(exit == 0 && outp.Trim() == "weaver/card1", $"not on branch: {outp}");
+            wt = resp.GetProperty("worktreePath").GetString();
+            if (string.IsNullOrWhiteSpace(wt))
+            {
+                // Legacy fallback — the shared checkout is on the branch.
+                var (exit, outp, _) = RunGit(dir, "symbolic-ref --short HEAD");
+                Assert.True(exit == 0 && outp.Trim() == "weaver/card1", $"not on branch: {outp}");
+            }
+            else
+            {
+                // Worktree mode — the isolated copy holds the branch, shared stays put.
+                var (exit, wtOut, _) = RunGit(wt, "symbolic-ref --short HEAD");
+                Assert.True(exit == 0 && wtOut.Trim() == "weaver/card1", $"worktree not on branch: {wtOut}");
+            }
         }
-        finally { TryCleanup(dir); }
+        finally { TryCleanupAll(dir, wt); }
     }
 
     [GitAvailableFact]
-    public async Task Start_Stashes_Uncommitted_Changes_Before_Branching()
+    public async Task Start_Leaves_Uncommitted_Changes_In_The_Shared_Checkout()
     {
         var dir = CreateTempRepo();
+        string? wt = null;
         try
         {
             CommitFile(dir, "file.txt", "hello");
-            // Dirty the working tree with a TRACKED modification so the stash has something to hold.
+            // Dirty the shared working tree with a TRACKED modification.
             File.WriteAllText(Path.Combine(dir, "file.txt"), "hello v2");
             Assert.True(RunGit(dir, "status --porcelain").output.Trim().Length > 0);
 
@@ -256,24 +285,30 @@ public class PrBranchFeatureTests
             var resp = await CallStart(controller, dir, "card1");
 
             Assert.True(resp.GetProperty("success").GetBoolean());
-            var (exit, stashOut, _) = RunGit(dir, "stash list");
-            Assert.True(exit == 0 && stashOut.Contains("weaver-auto-stash"), $"stash not found: {stashOut}");
-            // The tracked modification is actually captured in the stash — not just an entry existing.
-            var (exit2, showOut, _) = RunGit(dir, "stash show --name-only stash@{0}");
-            Assert.True(exit2 == 0 && showOut.Contains("file.txt"), $"stash missing file.txt: {showOut}");
+            wt = resp.GetProperty("worktreePath").GetString();
+            // The uncommitted change is STILL in the shared checkout — isolation means
+            // nothing is stashed, moved or lost: other people's work is never touched.
+            // (TrimEnd only: a leading space in porcelain marks an unstaged change, and
+            // Trim() would eat it.)
+            Assert.Equal(" M file.txt", RunGit(dir, "status --porcelain").output.TrimEnd());
+            Assert.Equal("hello v2", File.ReadAllText(Path.Combine(dir, "file.txt")));
+            Assert.Equal("", RunGit(dir, "stash list").output.Trim());
+            // The isolated worktree checks out the committed state — clean, no leaks.
+            Assert.Equal("", RunGit(wt!, "status --porcelain").output.Trim());
+            Assert.Equal("hello", File.ReadAllText(Path.Combine(wt!, "file.txt")));
         }
-        finally { TryCleanup(dir); }
+        finally { TryCleanupAll(dir, wt); }
     }
 
     [GitAvailableFact]
-    public async Task Start_Stashes_Untracked_Files_So_Nothing_Is_Lost()
+    public async Task Start_Leaves_Untracked_Files_In_The_Shared_Checkout()
     {
         var dir = CreateTempRepo();
+        string? wt = null;
         try
         {
             CommitFile(dir, "file.txt", "hello");
-            // A brand-new file is untracked — plain `stash push` would leave it in the
-            // working tree to ride along onto the branch; the -u stash must fold it in.
+            // A brand-new file is untracked in the shared checkout.
             File.WriteAllText(Path.Combine(dir, "new.txt"), "brand new");
             Assert.Contains("?? new.txt", RunGit(dir, "status --porcelain").output);
 
@@ -281,28 +316,26 @@ public class PrBranchFeatureTests
             var resp = await CallStart(controller, dir, "card1");
 
             Assert.True(resp.GetProperty("success").GetBoolean());
-            // Working tree is clean after the branch is created — nothing leaked onto it.
-            Assert.Equal("", RunGit(dir, "status --porcelain").output.Trim());
-            // The stash actually holds the untracked file.
-            var (exit, showOut, _) = RunGit(dir, "stash show -u --name-only stash@{0}");
-            Assert.True(exit == 0 && showOut.Contains("new.txt"), $"stash missing new.txt: {showOut}");
-            // And popping the stash restores it — nothing is lost.
-            var pop = RunGit(dir, "stash pop");
-            Assert.True(pop.exit == 0, $"stash pop failed: {pop.error}");
-            Assert.True(File.Exists(Path.Combine(dir, "new.txt")), "untracked file lost after stash pop");
+            wt = resp.GetProperty("worktreePath").GetString();
+            // The untracked file stays in the shared checkout — it never rides along
+            // into the isolated worktree (where it could be committed into the branch).
+            Assert.Contains("?? new.txt", RunGit(dir, "status --porcelain").output);
+            Assert.True(File.Exists(Path.Combine(dir, "new.txt")), "untracked file lost");
+            Assert.False(File.Exists(Path.Combine(wt!, "new.txt")), "untracked file leaked into the worktree");
         }
-        finally { TryCleanup(dir); }
+        finally { TryCleanupAll(dir, wt); }
     }
 
     [GitAvailableFact]
     public async Task Start_Falls_Back_To_Timestamped_Name_When_Branch_Exists()
     {
         var dir = CreateTempRepo();
+        string? wt = null;
         try
         {
             CommitFile(dir, "file.txt", "hello");
             // Pre-create the branch the Start would pick, then get BACK on master so
-            // the first checkout -b actually collides (from an unborn HEAD git would
+            // a fresh branch must be chosen (from an unborn HEAD git would
             // happily rename onto it instead of failing).
             RunGit(dir, "checkout -b weaver/TestCard1");
             RunGit(dir, "checkout master");
@@ -312,89 +345,148 @@ public class PrBranchFeatureTests
 
             Assert.True(resp.GetProperty("success").GetBoolean());
             Assert.Matches(@"^weaver/TestCard1-\d{14}$", resp.GetProperty("branchName").GetString());
-            // The pre-existing branch is the "original" the PR flow must restore.
+            wt = resp.GetProperty("worktreePath").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(wt));
+            // The pre-existing branch is the "original" the PR flow leaves untouched.
             Assert.Equal("master", resp.GetProperty("originalBranch").GetString());
         }
-        finally { TryCleanup(dir); }
+        finally { TryCleanupAll(dir, wt); }
     }
 
-    private static async Task<JsonElement> CallAbort(PRController controller, string dir, string branchName, string originalBranch)
+    private static async Task<JsonElement> CallAbort(PRController controller, string dir, string branchName, string originalBranch, string? worktreePath = null)
     {
         var result = await controller.Abort(new PrAbortRequest
         {
             ProjectPath = dir,
             CardId = "card1",
             BranchName = branchName,
-            OriginalBranch = originalBranch
+            OriginalBranch = originalBranch,
+            WorktreePath = worktreePath
         });
         var ok = Assert.IsType<OkObjectResult>(result);
         return JsonSerializer.SerializeToElement(ok.Value);
     }
 
     [GitAvailableFact]
-    public async Task Abort_Restores_Original_Branch_Pops_Stash_And_Deletes_Branch()
+    public async Task Abort_Removes_Worktree_Deletes_Branch_And_Leaves_Shared_Checkout_Put()
     {
         var dir = CreateTempRepo();
+        string? wt = null;
         try
         {
             CommitFile(dir, "file.txt", "hello v1");
-            // Pre-branch work: dirty the tree, then Start stashes it and branches.
-            File.WriteAllText(Path.Combine(dir, "file.txt"), "hello v2");
 
             var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
             var startResp = await CallStart(controller, dir, "card1");
             Assert.True(startResp.GetProperty("success").GetBoolean());
             var branch = startResp.GetProperty("branchName").GetString()!;
+            wt = startResp.GetProperty("worktreePath").GetString();
             Assert.Equal("weaver/card1", branch);
-            // On the weaver branch, working tree clean (the v2 change is stashed).
-            Assert.Equal("weaver/card1", RunGit(dir, "rev-parse --abbrev-ref HEAD").output.Trim());
+            Assert.True(Directory.Exists(wt), "worktree folder was not created");
+            // The shared checkout stayed on its original branch throughout.
+            Assert.Equal("master", RunGit(dir, "rev-parse --abbrev-ref HEAD").output.Trim());
 
-            var resp = await CallAbort(controller, dir, branch, "master");
+            var resp = await CallAbort(controller, dir, branch, "master", wt);
 
             Assert.True(resp.GetProperty("success").GetBoolean(), resp.TryGetProperty("error", out var errEl) ? errEl.GetString() : "no error");
-            Assert.Equal("master", resp.GetProperty("restoredBranch").GetString());
+            Assert.True(resp.GetProperty("worktreeRemoved").GetBoolean());
             Assert.True(resp.GetProperty("branchDeleted").GetBoolean());
-            // Back on the original branch, pre-branch changes restored from the stash.
+            // The shared checkout never moved and never accumulated a stash.
             Assert.Equal("master", RunGit(dir, "rev-parse --abbrev-ref HEAD").output.Trim());
-            Assert.Equal("hello v2", File.ReadAllText(Path.Combine(dir, "file.txt")));
-            // The weaver branch is gone.
-            var (exit, branchOut, _) = RunGit(dir, "branch --list weaver/card1");
-            Assert.True(exit == 0 && branchOut.Trim() == "", $"branch still exists: {branchOut}");
+            Assert.Equal("", RunGit(dir, "stash list").output.Trim());
+            // The isolated worktree folder is gone and the weaver branch is deleted.
+            Assert.False(Directory.Exists(wt), "worktree folder still exists");
+            Assert.Equal("", RunGit(dir, "branch --list weaver/card1").output.Trim());
+            wt = null; // already removed — avoid double cleanup
         }
-        finally { TryCleanup(dir); }
+        finally { TryCleanupAll(dir, wt); }
     }
 
     [GitAvailableFact]
-    public async Task Abort_Preserves_MidRun_Changes_In_WeaverAbort_Stash()
+    public async Task Abort_Worktree_Preserves_MidRun_Changes_In_WeaverAbort_Stash()
     {
         var dir = CreateTempRepo();
+        string? wt = null;
         try
         {
             CommitFile(dir, "file.txt", "hello v1");
-            File.WriteAllText(Path.Combine(dir, "file.txt"), "hello v2"); // stashed by Start
 
             var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
             var startResp = await CallStart(controller, dir, "card1");
             var branch = startResp.GetProperty("branchName").GetString()!;
+            wt = startResp.GetProperty("worktreePath").GetString();
 
-            // The agent edits a file mid-run on the weaver branch — this must never be lost.
-            File.WriteAllText(Path.Combine(dir, "file.txt"), "agent mid-run edit");
+            // The agent edits a file mid-run in the ISOLATED worktree — the shared
+            // checkout must stay pristine while this edit is preserved on abort.
+            File.WriteAllText(Path.Combine(wt!, "file.txt"), "agent mid-run edit");
+            Assert.Equal("hello v1", File.ReadAllText(Path.Combine(dir, "file.txt")));
 
-            var resp = await CallAbort(controller, dir, branch, "master");
+            var resp = await CallAbort(controller, dir, branch, "master", wt);
 
             Assert.True(resp.GetProperty("success").GetBoolean(), resp.TryGetProperty("error", out var errEl) ? errEl.GetString() : "no error");
-            Assert.Equal("master", resp.GetProperty("restoredBranch").GetString());
-            // The pre-branch stash was popped: the repo is back to the pre-branch state.
-            Assert.Equal("hello v2", File.ReadAllText(Path.Combine(dir, "file.txt")));
-            // The mid-run edit was swept into the weaver-abort stash, not destroyed.
+            // The shared checkout is exactly as it was before the run.
+            Assert.Equal("hello v1", File.ReadAllText(Path.Combine(dir, "file.txt")));
+            // The mid-run edit is recoverable from the weaver-abort stash.
             var (exit, stashOut, _) = RunGit(dir, "stash list");
             Assert.True(exit == 0 && stashOut.Contains("weaver-abort"), $"weaver-abort stash missing: {stashOut}");
             var (exit2, showOut, _) = RunGit(dir, "stash show --name-only stash@{0}");
             Assert.True(exit2 == 0 && showOut.Contains("file.txt"), $"abort stash missing file.txt: {showOut}");
-            // And the branch is deleted.
+            // Worktree folder gone, branch deleted.
+            Assert.False(Directory.Exists(wt), "worktree folder still exists");
             Assert.Equal("", RunGit(dir, "branch --list weaver/card1").output.Trim());
+            wt = null;
         }
-        finally { TryCleanup(dir); }
+        finally { TryCleanupAll(dir, wt); }
+    }
+
+    [GitAvailableFact]
+    public async Task Finish_Worktree_Commit_Only_Contains_Worktree_Changes()
+    {
+        // The core isolation guarantee: while the agent works in the isolated worktree,
+        // OTHER people's changes in the shared checkout never make it into the branch
+        // commit — Finish stages and commits ONLY the worktree.
+        var dir = CreateTempRepo();
+        string? wt = null;
+        try
+        {
+            CommitFile(dir, "file.txt", "hello");
+
+            var controller = new PRController(new GitService(), NullLogger<PRController>.Instance);
+            var startResp = await CallStart(controller, dir, "card1");
+            wt = startResp.GetProperty("worktreePath").GetString();
+            var branch = startResp.GetProperty("branchName").GetString()!;
+
+            // Another person edits the SHARED checkout while the agent works.
+            File.WriteAllText(Path.Combine(dir, "file.txt"), "other person's edit");
+            File.WriteAllText(Path.Combine(dir, "theirs.txt"), "their new file");
+            // The agent edits the ISOLATED worktree.
+            File.WriteAllText(Path.Combine(wt!, "file.txt"), "agent's edit");
+            File.WriteAllText(Path.Combine(wt!, "agent.txt"), "agent file");
+
+            var resp = await CallFinish(controller, dir, branch, "master", wt);
+
+            // No origin remote → push fails; success false and the worktree + branch are
+            // deliberately kept for retry (nothing is deleted on a failed push).
+            Assert.False(resp.GetProperty("success").GetBoolean());
+            Assert.Contains("origin", resp.GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
+            Assert.True(Directory.Exists(wt), "worktree must be kept for retry after a failed push");
+
+            // The branch commit (in the worktree) contains ONLY the agent's changes.
+            var (exit, logOut, logErr) = RunGit(wt!, "log --oneline -1 --stat");
+            Assert.True(exit == 0, $"git log failed: {logErr}");
+            Assert.Contains("agent.txt", logOut);
+            Assert.Contains("file.txt", logOut);
+            Assert.DoesNotContain("theirs.txt", logOut);
+
+            // The other person's work is still in the shared checkout, uncommitted,
+            // on the original branch — never staged, never committed, never moved.
+            var (exit2, statusOut, _) = RunGit(dir, "status --porcelain");
+            Assert.True(exit2 == 0);
+            Assert.Contains("theirs.txt", statusOut);
+            Assert.Contains(" M file.txt", statusOut);
+            Assert.Equal("master", RunGit(dir, "rev-parse --abbrev-ref HEAD").output.Trim());
+        }
+        finally { TryCleanupAll(dir, wt); }
     }
 
     [GitAvailableFact]

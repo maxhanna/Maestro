@@ -1027,6 +1027,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 : Path.Combine(osProfile, "Desktop");
         }
         var normNew = NormalizeChangeForDedup(step.Change);
+        // Web-step re-run guard FIRST (web-specific feedback + the lower 0.35 threshold): a
+        // re-proposed _web_search/_web_fetch whose query/URL matches — or near-matches — an
+        // already-executed one, while the results are in context, is the "loop of searching".
+        // The generic edit-step dedup below (0.82 Jaccard) lets reworded queries slip through.
+        if (RepeatedWebStepReason(step, planSoFar, discoveryContext) is string webDupReason)
+            return (false, webDupReason);
         foreach (var existing in planSoFar)
         {
             if (!string.Equals(existing.File, step.File, StringComparison.OrdinalIgnoreCase)) continue;
@@ -2344,6 +2350,64 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return $"The demanded OS output file ({where}) was ALREADY written by a completed _command step — the task's file requirement is satisfied. " +
                "Do NOT add another Set-Content/Out-File/redirect write to the same location. If the run is complete, return planComplete=true; " +
                "only write again if a verifier issue explicitly says the existing file content is wrong.";
+    }
+
+    /// <summary>
+    /// Web-step re-run guard: once a _web_search/_web_fetch step has been committed AND its
+    /// output was harvested into the discovery context ('### WEB RESULTS [...]' present), a
+    /// NEW web step targeting the SAME query/URL — or a near-reworded variant — is the
+    /// planner re-researching instead of using what the search returned. This is the
+    /// "loop of searching": each step's thinking re-derives the research need from the task
+    /// text and re-proposes the search. Reworded queries ("AI news article sources" vs
+    /// "AI news articles RSS feed or public API") score ~0.2-0.4 Jaccard — far below the
+    /// 0.82 edit-step dedup threshold — so the identical-query guard alone lets the loop run.
+    /// Web queries are far less diverse than edit anchors, so the guard uses the same 0.35
+    /// overlap threshold the additional-step queue uses. Gated on the results being IN
+    /// context: a failed/empty search harvests nothing, so retrying it stays allowed.
+    /// </summary>
+    public static string? RepeatedWebStepReason(PlanStep step, IEnumerable<PlanStep> committed, string discoveryContext)
+    {
+        if (!IsWebStep(step.File)) return null;
+        if (!discoveryContext.Contains("### WEB RESULTS", StringComparison.Ordinal)) return null;
+        var normNew = NormalizeChangeForDedup(step.Change);
+        if (normNew.Length == 0) return null;
+        var newWords = WebQueryWords(normNew);
+        if (newWords.Count == 0) return null;
+        foreach (var (existing, idx) in committed.Select((s, i) => (s, i)))
+        {
+            if (!IsWebStep(existing.File)) continue;
+            var normExisting = NormalizeChangeForDedup(existing.Change);
+            if (normExisting.Length == 0) continue;
+            var existingWords = WebQueryWords(normExisting);
+            if (existingWords.Count == 0) continue;
+            // Jaccard (same as the 0.35 additional-step threshold) PLUS a containment check:
+            // unequal-length queries ("AI news article sources" vs "AI news articles RSS feed
+            // or public API") score only ~0.2 Jaccard despite being the SAME research intent.
+            // Containment = overlap / smaller query — reworded variants keep ~75% of their
+            // words in the original, while a genuinely different topic shares almost none.
+            var inter = newWords.Intersect(existingWords).Count();
+            var jaccard = (double)inter / newWords.Union(existingWords).Count();
+            var containment = (double)inter / Math.Min(newWords.Count, existingWords.Count);
+            if (jaccard < 0.35 && containment < 0.6) continue;
+            if (existing.File.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase))
+                return $"An earlier _web_fetch step already fetched \"{existing.Change}\" and its results are in the DISCOVERY CONTEXT under '### WEB RESULTS [...] ###'. Do NOT fetch it again — use the content already returned. If you need a DIFFERENT article, _web_fetch a concrete URL from those results that has not been fetched yet.";
+            return $"Step {idx + 1} already ran _web_search \"{existing.Change}\" and its results are in the DISCOVERY CONTEXT under '### WEB RESULTS [...] ###'. Do NOT search the web again — those results are authoritative facts to USE, not to re-derive. If the task still needs an article's full content, _web_fetch a CONCRETE URL listed in the results (never an invented one); if it needs a file written, draw its content from the titles/URLs/summaries already returned.";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Word set for the web-step re-run comparison, plural-tolerant ("articles" ≡ "article"):
+    /// web queries reword plurals far more often than edit anchors do, and token-exact sets
+    /// would let "AI news article" dodge "AI news articles". Singularize each word so the
+    /// intent comparison is stable across rewording.
+    /// </summary>
+    private static HashSet<string> WebQueryWords(string normalized)
+    {
+        var words = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var w in normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            words.Add(w.Length > 3 && w.EndsWith("s") && !w.EndsWith("ss") ? w[..^1] : w);
+        return words;
     }
 
     /// <summary>

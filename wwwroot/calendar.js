@@ -746,8 +746,10 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         scheduleUpdate();
       };
 
-      // Extracts "HH:MM" from a cron preset's first two fields, or null when
-      // they aren't plain numbers (e.g. */15) — interval presets stay recurring.
+      // Extracts "HH:MM" from a cron expression's first two fields when they
+      // are plain numbers (e.g. "0 9 * * *" → "09:00"), or null for interval
+      // forms like "*/15 * * * *". Used to sync the Time field to a preset
+      // chip's schedule time.
       function cronPresetTime(expr) {
         try {
           var parts = expr.trim().split(/\s+/);
@@ -767,18 +769,17 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           d.cronExpression = '';
           return;
         }
+        // Every preset chip (Daily, Weekdays, Weekend, Specific day, Monthly,
+        // Yearly, intervals) is a RECURRING schedule — install the cron
+        // expression directly. The Date field stays as the anchor date; a
+        // one-off at a specific date+time is made with the Date/Time fields
+        // alone (no cron). Installing the cron is what makes "0 9 * * *" render
+        // a row on EVERY day of the month instead of only the anchor date.
+        d.cronExpression = expr;
+        // Sync the Time field to the schedule's hour:minute when the preset is
+        // a plain time (e.g. "0 9 * * *" → 09:00) so the form reads coherently.
         var hm = cronPresetTime(expr);
-        if (hm && d.date && !d.cronExpression) {
-          // The card already has a date and no recurring cron: apply the
-          // preset's time as a one-off fire on that date instead of installing
-          // a recurring schedule. Clear the Date field to make it recurring.
-          d.cronExpression = '';
-          d.time = timeToDate(hm);
-          var dStr = d.date instanceof Date ? localDateStr(d.date) : d.date;
-          if (_vm.showSideToast) _vm.showSideToast('⏰ One-off: fires once at ' + hm + ' on ' + dStr + ' — clear the Date field to make it recurring');
-        } else {
-          d.cronExpression = expr;
-        }
+        if (hm) d.time = timeToDate(hm);
       };
 
       vm.calEditCard = function (card, $event) {

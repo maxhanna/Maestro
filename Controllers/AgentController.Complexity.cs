@@ -349,33 +349,7 @@ partial class AgentController
                     "no imports from unrelated files). If the attached files don't contain something you need, say so and " +
                     "plan within what is attached.";
             }
-            var sb = new StringBuilder();
-            sb.AppendLine("Produce your extended reasoning for the NEXT step the planner should propose.");
-            sb.AppendLine();
-            sb.AppendLine("### TASK ###");
-            sb.AppendLine(string.IsNullOrWhiteSpace(prompt) ? "(no task text available)" : prompt);
-            sb.AppendLine();
-            sb.AppendLine("### PREVIOUS REASONING ###");
-            sb.AppendLine(string.IsNullOrWhiteSpace(previous) ? "(none yet — this is the first step)" : previous);
-            sb.AppendLine();
-            sb.AppendLine("### PLAN SO FAR (committed steps — do NOT redo these) ###");
-            if (planSoFar.Count == 0)
-                sb.AppendLine("(none — this is the first step)");
-            else
-            {
-                for (var i = 0; i < planSoFar.Count; i++)
-                    sb.AppendLine($"  Step {i + 1}: [{planSoFar[i].File}] {planSoFar[i].Change}");
-            }
-            if (!string.IsNullOrWhiteSpace(related))
-            {
-                sb.AppendLine();
-                sb.AppendLine(hasAttached ? "### ATTACHED FILES (the ONLY files you may touch) ###" : "### RELEVANT PROJECT FILES ###");
-                sb.AppendLine(hasAttached
-                    ? "These are the user's attached files, shown in full. Reason exclusively inside them — every edit must target one of these files."
-                    : "Files discovered for this task. Use these as your source of truth for what to copy and how to integrate.");
-                sb.AppendLine(related);
-            }
-            var user = sb.ToString();
+            var user = BuildPrePlanThinkingUserPrompt(prompt, previous, planSoFar, related, hasAttached, webSections);
 
             var (raw, error) = await CallLlmRawText(system, user, emitSse, ct,
                 requestTimeout: _infiniteTimeout,
@@ -435,6 +409,64 @@ partial class AgentController
                 new { reason = ex.Message }, ct: ct);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Builds the user prompt for the pre-plan deep-reasoning round. Extracted from
+    /// ExtendThinkingPrePlanAsync so the WEB RESULTS directive (and its absence for
+    /// non-web runs) is unit-testable — mirroring BuildIncrementalStepUserPrompt's
+    /// '### WEB RESULTS ARE IN CONTEXT ###' nudge on the planner side.
+    /// </summary>
+    internal static string BuildPrePlanThinkingUserPrompt(
+        string prompt, string previous, List<PlanStep> planSoFar, string related, bool hasAttached, string webSections)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Produce your extended reasoning for the NEXT step the planner should propose.");
+        sb.AppendLine();
+        sb.AppendLine("### TASK ###");
+        sb.AppendLine(string.IsNullOrWhiteSpace(prompt) ? "(no task text available)" : prompt);
+        sb.AppendLine();
+        sb.AppendLine("### PREVIOUS REASONING ###");
+        sb.AppendLine(string.IsNullOrWhiteSpace(previous) ? "(none yet — this is the first step)" : previous);
+        sb.AppendLine();
+        sb.AppendLine("### PLAN SO FAR (committed steps — do NOT redo these) ###");
+        if (planSoFar.Count == 0)
+            sb.AppendLine("(none — this is the first step)");
+        else
+        {
+            for (var i = 0; i < planSoFar.Count; i++)
+                sb.AppendLine($"  Step {i + 1}: [{planSoFar[i].File}] {planSoFar[i].Change}");
+        }
+        if (!string.IsNullOrWhiteSpace(related))
+        {
+            sb.AppendLine();
+            sb.AppendLine(hasAttached ? "### ATTACHED FILES (the ONLY files you may touch) ###" : "### RELEVANT PROJECT FILES ###");
+            sb.AppendLine(hasAttached
+                ? "These are the user's attached files, shown in full. Reason exclusively inside them — every edit must target one of these files."
+                : "Files discovered for this task. Use these as your source of truth for what to copy and how to integrate.");
+            sb.AppendLine(related);
+        }
+        // When an earlier _web_search/_web_fetch already ran, its REAL results ride in the
+        // RELEVANT PROJECT FILES section under '### WEB RESULTS [...] ###'. Without an explicit
+        // directive the reasoning engine silently ignores them and re-derives the research need
+        // from the task text — "I need to fetch an AI news article from a reliable source…" —
+        // which re-proposes the same _web_search on the very next planner turn (the observed
+        // search-loop: every step's thinking starts over from scratch). Tell it the results are
+        // authoritative FACTS to consume, never to re-derive. Gated on a committed web step,
+        // mirroring the planner-side nudge: sections can only appear once a search/fetch ran.
+        if (!string.IsNullOrWhiteSpace(webSections) && planSoFar.Any(s => IsWebStep(s.File)))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### EARLIER WEB SEARCH RESULTS (authoritative — do NOT re-search) ###");
+            sb.AppendLine("An earlier _web_search/_web_fetch step ALREADY RAN — its actual returned titles/URLs are in the " +
+                "RELEVANT PROJECT FILES section under the '### WEB RESULTS [...] ###' blocks. Those are REAL external " +
+                "facts, not something to re-derive. Do NOT propose another _web_search with the same or similar query, " +
+                "and do NOT plan scraping/fetching code to re-research what the search already returned. If the task " +
+                "still needs an article's full content, direct the planner to _web_fetch a CONCRETE URL listed in those " +
+                "results (never an invented one); if it needs a file written, draw its content from the titles/URLs/" +
+                "summaries already returned. The task is not a research task anymore — it is a USE-THE-RESULTS task.");
+        }
+        return sb.ToString();
     }
 
     /// <summary>

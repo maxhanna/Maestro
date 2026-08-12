@@ -26,6 +26,40 @@ public class GitResult
             return result;
         }
 
+        // ── Isolated git worktrees (the BRANCH feature's default mode) ────────
+        // A worktree is a separate working directory checked out to its own branch
+        // of the SAME repository (shared .git object database). Creating one never
+        // touches the main checkout, so other people working in the shared project
+        // folder keep their uncommitted changes and their branch — nothing to stash,
+        // nothing to switch, nothing that can ride along into the agent's branch.
+        public async Task<GitResult> CreateWorktreeAsync(string repoPath, string branchName, string worktreePath)
+        {
+            return await RunGitAsync(repoPath, $"worktree add -b \"{branchName}\" \"{worktreePath}\"");
+        }
+
+        public async Task<GitResult> RemoveWorktreeAsync(string repoPath, string worktreePath)
+        {
+            // --force: the throwaway working copy may hold untracked files / build
+            // output the agent left behind; it is isolated, so force removal is safe.
+            return await RunGitAsync(repoPath, $"worktree remove --force \"{worktreePath}\"");
+        }
+
+        public async Task<GitResult> PruneWorktreesAsync(string repoPath)
+        {
+            return await RunGitAsync(repoPath, "worktree prune");
+        }
+
+        public async Task<GitResult> DeleteBranchAsync(string repoPath, string branchName)
+        {
+            return await RunGitAsync(repoPath, $"branch -D \"{branchName}\"");
+        }
+
+        public async Task<bool> BranchExistsAsync(string repoPath, string branchName)
+        {
+            var result = await RunGitAsync(repoPath, $"rev-parse --verify --quiet \"refs/heads/{branchName}\"");
+            return result.Success;
+        }
+
         public async Task<GitResult> CommitAllAsync(string repoPath, string message)
         {
             await RunGitAsync(repoPath, "add -A");

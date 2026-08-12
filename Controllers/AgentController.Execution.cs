@@ -1111,7 +1111,13 @@ partial class AgentController
     }
 
     private NewsService? _newsService;
-    private NewsService GetNewsService() => _newsService ??= new NewsService(_clientFactory, SummarizeArticleForNewsAsync, ClassifyNewsPlanAsync);
+    private async Task<NewsService> GetNewsServiceAsync()
+    {
+        if (_newsService != null) return _newsService;
+        var baseUrl = await GetLlamaBaseUrl();
+        var model = await GetLlamaModel();
+        return _newsService = new NewsService(_clientFactory, baseUrl, model, ClassifyNewsPlanAsync);
+    }
 
     /// <summary>Summarizes a fetched article for the news digest (≤150 words). Falls back to
     /// the feed snippet when llama is unreachable or returns nothing — the digest must never
@@ -1163,7 +1169,7 @@ partial class AgentController
     {
         if (NewsService.LooksLikeNewsQuery(prompt) || NewsService.LooksLikeNewsQuery(query))
         {
-            var digest = await GetNewsService().FetchNewsAsync(prompt ?? query, query, NewsService.DefaultLimit, ct);
+            var digest = await (await GetNewsServiceAsync()).FetchNewsAsync(prompt ?? query, query, NewsService.DefaultLimit, ct);
             return (digest, null);
         }
         return await WebSearchAsync(query, ct);

@@ -121,15 +121,20 @@ angular.module('kanbanApp')
         function applyPrFinishOutcome(card, prResp, err) {
             if (!card || !card.prStatus) return 'noop';
             if (!card.autoPr) { delete card.prStatus; return 'skipped'; }
+            // Carry the isolated worktree path across every outcome: while the branch
+            // still exists (error → worktree kept for retry/abort) the card must keep
+            // resolving its project to the worktree. The finish handler clears it on
+            // success, once the backend has removed the worktree.
+            var wt = card.prStatus.worktreePath;
             if (err) {
-                card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch };
+                card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch, worktreePath: wt };
                 return 'error';
             }
             if (prResp && prResp.data && prResp.data.success) {
-                card.prStatus = { status: 'pr-created', branch: card.prStatus.branch, prUrl: prResp.data.prUrl };
+                card.prStatus = { status: 'pr-created', branch: card.prStatus.branch, prUrl: prResp.data.prUrl, worktreePath: wt };
                 return 'pr-created';
             }
-            card.prStatus = { status: 'error', error: (prResp && prResp.data && prResp.data.error) || 'PR creation failed', branch: card.prStatus.branch };
+            card.prStatus = { status: 'error', error: (prResp && prResp.data && prResp.data.error) || 'PR creation failed', branch: card.prStatus.branch, worktreePath: wt };
             return 'error';
         }
         function normalizeStepStatus(status) {
@@ -210,6 +215,38 @@ angular.module('kanbanApp')
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.agentRuns = []; vm.currentRun = null;
+
+                // BRANCH cards with an active isolated git worktree resolve their project
+                // to the WORKTREE path so every path-keyed operation (agent run, diff
+                // viewer, file open) hits the isolated copy and never the shared checkout
+                // other people work in. The worktreePath is cleared once the branch is
+                // finished or aborted, so everything falls back to the shared project.
+                function cardProject(card) {
+                    var base = (card && card.filePath) || vm.selectedProject;
+                    if (card && card.prStatus && card.prStatus.worktreePath) return card.prStatus.worktreePath;
+                    return base;
+                }
+                // Rewrites a card's stored absolute diff paths from the isolated worktree
+                // prefix to the shared repo prefix after finish (the backend copies the
+                // worktree's data/undo into the shared repo before removing it), so the
+                // card's diff viewer keeps working from the shared checkout.
+                function rebaseCardDiffPaths(card, fromPrefix, toPrefix) {
+                    if (!card || !fromPrefix || !toPrefix) return;
+                    function rebase(p) {
+                        if (typeof p !== 'string' || p.indexOf(fromPrefix) !== 0) return p;
+                        return toPrefix + p.slice(fromPrefix.length);
+                    }
+                    if (card._plan && card._plan.items) {
+                        card._plan.items.forEach(function (item) {
+                            if (item && Array.isArray(item.diffs)) item.diffs = item.diffs.map(rebase);
+                        });
+                    }
+                    if (card._appliedDiffs) {
+                        var next = {};
+                        Object.keys(card._appliedDiffs).forEach(function (p) { next[rebase(p)] = true; });
+                        card._appliedDiffs = next;
+                    }
+                }
                 vm.refreshStreamingActive = function () {
                     var activeNow = vm.agentRuns.filter(function (r) { return r.active; }).length;
                     var wasActive = vm._lastActiveRunCount || 0;
@@ -527,6 +564,9 @@ angular.module('kanbanApp')
                     delete card._endpointQueued;
                     delete card._autoQueued;
                     var proj = card.filePath || vm.selectedProject; if (!proj) return $window.alert('No project assigned');
+                    // BRANCH cards run inside their isolated worktree (when one is active)
+                    // so the agent's edits never touch the shared checkout.
+                    var runProj = cardProject(card) || proj;
                     try {
                         if (!isAutoRestart) card._agentIteration = 0;
                         delete card.agentAnalysis; delete card.agentLog;
@@ -587,10 +627,10 @@ angular.module('kanbanApp')
                                 vm.planItems = [];
                                 vm.agentActivityLog = [];
                             }
-                            pushAgentLog(vm, 'info', isAutoRestart ? 'Agent restarting (' + (card._agentIteration || 0) + '/5)' : 'Agent started', { project: proj, task: card.text });
+                            pushAgentLog(vm, 'info', isAutoRestart ? 'Agent restarting (' + (card._agentIteration || 0) + '/5)' : 'Agent started', { project: runProj, task: card.text });
                             vm.activeCardText = card.text; vm._agentStartTime = Date.now();
                             var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-                            var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) || '', buildCommands: vm.getProjectBuildCommands(proj) || null, endpointId: card.llmEndpointId || '', runId: run.runId };
+                            var payload = { prompt: card.text, project: runProj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) || '', buildCommands: vm.getProjectBuildCommands(proj) || null, endpointId: card.llmEndpointId || '', runId: run.runId };
                             vm.moveCardToDoing(card.id); vm.activeCardId = card.id; vm.activeCardIds.add(card.id);
                             var localAbortController = run.abortController;
                             fetch('/api/agent/execute-stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: localAbortController.signal })
@@ -1009,11 +1049,20 @@ angular.module('kanbanApp')
                                                                 }
                                                                 if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {
                                                                     card.prStatus.status = 'creating-pr'; pushAgentLog(vm, 'info', 'Creating PR for branch ' + card.prStatus.branch + '...');
-                                                                    $http.post('/api/pr/finish', { projectPath: proj, cardId: card.id, cardText: card.text, branchName: card.prStatus.branch, summary: finalSummary, originalBranch: card.prStatus.originalBranch }).then(function (prResp) {
+                                                                    $http.post('/api/pr/finish', { projectPath: proj, cardId: card.id, cardText: card.text, branchName: card.prStatus.branch, summary: finalSummary, originalBranch: card.prStatus.originalBranch, worktreePath: card.prStatus.worktreePath || '' }).then(function (prResp) {
                                                                         var outcome = applyPrFinishOutcome(card, prResp, null);
                                                                         if (outcome === 'pr-created') { pushAgentLog(vm, 'info', 'PR created: ' + (card.prStatus.prUrl || 'Check your repository')); }
                                                                         else if (outcome === 'error') { pushAgentLog(vm, 'warn', 'PR creation: ' + card.prStatus.error); }
                                                                         else if (outcome === 'skipped') { pushAgentLog(vm, 'info', 'BRANCH was toggled off — skipping PR creation'); }
+                                                                        // The backend removed the isolated worktree on success and copied its
+                                                                        // data/undo diffs into the shared repo — rebase the card's stored diff
+                                                                        // paths and drop the (now-dead) worktree path so the card resolves back
+                                                                        // to the shared project and its diff viewer keeps working.
+                                                                        if (outcome === 'pr-created' && card.prStatus && card.prStatus.worktreePath) {
+                                                                            rebaseCardDiffPaths(card, card.prStatus.worktreePath, proj);
+                                                                            delete card.prStatus.worktreePath;
+                                                                            if (vm.saveCards) vm.saveCards();
+                                                                        }
                                                                         finishCard();
                                                                     }, function (err) {
                                                                         var outcome = applyPrFinishOutcome(card, null, err);
@@ -1767,8 +1816,9 @@ angular.module('kanbanApp')
                     // Resolve against the CARD's project (falling back to the selected
                     // one) so apply/preview/delete/open all hit the same root — a diff
                     // lives in the card's project, which may be an absolute path outside
-                    // the workspace root (e.g. a benchmark sandbox).
-                    var proj = (card && card.filePath) || vm.selectedProject;
+                    // the workspace root (e.g. a benchmark sandbox). While a BRANCH card
+                    // has an active isolated worktree, that worktree IS the project root.
+                    var proj = cardProject(card);
                     if (!proj) return;
                     if (vm.diffIsApplied(step, diffPath, card)) return;
                     // Swap mode: when the step already has a live applied diff (the
@@ -1821,7 +1871,7 @@ angular.module('kanbanApp')
                 };
                 vm.previewDiff = function (diffPath, step, card) {
                     if (!diffPath) return;
-                    var proj = (card && card.filePath) || vm.selectedProject;
+                    var proj = cardProject(card);
                     if (!proj) return;
                     step._previews = step._previews || {};
                     var p = step._previews[diffPath] = step._previews[diffPath] || {};
@@ -1848,7 +1898,7 @@ angular.module('kanbanApp')
                     }
                     if ($event) $event.stopPropagation();
                     if (!diffPath) return;
-                    var proj = (card && card.filePath) || vm.selectedProject;
+                    var proj = cardProject(card);
                     if (!proj) return;
                     step._previews = step._previews || {};
                     var p = step._previews[diffPath] = step._previews[diffPath] || {};
@@ -1896,7 +1946,7 @@ angular.module('kanbanApp')
                     if (!card) return;
                     var paths = vm.cardDiffPaths(card);
                     if (!paths.length) return;
-                    var proj = (card && card.filePath) || vm.selectedProject;
+                    var proj = cardProject(card);
                     if (!proj) return;
                     if (!window.confirm('Delete ' + paths.length + ' diff file(s) for this card? This cannot be undone.')) return;
                     card._deletingAllDiffs = true;
@@ -2051,7 +2101,7 @@ angular.module('kanbanApp')
                     }
                     if ($event) $event.stopPropagation();
                     if (!diffPath) return;
-                    var proj = (card && card.filePath) || vm.selectedProject;
+                    var proj = cardProject(card);
                     if (!proj) return;
                     var normalized = String(diffPath).replace(/\\/g, '/');
                     vm.showIDE = true;

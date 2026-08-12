@@ -229,7 +229,7 @@
               <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
                 ng-class="{'meta-plan-done': sp.done}">
                 <span class="meta-plan-icon">{{sp.done ? '✅' : '⬜'}}</span>
-                <div class="meta-plan-body">
+                <div class="meta-plan-body" title="{{sp.description}}">
                   <div class="meta-plan-title">{{sp.title}}</div>
                   <div class="meta-plan-desc">{{sp.description}}</div>
                   <div ng-if="sp.files && sp.files.length">
@@ -597,7 +597,7 @@
             <div class="section-body">
               <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item" ng-class="{'meta-plan-done': sp.done}">
                 <span class="meta-plan-icon">{{sp.done ? '✅' : '⬜'}}</span>
-                <div class="meta-plan-body">
+                <div class="meta-plan-body" title="{{sp.description}}">
                   <div class="meta-plan-title">{{sp.title}}</div>
                   <div class="meta-plan-desc">{{sp.description}}</div>
                   <div ng-if="sp.files && sp.files.length">
@@ -1013,7 +1013,7 @@
             <div class="section-body">
               <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item" ng-class="{'meta-plan-done': sp.done}">
                 <span class="meta-plan-icon">{{sp.done ? '✅' : '⬜'}}</span>
-                <div class="meta-plan-body">
+                <div class="meta-plan-body" title="{{sp.description}}">
                   <div class="meta-plan-title">{{sp.title}}</div>
                   <div class="meta-plan-desc">{{sp.description}}</div>
                   <div ng-if="sp.files && sp.files.length">

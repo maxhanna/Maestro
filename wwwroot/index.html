@@ -470,7 +470,7 @@
                 ng-style="{'font-size': vm.metaPlanFontSize + 'px'}"
                 style="display: flex; gap: 6px; margin-bottom: 4px;">
                 <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
-                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                <div class="meta-plan-body" title="{{sp.description}}">
                   <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
                   <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
                   <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">

@@ -26,6 +26,46 @@ public class PRController : ControllerBase
                     return BadRequest(new { success = false, error = "ProjectPath required" });
                 var originalBranch = await _git.GetCurrentBranchAsync(req.ProjectPath);
                 var branchName = BuildBranchName(req.CardId);
+                var segment = SanitizeBranchSegment(req.CardId);
+                var worktreePath = BuildWorktreePath(req.ProjectPath, segment);
+
+                // ── Isolated git worktree mode (default) ───────────────────────
+                // The new branch is checked out in its OWN working directory (a sibling
+                // folder) so the shared checkout — and everyone else working in it — is
+                // never switched, stashed or swept into the agent's commit. The shared
+                // repo stays exactly as it was: branch, uncommitted changes and all.
+                // Falls back to the legacy stash+checkout flow when worktrees can't be
+                // used (e.g. an unborn HEAD with no commits, or an unwritable parent
+                // directory).
+                await _git.PruneWorktreesAsync(req.ProjectPath);
+                var wtResult = await _git.CreateWorktreeAsync(req.ProjectPath, branchName, worktreePath);
+                if (!wtResult.Success)
+                {
+                    // Collision (branch from a previous run, or a stale folder at the
+                    // worktree path): retry ONCE with a timestamped identity so the
+                    // shared checkout still never gets switched. Legacy is a last resort.
+                    branchName = BuildBranchNameWithTimestamp(req.CardId);
+                    worktreePath = BuildWorktreePathWithTimestamp(req.ProjectPath, segment);
+                    wtResult = await _git.CreateWorktreeAsync(req.ProjectPath, branchName, worktreePath);
+                }
+                if (wtResult.Success)
+                {
+                    return Ok(new
+                    {
+                        success = true,
+                        mode = "worktree",
+                        branchName,
+                        originalBranch,
+                        worktreePath,
+                        output = wtResult.Output,
+                        error = wtResult.Error
+                    });
+                }
+
+                // ── Legacy fallback: switch the shared checkout (stash + branch) ──
+                // Only reached when worktrees are unavailable; the branch then lives in
+                // the shared folder exactly as it did before worktree support.
+                var legacyBranch = BuildBranchName(req.CardId);
                 var hasChanges = await _git.HasUncommittedChangesAsync(req.ProjectPath);
                 if (hasChanges)
                 {
@@ -36,18 +76,20 @@ public class PRController : ControllerBase
                     // `stash pop` in Finish once the original branch is checked back out.
                     await _git.RunGitAsync(req.ProjectPath, "stash push -u -m \"weaver-auto-stash\"");
                 }
-                var branchResult = await _git.CreateBranchAsync(req.ProjectPath, branchName);
+                var branchResult = await _git.CreateBranchAsync(req.ProjectPath, legacyBranch);
                 if (!branchResult.Success)
                 {
                     // Branch may already exist — try with timestamp suffix
-                    branchName = BuildBranchNameWithTimestamp(req.CardId);
-                    branchResult = await _git.CreateBranchAsync(req.ProjectPath, branchName);
+                    legacyBranch = BuildBranchNameWithTimestamp(req.CardId);
+                    branchResult = await _git.CreateBranchAsync(req.ProjectPath, legacyBranch);
                 }
                 return Ok(new
                 {
                     success = branchResult.Success,
-                    branchName = branchResult.Success ? branchName : null,
+                    mode = "legacy",
+                    branchName = branchResult.Success ? legacyBranch : null,
                     originalBranch = branchResult.Success ? originalBranch : null,
+                    worktreePath = (string?)null,
                     output = branchResult.Output,
                     error = branchResult.Error
                 });
@@ -79,6 +121,51 @@ public class PRController : ControllerBase
                     return BadRequest(new { success = false, error = "BranchName required" });
 
                 var log = new List<string>();
+
+                // ── Worktree mode: remove the isolated working copy ─────────────
+                // The shared checkout was never switched or stashed, so there is nothing
+                // to restore — just tear the throwaway worktree down and delete the
+                // branch. Mid-run uncommitted changes are preserved in a weaver-abort
+                // stash (a shared-repo ref) so nothing the agent did is silently lost.
+                if (!string.IsNullOrWhiteSpace(req.WorktreePath))
+                {
+                    if (Directory.Exists(req.WorktreePath))
+                    {
+                        if (await _git.HasUncommittedChangesAsync(req.WorktreePath))
+                        {
+                            var stashResult = await _git.RunGitAsync(req.WorktreePath, "stash push -u -m \"weaver-abort\"");
+                            if (stashResult.Success) { log.Add("stashed mid-run changes (weaver-abort) — recover with `git stash pop`"); }
+                            else { log.Add("could not stash mid-run changes: " + (stashResult.Error ?? stashResult.Output)); }
+                        }
+                        var removeResult = await _git.RemoveWorktreeAsync(req.ProjectPath, req.WorktreePath);
+                        if (!removeResult.Success)
+                            return Ok(new { success = false, error = removeResult.Error ?? removeResult.Output, worktreeRemoved = false, branchDeleted = false, log });
+                        log.Add("removed isolated worktree " + req.WorktreePath);
+                    }
+                    else
+                    {
+                        log.Add("worktree already removed — nothing to clean up");
+                    }
+                    // Drop stale worktree metadata so branch -D isn't refused as
+                    // "checked out in another worktree".
+                    await _git.PruneWorktreesAsync(req.ProjectPath);
+                    var delWt = await _git.DeleteBranchAsync(req.ProjectPath, req.BranchName);
+                    var deleteErrorWt = delWt.Success ? null : (delWt.Error ?? delWt.Output);
+                    if (deleteErrorWt != null && deleteErrorWt.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0)
+                        return Ok(new { success = false, error = deleteErrorWt, branchDeleted = false, worktreeRemoved = true, log });
+                    log.Add("deleted branch " + req.BranchName);
+                    return Ok(new
+                    {
+                        success = true,
+                        restoredBranch = await _git.GetCurrentBranchAsync(req.ProjectPath),
+                        branchDeleted = true,
+                        worktreeRemoved = true,
+                        log
+                    });
+                }
+
+                // ── Legacy flow: restore the original branch, pop the pre-branch
+                // stash, and delete the branch (unchanged behavior) ───────────────
                 var currentBranch = await _git.GetCurrentBranchAsync(req.ProjectPath);
                 var onBranch = string.Equals(currentBranch, req.BranchName, StringComparison.OrdinalIgnoreCase);
                 string? restoredBranch = null;
@@ -165,39 +252,83 @@ public class PRController : ControllerBase
                 if (string.IsNullOrWhiteSpace(req.ProjectPath))
                     return BadRequest(new { success = false, error = "ProjectPath required" });
                 var branchName = req.BranchName ?? BuildBranchName(req.CardId);
-                // Commit all changes
-                var commitResult = await _git.CommitAllAsync(req.ProjectPath, req.CardText ?? "Weaver agent changes");
+
+                // Worktree mode (default): the branch lives in an isolated working copy
+                // and the agent's edits are committed THERE, so the shared checkout is
+                // never staged, committed or switched — other people's work stays put.
+                // Legacy mode (no worktreePath): operate on the shared checkout as before.
+                var worktreePath = req.WorktreePath;
+                var isWorktree = !string.IsNullOrWhiteSpace(worktreePath) && Directory.Exists(worktreePath);
+                var workDir = isWorktree ? worktreePath! : req.ProjectPath;
+
+                // Commit all changes (in the isolated worktree when present)
+                var commitResult = await _git.CommitAllAsync(workDir, req.CardText ?? "Weaver agent changes");
                 if (!commitResult.Success && !commitResult.Output.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase) && !commitResult.Error.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase))
                 {
                     _logger.LogWarning("Commit warning: {Output} {Error}", commitResult.Output, commitResult.Error);
                 }
                 // Push
-                var pushResult = await _git.PushAsync(req.ProjectPath, branchName);
+                var pushResult = await _git.PushAsync(workDir, branchName);
                 if (!pushResult.Success)
                 {
-                    return Ok(new { success = false, error = pushResult.Error, branchName, commitHash = ExtractCommitHash(commitResult.Output) });
+                    // Keep the worktree + branch so the user can retry — nothing is
+                    // deleted on a failed push.
+                    return Ok(new { success = false, error = pushResult.Error, branchName, commitHash = ExtractCommitHash(commitResult.Output), worktreePath = isWorktree ? worktreePath : null });
                 }
                 // Create PR via gh CLI
                 var prBody = $"Automated PR by Weaver agent.\n\n{req.Summary ?? req.CardText ?? ""}";
-                var prResult = await _git.CreatePullRequestAsync(req.ProjectPath, req.CardText ?? "Weaver agent changes", prBody, branchName);
+                var prResult = await _git.CreatePullRequestAsync(workDir, req.CardText ?? "Weaver agent changes", prBody, branchName);
                 string? prUrl = null;
                 if (prResult.Success)
                 {
                     // gh returns the PR URL on success
                     prUrl = ExtractPrUrl(prResult.Output);
                 }
-                // Restore original branch
+
+                // Cleanup depends on the mode the branch was created in.
                 string? restoreError = null;
-                if (!string.IsNullOrWhiteSpace(req.OriginalBranch))
+                string? cleanupError = null;
+                var undoDiffsCopied = 0;
+                var worktreeRemoved = false;
+                if (isWorktree)
                 {
-                    var checkoutResult = await _git.RunGitAsync(req.ProjectPath, $"checkout \"{req.OriginalBranch}\"");
-                    if (checkoutResult.Success)
+                    if (prResult.Success)
                     {
-                        await _git.RunGitAsync(req.ProjectPath, "stash pop");
+                        // Preserve the card's diff trail: copy the worktree's data/undo
+                        // snapshots into the SHARED repo before the worktree is removed, so
+                        // the card's diff viewer keeps working from the shared checkout.
+                        undoDiffsCopied = CopyUndoDiffs(worktreePath!, req.ProjectPath);
+                        var removeResult = await _git.RemoveWorktreeAsync(req.ProjectPath, worktreePath!);
+                        if (removeResult.Success)
+                        {
+                            worktreeRemoved = true;
+                            // The branch is pushed (PR created) — drop the local ref. The
+                            // shared checkout never moved, so there is nothing to restore.
+                            var delResult = await _git.DeleteBranchAsync(req.ProjectPath, branchName);
+                            if (!delResult.Success) cleanupError = delResult.Error;
+                        }
+                        else
+                        {
+                            cleanupError = removeResult.Error;
+                        }
                     }
-                    else
+                    // On push/PR failure the worktree is intentionally left in place for
+                    // retry/abort — no cleanup, no restore (nothing was touched here).
+                }
+                else
+                {
+                    // Legacy: restore the original branch + pop the pre-branch stash.
+                    if (!string.IsNullOrWhiteSpace(req.OriginalBranch))
                     {
-                        restoreError = checkoutResult.Error;
+                        var checkoutResult = await _git.RunGitAsync(req.ProjectPath, $"checkout \"{req.OriginalBranch}\"");
+                        if (checkoutResult.Success)
+                        {
+                            await _git.RunGitAsync(req.ProjectPath, "stash pop");
+                        }
+                        else
+                        {
+                            restoreError = checkoutResult.Error;
+                        }
                     }
                 }
                 return Ok(new
@@ -212,7 +343,11 @@ public class PRController : ControllerBase
                     prOutput = prResult.Output,
                     prError = prResult.Error,
                     pushError = pushResult.Error,
-                    restoreError = restoreError
+                    restoreError = restoreError,
+                    worktreePath = isWorktree ? worktreePath : null,
+                    worktreeRemoved = worktreeRemoved,
+                    cleanupError = cleanupError,
+                    undoDiffsCopied = undoDiffsCopied
                 });
             }
             catch (Exception ex)
@@ -237,6 +372,59 @@ public class PRController : ControllerBase
 
         private static string BuildBranchNameWithTimestamp(string? cardId)
             => $"weaver/{SanitizeBranchSegment(cardId)}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+        /// <summary>
+        /// Isolated worktree location for a card's branch: a SIBLING folder of the repo,
+        /// named &lt;repo&gt;-weaver-&lt;cardId&gt;. Living next to the shared checkout keeps the
+        /// path predictable for humans and on the same volume (worktrees can't span
+        /// drives for the same repo anyway — git refuses a worktree on a different
+        /// filesystem than the main repo).
+        /// </summary>
+        private static string BuildWorktreePath(string repoPath, string segment)
+        {
+            var trimmed = (repoPath ?? "").TrimEnd('\\', '/');
+            var name = Path.GetFileName(trimmed);
+            if (string.IsNullOrEmpty(name)) name = "repo";
+            var parent = Path.GetDirectoryName(trimmed);
+            return Path.Combine(parent ?? trimmed, $"{name}-weaver-{segment}");
+        }
+
+        private static string BuildWorktreePathWithTimestamp(string repoPath, string segment)
+            => BuildWorktreePath(repoPath, segment) + "-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+
+        /// <summary>
+        /// Preserves a card's diff trail across worktree cleanup: copies every *.diff
+        /// snapshot from the isolated worktree's data/undo into the SHARED repo's
+        /// data/undo (skipping names that already exist there — another card's diff
+        /// is never clobbered). The client rewrites its stored diff paths from the
+        /// worktree prefix to the shared repo prefix after finish, so the diff viewer
+        /// keeps working once the worktree is gone. Returns how many files were copied.
+        /// </summary>
+        private static int CopyUndoDiffs(string worktreePath, string repoPath)
+        {
+            var src = Path.Combine(worktreePath, "data", "undo");
+            if (!Directory.Exists(src)) return 0;
+            var dst = Path.Combine(repoPath, "data", "undo");
+            var copied = 0;
+            try
+            {
+                Directory.CreateDirectory(dst);
+                foreach (var f in Directory.GetFiles(src, "*.diff"))
+                {
+                    var target = Path.Combine(dst, Path.GetFileName(f));
+                    // Fully qualified: `File` here is System.IO.File, but inside a
+                    // controller it would otherwise resolve to ControllerBase.File.
+                    if (System.IO.File.Exists(target)) continue;
+                    System.IO.File.Copy(f, target);
+                    copied++;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"CopyUndoDiffs failed: {ex.Message}");
+            }
+            return copied;
+        }
 
         /// <summary>
         /// Finds the stash@{N} reference of the weaver-auto-stash entry created by
@@ -284,6 +472,8 @@ public class PRController : ControllerBase
         public string? BranchName { get; set; }
         public string? Summary { get; set; }
         public string? OriginalBranch { get; set; }
+        /// <summary>Isolated worktree the branch lives in (null for legacy shared-checkout branches).</summary>
+        public string? WorktreePath { get; set; }
     }
     public class PrAbortRequest
     {
@@ -291,4 +481,6 @@ public class PRController : ControllerBase
         public string? CardId { get; set; }
         public string? BranchName { get; set; }
         public string? OriginalBranch { get; set; }
+        /// <summary>Isolated worktree the branch lives in (null for legacy shared-checkout branches).</summary>
+        public string? WorktreePath { get; set; }
     }

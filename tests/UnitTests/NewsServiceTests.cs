@@ -111,7 +111,7 @@ public class NewsServiceTests
     {
         // No LLM plan extractor — the deterministic fallback must do the locality routing.
         var factory = new NewsScriptedClientFactory();
-        var service = new NewsService(factory);
+        var service = new NewsService(factory, "http://localhost:8080", "test-model");
 
         var digest = await service.FetchNewsAsync(
             "Find the local Montreal news and insert it into a text document on desktop",
@@ -137,7 +137,7 @@ public class NewsServiceTests
     {
         // The LLM planner (fenced JSON, as a real model tends to emit) picks food + Paris.
         var factory = new NewsScriptedClientFactory();
-        var service = new NewsService(factory, null,
+        var service = new NewsService(factory, "http://localhost:8080", "test-model",
             (prompt, _) => Task.FromResult<string?>(
                 "```json\n{\"query\": \"paris food news\", \"topics\": [\"food\"], \"places\": [\"paris\"], \"region\": \"france\"}\n```"));
 
@@ -161,7 +161,7 @@ public class NewsServiceTests
     {
         // A broken/empty LLM plan must not break the digest — deterministic extraction takes over.
         var factory = new NewsScriptedClientFactory();
-        var service = new NewsService(factory, null,
+        var service = new NewsService(factory, "http://localhost:8080", "test-model",
             (_, _) => Task.FromResult<string?>("LLM SUMMARY"));
 
         var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
@@ -178,7 +178,7 @@ public class NewsServiceTests
     public async Task FetchNewsAsync_ParsesDedupsInterleaves_AndAssemblesDigest()
     {
         var factory = new NewsScriptedClientFactory();
-        var service = new NewsService(factory);
+        var service = new NewsService(factory, "http://localhost:8080", "test-model");
 
         var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
@@ -215,7 +215,7 @@ public class NewsServiceTests
     public async Task FetchNewsAsync_DeadFeed_DoesNotKillDigest()
     {
         var factory = new NewsScriptedClientFactory { FailTechCrunch = true };
-        var service = new NewsService(factory);
+        var service = new NewsService(factory, "http://localhost:8080", "test-model");
 
         var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
@@ -229,7 +229,7 @@ public class NewsServiceTests
     public async Task FetchNewsAsync_AllSourcesDead_ReturnsNoResultsDigest_NoThrow()
     {
         var factory = new NewsScriptedClientFactory { FailAll = true };
-        var service = new NewsService(factory);
+        var service = new NewsService(factory, "http://localhost:8080", "test-model");
 
         var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
@@ -238,16 +238,15 @@ public class NewsServiceTests
     }
 
     [Fact]
-    public async Task FetchNewsAsync_ThinSnippet_InjectedSummarizer_UsesLlmSummary()
+    public async Task FetchNewsAsync_ThinSnippet_FetchesArticleAndUsesLlmSummary()
     {
         var factory = new NewsScriptedClientFactory { ServeArticleHtml = true };
-        var service = new NewsService(factory,
-            (articleText, _) => Task.FromResult<string?>("INJECTED SUMMARY of [" + articleText[..20] + "]"));
+        var service = new NewsService(factory, "http://localhost:8080", "test-model");
 
         var digest = await service.FetchNewsAsync("AI news", limit: 8, ct: CancellationToken.None);
 
-        // The thin snippet (< 200 chars) triggered the article fetch + summarizer path.
-        Assert.Contains("INJECTED SUMMARY", digest);
+        // The thin snippet (< 200 chars) triggered the article fetch + LLM summarizer path.
+        Assert.Contains("LLM SUMMARY", digest);
         Assert.Contains("Thin Snippet Story", digest);
     }
 

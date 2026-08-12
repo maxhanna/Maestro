@@ -7313,3 +7313,11 @@ h3 .small.ghost:hover {
 .meeting-riv-side.meeting-riv-seam {
 	border-right: 1px solid rgba(255, 255, 255, 0.55);
 }
+
+.meta-plan-body {
+	flex: 1;
+	min-width: 0;
+	white-space: break-spaces;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
