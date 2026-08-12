@@ -345,7 +345,12 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // The plan is the single steered _command write.
         Assert.NotNull(plan);
         Assert.Equal(new[] { "_command" }, plan!.Plan.Select(s => s.File).ToArray());
-        Assert.Contains("Set-Content", plan.Plan[0].Change);
+        // On Windows the steering teaches the Set-Content cmdlet; on Unix hosts the
+        // same write is a bash echo redirect — both target the same absolute path.
+        if (OperatingSystem.IsWindows())
+            Assert.Contains("Set-Content", plan.Plan[0].Change);
+        else
+            Assert.Contains(_steerTarget, plan.Plan[0].Change);
 
         // The _command executed for real and its result landed in the run.
         var cmdResult = allSteps.OfType<Dictionary<string, object?>>()
@@ -831,8 +836,12 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     if (n == 1)
                         return ("{\"planComplete\": true, \"completionReason\": \"nothing to do\"}", "planner-step");
                     if (n == 2)
-                        return (PlannerStepJson("_command",
-                            $"Set-Content -Path \"{_owner.SteerTarget}\" -Value \"repair data\" -Encoding UTF8"), "planner-step");
+                    {
+                        var writeCmd = OperatingSystem.IsWindows()
+                            ? $"Set-Content -Path \"{_owner.SteerTarget}\" -Value \"repair data\" -Encoding UTF8"
+                            : $"echo 'repair data' > \"{_owner.SteerTarget}\"";
+                        return (PlannerStepJson("_command", writeCmd), "planner-step");
+                    }
                     return ("{\"planComplete\": true, \"completionReason\": \"wrote the file\"}", "planner-step");
                 }
                 if (_owner.Mode == PlannerMode.NeverWrites)

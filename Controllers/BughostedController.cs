@@ -345,6 +345,14 @@ public class BughostedController : ControllerBase
         {
             try
             {
+                if (!OperatingSystem.IsWindows())
+                {
+                    // The self-updater replaces the running executable and restarts it via a
+                    // cmd.exe script — a Windows-only flow (the update URL serves Weaver.exe).
+                    // On other hosts report a clean failure instead of downloading an exe.
+                    _updateStage = "failed";
+                    return;
+                }
                 var remoteVer = await GetRemoteVersionAsync();
                 if (remoteVer == null) { _updateStage = "failed"; return; }
                 await SetLocalVersionAsync(remoteVer);

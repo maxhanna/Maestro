@@ -989,6 +989,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // letting it invent Linux paths.
         var osTask = IsExternalFilesystemTask(originalPrompt);
         var osDesktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        if (string.IsNullOrWhiteSpace(osDesktopPath))
+        {
+            // Headless/service hosts (Linux CI runners) have no Desktop folder — give the
+            // rejection feedback a usable anchor instead of "Desktop is at ."
+            var osProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            osDesktopPath = string.IsNullOrWhiteSpace(osProfile)
+                ? (OperatingSystem.IsWindows() ? "C:\\Users\\<username>\\Desktop" : "$HOME/Desktop")
+                : Path.Combine(osProfile, "Desktop");
+        }
         var normNew = NormalizeChangeForDedup(step.Change);
         foreach (var existing in planSoFar)
         {
@@ -1053,7 +1062,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             !AgentProjectUtilities.LooksLikeShellCommand(step.Change))
         {
             if (osTask)
-                return (false, $"_command step is not an executable shell command. You are on {(OperatingSystem.IsWindows() ? "Windows" : Environment.OSVersion)} and the Desktop is at {osDesktopPath}. A _command step's change must BE the real command with an absolute path, e.g. New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force. Never put planning notes in a _command step.");
+            {
+                var mkDirExample = OperatingSystem.IsWindows()
+                    ? $"New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force"
+                    : $"mkdir -p \"{osDesktopPath}/<name>\"";
+                return (false, $"_command step is not an executable shell command. You are on {(OperatingSystem.IsWindows() ? "Windows" : Environment.OSVersion)} and the Desktop is at {osDesktopPath}. A _command step's change must BE the real command with an absolute path, e.g. {mkDirExample}. Never put planning notes in a _command step.");
+            }
             return (false, "_command step is not an executable shell command. Use _command only for real terminal commands such as `dotnet test`, `npm install`, or `cd app; npx ng g c name`. Put planning notes in the thinking field, not in a command step.");
         }
         // FETCH-IN-COMMAND GUARD: a _command step that pulls CONTENT from an http(s)
@@ -1083,7 +1097,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 || Regex.IsMatch(ch, @"^[A-Za-z]:[\\/]") // C:\ or C:/
                 || Regex.IsMatch(ch, @"\b(desktop|downloads|documents|userprofile|%userprofile%|home dir|home directory)\b", RegexOptions.IgnoreCase);
             if (looksOsPath)
-                return (false, $"{step.File} writes RELATIVE TO THE PROJECT ROOT — it cannot create \"{ch}\" on the Desktop/OS filesystem. Use a _command step whose change is a real command with an absolute path, e.g. New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force (Desktop is at {osDesktopPath}).");
+            {
+                var mkDirExample = OperatingSystem.IsWindows()
+                    ? $"New-Item -ItemType Directory -Path \"{osDesktopPath}\\<name>\" -Force"
+                    : $"mkdir -p \"{osDesktopPath}/<name>\"";
+                return (false, $"{step.File} writes RELATIVE TO THE PROJECT ROOT — it cannot create \"{ch}\" on the Desktop/OS filesystem. Use a _command step whose change is a real command with an absolute path, e.g. {mkDirExample} (Desktop is at {osDesktopPath}).");
+            }
         }
         // ATTACHED-FILES EDIT GUARD: when the user attached specific files AND the task prompt
         // does not ask to create a new file/folder, a _create_file/_create_directory step is
@@ -2614,10 +2633,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var targetName = string.IsNullOrWhiteSpace(osDemand.FileNameHint)
                             ? AgentOsOutputVerifier.DefaultDumpFileName
                             : osDemand.FileNameHint!;
-                        var fb = $"The task explicitly asks to write a file to \"{Path.Combine(osDemand.DirectoryPath, targetName)}\" " +
+                        var osTargetPath = Path.Combine(osDemand.DirectoryPath, targetName);
+                        var writeExample = OperatingSystem.IsWindows()
+                            ? $"Set-Content -Path \"{osTargetPath}\" -Value \"<content>\" -Encoding UTF8"
+                            : $"echo \"<content>\" > \"{osTargetPath}\"";
+                        var fb = $"The task explicitly asks to write a file to \"{osTargetPath}\" " +
                             $"on the OS filesystem, but the run ended without creating it{(dumpError != null ? $" ({dumpError})" : "")}. " +
                             $"Plan a _command step that writes the output file there with an absolute path, e.g. " +
-                            $"Set-Content -Path \"{Path.Combine(osDemand.DirectoryPath, targetName)}\" -Value \"<content>\" -Encoding UTF8. " +
+                            $"{writeExample}. " +
                             $"Do NOT declare the plan complete until the file exists.";
                         await EmitRejectedLog(emitSse,
                             "Interleaved execution: rejected plan-complete — the task demanded an OS output file that was never created",

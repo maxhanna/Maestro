@@ -143,7 +143,10 @@ public class RequirementChecklistSeparationTests
         // The OS-OUTPUT DEMAND section names the demanded file and the ONLY tool that can
         // create it — a _command with an absolute path.
         Assert.Contains("## OS-OUTPUT DEMAND", prompt);
-        Assert.Contains("Set-Content -Path", prompt);
+        if (OperatingSystem.IsWindows())
+            Assert.Contains("Set-Content -Path", prompt);
+        else
+            Assert.Contains("echo \"<content>\" >", prompt);
         Assert.Contains("Only step type that can create it is a _command", prompt, StringComparison.OrdinalIgnoreCase);
         // The explicit anti-pattern from the field failure: never write app code to "write"
         // the file.

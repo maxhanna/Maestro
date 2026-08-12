@@ -67,7 +67,12 @@ public class IncrementalStepToolsPromptTests
         Assert.Contains("\"file\":\"_web_search\"", prompt);
         Assert.Contains("\"file\":\"_web_fetch\"", prompt);
         Assert.Contains("\"file\":\"_command\"", prompt);
-        Assert.Contains("Set-Content -Path", prompt);
+        // The write step of the chain is taught in the host's shell: Set-Content on
+        // Windows, a bash echo redirect on Unix hosts.
+        if (OperatingSystem.IsWindows())
+            Assert.Contains("Set-Content -Path", prompt);
+        else
+            Assert.Contains("> \"<desktop-path>", prompt);
         Assert.Contains("declare planComplete only after the file is written", prompt);
     }
 

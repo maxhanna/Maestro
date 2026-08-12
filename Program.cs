@@ -63,9 +63,11 @@ var isFirstRun = !File.Exists(dbPath);
 // back to %LOCALAPPDATA%\Weaver\ so the warning about the unwritable folder is
 // itself recorded.
 var dataWritable = IsDirectoryWritable(weaverDataDir);
-_startupLogPath = dataWritable
+// %LOCALAPPDATA% is empty on headless Linux — fall back to the data dir for the log there.
+var localAppDataDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+_startupLogPath = dataWritable || string.IsNullOrWhiteSpace(localAppDataDir)
     ? Path.Combine(weaverDataDir, "weaver-startup.log")
-    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Weaver", "weaver-startup.log");
+    : Path.Combine(localAppDataDir, "Weaver", "weaver-startup.log");
 Log($"── Weaver startup ── {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
 Log($"Working folder: {basePath}");
 Log($"Data folder:    {weaverDataDir}");

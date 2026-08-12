@@ -196,7 +196,11 @@ public class OsMarkerGuardTests
         var (valid, reason) = Validate(new PlanStep { File = "_command", Change = "Create temporary script to fetch latest AI article data" },
             "Search the web for an AI article and write it to a text file on my desktop");
         Assert.False(valid);
-        Assert.Contains("New-Item -ItemType Directory", reason);
+        // The OS-task feedback teaches the host's shell: New-Item on Windows, mkdir -p on Unix.
+        if (OperatingSystem.IsWindows())
+            Assert.Contains("New-Item -ItemType Directory", reason);
+        else
+            Assert.Contains("mkdir -p", reason);
     }
 
     [Fact]

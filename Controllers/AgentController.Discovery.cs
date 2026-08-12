@@ -91,7 +91,7 @@ partial class AgentController
             if (lower.Contains(loc)) { hasLocation = true; break; }
         }
         if (!hasLocation &&
-            Regex.IsMatch(lower, @"[a-z]:[\\/]|~/|/home/|/users/|%userprofile%|%temp%|%tmp%|%appdata%"))
+            Regex.IsMatch(lower, @"[a-z]:[\\/]|~/|/\S+/\S*|/home/|/users/|%userprofile%|%temp%|%tmp%|%appdata%"))
         {
             hasLocation = true;
         }
@@ -546,15 +546,28 @@ partial class AgentController
             var homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             var osSb = new StringBuilder();
             osSb.AppendLine("THIS TASK OPERATES ON THE OS FILESYSTEM OUTSIDE THE REPOSITORY (desktop/home/Downloads/etc.).");
-            osSb.AppendLine($"You are running on {osName}. Use THIS operating system's path syntax (Windows backslashes like C:\\Users\\Name\\Desktop\\...) — never Linux paths like /home/user/...");
+            if (OperatingSystem.IsWindows())
+                osSb.AppendLine($"You are running on {osName}. Use THIS operating system's path syntax (Windows backslashes like C:\\Users\\Name\\Desktop\\...) — never Linux paths like /home/user/...");
+            else
+                osSb.AppendLine($"You are running on {osName}. Use THIS operating system's path syntax (Unix forward slashes like /home/user/...) — never Windows paths like C:\\Users\\...");
             osSb.AppendLine($"Desktop folder: {desktopPath}");
             osSb.AppendLine($"Home folder: {homePath}");
             osSb.AppendLine("The repository's files are NOT relevant to this task — do NOT plan edits to them.");
             osSb.AppendLine("_create_directory/_create_file write RELATIVE TO THE PROJECT ROOT ONLY — they CANNOT create folders/files on the Desktop or anywhere outside the repo. Only a _command step can touch the OS filesystem.");
             osSb.AppendLine("For Desktop targets, output a _command step whose change IS a real command with an absolute path, e.g.:");
-            osSb.AppendLine($"  _command | change: New-Item -ItemType Directory -Path \"{desktopPath}\\<name>\" -Force");
-            osSb.AppendLine($"  _command | change: Set-Content -Path \"{desktopPath}\\<file>.txt\" -Value \"<content>\" -Encoding UTF8");
-            osSb.AppendLine($"  _command | change: Invoke-RestMethod https://example.com/api | Set-Content -Path \"{desktopPath}\\<file>.txt\"");
+            if (OperatingSystem.IsWindows())
+            {
+                osSb.AppendLine($"  _command | change: New-Item -ItemType Directory -Path \"{desktopPath}\\<name>\" -Force");
+                osSb.AppendLine($"  _command | change: Set-Content -Path \"{desktopPath}\\<file>.txt\" -Value \"<content>\" -Encoding UTF8");
+                osSb.AppendLine($"  _command | change: Invoke-RestMethod https://example.com/api | Set-Content -Path \"{desktopPath}\\<file>.txt\"");
+            }
+            else
+            {
+                var homeDir = string.IsNullOrWhiteSpace(homePath) ? "~" : homePath;
+                osSb.AppendLine($"  _command | change: mkdir -p \"{homeDir}/<name>\"");
+                osSb.AppendLine($"  _command | change: echo \"<content>\" > \"{homeDir}/<file>.txt\"");
+                osSb.AppendLine($"  _command | change: curl -s https://example.com/api > \"{homeDir}/<file>.txt\"");
+            }
             osSb.AppendLine("Never write application code (Python/JS/C# scripts) to perform the operation.");
             osSb.AppendLine();
             await EmitLog(emitSse, "info",

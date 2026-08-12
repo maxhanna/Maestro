@@ -30,6 +30,10 @@ public class ExternalFilesystemTaskTests
     [InlineData("Clear the temp folder")]
     [InlineData("Create a folder at C:\\Users\\me\\Desktop\\Daily Post")]
     [InlineData("Create a shortcut on the desktop")]
+    // Absolute Unix paths (the shape the Linux CI temp dirs use) must trip the gate
+    // exactly like a Windows drive path does.
+    [InlineData("Check the latest release online and save the version to a file at /tmp/weaver_toolsel_abc/proj/release-version.txt")]
+    [InlineData("Write the data into a text file at /tmp/weaver_webtask_abc/dump2/report.txt")]
     public void DetectsExternalFilesystemTasks(string prompt)
     {
         Assert.True(IsOs(prompt));

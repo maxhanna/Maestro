@@ -99,7 +99,9 @@ public static class CodeFormatterService
                 if (Directory.Exists(candidate))
                 {
                     _formatterDir = candidate;
-                    _prettierCli = Path.Combine(candidate, "node_modules", ".bin", "prettier.cmd");
+                    // npm's .bin holds prettier.cmd on Windows and a bare `prettier` on Unix.
+                    _prettierCli = Path.Combine(candidate, "node_modules", ".bin",
+                        OperatingSystem.IsWindows() ? "prettier.cmd" : "prettier");
                     break;
                 }
                 dir = dir.Parent;
@@ -202,7 +204,7 @@ public static class CodeFormatterService
                 Debug.WriteLine("[CodeFormatter] npx not found on PATH");
                 return content;
             }
-            prettierCmd = "npx.cmd";
+            prettierCmd = OperatingSystem.IsWindows() ? "npx.cmd" : "npx";
             prettierArgsBase = "--yes prettier";
             workingDir = Path.GetTempPath();
         }
@@ -295,7 +297,7 @@ public static class CodeFormatterService
         {
             using var proc = new Process
             {
-                StartInfo = new ProcessStartInfo("npx.cmd", "--version")
+                StartInfo = new ProcessStartInfo(OperatingSystem.IsWindows() ? "npx.cmd" : "npx", "--version")
                 {
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,

@@ -171,17 +171,21 @@ public class DatabaseService
             // The version file lived in several places over the app's history:
             // next to the data dir (dev runs), and in %LOCALAPPDATA%\Weaver
             // (installed builds), under either .weaver-version or .weaver-version.txt.
+            // Headless Linux hosts have no %LOCALAPPDATA% (GetFolderPath returns "") — skip
+            // that legacy root so an empty string never becomes a cwd-relative probe.
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             var roots = new[]
             {
                 _weaverDataDir,
                 Path.GetDirectoryName(_weaverDataDir) ?? "",
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Weaver"),
+                string.IsNullOrWhiteSpace(localAppData) ? "" : Path.Combine(localAppData, "Weaver"),
             };
             var names = new[] { ".weaver-version", ".weaver-version.txt" };
 
             var hasVersion = !string.IsNullOrWhiteSpace(GetLocalVersion());
             foreach (var root in roots)
             {
+                if (string.IsNullOrWhiteSpace(root)) continue;
                 foreach (var name in names)
                 {
                     var versionFile = Path.Combine(root, name);

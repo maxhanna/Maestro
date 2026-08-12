@@ -58,15 +58,26 @@ partial class AgentController
         baseInstructions.AppendLine("  {\"done\": true, \"summary\": \"what was accomplished\"}");
         baseInstructions.AppendLine($"Desktop: {desktopPath}");
         baseInstructions.AppendLine($"Project: {projectRoot}");
-        baseInstructions.AppendLine("CRITICAL: Each cmd runs in a separate PowerShell session — state does NOT persist between commands. If you read data in one cmd and need it in the next, save to a temp file: Get-Content ... | Set-Content _temp_step1.txt");
+        if (isWindows)
+        {
+            baseInstructions.AppendLine("CRITICAL: Each cmd runs in a separate PowerShell session — state does NOT persist between commands. If you read data in one cmd and need it in the next, save to a temp file: Get-Content ... | Set-Content _temp_step1.txt");
+            baseInstructions.AppendLine("For files: New-Item -ItemType File -Path \"<path>\" -Force  (NOT mkdir)");
+            baseInstructions.AppendLine("For folders: New-Item -ItemType Directory -Path \"<path>\" -Force");
+            baseInstructions.AppendLine("Inspect before acting: for repository questions use fast file commands first. Prefer `rg --files` to enumerate files, `rg -n \"pattern\" <path>` to search text, and `Get-Content -TotalCount/-Tail` for bounded reads. If `rg` is unavailable, use PowerShell equivalents.");
+            baseInstructions.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
+        }
+        else
+        {
+            baseInstructions.AppendLine("CRITICAL: Each command runs in a fresh bash shell — state does NOT persist between commands. If you read data in one command and need it in the next, save to a temp file: cat _temp_step1.txt");
+            baseInstructions.AppendLine("For files: use `touch \"<path>\"` or `echo \"<content>\" > \"<path>\"`");
+            baseInstructions.AppendLine("For folders: use `mkdir -p \"<path>\"`");
+            baseInstructions.AppendLine("Inspect before acting: for repository questions use fast file commands first. Prefer `rg --files` to enumerate files, `rg -n \"pattern\" <path>` to search text, and `head -n`/`tail -n` for bounded reads.");
+            baseInstructions.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use curl — NOT web_search. web_search is only for finding URLs or info you don't already know.");
+        }
         baseInstructions.AppendLine("If this task's results will feed into a subsequent code-editing step, save output files INSIDE the project directory (use a temp path like \"_temp_data.json\") so the next pipeline can read them. The file will be attached to the card automatically.");
-        baseInstructions.AppendLine("For files: New-Item -ItemType File -Path \"<path>\" -Force  (NOT mkdir)");
-        baseInstructions.AppendLine("For folders: New-Item -ItemType Directory -Path \"<path>\" -Force");
-        baseInstructions.AppendLine("NEVER use cd/Set-Location — use absolute paths");
-        baseInstructions.AppendLine("Inspect before acting: for repository questions use fast file commands first. Prefer `rg --files` to enumerate files, `rg -n \"pattern\" <path>` to search text, and `Get-Content -TotalCount/-Tail` for bounded reads. If `rg` is unavailable, use PowerShell equivalents.");
+        baseInstructions.AppendLine("NEVER use cd — use absolute paths");
         baseInstructions.AppendLine("Keep outputs small and useful. Limit broad searches, exclude bin/obj/node_modules/.git/dist, and save large raw outputs to a project temp file instead of dumping them into the conversation.");
         baseInstructions.AppendLine("After every command, decide what new fact was learned and what exact next step follows. Do not repeat failed commands without changing the hypothesis or command.");
-        baseInstructions.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
         baseInstructions.AppendLine("BEFORE planning the first step, assess the full task end-to-end. What data do you need? What files will be created? What merge/transform/verification steps are needed? Plan the smallest complete chain, usually 1-4 steps.");
         baseInstructions.AppendLine("KEEP THE ORIGINAL TASK AS YOUR NORTH STAR. After each step, check: does this complete the user's request yet? If the planned steps do not add up to finishing the task, add the remaining steps. If your plan covers the full task, execute the steps — do NOT keep planning new steps.");
         if (isWindows)
@@ -299,7 +310,12 @@ partial class AgentController
                 }
                 var cmdLower = cmd.TrimStart().ToLowerInvariant();
                 if (cmdLower.StartsWith("mkdir") && Regex.IsMatch(cmd, @"\.\w{2,4}[""'\s]|\.\w{2,4}$"))
-                { conversation.AppendLine("REJECTED: mkdir creates DIRECTORIES. Use: New-Item -ItemType File -Path \"<path>\" -Force"); continue; }
+                {
+                    conversation.AppendLine(isWindows
+                        ? "REJECTED: mkdir creates DIRECTORIES. Use: New-Item -ItemType File -Path \"<path>\" -Force"
+                        : "REJECTED: mkdir creates DIRECTORIES. Use: touch \"<path>\" or echo \"<content>\" > \"<path>\"");
+                    continue;
+                }
                 if (cmdLower == "cd" || cmdLower.StartsWith("cd ") || cmdLower.Contains("set-location"))
                 { conversation.AppendLine("REJECTED: cd/Set-Location not supported. Use absolute paths."); continue; }
                 var freshOut = await RunMarkerCommandWithRetryAsync(cmd, projectRoot, emitSse, ct, waitMinutes: 10);
