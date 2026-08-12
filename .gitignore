@@ -14,3 +14,9 @@ artifacts/
 **/TestResultsCoverage/
 *.cobertura.xml
 
+# Local tool / cache directories (environment-local, not project files)
+.agents/
+.claude/
+.dirac-cache/
+tmp/
+
