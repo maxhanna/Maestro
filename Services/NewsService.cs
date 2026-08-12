@@ -59,6 +59,18 @@ public partial class NewsService
     /// while still parallelizing the HTTP article fetches.</summary>
     private const int MaxConcurrentItems = 4;
 
+    /// <summary>Max items for the single consolidated LLM call. Beyond this, attention
+    /// quality degrades on smaller models and we fall back to per-item calls.</summary>
+    private const int MaxItemsForSingleCall = 6;
+
+    /// <summary>Max combined article text for the single call. ~16K chars ≈ 4K tokens,
+    /// leaving room for the prompt and output in an 8K-context model.</summary>
+    private const int MaxCombinedCharsForSingleCall = 16000;
+
+    /// <summary>Max output tokens for the single call: ~200 per item summary + 300 for
+    /// the overview, with headroom for formatting/markers.</summary>
+    private const int SingleCallMaxTokens = 1500;
+
     /// <summary>Hosts whose article pages are JS-rendered (no server-side text) — skip the page fetch.</summary>
     private static readonly HashSet<string> JsRenderedHosts = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -72,6 +84,14 @@ public partial class NewsService
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex { get; }
+
+    /// <summary>Matches both marker formats the model might produce:
+    /// Bracket:  [SUMMARY] or [0]
+    /// Markdown: ### SUMMARY or ### Article 0
+    /// Multiline + IgnoreCase so ^ matches at each line start and case varies.</summary>
+    [GeneratedRegex(@"^(?:\[|#{1,4}\s*)(SUMMARY|ARTICLE\s*\d+|\d+)\]?\s*:?\s*",
+        RegexOptions.Multiline | RegexOptions.IgnoreCase)]
+    private static partial Regex MarkerRegex { get; }
 
     public NewsService(IHttpClientFactory clientFactory, ConfigFileService configFile,
         ILogger<NewsService> logger)
@@ -139,31 +159,51 @@ public partial class NewsService
             return ($"# Weaver web results\nTask: {q}\nGenerated: {generatedAt}\n\nNo results found for \"{q}\".\n", null);
         }
 
-        // Per-item: fetch article body (snippet-first) + summarize. Run with bounded
-        // concurrency — the article-page HTTP fetches are independent and parallelize
-        // well, but the LLM calls will queue at a single-slot endpoint regardless.
+        // Phase 1: fetch article bodies in parallel (snippet-first). Bounded concurrency
+        // because article-page HTTP fetches are independent but we don't want dozens of
+        // simultaneous connections. No LLM calls here — bodies are just raw text for
+        // the summarization phase.
         var semaphore = new SemaphoreSlim(MaxConcurrentItems, MaxConcurrentItems);
-        var summaryTasks = interleaved.Select(async item =>
+        var bodyTasks = interleaved.Select(async item =>
         {
             await semaphore.WaitAsync(ct);
             try
             {
-                ct.ThrowIfCancellationRequested();
                 var body = item.Snippet ?? "";
                 if (body.Length < ThinSnippetThreshold && !IsJsRenderedUrl(item.Url))
                 {
                     var fetched = await TryFetchArticleBodyAsync(item.Url, ct);
                     if (fetched.Length > body.Length) body = fetched;
                 }
-                var summary = await SummarizeAsync(item.Title, body, model, baseUrl, ct);
-                return (item, summary);
+                return (item, body);
             }
             finally { semaphore.Release(); }
         });
-        var summaries = (await Task.WhenAll(summaryTasks)).ToList();
+        var bodies = (await Task.WhenAll(bodyTasks)).ToList();
 
-        // Overall batch summary — one LLM call over all individual summaries.
-        var batchSummary = await SummarizeBatchAsync(q, summaries, model, baseUrl, ct);
+        // Phase 2: summarize. Try a single consolidated LLM call first (one round-trip
+        // instead of N+1); fall back to per-item + batch when the single call isn't
+        // feasible (too many items, too much text) or the model's response doesn't
+        // follow the marker format. For 1 item, the fallback is optimal (1 call, no
+        // batch), so skip the single-call path entirely.
+        var combinedChars = bodies.Sum(b => Math.Min((b.body ?? "").Length, MaxArticleCharsForSummary));
+        string batchSummary;
+        List<string> itemSummaries;
+
+        if (interleaved.Count >= 2 && interleaved.Count <= MaxItemsForSingleCall
+            && combinedChars <= MaxCombinedCharsForSingleCall)
+        {
+            var (ok, summary, summaries) = await TrySummarizeAllAsync(q, bodies, model, baseUrl, ct);
+            if (ok) { batchSummary = summary; itemSummaries = summaries; }
+            else
+            {
+                (batchSummary, itemSummaries) = await SummarizeAllFallbackAsync(q, bodies, model, baseUrl, ct);
+            }
+        }
+        else
+        {
+            (batchSummary, itemSummaries) = await SummarizeAllFallbackAsync(q, bodies, model, baseUrl, ct);
+        }
 
         // Assemble in the same schema as WebSearchAsync output (## Summary / ## Results)
         // so the agent's web-results pipeline (### WEB RESULTS [query] ###) treats _news
@@ -180,10 +220,10 @@ public partial class NewsService
         sb.AppendLine($"Source: {interleaved[0].Url}");
         sb.AppendLine();
         sb.AppendLine("## Results");
-        foreach (var (item, summary) in summaries)
+        for (var i = 0; i < interleaved.Count; i++)
         {
-            // Bullet format matches WebSearchAsync: "  - <text> (<url>)"
-            // Include the one-line summary so the digest carries real content, not just links.
+            var item = interleaved[i];
+            var summary = i < itemSummaries.Count ? itemSummaries[i] : "";
             var oneLiner = ExtractOneLiner(summary);
             sb.AppendLine($"  - {item.Title}: {oneLiner} ({item.Url})");
         }
@@ -617,6 +657,186 @@ public partial class NewsService
             _logger.LogWarning(ex, "LLM batch summary failed — degrading to concatenated snippets");
             return TruncateFallback(combined);
         }
+    }
+
+    // ── Single consolidated call (N+1 → 1) ──────────────────────────────────
+
+    /// <summary>
+    /// Single consolidated LLM call: produces both the per-item summaries and the
+    /// batch overview in one round-trip using marker-delimited output ([SUMMARY]
+    /// and [N] markers). The model sees all articles at once, so the overview is
+    /// more coherent than summarizing first-sentences separately.
+    ///
+    /// Returns (true, summary, itemSummaries) on success; (false, _, _) when the
+    /// model didn't follow the marker format or the response was empty — the caller
+    /// then falls back to the N+1 per-item path. Missing items within a partially-
+    /// parseable response are filled with snippet fallbacks (no full retry).
+    /// </summary>
+    private async Task<(bool ok, string summary, List<string> itemSummaries)> TrySummarizeAllAsync(
+        string query, List<(NewsItem item, string body)> bodies,
+        string model, string baseUrl, CancellationToken ct)
+    {
+        var userContent = new StringBuilder();
+        for (var i = 0; i < bodies.Count; i++)
+        {
+            var (item, body) = bodies[i];
+            var bodyText = body ?? "";
+            if (bodyText.StartsWith(item.Title, StringComparison.OrdinalIgnoreCase))
+                bodyText = bodyText[item.Title.Length..].TrimStart('\n', ' ', '\r');
+            var text = string.IsNullOrWhiteSpace(bodyText) ? item.Title : $"{item.Title}\n{bodyText}";
+            if (text.Length > MaxArticleCharsForSummary)
+                text = text[..MaxArticleCharsForSummary] + "…";
+            userContent.Append($"[{i}]\n{text}\n\n");
+        }
+
+        if (userContent.Length < MinSummaryBodyLength)
+            return (false, "", new List<string>());
+
+        try
+        {
+            var client = _clientFactory.CreateClient("llama");
+            client.Timeout = TimeSpan.FromMinutes(4);
+            var systemPrompt = $"Summarize each article as ### Article 0 through ### Article {bodies.Count - 1} "
+                              + "(≤150 words each, key facts, no opinion). "
+                              + "Then write ### SUMMARY: a ≤200-word overview grouping related stories.";
+            var req = new
+            {
+                model,
+                stream = false,
+                temperature = 0.2,
+                max_tokens = SingleCallMaxTokens,
+                messages = new object[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = userContent.ToString() }
+                }
+            };
+            var content = new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json");
+            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", content, ct);
+            var respText = await resp.Content.ReadAsStringAsync(ct);
+            var responseText = ExtractContent(respText);
+
+            if (string.IsNullOrWhiteSpace(responseText))
+                return (false, "", new List<string>());
+
+            var (summary, itemSummaries, markersFound) = ParseMarkerResponse(responseText, bodies.Count);
+
+            _logger.LogDebug("Single-call response ({Len} chars): {Response}", responseText.Length, responseText);
+            _logger.LogDebug("Parsed: hasSummary={HasSummary}, markers={Found}/{Expected}", summary != null, markersFound, bodies.Count);
+
+            // Fallback if: no [SUMMARY] marker, or fewer than half the item markers present.
+            if (summary == null || markersFound * 2 < bodies.Count)
+                return (false, "", new List<string>());
+
+            // Fill missing items with snippet fallbacks.
+            for (var i = 0; i < itemSummaries.Count; i++)
+            {
+                if (string.IsNullOrWhiteSpace(itemSummaries[i]))
+                    itemSummaries[i] = TruncateFallback(
+                        bodies[i].body.Length > 0 ? bodies[i].body : bodies[i].item.Title);
+            }
+
+            if (string.IsNullOrWhiteSpace(summary))
+                return (false, "", new List<string>());
+
+            return (true, summary.Trim(), itemSummaries);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Single-call summarization failed — falling back to per-item");
+            return (false, "", new List<string>());
+        }
+    }
+
+    /// <summary>
+    /// Fallback: per-item summarization (N calls) + batch summary (1 call). This is
+    /// the original N+1 approach, used when the single consolidated call isn't
+    /// feasible (too many items, too much text, 1 item) or didn't produce parseable
+    /// output. Kept intact as the safety net.
+    /// </summary>
+    private async Task<(string batchSummary, List<string> itemSummaries)> SummarizeAllFallbackAsync(
+        string query, List<(NewsItem item, string body)> bodies,
+        string model, string baseUrl, CancellationToken ct)
+    {
+        var semaphore = new SemaphoreSlim(MaxConcurrentItems, MaxConcurrentItems);
+        var tasks = bodies.Select(async entry =>
+        {
+            await semaphore.WaitAsync(ct);
+            try
+            {
+                var summary = await SummarizeAsync(entry.item.Title, entry.body, model, baseUrl, ct);
+                return (entry.item, summary);
+            }
+            finally { semaphore.Release(); }
+        });
+        var summariesWithItems = (await Task.WhenAll(tasks)).ToList();
+        var itemSummaries = summariesWithItems.Select(s => s.summary).ToList();
+        var batchSummary = await SummarizeBatchAsync(query, summariesWithItems, model, baseUrl, ct);
+        return (batchSummary, itemSummaries);
+    }
+
+    /// <summary>
+    /// Parses a marker-delimited LLM response into the overview and per-item
+    /// summaries. Expected format:
+    /// <code>
+    /// [SUMMARY]
+    /// overview text...
+    /// [0]
+    /// item 0 summary...
+    /// [1]
+    /// item 1 summary...
+    /// </code>
+    /// Returns (summary, itemSummaries, itemMarkersFound). summary is null when the
+    /// [SUMMARY] marker is absent. itemSummaries is padded to expectedCount with
+    /// empty strings for missing items. itemMarkersFound counts how many [N] markers
+    /// matched a valid index — the caller uses this to decide whether to accept or
+    /// fall back (fewer than half → fallback).
+    /// </summary>
+    internal static (string? summary, List<string> itemSummaries, int itemMarkersFound)
+        ParseMarkerResponse(string response, int expectedCount)
+    {
+        var matches = MarkerRegex.Matches(response);
+        if (matches.Count == 0)
+            return (null, Enumerable.Repeat("", expectedCount).ToList(), 0);
+
+        string? summary = null;
+        var items = Enumerable.Repeat("", expectedCount).ToArray();
+        var itemMarkersFound = 0;
+
+        for (var i = 0; i < matches.Count; i++)
+        {
+            var m = matches[i];
+            var label = m.Groups[1].Value.Trim();
+            var start = m.Index + m.Length;
+            var end = i + 1 < matches.Count ? matches[i + 1].Index : response.Length;
+            var text = response[start..end].Trim();
+
+            if (label.StartsWith("SUMMARY", StringComparison.OrdinalIgnoreCase))
+            {
+                summary = text;
+            }
+            else
+            {
+                // Extract the numeric index from "Article 0" or "0".
+                var numStr = label.StartsWith("ARTICLE", StringComparison.OrdinalIgnoreCase)
+                    ? label[label.IndexOfAny("0123456789".ToCharArray())..]
+                    : label;
+                if (int.TryParse(numStr, out var idx) && idx >= 0 && idx < expectedCount)
+                {
+                    // Strip "**Summary:**" prefix that some models add before item text.
+                    if (text.StartsWith("**", StringComparison.Ordinal))
+                    {
+                        var colon = text.IndexOf(':');
+                        if (colon > 0 && colon < 25)
+                            text = text[(colon + 1)..].TrimStart('*', ' ', '\n');
+                    }
+                    items[idx] = text;
+                    itemMarkersFound++;
+                }
+            }
+        }
+
+        return (summary, items.ToList(), itemMarkersFound);
     }
 
     /// <summary>

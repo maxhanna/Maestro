@@ -244,4 +244,215 @@ public class NewsServiceTests
         Assert.Equal("arXiv", single.Source);
         Assert.Contains("new network architecture", single.Snippet);
     }
+
+    // ── ParseMarkerResponse (single-call consolidation parser) ─────────────
+
+    [Fact]
+    public void ParseMarkerResponse_ParsesSummaryAndItems()
+    {
+        var resp = """
+            [SUMMARY]
+            Overview of the latest AI news.
+
+            [0]
+            First article summary.
+
+            [1]
+            Second article summary.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 2);
+
+        Assert.Equal("Overview of the latest AI news.", summary);
+        Assert.Equal(2, items.Count);
+        Assert.Equal("First article summary.", items[0]);
+        Assert.Equal("Second article summary.", items[1]);
+        Assert.Equal(2, found);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_ParsesMarkdownHeadings()
+    {
+        var resp = """
+            ### Article 0
+            **Summary:** First article about AI.
+
+            ### Article 1
+            **Summary:** Second article about quantum computing.
+
+            ### SUMMARY
+            These stories highlight AI and quantum advances.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 2);
+
+        Assert.Equal("These stories highlight AI and quantum advances.", summary);
+        Assert.Equal(2, found);
+        Assert.Equal("First article about AI.", items[0]);
+        Assert.Equal("Second article about quantum computing.", items[1]);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_MixedFormats_Parseable()
+    {
+        // Model mixes bracket and markdown — parser should handle both.
+        var resp = """
+            ### Article 0
+            First article summary.
+
+            [1]
+            Second article summary.
+
+            ### SUMMARY
+            Overview text.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 2);
+
+        Assert.Equal("Overview text.", summary);
+        Assert.Equal(2, found);
+        Assert.Equal("First article summary.", items[0]);
+        Assert.Equal("Second article summary.", items[1]);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_NoMarkers_ReturnsNullSummary()
+    {
+        var resp = "The model just wrote prose without any markers at all.";
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 3);
+
+        Assert.Null(summary);
+        Assert.Equal(3, items.Count);
+        Assert.All(items, s => Assert.Equal("", s));
+        Assert.Equal(0, found);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_MissingSummary_ReturnsNull()
+    {
+        var resp = """
+            [0]
+            First summary.
+
+            [1]
+            Second summary.
+            """;
+        var (summary, _, _) = NewsService.ParseMarkerResponse(resp, 2);
+        Assert.Null(summary);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_MissingItems_PaddedToExpectedCount()
+    {
+        var resp = """
+            [SUMMARY]
+            Overview.
+
+            [0]
+            Only this one.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 3);
+
+        Assert.Equal("Overview.", summary);
+        Assert.Equal(3, items.Count);
+        Assert.Equal("Only this one.", items[0]);
+        Assert.Equal("", items[1]);
+        Assert.Equal("", items[2]);
+        Assert.Equal(1, found);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_ItemsOutOfOrder_MappedByIndex()
+    {
+        var resp = """
+            [SUMMARY]
+            Overview.
+
+            [1]
+            Second summary.
+
+            [0]
+            First summary.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 2);
+
+        Assert.Equal("Overview.", summary);
+        Assert.Equal("First summary.", items[0]);
+        Assert.Equal("Second summary.", items[1]);
+        Assert.Equal(2, found);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_OutOfRangeIndex_Ignored()
+    {
+        var resp = """
+            [SUMMARY]
+            Overview.
+
+            [0]
+            First.
+
+            [5]
+            Out of range — should be ignored.
+
+            [1]
+            Second.
+            """;
+        var (summary, items, found) = NewsService.ParseMarkerResponse(resp, 2);
+
+        Assert.Equal("Overview.", summary);
+        Assert.Equal("First.", items[0]);
+        Assert.Equal("Second.", items[1]);
+        // [5] is out of range (expectedCount=2), so it doesn't count.
+        Assert.Equal(2, found);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_LessThanHalfTriggersFallback()
+    {
+        // 5 expected, only 2 found → 2*2=4 < 5 → caller should fall back.
+        var resp = """
+            [SUMMARY]
+            Overview.
+
+            [0]
+            First.
+
+            [1]
+            Second.
+            """;
+        var (_, _, found) = NewsService.ParseMarkerResponse(resp, 5);
+        Assert.Equal(2, found);
+        Assert.True(found * 2 < 5, "Fewer than half should trigger fallback");
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_HalfOrMoreAccepted()
+    {
+        // 4 expected, 3 found → 3*2=6 >= 4 → caller should accept.
+        var resp = """
+            [SUMMARY]
+            Overview.
+
+            [0]
+            First.
+
+            [1]
+            Second.
+
+            [3]
+            Fourth.
+            """;
+        var (_, items, found) = NewsService.ParseMarkerResponse(resp, 4);
+        Assert.Equal(3, found);
+        Assert.True(found * 2 >= 4, "Half or more should be accepted");
+        // Missing item [2] is padded with empty string.
+        Assert.Equal("", items[2]);
+    }
+
+    [Fact]
+    public void ParseMarkerResponse_EmptyResponse_ReturnsNull()
+    {
+        var (summary, items, found) = NewsService.ParseMarkerResponse("", 3);
+        Assert.Null(summary);
+        Assert.Equal(3, items.Count);
+        Assert.Equal(0, found);
+    }
 }
