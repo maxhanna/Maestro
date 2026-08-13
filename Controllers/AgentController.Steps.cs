@@ -617,6 +617,30 @@ partial class AgentController
             : assessReason ?? "";
         return assessFailed || (isComplete && !assessFailed);
     }
+    /// <summary>
+    /// Writes the '## Filesystem step results (created on disk)' section of the completion
+    /// assessment prompt: each executed _create_directory/_create_file step with its on-disk
+    /// existence (re-verified, so a failed create shows "does not exist on disk"). Extracted
+    /// so the section is unit-testable. Without it the assessor claimed a successfully created
+    /// folder was "never physically created" — the create result existed in allResults but was
+    /// never surfaced in the assessment prompt.
+    /// </summary>
+    internal static void AppendCreateStepsSection(
+        StringBuilder sb, List<Dictionary<string, object?>> createSteps, string projectRoot)
+    {
+        sb.AppendLine("## Filesystem step results (created on disk)");
+        foreach (var s in createSteps)
+        {
+            var path = s.GetValueOrDefault("path")?.ToString() ?? "?";
+            var status = s.TryGetValue("status", out var st) ? st?.ToString() : "?";
+            var rel = path.Replace('\\', '/');
+            var full = Path.GetFullPath(Path.Combine(projectRoot, rel));
+            var exists = System.IO.Directory.Exists(full) || System.IO.File.Exists(full);
+            sb.AppendLine($"- {path}: {status} — {(exists ? "EXISTS on disk" : "does not exist on disk")}");
+        }
+        sb.AppendLine();
+    }
+
     private async Task<(bool isComplete, string reason)> AssessCompletion(
         string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
         AgentPlan? plan = null, List<string>? attachedFiles = null, int? atomicStepEstimate = null,
@@ -635,6 +659,16 @@ partial class AgentController
         // (e.g. `ping 8.8.8.8`) keeps the no-LLM short-circuit.
         var webSteps = executedSteps.OfType<Dictionary<string, object?>>()
             .Where(s => s.TryGetValue("type", out var t) && t?.ToString() is "_web_search" or "_web_fetch" or "web_search" or "web_fetch")
+            .ToList();
+        // Created directories/files (type "create") are real filesystem state the assessor
+        // must see: without them it concluded "the folder was never physically created" even
+        // after a successful _create_directory (the result lives in allResults but was never
+        // surfaced in the assessment prompt). Existence is re-verified on disk so a failed
+        // create is never presented as real.
+        var createSteps = executedSteps.OfType<Dictionary<string, object?>>()
+            .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "create")
+            .GroupBy(s => s.GetValueOrDefault("path")?.ToString() ?? Guid.NewGuid().ToString())
+            .Select(g => g.Last())
             .ToList();
         if (editSteps.Count == 0 && webSteps.Count == 0) return (true, "No edit steps — command-only task");
         var failed = editSteps.Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "skipped")).ToList();
@@ -702,6 +736,8 @@ partial class AgentController
             }
             sb.AppendLine();
         }
+        if (createSteps.Count > 0)
+            AppendCreateStepsSection(sb, createSteps, projectRoot);
         if (webSteps.Count > 0)
         {
             sb.AppendLine("## Web step results");

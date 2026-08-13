@@ -8,6 +8,7 @@ using Weaver;
 using Weaver.Controllers;
 using Weaver.Services;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Weaver.UnitTests;
 
@@ -21,6 +22,10 @@ namespace Weaver.UnitTests;
 /// </summary>
 public class NewsServiceTests
 {
+    private readonly ITestOutputHelper _out;
+
+    public NewsServiceTests(ITestOutputHelper output) => _out = output;
+
     private const string NewsPrompt =
         "Get a latest AI news article from the web and paste the article in a text file on the desktop.";
     private const string PlainPrompt =
@@ -300,6 +305,139 @@ public class NewsServiceTests
         Assert.Contains("## Results", outp); // DuckDuckGo format, untouched
         Assert.DoesNotContain("# AI News", outp);
     }
+
+    // ── Digest shrinkage through the agent pipeline stages ────────────────────────────────
+    // The digest is PRE-COMPACTED by design (DefaultLimit=8 items, MaxSnippetChars=1500,
+    // MaxDigestChars=25000), so unlike a raw multi-MB fetch — which the discovery context
+    // chops at 20k/section — a production digest should ride through every agent stage
+    // UNTRUNCATED. Measured through the same five stages as the web-results shrinkage test.
+    private static readonly MethodInfo DigestCapMethod = typeof(AgentController).GetMethod(
+        "CapWebStepOutputForClient", BindingFlags.NonPublic | BindingFlags.Static)!;
+    private static readonly MethodInfo DigestAppendMethod = typeof(AgentController).GetMethod(
+        "AppendWebResultsToDiscoveryContext", BindingFlags.NonPublic | BindingFlags.Static)!;
+    private static readonly MethodInfo DigestPlannerMethod = typeof(AgentController).GetMethod(
+        "BuildPlannerDiscoveryContext", BindingFlags.NonPublic | BindingFlags.Static)!;
+    private static readonly MethodInfo DigestThinkingMethod = typeof(AgentController).GetMethod(
+        "ExtractWebResultSectionsForThinking", BindingFlags.NonPublic | BindingFlags.Static)!;
+    private static readonly MethodInfo DigestEditMethod = typeof(AgentController).GetMethod(
+        "HarvestWebResultsForEditContext", BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static (string capped, bool truncated) DigestClientCap(string? output)
+        => ((ValueTuple<string, bool>)DigestCapMethod.Invoke(null, new object?[] { output })!);
+
+    private static string DigestDiscovery(string ctx, List<Dictionary<string, object?>> results)
+        => (string)DigestAppendMethod.Invoke(null, new object?[] { ctx, results, 20000, 60000 })!;
+
+    private static string DigestPlanner(string discovery)
+        => (string)DigestPlannerMethod.Invoke(null, new object?[] { discovery })!;
+
+    private static string DigestThinking(string discovery)
+        => (string)DigestThinkingMethod.Invoke(null, new object?[] { discovery })!;
+
+    private static string DigestEdit(List<Dictionary<string, object?>> results)
+        => (string)DigestEditMethod.Invoke(null, new object?[] { results })!;
+
+    /// <summary>A digest built faithfully to BuildDigest's format at the production ceiling:
+    /// 8 items (DefaultLimit) × 1500-char snippets (MaxSnippetChars) ≈ 14k.</summary>
+    private static string BuildMaxDesignDigest()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# AI News — 2026-08-12 — \"AI research breakthroughs latest\"");
+        sb.AppendLine("8 item(s) from VentureBeat, TechCrunch, MIT Technology Review, Wired, Ars Technica.");
+        sb.AppendLine();
+        sb.AppendLine("## Summary");
+        sb.AppendLine("A roundup of the latest AI research and industry news, with fresh dated items and real URLs. " +
+                      new string('s', 400));
+        for (var i = 0; i < 8; i++)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"## Item {i}: a realistic AI headline with substantial detail for the digest body");
+            sb.AppendLine($"Source: https://example.com/item{i}");
+            sb.AppendLine("Published: Wed, 12 Aug 2026 10:00:00 GMT");
+            sb.AppendLine("Feed: VentureBeat");
+            sb.AppendLine(new string((char)('a' + i), 1500));
+        }
+        return sb.ToString();
+    }
+
+    [Fact]
+    public async Task NewsDigest_RealRun_PreCompactedByDesign_NoTruncationInAnyStage()
+    {
+        // A REAL digest through the actual parser + fixtures (VB/TC/HN/arXiv/Lobsters items).
+        var factory = new NewsScriptedClientFactory();
+        var service = new NewsService(factory, "http://localhost:8080", "test-model");
+        var digest = await service.FetchNewsAsync("AI news", limit: NewsService.DefaultLimit, ct: CancellationToken.None);
+
+        Assert.True(digest.Length >= 500, $"digest should contain real items — got {digest.Length} chars");
+        Assert.True(digest.Length <= 12000, "a DefaultLimit digest should fit inside every stage cap");
+        var results = new List<Dictionary<string, object?>>
+        {
+            new() { ["type"] = "_web_search", ["status"] = "done", ["query"] = "AI news", ["output"] = digest }
+        };
+
+        var (_, clientTruncated) = DigestClientCap(digest);
+        Assert.False(clientTruncated, $"the 12k client display cap must NOT fire on a {digest.Length}-char digest");
+        var discovery = DigestDiscovery("", results);
+        var planner = DigestPlanner(discovery);
+        var thinking = DigestThinking(discovery);
+        var edit = DigestEdit(results);
+        // The planner/thinking passes TrimEnd trailing whitespace per section (content is
+        // preserved, line endings normalized), so compare normalized content — the whole
+        // digest must ride through UNTRUNCATED (no "…" chop marker may touch it).
+        var normDigest = Norm(digest);
+        foreach (var stage in new[] { discovery, planner, thinking, edit })
+        {
+            var normStage = Norm(stage);
+            Assert.Contains(normDigest, normStage, StringComparison.Ordinal); // zero loss
+            var at = normStage.IndexOf(normDigest, StringComparison.Ordinal);
+            Assert.DoesNotContain("…", normStage.Substring(at, normDigest.Length));
+        }
+
+        _out.WriteLine("=== News-digest shrinkage through the agent pipeline (real run, " + digest.Length + " chars) ===");
+        _out.WriteLine($"  Pre-compaction (NewsService design caps): DefaultLimit=8 items · MaxSnippetChars=1500 · MaxDigestChars=25000");
+        _out.WriteLine($"  Stage 0  allResults (digest, raw)          : {digest.Length,6:N0} chars  (pre-compacted by the feed parser — no pipeline loss to recover)");
+        _out.WriteLine($"  Stage 1  client SSE display cap (12k)      : {(DigestClientCap(digest).capped).Length,6:N0} chars  truncated={(clientTruncated ? "YES" : "no")}");
+        _out.WriteLine($"  Stage 2  discovery context (20k/sec, 60k total): {discovery.Length,6:N0} chars  survival 100% — no truncation");
+        _out.WriteLine($"  Stage 3  planner prompt (verbatim)         : {planner.Length,6:N0} chars  0% further loss");
+        _out.WriteLine($"  Stage 4  thinking prompt (verbatim)         : {thinking.Length,6:N0} chars  0% further loss");
+        _out.WriteLine($"  Stage 5  edit-resolution (60k on demand)   : {edit.Length,6:N0} chars  0% further loss");
+        _out.WriteLine($"  → Pre-compacted by design: 8 items × 1500-char snippets fit inside every stage cap; the pipeline adds ZERO loss.");
+    }
+
+    [Fact]
+    public void NewsDigest_MaxDesignSize_OnlyClientDisplayCapFires()
+    {
+        // The digest at its production ceiling (8 items × 1500-char snippets ≈ 14k): larger
+        // than the 12k client DISPLAY cap, but still inside the 20k discovery per-section cap.
+        var digest = BuildMaxDesignDigest();
+        Assert.True(digest.Length > 12000 && digest.Length <= 20000, $"fixture must exceed the client cap but fit the discovery cap: {digest.Length}");
+        var results = new List<Dictionary<string, object?>>
+        {
+            new() { ["type"] = "_web_search", ["status"] = "done", ["query"] = "AI news", ["output"] = digest }
+        };
+
+        var (_, clientTruncated) = DigestClientCap(digest);
+        Assert.True(clientTruncated, "the client DISPLAY cap should fire on the max-size digest (display only)");
+        var normDigest = Norm(digest);
+        var discovery = DigestDiscovery("", results);
+        var planner = DigestPlanner(discovery);
+        var thinking = DigestThinking(discovery);
+        var edit = DigestEdit(results);
+        foreach (var stage in new[] { discovery, planner, thinking, edit })
+            Assert.Contains(normDigest, Norm(stage), StringComparison.Ordinal); // agent context keeps ALL of it
+
+        _out.WriteLine("=== News-digest at the production ceiling (" + digest.Length + " chars) ===");
+        _out.WriteLine($"  Stage 1  client SSE display cap (12k)      : truncated={(clientTruncated ? "YES" : "no")} — display only, agent context unaffected");
+        _out.WriteLine($"  Stage 2  discovery context (20k/sec)       : {discovery.Length,6:N0} chars  full digest present, 0% loss");
+        _out.WriteLine($"  Stage 3  planner / Stage 4 thinking        : verbatim, 0% further loss");
+        _out.WriteLine($"  Stage 5  edit-resolution (60k on demand)   : {edit.Length,6:N0} chars  0% loss");
+        _out.WriteLine($"  → Even the largest production digest fits the discovery budget — the digest path never hits the 20k chop that a raw fetch does.");
+    }
+
+    /// <summary>Normalizes line endings and trailing whitespace so stage outputs built with
+    /// different newline conventions (AppendLine → Environment.NewLine vs the pipeline's
+    /// '\n' separators + TrimEnd) can be compared content-wise.</summary>
+    private static string Norm(string s) => s.Replace("\r\n", "\n").Trim();
 
     private static void AssertOrder(string haystack, params string[] needles)
     {

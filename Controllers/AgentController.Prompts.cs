@@ -372,6 +372,7 @@ partial class AgentController
             if (enabled == null || enabled.Contains("_command")) markers.Add("_command");
             if (enabled == null || enabled.Contains("_web_search")) markers.Add("_web_search");
             if (enabled == null || enabled.Contains("_web_fetch")) markers.Add("_web_fetch");
+            if (enabled == null || enabled.Contains("_scraper")) markers.Add("_scraper");
             if (enabled == null || enabled.Contains("_discover")) markers.Add("_discover");
             if (enabled == null || enabled.Contains("_git")) markers.Add("_git");
             if (enabled == null || enabled.Contains("_rename_file")) markers.Add("_rename_file");
@@ -444,7 +445,13 @@ partial class AgentController
                 sb.Append(OperatingSystem.IsWindows()
                     ? "  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"... | Set-Content -Path \"<desktop-path>\\ai_article.txt\" -Encoding UTF8\"}}\n"
                     : "  3. {\"planComplete\":false,\"step\":{\"file\":\"_command\",\"change\":\"echo \"<content>\" > \"<desktop-path>/ai_article.txt\"\"}}\n");
-                sb.Append("Each step consumes the previous step's output; declare planComplete only after the file is written.\n\n");
+                sb.Append("Each step consumes the previous step's output; declare planComplete only after the file is written.\n");
+                sb.Append("DATA-FETCH tasks (\"fetch the live/current data from <URL/API> and write it …\") use the SAME chain — do NOT write a scraper script. ");
+                sb.Append("A _web_fetch step fetches the URL for you: its content lands in the run and is auto-written to the demanded file. ");
+                sb.Append("Never plan a _create_file for a Python/JS/PowerShell script that calls requests.get/urllib/fetch()/Invoke-RestMethod, and never plan a _command that runs one — ");
+                sb.Append("the fetch is a step tool, not application code. If the task names the URL (e.g. https://pokeapi.co/api/v2/...), plan \"_web_fetch\" with that exact URL directly. ");
+                sb.Append("If _web_fetch KEEPS FAILING, plan a \"_scraper\" step with the URL instead — the system probes your OS, available interpreters and installed scraping packages, and builds + runs a working scraper that writes the demanded file. ");
+                sb.Append("Only if the task itself explicitly asks for a Python/Node script may you write (and run) one.\n\n");
             }
         }
         sb.Append("Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n");
@@ -781,6 +788,7 @@ partial class AgentController
         ["_sql_migration"] = "\"_sql_migration\"      — Write a SQL migration file for a NEW database table: put a short description in \"change\" (e.g. \"benchmark_scores table\"), put the full CREATE TABLE IF NOT EXISTS statement in \"newString\". The system writes migrations/<timestamp>_create_<table>.sql so the user can apply the table to their database manually, then delete the file. Do NOT inline CREATE TABLE in method bodies.",
         ["_web_search"] = "\"_web_search\"         — Search the web; put the query in \"change\"",
         ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
+        ["_scraper"] = "\"_scraper\"           — FALLBACK fetch when _web_fetch keeps failing: put the URL in \"change\"; the system probes your OS/interpreter/installed packages and builds+runs a working scraper, writing the demanded file. Never write scraper code yourself.",
         ["_git"] = "\"_git\"                — Git operation (commit/pull/push/branch/revert)",
         ["_rename_file"] = "\"_rename_file\"        — Rename: put \"oldpath → newpath\" in \"change\"",
         ["_delete_file"] = "\"_delete_file\"        — Delete a file path in \"change\"",

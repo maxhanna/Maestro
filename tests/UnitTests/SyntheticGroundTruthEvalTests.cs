@@ -663,6 +663,59 @@ public class SyntheticGroundTruthEvalTests : IDisposable
     }
 
     [Fact]
+    public async Task RunLlmSpend_CumulativeAcrossSteps_NeverResetByTake()
+    {
+        // The live "tokens used" counter: unlike TakeStepLlmMetrics (per-step snapshot that
+        // resets), RunLlmSpend keeps the CUMULATIVE run spend so the header can show the
+        // total even when the discovery context is tiny (OS/benchmark runs with an empty
+        // sandbox) — the numbers the per-step badges and the 📊 logs report, summed.
+        var controller = BuildController();
+        var record = typeof(AgentController).GetMethod("RecordLlmRoundMetricsAsync",
+            BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("RecordLlmRoundMetricsAsync not found");
+        var take = typeof(AgentController).GetMethod("TakeStepLlmMetrics",
+            BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("TakeStepLlmMetrics not found");
+        var spend = typeof(AgentController).GetMethod("RunLlmSpend",
+            BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("RunLlmSpend not found");
+
+        Assert.Null(spend.Invoke(controller, null));
+
+        const string sys = "You are a planner.";
+        const string user = "plan the next atomic step";
+        const string resp = "{\"planComplete\":false,\"step\":{\"file\":\"a.ts\",\"change\":\"x\"}}";
+        await (Task)record.Invoke(controller, new object?[] { "planner step 1", sys, user, resp, false, CancellationToken.None })!;
+        await (Task)record.Invoke(controller, new object?[] { "verify step 1", sys, user, resp, false, CancellationToken.None })!;
+
+        dynamic run1 = spend.Invoke(controller, null)!;
+        Assert.NotNull(run1);
+        Assert.Equal(2, (int)run1.calls);
+        var expectedPrompt = 2 * (AgentTokenMetrics.EstimateTokens(sys) + AgentTokenMetrics.EstimateTokens(user));
+        var expectedResponse = 2 * AgentTokenMetrics.EstimateTokens(resp);
+        Assert.Equal(expectedPrompt, (int)run1.promptTokens);
+        Assert.Equal(expectedResponse, (int)run1.responseTokens);
+        Assert.Equal(expectedPrompt + expectedResponse, (int)run1.totalTokens);
+
+        // A per-step TAKE snapshots+resets the step counters but must NOT touch the run total.
+        dynamic taken = take.Invoke(controller, null)!;
+        Assert.Equal(2, (int)taken.calls);
+        Assert.Null(take.Invoke(controller, null)); // step counters reset
+
+        // More rounds accumulate on top of the run total — still 4 calls, doubled values.
+        await (Task)record.Invoke(controller, new object?[] { "planner step 2", sys, user, resp, false, CancellationToken.None })!;
+        await (Task)record.Invoke(controller, new object?[] { "web assess", sys, user, resp, false, CancellationToken.None })!;
+        dynamic run2 = spend.Invoke(controller, null)!;
+        Assert.Equal(4, (int)run2.calls);
+        Assert.Equal(2 * expectedPrompt, (int)run2.promptTokens);
+        Assert.Equal(2 * expectedResponse, (int)run2.responseTokens);
+        Assert.Equal(2 * (expectedPrompt + expectedResponse), (int)run2.totalTokens);
+        // The run total is never reset by a take.
+        dynamic run3 = spend.Invoke(controller, null)!;
+        Assert.Equal(4, (int)run3.calls);
+    }
+
+    [Fact]
     public async Task RenameTask_AmbiguousSingleLineAnchor_NeverLandsPartialRename()
     {
         // The counting lesson applied: the model "confidently" anchors ONE occurrence line
@@ -1341,33 +1394,49 @@ public class SyntheticGroundTruthEvalTests : IDisposable
     [Fact]
     public async Task CleanPass_OsOutputDemandSatisfied_PublishesOsOutputPass()
     {
-        // The web-task clean pass ("search the web and write the data into a text file on my
-        // desktop"): zero repo edits, but the OS-output demand was satisfied by a completed
-        // command targeting the directory. The ground-truth section must render with the OS
-        // check's pass — a clean pass is still a verified pass.
+        // The web-task clean pass ("search the web and write the data into a text file"):
+        // zero repo edits, but the OS-output demand was satisfied — the demanded file REALLY
+        // exists with content on disk (the written-check requires the actual file with
+        // meaningful content, not just a command that mentions the folder). Pinned to an
+        // absolute TEMP path so the deterministic check never depends on real-world state
+        // (Desktop\ai_article_data.txt existing on the machine) — the old "on my desktop"
+        // wording made this test pass/fail on desktop contents. The ground-truth section must
+        // render with the OS check's pass — a clean pass is still a verified pass.
         const string cardId = "gt-card-os";
-        await _boardData.SaveRawAsync(BoardWithCard(cardId, "doing"));
-        const string prompt =
-            "Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.";
-        var hasDemand = AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out var demand);
-        Assert.True(hasDemand);
-        var results = new List<object>
+        var dir = Path.Combine(Path.GetTempPath(), "weaver_osv_gt_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
         {
-            new Dictionary<string, object?>
+            var target = Path.Combine(dir, "ai_article_data.txt");
+            File.WriteAllText(target, "data");
+            await _boardData.SaveRawAsync(BoardWithCard(cardId, "doing"));
+            var prompt = $"search the web for an interesting and relevant AI article and write the data into a text file at \"{target}\"";
+            var hasDemand = AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out var demand);
+            Assert.True(hasDemand);
+            Assert.Equal(dir, demand.DirectoryPath);
+            Assert.Equal("ai_article_data.txt", demand.FileNameHint);
+            var results = new List<object>
             {
-                ["type"] = "_command", ["status"] = "done",
-                ["command"] = $"Set-Content -Path \"{Path.Combine(demand.DirectoryPath, "ai_article_data.txt")}\" -Value 'data'"
-            }
-        };
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "_command", ["status"] = "done",
+                    ["command"] = $"Set-Content -Path \"{target}\" -Value 'data'"
+                }
+            };
 
-        var (complete, _, _, _, _) = await InvokePostExecuteVerify(prompt, results, cardId);
+            var (complete, _, _, _, _) = await InvokePostExecuteVerify(prompt, results, cardId);
 
-        Assert.True(complete);
-        var gt = ReadGroundTruth(await _boardData.LoadRawAsync(), cardId);
-        Assert.NotNull(gt);
-        var pass = Assert.Single(gt!);
-        Assert.Contains("✓ OS output:", pass);
-        Assert.Contains("ai_article_data.txt", pass);
+            Assert.True(complete);
+            var gt = ReadGroundTruth(await _boardData.LoadRawAsync(), cardId);
+            Assert.NotNull(gt);
+            var pass = Assert.Single(gt!);
+            Assert.Contains("✓ OS output:", pass);
+            Assert.Contains("ai_article_data.txt", pass);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
     }
 
     [Fact]
@@ -1957,7 +2026,7 @@ public class SyntheticGroundTruthEvalTests : IDisposable
             /*attachedFiles*/ attachedFiles ?? new List<string> { GlobeCssRel, GlobeHtmlRel },
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ cardId,
-            /*createTests*/ false, /*buildCommands*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
         })!;
         return await task;
     }

@@ -38,6 +38,10 @@ public partial class AgentController : ControllerBase
     private readonly EditKnowledgeService _editKnowledge;
     private readonly PushNotificationService _push;
     private readonly DatabaseService _db;
+    // Builds + runs KNOWN-GOOD scraper scripts for the host environment (OS, interpreters,
+    // installed scraping packages) when _web_fetch keeps failing — the "_scraper" fallback
+    // step. Tests swap this via reflection with a fake runner.
+    private ScraperEnvironmentService _scraperService = new();
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
     private async Task<FrontendConfig> LoadConfigAsync()
@@ -80,6 +84,15 @@ public partial class AgentController : ControllerBase
     private int _stepLlmPromptTokens;
     private int _stepLlmResponseTokens;
     private int _stepLlmCalls;
+    // RUN-level cumulative LLM spend (never reset mid-run) — the live "tokens currently in
+    // use" counter. The discovery-context counter alone is meaningless on OS/benchmark tasks
+    // whose sandbox holds no files (context ≈ 0 tokens) even while every planner round burns
+    // thousands of prompt+response tokens; this total is what the run actually cost. Emitted
+    // on every context SSE event so the agent panel shows it growing in real time. Reset at
+    // run start in StepResolutionPipeline alongside the per-step accumulators.
+    private int _runLlmPromptTokens;
+    private int _runLlmResponseTokens;
+    private int _runLlmCalls;
     // Phase-1 discovery steps (read results), used to build the live context breakdown as the
     // discovery context grows during execution.
     private List<object> _discoverySteps = new();
@@ -176,9 +189,29 @@ public partial class AgentController : ControllerBase
         _stepLlmPromptTokens += promptTokens;
         _stepLlmResponseTokens += responseTokens;
         _stepLlmCalls++;
+        _runLlmPromptTokens += promptTokens;
+        _runLlmResponseTokens += responseTokens;
+        _runLlmCalls++;
         await EmitLog(emitSse, "metric",
             $"📊 LLM round [{label}]: ~{promptTokens:N0} prompt + ~{responseTokens:N0} response = ~{(promptTokens + responseTokens):N0} tokens",
             ct: ct);
+    }
+
+    /// <summary>
+    /// The cumulative LLM token spend of the CURRENT run (never reset mid-run), for the live
+    /// "tokens used" counter on the agent panel — distinct from the per-step snapshot and
+    /// from the discovery-context size. Returns null when no labeled LLM round has run yet.
+    /// </summary>
+    private object? RunLlmSpend()
+    {
+        if (_runLlmCalls == 0) return null;
+        return new
+        {
+            calls = _runLlmCalls,
+            promptTokens = _runLlmPromptTokens,
+            responseTokens = _runLlmResponseTokens,
+            totalTokens = _runLlmPromptTokens + _runLlmResponseTokens
+        };
     }
 
     /// <summary>
@@ -488,12 +521,14 @@ public partial class AgentController : ControllerBase
             await EmitLog(true, "info", "Agent started", new { projectRoot, task = req.Prompt, endpoint = runEndpointName });
             AgentPlan? existingPlan = null;
             HashSet<int>? completedIndices = null;
+            List<Dictionary<string, object?>>? loadedWebResults = null;
             bool isBenchmark = req.IsBenchmark;
             if (!string.IsNullOrWhiteSpace(req.CardId))
             {
-                var (loadedPlan, loadedCompleted, loadedBenchmark) = await LoadPlanFromBoardDataAsync(req.CardId);
+                var (loadedPlan, loadedCompleted, loadedBenchmark, webResults) = await LoadPlanFromBoardDataAsync(req.CardId);
                 existingPlan = loadedPlan;
                 completedIndices = loadedCompleted;
+                loadedWebResults = webResults;
                 if (loadedBenchmark) isBenchmark = true;
             }
             if (isBenchmark)
@@ -513,7 +548,8 @@ public partial class AgentController : ControllerBase
                 completedStepIndices: completedIndices,
                 cardId: req.CardId,
                 createTests: req.CreateTests,
-                buildCommands: req.BuildCommands);
+                buildCommands: req.BuildCommands,
+                webResults: loadedWebResults);
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentProjectUtilities.HasSuccessfulEdits(allSteps);
             if (isBenchmark)

@@ -65,6 +65,10 @@ partial class AgentController
         _stepLlmPromptTokens = 0;
         _stepLlmResponseTokens = 0;
         _stepLlmCalls = 0;
+        // Run-level cumulative LLM spend (the live "tokens used" counter) is per-run too.
+        _runLlmPromptTokens = 0;
+        _runLlmResponseTokens = 0;
+        _runLlmCalls = 0;
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         // These disk/DB tasks deliberately start before the connectivity probe is
         // awaited: on the rare probe failure their results are discarded, which is
@@ -1170,6 +1174,10 @@ partial class AgentController
             contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext),
             contextChars = discoveryContext.Length,
             contextBreakdown = BuildContextBreakdown(_discoverySteps, discoveryContext),
+            // The cumulative LLM spend so far — the live "tokens used" number. The context
+            // size alone is meaningless on OS/benchmark tasks (empty sandbox ≈ 0 context
+            // tokens) while every planner/verify round still costs thousands of tokens.
+            llmSpend = RunLlmSpend(),
             final
         }, ct);
     }

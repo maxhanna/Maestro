@@ -16,8 +16,7 @@ namespace Weaver.Services;
 /// <remarks>
 /// <para>
 /// Detection discipline mirrors <c>AgentController.IsExternalFilesystemTask</c>
-/// (OS-location word + filesystem artifact + repo-context escape hatch): a demand
-/// fires only when the task has a WRITE verb (write/save/dump/export/store/put/log),
+/// (OS-location word + filesystem artifact + repo-context escape hatch): a demand    /// fires only when the task has a WRITE verb (write/save/dump/export/store/put/log/create/append/insert/add),
 /// a FILE artifact ("text file", " file", ".txt", "data", "results", …) AND an OS
 /// location ("my desktop", "downloads folder", an absolute path, a ~ path). A repo
 /// mention anywhere in the prompt escapes — "save to the project's desktop folder"
@@ -65,7 +64,7 @@ public static class AgentOsOutputVerifier
     };
 
     private static readonly string[] WriteVerbs =
-        { "write", "save", "dump", "export", "store", "put", "log" };
+        { "write", "save", "dump", "export", "store", "put", "log", "create", "append", "insert", "add" };
 
     private static readonly string[] FileArtifacts =
     {
@@ -76,7 +75,8 @@ public static class AgentOsOutputVerifier
     /// <summary>
     /// Deterministically detects whether the task demands a file be written to the OS
     /// filesystem (desktop/downloads/documents/home or an absolute/~/path). Fires only
-    /// when a write verb AND a file artifact AND an OS location all appear, and never
+    /// when a write verb (write/save/dump/export/store/put/log/create/append/insert/add) AND a file artifact
+    /// AND an OS location all appear, and never
     /// when the task references the repo.
     /// </summary>
     public static bool TryGetOsFileOutputDemand(string? prompt, out OsOutputDemand demand)
@@ -160,9 +160,11 @@ public static class AgentOsOutputVerifier
     }
 
     /// <summary>
-    /// True when the run plausibly wrote the demanded output: a successful _command step
-    /// whose command text references the target directory, or the target file existing on
-    /// disk (task-named file, else <see cref="DefaultDumpFileName"/>).
+    /// True when the run plausibly wrote the demanded output: the demanded file exists on
+    /// disk with meaningful content (task-named file, else <see cref="DefaultDumpFileName"/>).
+    /// When the OS location cannot be resolved (headless runners have no Desktop/Documents
+    /// folder), a successful _command step whose text references the target file is the only
+    /// evidence available and counts as written.
     /// </summary>
     public static bool IsOsOutputWritten(OsOutputDemand demand, IEnumerable<Dictionary<string, object?>> results)
     {
@@ -173,24 +175,157 @@ public static class AgentOsOutputVerifier
             try { normDir = Path.GetFullPath(demand.DirectoryPath).Replace('\\', '/'); }
             catch { normDir = ""; }
         }
+        // PRIMARY: whenever the target directory resolves, the demanded file itself must
+        // exist with meaningful content. A done _command that merely MENTIONS the directory
+        // — or that wrote a differently-named file — is not proof of the write: a failed
+        // fetch can save an empty PowerShell object rendering ("@{title=; summary=}") or the
+        // agent can pick its own file name, and neither satisfies "write the data into a
+        // text file on my desktop".
+        if (normDir.Length > 0)
+        {
+            try
+            {
+                var targetPath = Path.Combine(demand.DirectoryPath, fileName);
+                if (System.IO.File.Exists(targetPath))
+                    return HasMeaningfulContent(targetPath);
+            }
+            catch { }
+            return false;
+        }
+        // HEADLESS FALLBACK: on platforms where the OS folder cannot be resolved there is no
+        // file to inspect, so a done command naming the target file is the only evidence.
         foreach (var r in results)
         {
             if (r.GetValueOrDefault("type")?.ToString() is not ("command" or "_command")) continue;
             if (r.GetValueOrDefault("status")?.ToString() != "done") continue;
             var cmd = r.GetValueOrDefault("command")?.ToString() ?? r.GetValueOrDefault("change")?.ToString() ?? "";
             if (cmd.Length == 0) continue;
-            // A successful command referencing the demanded directory counts as written.
-            if (normDir.Length > 0 && cmd.Replace('\\', '/').Contains(normDir, StringComparison.OrdinalIgnoreCase))
-                return true;
-            // Fallback when the directory couldn't be resolved on this platform (headless
-            // Linux has no Desktop/Documents folder): a done command that names the target
-            // file still proves the write happened.
             if (fileName.Length > 0 && cmd.Contains(fileName, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
-        if (normDir.Length == 0) return false;
-        try { return System.IO.File.Exists(Path.Combine(demand.DirectoryPath, fileName)); }
+        return false;
+    }
+
+    /// <summary>
+    /// True when the file exists with real, non-trivial content. Rejects an empty file and
+    /// the "hollow object rendering" a failed PowerShell fetch produces — Select-Object on an
+    /// HTML response stringifies as "@{title=; summary=; publishedDate=}" (every property
+    /// empty) and Set-Content happily saves that. Such a file is evidence of a failed fetch,
+    /// not of the demanded data being written.
+    /// </summary>
+    private static bool HasMeaningfulContent(string path)
+    {
+        string content;
+        try { content = System.IO.File.ReadAllText(path); }
         catch { return false; }
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        return !IsHollowObjectRendering(content);
+    }
+
+    /// <summary>
+    /// True when the entire content is an "@{key=; key=}" rendering in which every property
+    /// value is empty — the signature of a failed fetch (Select-Object of an HTML response)
+    /// rather than real data.
+    /// </summary>
+    private static bool IsHollowObjectRendering(string content)
+    {
+        var trimmed = content.Trim();
+        if (!trimmed.StartsWith("@{", StringComparison.Ordinal) || !trimmed.EndsWith("}", StringComparison.Ordinal))
+            return false;
+        var inner = trimmed[2..^1];
+        if (string.IsNullOrWhiteSpace(inner)) return true;
+        foreach (var part in inner.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = part.IndexOf('=');
+            var value = eq >= 0 ? part[(eq + 1)..] : part;
+            if (!string.IsNullOrWhiteSpace(value)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves where a web step's task wants its output file, for the eager dump's
+    /// destination preparation. OS demands (absolute / ~ / named desktop-downloads paths)
+    /// are resolved exactly as <see cref="TryGetOsFileOutputDemand"/> and win; otherwise a
+    /// REPO-RELATIVE demand ("create a folder called benchmark_test_16 … a file called
+    /// pokemon_data.csv at the project root") resolves under <paramref name="projectRoot"/>
+    /// — the benchmark-task failure mode where the fetch must land in a folder that does
+    /// not exist yet. Returns false when the task has no write-verb + file-artifact demand
+    /// either way.
+    /// </summary>
+    public static bool TryGetFileOutputTarget(string prompt, string projectRoot, out OsOutputDemand demand)
+    {
+        demand = new OsOutputDemand("", "", null);
+        if (string.IsNullOrWhiteSpace(prompt) || string.IsNullOrWhiteSpace(projectRoot))
+            return false;
+        if (TryGetOsFileOutputDemand(prompt, out var osDemand))
+        {
+            demand = osDemand;
+            return true;
+        }
+        var lower = prompt.ToLowerInvariant();
+        var hasWriteVerb = false;
+        foreach (var v in WriteVerbs)
+            if (Regex.IsMatch(lower, $@"\b{v}\w*\b")) { hasWriteVerb = true; break; }
+        if (!hasWriteVerb) return false;
+        var hasArtifact = false;
+        foreach (var a in FileArtifacts)
+            if (lower.Contains(a)) { hasArtifact = true; break; }
+        if (!hasArtifact) return false;
+        // Prefer an explicit relative path ("benchmark_test_16/pokemon_data.csv"); otherwise a
+        // bare file name may be scoped into a folder the task names ("create a folder called
+        // X … a file called Y.csv"). Falls back to the file at the project root.
+        var rel = ExtractRelativePath(prompt);
+        if (string.IsNullOrWhiteSpace(rel))
+        {
+            // A tight bare-filename token (no spaces — a real file name), NOT the OS hint
+            // extractor: "create a file called pokemon_data.csv" must yield "pokemon_data.csv",
+            // never the whole phrase.
+            var bareFile = Regex.Match(prompt, @"\b([A-Za-z0-9_\-]+\.[A-Za-z0-9]{1,5})\b");
+            if (!bareFile.Success) return false;
+            var hint = bareFile.Groups[1].Value;
+            var folder = Regex.Match(lower,
+                @"(?:folder|directory)\s+(?:called\s+|named\s+)?['""']?([a-z0-9_\-]+)['""']?",
+                RegexOptions.IgnoreCase);
+            rel = folder.Success ? folder.Groups[1].Value + "/" + hint : hint;
+        }
+        if (!LooksLikeFilePath(rel)) return false;
+        string full;
+        try { full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar))); }
+        catch { return false; }
+        var dir = Path.GetDirectoryName(full);
+        if (string.IsNullOrWhiteSpace(dir)) return false;
+        demand = new OsOutputDemand("repo", dir, Path.GetFileName(full));
+        return true;
+    }
+
+    /// <summary>
+    /// Creates the demanded dump destination's parent directory when it does not exist
+    /// (idempotent) so a web step's eager dump — and any later write step — can never fail
+    /// on "directory not found". Returns the directory, or null when the demand has no
+    /// resolvable directory or creation fails.
+    /// </summary>
+    public static string? PrepareDumpDirectory(OsOutputDemand demand)
+    {
+        if (string.IsNullOrWhiteSpace(demand.DirectoryPath)) return null;
+        try
+        {
+            System.IO.Directory.CreateDirectory(demand.DirectoryPath);
+            return demand.DirectoryPath;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>A relative path with at least one separator and a file extension
+    /// ("benchmark_test_16/pokemon_data.csv", 'data/notes.md') — quoted or bare.</summary>
+    private static string? ExtractRelativePath(string prompt)
+    {
+        var quoted = Regex.Match(prompt,
+            @"[""']((?:[A-Za-z0-9_\-]+[\\/])+[A-Za-z0-9_\-]+\.[A-Za-z0-9]{1,5})[""']");
+        if (quoted.Success) return quoted.Groups[1].Value.Trim();
+        var bare = Regex.Match(prompt,
+            @"\b([A-Za-z0-9_\-]+[\\/][A-Za-z0-9_\-]+\.[A-Za-z0-9]{1,5})\b");
+        return bare.Success ? bare.Groups[1].Value.Trim() : null;
     }
 
     /// <summary>
@@ -207,15 +342,18 @@ public static class AgentOsOutputVerifier
             ? demand.DirectoryPath
             : Path.Combine(demand.DirectoryPath, demand.FileNameHint!);
         return $"The task asked to write a file to \"{where}\" on the OS filesystem (outside the repo), " +
-               "but the run ended without creating it — no _command step wrote there and the file does not exist. " +
-               "The requested file was never created, so the task is not complete.";
+               "but the run did not deliver it — the demanded file was never created (it does not exist), " +
+               "or it exists with empty/hollow content (e.g. a failed fetch stringified as '@{title=; summary=}'). " +
+               "The task is not complete.";
     }
 
     /// <summary>
     /// Writes the run's harvested web results (search + fetch outputs, in order, capped)
-    /// to the demanded target path. Returns the written path on success. The file gets a
-    /// small header (task + timestamp) so the dump stands alone. Pure function of the
-    /// results — no LLM, no planning round.
+    /// to the demanded target path. Returns the written path on success. Creates the
+    /// parent directory when needed (the task may name an arbitrary path); when the
+    /// target file already exists the fresh sections are APPENDED so existing content is
+    /// never clobbered, otherwise a small header (task + timestamp) leads the file so the
+    /// dump stands alone. Pure function of the results — no LLM, no planning round.
     /// </summary>
     public static (bool dumped, string? path, string? error) TryAutoDumpWebResults(
         string prompt, OsOutputDemand demand, IEnumerable<Dictionary<string, object?>> results)
@@ -252,8 +390,25 @@ public static class AgentOsOutputVerifier
         catch (Exception ex) { return (false, null, $"invalid target path: {ex.Message}"); }
         try
         {
-            var header = $"# Weaver web results\nTask: {prompt}\nGenerated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n";
-            System.IO.File.WriteAllText(target, header + sections, Encoding.UTF8);
+            // CREATE the parent directory when needed — the task may name an arbitrary
+            // path ("~/scratch/pokemon_data.csv") whose folders do not exist yet, and
+            // File.WriteAllText would fail without them.
+            var parentDir = Path.GetDirectoryName(target);
+            if (!string.IsNullOrWhiteSpace(parentDir))
+                System.IO.Directory.CreateDirectory(parentDir);
+            if (System.IO.File.Exists(target))
+            {
+                // INSERT rather than clobber: append the fresh web-results sections to
+                // whatever is already there, delimited, so an existing file (a notes doc,
+                // a CSV that already has its header row, an earlier dump) keeps its
+                // content instead of being destroyed by the next fetch.
+                System.IO.File.AppendAllText(target, "\n" + sections, Encoding.UTF8);
+            }
+            else
+            {
+                var header = $"# Weaver web results\nTask: {prompt}\nGenerated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n";
+                System.IO.File.WriteAllText(target, header + sections, Encoding.UTF8);
+            }
             return (true, target, null);
         }
         catch (Exception ex)

@@ -265,6 +265,8 @@
             <span ng-if="vm.streamingContextSize" class="phase-tag context-tag"
               ng-mouseenter="vm.showContextBreakdown = true" ng-mouseleave="vm.showContextBreakdown = false"
               title="Peak context size at run end (~{{vm.streamingContextChars | formatNumber}} chars)">⚡ {{vm.streamingContextSize | formatNumber}} tokens</span>
+            <span ng-if="vm.llmSpend && vm.llmSpend.totalTokens" class="phase-tag llm-spend-tag"
+              title="LLM tokens used this run — {{vm.llmSpend.calls}} call(s): ~{{vm.llmSpend.promptTokens | formatNumber}} prompt + ~{{vm.llmSpend.responseTokens | formatNumber}} response">♨ ~{{vm.llmSpend.totalTokens | formatNumber}} used</span>
           </div>
 
           <!-- Streaming state -->
@@ -285,6 +287,8 @@
                   </span>
                 </span>
               </span>
+              <span ng-if="vm.llmSpend && vm.llmSpend.totalTokens" class="phase-tag llm-spend-tag"
+                title="LLM tokens used this run — {{vm.llmSpend.calls}} call(s): ~{{vm.llmSpend.promptTokens | formatNumber}} prompt + ~{{vm.llmSpend.responseTokens | formatNumber}} response">♨ ~{{vm.llmSpend.totalTokens | formatNumber}} used</span>
               <span ng-if="vm.focusStats && vm.focusStats.files > 0" class="phase-tag focus-stat-tag"
                 title="Discovery focus: {{vm.focusStats.files}} file(s) read as focused regions, saved ~{{vm.focusStats.chars | formatNumber}} chars{{vm.focusStats.threshold ? ', effective focus threshold ' + (vm.focusStats.threshold | formatNumber) + ' chars' : ''}}">
                 📊 {{vm.focusStats.files}} focused · ~{{vm.focusStats.chars | formatNumber}} chars{{vm.focusStats.threshold ? ' · thr ' + (vm.focusStats.threshold | formatNumber) : ''}}
@@ -1093,7 +1097,7 @@
         </div>
       </div>
       <div class="popup-body">
-        <a href="https://bughosted.com/WeaverHelp" target="_blank" rel="noopener noreferrer"
+        <a href="https://maxhanna.github.io/weaver/" target="_blank" rel="noopener noreferrer"
           style="display:block; text-align:center; padding:13px 16px; background:rgba(212,175,55,0.12); color:#fbbf24; border:1px solid rgba(212,175,55,0.4); border-radius:8px; text-decoration:none; font-weight:bold; font-size:1.05em; transition:all 0.15s ease;"
           onmouseover="this.style.background='rgba(212,175,55,0.22)'" onmouseout="this.style.background='rgba(212,175,55,0.12)'">
           📚 Open Documentation

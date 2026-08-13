@@ -108,7 +108,8 @@ public static class AgentProjectUtilities
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_explore", StringComparison.OrdinalIgnoreCase) ||
-        file.Equals("_discover", StringComparison.OrdinalIgnoreCase));
+        file.Equals("_discover", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_scraper", StringComparison.OrdinalIgnoreCase));
 
     public static bool IsPathUnderRoot(string fullPath, string root)
     {
@@ -126,7 +127,8 @@ public static class AgentProjectUtilities
         {
             "_git", "_ping", "_show", "_display", "_create_file", "_create_directory",
             "_package_install", "_command", "_web_search", "_web_fetch", "_explore", "_discover",
-            "_rename", "_rename_file", "_move_file", "_delete_file", "_continue"
+            "_rename", "_rename_file", "_move_file", "_delete_file", "_continue",
+            "_scraper"
         };
         return !specialMarkers.Contains(path);
     }
@@ -150,6 +152,11 @@ public static class AgentProjectUtilities
         var knownCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "cd", "dir", "ls", "pwd", "echo", "type", "copy", "xcopy", "robocopy",
+            // Directory creation/removal — real terminal commands (the OS-task discovery
+            // section and the docs teach mkdir/New-Item for folder creation; a planned
+            // mkdir must pass the shell-command gate or it is rejected as "not an
+            // executable shell command" after the web-prep exemption already let it through).
+            "mkdir", "md", "rmdir", "rd",
             "dotnet", "npm", "npx", "pnpm", "yarn", "node", "python", "py",
             "git", "gh", "docker", "docker-compose", "kubectl", "ng", "vite",
             "tsc", "eslint", "prettier", "jest", "vitest", "playwright",
@@ -214,6 +221,34 @@ public static class AgentProjectUtilities
     private static readonly Regex ContentFetchCommandRegex = new Regex(
         @"(?i)\b(curl|wget|curl\.exe|irm|iwr|invoke-restmethod|invoke-webrequest|requests\.(?:get|post)|urllib|httpclient|webclient|downloadstring|downloadfile)\b[^\r\n]{0,200}https?://"
         + @"|\bfetch\(\s*['""]?https?://",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// True when a _create_file payload is a scraper/fetch SCRIPT — application code that
+    /// programs an HTTP fetch (requests.get/urllib/fetch()/Invoke-RestMethod/HttpClient/curl)
+    /// against a URL AND writes the result somewhere. That is the "wrote a Python app to do
+    /// the fetch" failure mode: on a web-needing task the fetch belongs to the _web_fetch step
+    /// tool, not to a script the planner invents (the model reaches for requests + csv when it
+    /// forgets _web_fetch exists). Requiring the URL AND a file-write keeps real client-service
+    /// code (an HTTP client that returns data, no file output) out of the net — only standalone
+    /// scrape-and-save scripts match.
+    /// </summary>
+    public static bool LooksLikeScraperScriptContent(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        if (!Regex.IsMatch(content, @"https?://", RegexOptions.IgnoreCase)) return false;
+        if (!ScraperFetchWordRegex.IsMatch(content)) return false;
+        return ScraperWriteRegex.IsMatch(content);
+    }
+
+    private static readonly Regex ScraperFetchWordRegex = new Regex(
+        @"(?i)\b(requests\.(?:get|post|request)|urllib|urlopen|http\.client|httpclient|webclient|"
+        + @"invoke-restmethod|invoke-webrequest|curl|wget|axios|fetch\s*\()",
+        RegexOptions.Compiled);
+
+    private static readonly Regex ScraperWriteRegex = new Regex(
+        @"(?i)\b(open\s*\([^)]*['\""][wa][b+]?['\""]|\.[\w]*write\w*\s*\(|writealltext|"
+        + @"set-content|out-file|to_csv|json\.dump|echo\s+[^\r\n]*>|>\s*['\""]?[\w./\\]+\.(?:csv|json|txt|md))",
         RegexOptions.Compiled);
 
     public static bool HasSuccessfulEdits(IEnumerable<object> steps) =>

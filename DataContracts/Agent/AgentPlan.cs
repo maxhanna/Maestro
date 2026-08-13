@@ -64,6 +64,15 @@ public class PlanStep
 {
     public string File { get; set; } = string.Empty;
     public string Change { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Frontend-side plan-item state persisted on the card (e.g. "rejected" for a step the
+    /// interleaved validator vetoed). Round-trips through boarddata so a restarted run can
+    /// skip rejected steps instead of executing them.
+    /// </summary>
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
+
     public int Priority { get; set; }
     public string? OldString { get; set; } = string.Empty;
     public string? NewString { get; set; } = string.Empty;

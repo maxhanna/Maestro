@@ -332,6 +332,11 @@ partial class AgentController
                 "- Decide: exactly which file to touch next, what to insert or change, the exact anchor text (oldString) to " +
                 "match against the current file, and the exact replacement (newString). Think about what could go wrong — " +
                 "missing imports, type errors, breaking call sites, duplicate anchors, CRLF line endings.\n" +
+                "- WEB/DATA-FETCH TASKS: when the task needs CURRENT or LIVE data from an external URL/API (search results, " +
+                "an API endpoint, the web), the next step is a STEP TOOL, not application code: \"_web_search\" (query in " +
+                "change) or \"_web_fetch\" (the exact URL in change). NEVER direct the planner to write a Python/JS/" +
+                "PowerShell scraper script (requests.get, urllib, fetch(), Invoke-RestMethod, HttpClient) or a _command that " +
+                "runs one — the system fetches the URL itself and auto-writes the harvested data to the demanded file.\n" +
                 "- WHOLE-METHOD STEPS USE FORMAT C: When the next step ADDS a brand-new method/function or REPLACES an ENTIRE " +
                 "existing method, direct the planner to emit FORMAT C (targetType=\"method\", targetName, insertAfter:true for ADD, " +
                 "newCode=COMPLETE new method) instead of oldString/newString — newCode carries only the new method, which saves " +
@@ -465,6 +470,25 @@ partial class AgentController
                 "still needs an article's full content, direct the planner to _web_fetch a CONCRETE URL listed in those " +
                 "results (never an invented one); if it needs a file written, draw its content from the titles/URLs/" +
                 "summaries already returned. The task is not a research task anymore — it is a USE-THE-RESULTS task.");
+        }
+        // OS-filesystem tasks (desktop/downloads/documents/home or an absolute path) have NO repo
+        // files to reason about, but the deep-reasoning system prompt is framed entirely around
+        // repo edits (anchors, FORMAT C, imports). Without an explicit frame the engine improvises
+        // script/infrastructure plans — "create main.py, import requests, pathlib…" — even though
+        // the planner's actual next step is a plain _command write or a _web_fetch of a URL from
+        // the results. Reframe the reasoning so the thinking aligns with the step. Gated on the
+        // same detection as discovery (IsExternalFilesystemTask); attached files mean repo-edit
+        // intent and win over the OS frame.
+        if (!hasAttached && IsExternalFilesystemTask(prompt))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### OS-FILESYSTEM TASK — OUTSIDE THE REPOSITORY ###");
+            sb.AppendLine("This task targets the OS filesystem (desktop/downloads/documents/home or an absolute path), " +
+                "NOT the repository. There are no repo files to read, edit, or anchor against, and NO scripts or source " +
+                "files to build. Do NOT plan Python/JS/C#/PowerShell scripts, 'main.py', imports, or scraping/fetching " +
+                "infrastructure. The next step will be a single concrete _command (a direct file write, or a fetch of a " +
+                "URL already listed in the web results) or a _web_fetch of a concrete URL from those results. Draw any " +
+                "file content VERBATIM from the web results / task text — never invent article URLs or data.");
         }
         return sb.ToString();
     }

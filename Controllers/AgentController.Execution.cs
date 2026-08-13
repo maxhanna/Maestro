@@ -162,6 +162,25 @@ partial class AgentController
                 try { await onActivity("executing"); } catch { }
             }
             var item = planItems[itemIdx];
+            // A step the interleaved validator REJECTED (web-gate veto, invented-path guard,
+            // etc.) is vetoed for this plan — replaying it on a restart would execute a step
+            // the run already refused (the benchmark run re-ran a rejected `mkdir` this way).
+            if (string.Equals(item.Status, "rejected", StringComparison.OrdinalIgnoreCase))
+            {
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex,
+                        type = "plan",
+                        description = item.Change,
+                        path = item.File,
+                        status = "skipped",
+                        planItemIndex = itemIdx,
+                        message = "Rejected in a previous run — skipping"
+                    }, ct);
+                stepIndex++;
+                continue;
+            }
             if (completedStepIndices.Contains(itemIdx))
             {
                 if (emitSse)
@@ -481,6 +500,36 @@ partial class AgentController
                     }
                     if (System.IO.File.Exists(newFileFullPath))
                     {
+                        // A web-step eager dump (or any earlier create in this run) may have
+                        // already produced THIS exact file with the demanded data — treat that
+                        // as done instead of erroring, so a plan that both dumps and plans a
+                        // _create_file for the same target doesn't stall on "file already exists".
+                        var normTarget = newFileFullPath.Replace('\\', '/').TrimEnd('/');
+                        var alreadyCreated = allResults.OfType<Dictionary<string, object?>>()
+                            .Any(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+                                      r.GetValueOrDefault("status")?.ToString() is "created" or "done" &&
+                                      string.Equals(
+                                          r.GetValueOrDefault("path")?.ToString()?.Replace('\\', '/').TrimEnd('/'),
+                                          normTarget, StringComparison.OrdinalIgnoreCase));
+                        if (alreadyCreated)
+                        {
+                            await EmitLog(emitSse, "info",
+                                $"✓ Already done: {newFileRelPath} — created earlier in this run (web-step dump); nothing to create", ct: ct);
+                            var skipResult = new Dictionary<string, object?>
+                            {
+                                ["index"] = stepIndex,
+                                ["type"] = "create",
+                                ["status"] = "skipped",
+                                ["path"] = newFileRelPath,
+                                ["reason"] = "file already created earlier in this run",
+                                ["planItemIndex"] = itemIdx
+                            };
+                            if (emitSse) await SendSse(Response, "step", skipResult, ct);
+                            allResults.Add(skipResult);
+                            await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
+                            stepIndex++;
+                            continue;
+                        }
                         await EmitLog(emitSse, "error", $"Cannot create {newFileRelPath} — file already exists at that exact path. Convert this step to an edit of the existing file.", ct: ct);
                         var existResult = new Dictionary<string, object?>
                         {
@@ -623,6 +672,21 @@ partial class AgentController
             {
                 (stepIndex, discoveryContext) = await ExecuteWebPlanStep(planFile, changeDesc, prompt, projectRoot, emitSse, ct,
                     allResults, planItems, itemIdx, stepIndex, discoveryContext, webCtx);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
+                // PERSIST the harvested web output on the card so a replayed run (restart)
+                // rebuilds its discovery context with this run's web data instead of starting
+                // empty — completed web steps are skipped on replay, never re-executed, so
+                // their results would otherwise be lost (allResults is session-only).
+                await PersistWebResultsToCardAsync(cardId, allResults);
+                continue;
+            }
+            if (planFile.Equals("_scraper", StringComparison.OrdinalIgnoreCase))
+            {
+                // FALLBACK FETCH when _web_fetch keeps failing: the system probes the host
+                // (OS, available interpreters, installed scraping packages), generates a
+                // KNOWN-GOOD scraper for the best toolchain, runs it against the URL, and
+                // writes the demanded file — no freehand LLM scraper code ever runs.
+                stepIndex = await ExecuteScraperStep(changeDesc, prompt, projectRoot, emitSse, ct, allResults, stepIndex);
                 await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
@@ -1185,6 +1249,45 @@ partial class AgentController
         var query = changeDesc.Trim();
         if (string.IsNullOrWhiteSpace(query))
             return (stepIndex, discoveryContext);
+        // PREPARE THE DUMP DESTINATION BEFORE THE WEB STEP — a task that demands an output
+        // file ("create a folder called benchmark_test_16 … a file called pokemon_data.csv")
+        // must never fail because the destination folder doesn't exist yet. Resolve the
+        // demanded target (OS path, or repo-relative under the project root) and create its
+        // parent directory NOW, idempotently, so the fetch's eager dump — and any later
+        // write step — always have a home. A task that explicitly demands the folder
+        // ("create a folder called X") sees it exist before the web step even runs, so the
+        // planner no longer needs to fight the missing-web-search guard for a mkdir step
+        // (the folder is simply there once the first web step executes).
+        if (AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out var prepDemand) &&
+            !string.IsNullOrWhiteSpace(prepDemand.DirectoryPath) &&
+            !System.IO.Directory.Exists(prepDemand.DirectoryPath))
+        {
+            var prepDir = AgentOsOutputVerifier.PrepareDumpDirectory(prepDemand);
+            if (prepDir != null)
+            {
+                allResults.Add(new Dictionary<string, object?>
+                {
+                    ["index"] = allResults.Count,
+                    ["type"] = "create",
+                    ["status"] = "created",
+                    ["path"] = prepDir,
+                    ["output"] = $"Dump destination folder created before the web step (the task demanded an output file there): {prepDir}"
+                });
+                if (emitSse)
+                {
+                    await SendSse(Response, "step", new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "create",
+                        ["status"] = "created",
+                        ["path"] = prepDir,
+                        ["description"] = "Created the demanded output folder before the web step",
+                        ["output"] = $"Folder ready for the demanded output file: {prepDir}"
+                    }, ct);
+                    await EmitLog(emitSse, "info", $"📁 Dump destination folder ready before the web step: {prepDir}", ct: ct);
+                }
+            }
+        }
         await EmitLog(emitSse, "info", $"Web {(isSearch ? "search" : "fetch")}: {query}", ct: ct);
         var (outp, err) = isSearch ? await ExecuteWebSearchAsync(query, prompt, ct) : await WebFetchAsync(query, ct);
         var curIdx = stepIndex;
@@ -1211,6 +1314,67 @@ partial class AgentController
                 ["truncated"] = truncated
             }, ct);
         }
+        // EAGER OS-DUMP — when a web step is tasked with a prompt that demands a file be
+        // written on the OS filesystem ("fetch the article and create a text file on my
+        // desktop with the data"), write it HERE in the same web step while the returned
+        // data is fresh, instead of deferring to a later LLM step where the harvested
+        // results get compacted in the context or fabricated. The dump is deterministic (a
+        // pure function of the results just gathered — no planning round), creates parent
+        // folders and appends rather than clobbers an existing file (IsOsOutputWritten), so
+        // the CRUD against the demanded path happens right away.
+        //
+        // WHICH steps trigger it: a successful _web_fetch always (its output IS the demanded
+        // data), and a _web_search ONLY when it routed to the news digest (the same
+        // LooksLikeNewsQuery predicate ExecuteWebSearchAsync uses) — a digest search already
+        // returns the finished, dated article list with real URLs, so for a news-marked task
+        // demanding an OS file that IS the data, used up right here. A plain DuckDuckGo
+        // search is intermediate research — the fetch that follows owns the content — so it
+        // must not dump (that keeps the fetch-retry and repeated-search paths intact).
+        var allResultDicts = allResults.OfType<Dictionary<string, object?>>().ToList();
+        var isNewsDigestSearch = isSearch &&
+            (NewsService.LooksLikeNewsQuery(prompt) || NewsService.LooksLikeNewsQuery(query));
+        if (err == null && (isNewsDigestSearch || !isSearch) &&
+            AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out var osDemand) &&
+            !AgentOsOutputVerifier.IsOsOutputWritten(osDemand, allResultDicts))
+        {
+            var (dumped, dumpPath, dumpError) = AgentOsOutputVerifier.TryAutoDumpWebResults(
+                prompt, osDemand, allResultDicts);
+            if (dumped && dumpPath != null)
+            {
+                // "os" marks an OS-filesystem write (outside the repo) so repo-edit filters
+                // can exclude it; a repo-relative dump (LocationKind "repo") IS a repo edit.
+                var isOsWrite = !string.Equals(osDemand.LocationKind, "repo", StringComparison.OrdinalIgnoreCase);
+                allResults.Add(new Dictionary<string, object?>
+                {
+                    ["index"] = allResults.Count,
+                    ["type"] = "create",
+                    ["status"] = "created",
+                    ["path"] = dumpPath,
+                    ["os"] = isOsWrite,
+                    ["output"] = $"Output file written with the fresh web data (auto-dumped in the web step — the task demanded a file): {dumpPath}"
+                });
+                if (emitSse)
+                {
+                    await SendSse(Response, "step", new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "create",
+                        ["status"] = "created",
+                        ["path"] = dumpPath,
+                        ["os"] = isOsWrite,
+                        ["description"] = $"Wrote the demanded output file: {dumpPath}",
+                        ["output"] = $"Fresh web data dumped to {dumpPath} — the task's file demand was satisfied in the web step"
+                    }, ct);
+                    await EmitLog(emitSse, "success",
+                        $"💾 File demand satisfied in the web step — dumped fresh web data to {dumpPath}", ct: ct);
+                }
+            }
+            else if (emitSse)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"File demand detected but no dumpable web data yet ({dumpError}) — the plan will still need a write step.", ct: ct);
+            }
+        }
         if (!string.IsNullOrWhiteSpace(outp) && outp.Length > 80)
             webCtx.AppendLine($"\n## Web [{query}]\n{outp}");
         var nextIsWeb = itemIdx + 1 < planItems.Count &&
@@ -1235,6 +1399,88 @@ partial class AgentController
         }
         return (stepIndex + 1, discoveryContext);
     }
+
+    /// <summary>
+    /// Executes the "_scraper" fallback step: the system (not the LLM) builds a KNOWN-GOOD
+    /// scraper for the host's best toolchain (python+requests → python+urllib → node fetch →
+    /// PowerShell) and runs it against the URL, writing the task's demanded file. The output
+    /// is wrapped in the same ### WEB RESULTS shape the eager dump uses, so downstream
+    /// verifiers and the benchmark scorer treat it like any other fetched data.
+    /// </summary>
+    private async Task<int> ExecuteScraperStep(
+        string url, string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        List<object> allResults, int stepIndex)
+    {
+        if (emitSse)
+            await EmitLog(emitSse, "info", $"Scraper fallback: building a known-good scraper for {url}…", ct: ct);
+        string? outputPath = null;
+        if (AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out var demand) &&
+            !string.IsNullOrWhiteSpace(demand.DirectoryPath))
+        {
+            outputPath = Path.Combine(demand.DirectoryPath,
+                string.IsNullOrWhiteSpace(demand.FileNameHint) ? "output.txt" : demand.FileNameHint!);
+        }
+        var result = await _scraperService.TryRunScraperAsync(
+            url, outputPath, projectRoot, _scraperService.MetadataLineForNow(), ct);
+        var writtenRel = result.WrittenPath != null && AgentProjectUtilities.IsPathUnderRoot(result.WrittenPath, projectRoot)
+            ? Path.GetRelativePath(projectRoot, result.WrittenPath).Replace('\\', '/')
+            : result.WrittenPath;
+        var output = result.Success
+            ? $"Scraper ran OK (script: {writtenRel ?? "(stdout only)"}):\n{result.Output}"
+            : $"Scraper FAILED: {result.Error}";
+        if (emitSse)
+        {
+            await SendSse(Response, "step", new
+            {
+                index = stepIndex,
+                type = "scraper",
+                status = result.Success ? "done" : "error",
+                path = url,
+                description = $"Known-good scraper for {url}",
+                output = output,
+                error = result.Success ? null : result.Error
+            }, ct);
+        }
+        allResults.Add(new Dictionary<string, object?>
+        {
+            ["index"] = stepIndex,
+            ["type"] = "scraper",
+            ["status"] = result.Success ? "done" : "error",
+            ["path"] = url,
+            ["url"] = url,
+            ["query"] = $"scraper:{url}",
+            ["output"] = output,
+            ["error"] = result.Error
+        });
+        if (result.Success && result.WrittenPath != null)
+        {
+            if (emitSse)
+            {
+                await SendSse(Response, "step", new
+                {
+                    index = stepIndex + 1,
+                    type = "create",
+                    status = "created",
+                    path = writtenRel,
+                    os = !string.Equals(demand?.LocationKind, "repo", StringComparison.OrdinalIgnoreCase),
+                    description = $"Wrote the demanded output file: {writtenRel}",
+                    output = $"Fresh data written to {writtenRel} by the system-built scraper"
+                }, ct);
+            }
+            allResults.Add(new Dictionary<string, object?>
+            {
+                ["index"] = stepIndex + 1,
+                ["type"] = "create",
+                ["status"] = "created",
+                ["path"] = writtenRel,
+                ["os"] = !string.Equals(demand?.LocationKind, "repo", StringComparison.OrdinalIgnoreCase),
+                ["output"] = $"Fresh data written to {writtenRel} by the system-built scraper"
+            });
+            return stepIndex + 2;
+        }
+        return stepIndex + 1;
+    }
+
     private static (bool approved, string reason, int score) VerifyEdit(
         string oldString, string newString, string oldContent, string newContent, bool fromFormatC = false)
     {

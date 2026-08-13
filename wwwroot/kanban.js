@@ -62,6 +62,22 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         return null;
       };
 
+      // Pure guard for the startup drain: after a reload, a cron fire parked in To Do
+      // during a previous session (_endpointQueued, persisted in boarddata) never starts
+      // on its own — processQueuedCards only fires when a run FINISHES, and a fresh load
+      // has no finishing run. May the board drain it now? Only when state is loaded,
+      // nothing is streaming, and at least one READY parked/queued card is waiting.
+      // _autoQueued suggestion cards ride the same drain and are equally stranded after
+      // a reload, so both flags qualify (mirroring autoQueueEligible's "always drain").
+      // (tests/js/kanban-load-drain.test.js extracts this helper from the live source.)
+      function shouldDrainParkedCardsOnLoad(boardState, streamingActive) {
+        if (streamingActive) return false;
+        if (!boardState || !Array.isArray(boardState.todo)) return false;
+        return boardState.todo.some(function (c) {
+          return c && (c._endpointQueued || c._autoQueued) && c.ready && !c.selfImproving;
+        });
+      }
+
       function loadBoardData() {
         $http.get('/api/boarddata/load').then(function (resp) {
           try {
@@ -127,6 +143,19 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
               // Restore benchmark panel state (running flag + run-all queue/results)
               // from the board so a reload shows accurate progress instead of idle.
               if (vm._restoreBenchmarkState) vm._restoreBenchmarkState();
+
+              // Startup drain: a cron fire parked in To Do during a previous session
+              // (_endpointQueued, persisted in boarddata) would otherwise never start —
+              // processQueuedCards only fires when a run finishes, and a fresh load has no
+              // finishing run. With the board now loaded and nothing streaming, drain it so
+              // the queued job actually runs (a queued scheduled job must never be stranded).
+              // The drain itself re-checks busy endpoints, so a run that is genuinely still
+              // active on the server parks the card again instead of double-starting.
+              if (shouldDrainParkedCardsOnLoad(vm.state, vm.streamingActive)) {
+                $timeout(function () {
+                  if (vm.processQueuedCards) vm.processQueuedCards();
+                }, 100);
+              }
 
               if (vm.activeCardId && vm.planItems && vm.planItems.length) {
                 var activeCard = findCardById(vm.activeCardId);
@@ -228,6 +257,23 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         var cached = _cardsCache[key];
         if (cached && cached._version === _cardsVersion && cached._length === all.length) return cached;
         var filtered = all.filter(function (c) { return c.filePath === vm.selectedProject; });
+        // Scheduled (cron) cards run in THEIR OWN project — when that differs from the
+        // current selection, the strict project filter would hide the card from the
+        // board entirely: the agent output streams in the right-hand panel, but the
+        // card is nowhere to be seen. Surface _fromCron cards in Doing AND To Do
+        // regardless of project so a cron fire is always visible and controllable:
+        // Doing holds the running (and stopped-awaiting-cleanup) card, while To Do
+        // holds a fire that landed while the endpoint was busy (parked with
+        // _endpointQueued and queued to start the moment the current run clears) — a
+        // queued scheduled job must never be invisible. They leave the column via the
+        // normal lifecycle (delete on completion / manual delete), which calls
+        // saveCards and bumps _cardsVersion, invalidating this cache.
+        if ((col === 'doing' || col === 'todo') && vm.selectedProject) {
+          var cronElsewhere = all.filter(function (c) {
+            return c.filePath !== vm.selectedProject && c._fromCron;
+          });
+          if (cronElsewhere.length) filtered = filtered.concat(cronElsewhere);
+        }
         // Last-resort guard: never hand the ng-repeat a duplicate id, or Angular
         // throws ngRepeat:dupes and kills the whole digest. Keeps the board alive
         // even if a double-delivered push slips through elsewhere.

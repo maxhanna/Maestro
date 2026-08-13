@@ -111,6 +111,26 @@ angular.module('kanbanApp')
             if (!card || !card._autoQueued || !startedSuggestionCard) return false;
             return true;
         }
+        // Pure completion verdict for the 'done' SSE event. The server's explicit verdict
+        // wins: parsed.complete=true means the run was VERIFIED complete (the repair loop
+        // ended with zero issues and recorded a verified_complete step), so every real plan
+        // item is marked done — a stale unchecked item (a no-op repair edit that never
+        // emitted a step event, or a preserved rejected step) must never force a false
+        // restart of a finished card. Only when the server did NOT verify completion do
+        // unchecked steps mean "card stays in Doing" (the original plan-gate behavior for
+        // genuinely incomplete runs). Rejected steps keep their rejected marker.
+        // (tests/js/agent-done-verdict.test.js extracts this helper from the live source.)
+        function applyDoneVerdict(parsed, planItems) {
+            if (!planItems || !planItems.length) return { incomplete: !!(parsed && parsed.incomplete) };
+            if (parsed && parsed.complete) {
+                planItems.forEach(function (pi) { if (pi.status !== 'rejected') pi.done = true; });
+                return { incomplete: false };
+            }
+            if (!planItems.every(function (pi) { return pi.done; })) {
+                return { incomplete: true, unchecked: planItems.filter(function (pi) { return !pi.done; }).length };
+            }
+            return { incomplete: !!(parsed && parsed.incomplete) };
+        }
         // Pure guard for the pr/finish completion path: if BRANCH was toggled off while
         // the card was running, the finish POST must not re-record any PR state — the
         // card's prStatus is cleared instead ("skipped") so no stale "PR: weaver/xxx"
@@ -211,7 +231,7 @@ angular.module('kanbanApp')
                 vm.aiPrompt = ''; vm.aiResponse = ''; vm.activeCardText = ''; vm.activeCardId = null;
                 vm.activeCardIds = new Set(); vm.aiChatMessages = []; vm.aiChatInput = ''; vm.aiChatLoading = false; vm.chatMode = 'ask';
                 vm.streamingActive = false; vm.streamingThinking = ''; vm.streamingSummary = ''; vm._agentStopped = false; vm.streamingPhase = '';
-                vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.streamingTokenBuffer = '';
+                vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.llmSpend = null; vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.streamingTokenBuffer = '';
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.agentRuns = []; vm.currentRun = null;
@@ -591,7 +611,7 @@ angular.module('kanbanApp')
                         vm.refreshStreamingActive();
                         function startAgent() {
                             run._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
-                            vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
+                            vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.llmSpend = null; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
                             vm.focusStats = null;
                             vm.complexityScore = null; vm.complexityLabel = ''; vm.complexityTokenCap = null; vm.complexityMaxTokens = null; vm.complexityAtomicSteps = null;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
@@ -684,12 +704,16 @@ angular.module('kanbanApp')
                                                                 if (parsed && parsed.contextSize) { vm.streamingContextSize = parsed.contextSize; }
                                                                 if (parsed && parsed.contextChars) { vm.streamingContextChars = parsed.contextChars; }
                                                                 if (parsed && Array.isArray(parsed.contextBreakdown)) { vm.streamingContextBreakdown = parsed.contextBreakdown; }
+                                                                if (parsed && parsed.llmSpend) { vm.llmSpend = parsed.llmSpend; }
                                                                 break;
                                                             case 'context':
                                                                 // Live context counter updates during orchestration — no phase change, no log entry.
                                                                 if (parsed && parsed.contextSize) { vm.streamingContextSize = parsed.contextSize; }
                                                                 if (parsed && parsed.contextChars) { vm.streamingContextChars = parsed.contextChars; }
                                                                 if (parsed && Array.isArray(parsed.contextBreakdown)) { vm.streamingContextBreakdown = parsed.contextBreakdown; }
+                                                                // Live cumulative LLM spend — the "tokens used" counter (context size alone is
+                                                                // meaningless on OS/benchmark runs whose sandbox has no files).
+                                                                if (parsed && parsed.llmSpend) { vm.llmSpend = parsed.llmSpend; }
                                                                 // Final run-end context: persist the PEAK size onto the card (like _groundTruth /
                                                                 // _verification) so completed cards keep showing it after the live section closes,
                                                                 // surviving reloads — instead of the counter vanishing/resetting once the run ends.
@@ -697,6 +721,7 @@ angular.module('kanbanApp')
                                                                     var ctxCard = vm.findCardById(vm.activeCardId);
                                                                     if (ctxCard) {
                                                                         ctxCard._context = { size: vm.streamingContextSize, chars: vm.streamingContextChars, breakdown: vm.streamingContextBreakdown };
+                                                                        if (parsed.llmSpend) ctxCard._llmSpend = parsed.llmSpend;
                                                                         if (vm.saveCards) vm.saveCards();
                                                                     }
                                                                 }
@@ -912,7 +937,15 @@ angular.module('kanbanApp')
                                                                 run.active = false; run.status = 'done'; run.elapsed = Date.now() - run.startedAt; vm.refreshStreamingActive();
                                                                 if (vm.loadEndpointHealth) vm.loadEndpointHealth();
                                                                 var editsApplied = parsed && parsed.editsApplied;
-                                                                var incomplete = parsed && parsed.incomplete;
+                                                                // The server's completion verdict is authoritative: parsed.complete=true means the
+                                                                // run was verified complete (repair loop ended with zero issues). applyDoneVerdict
+                                                                // syncs non-rejected plan items to done when complete so a stale unchecked item
+                                                                // (a no-op repair edit that never emitted a step event, or a preserved rejected
+                                                                // step) can never force a false restart of a finished card; the plan-items check
+                                                                // only applies when the server did NOT verify completion.
+                                                                var doneVerdict = applyDoneVerdict(parsed, vm.planItems);
+                                                                var incomplete = doneVerdict.incomplete;
+                                                                if (doneVerdict.unchecked) pushAgentLog(vm, 'warn', 'Plan has ' + doneVerdict.unchecked + ' unchecked step(s) — card stays in Doing');
                                                                 if (card.id !== vm.activeCardId) {
                                                                     if (card._benchmark && recordBenchmarkScore) { recordBenchmarkScore((parsed && parsed.warning) || ''); }
                                                                     var concMsg = editsApplied ? 'Agent finished (concurrent)' : 'Agent finished without file edits (concurrent)';
@@ -965,10 +998,6 @@ angular.module('kanbanApp')
                                                                 var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
                                                                 if (doIdx !== -1) { vm.state.doing[doIdx].agentAnalysis = analysis; vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog); }
                                                                 if (vm._agentStopped || card.id !== vm.activeCardId) { $scope.$applyAsync(); return; }
-                                                                if (vm.planItems && vm.planItems.length) {
-                                                                    var allDone = vm.planItems.every(function (pi) { return pi.done; });
-                                                                    if (!allDone) { incomplete = true; pushAgentLog(vm, 'warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing'); }
-                                                                }
                                                                 function recordBenchmarkScore(errorReason) {
                                                                     if (!card._benchmark) return;
                                                                     vm.benchmarkRunning = false; vm.benchmarkLevel = null;

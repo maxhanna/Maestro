@@ -218,4 +218,40 @@ public class RejectedPlanStepPersistenceTests
         }
         finally { try { Directory.Delete(dir, true); } catch { /* db file stays locked — best effort */ } }
     }
+
+    [Fact]
+    public void LoadPlanFromBoardDataAsync_PreservesRejectedStatusForReplaySkip()
+    {
+        // The benchmark-run shape: the card's persisted plan contains a step the interleaved
+        // validator REJECTED (the `mkdir` _command, status=rejected, done=false). When the
+        // run restarts, the loaded PlanStep must carry Status="rejected" so ExecutePlan skips
+        // it instead of executing a step the run already refused (the observed restart re-ran
+        // the rejected mkdir on the Desktop).
+        var (controller, db, dir) = BuildHarness();
+        try
+        {
+            db.SetBoardData(BoardWithCard("card-replay", "doing",
+                "[{\"index\":0,\"file\":\"_web_search\",\"change\":\"q\",\"line\":0,\"done\":true}," +
+                 "{\"index\":1,\"file\":\"benchmark_test_16\",\"change\":\"benchmark_test_16\",\"line\":0,\"done\":true}," +
+                 "{\"index\":2,\"file\":\"_command\",\"change\":\"mkdir C:\\\\Users\\\\Saint\\\\Desktop\\\\benchmark_test_16\",\"line\":0,\"done\":false,\"status\":\"rejected\",\"error\":\"web-gate veto\"}]"));
+
+            var method = typeof(AgentController).GetMethod("LoadPlanFromBoardDataAsync", BindingFlags.NonPublic | BindingFlags.Instance)
+                ?? throw new InvalidOperationException("LoadPlanFromBoardDataAsync not found");
+            var result = ((Task<(AgentPlan? plan, HashSet<int>? completed, bool isBenchmark, List<Dictionary<string, object?>>? webResults)>)method
+                .Invoke(controller, new object?[] { "card-replay" })!).GetAwaiter().GetResult();
+            Assert.Null(result.webResults); // no web steps in this fixture — the 4th slot stays null
+
+            Assert.NotNull(result.plan);
+            Assert.Equal(3, result.plan!.Plan.Count);
+            var rejected = result.plan.Plan[2];
+            Assert.Equal("_command", rejected.File);
+            Assert.Equal("mkdir C:\\Users\\Saint\\Desktop\\benchmark_test_16", rejected.Change);
+            Assert.Equal("rejected", rejected.Status, ignoreCase: true);
+            // The rejected step was never done, so it is NOT in the completed set — the
+            // replay skip must come from the Status marker, not from completedIndices.
+            Assert.NotNull(result.completed);
+            Assert.False(result.completed!.Contains(2));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { /* db file stays locked — best effort */ } }
+    }
 }

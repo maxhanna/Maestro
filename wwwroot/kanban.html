@@ -52,6 +52,8 @@
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
             <span class="card-tag tag-context" ng-if="card._context && card._context.size"
               title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
+            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
           </div>
 
           <div class="card-text">
@@ -375,6 +377,8 @@
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
             <span class="card-tag tag-context" ng-if="card._context && card._context.size"
               title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
+            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
             <span class="card-tag tag-ready" ng-if="vm.isCardActive(card.id)" style="margin-left:auto;">▶ ACTIVE</span>
             <span class="card-tag tag-interrupted" ng-if="!vm.isCardActive(card.id) && vm.cardRunInterrupted(card)" style="margin-left:auto;" title="This card's run is no longer live — the stream ended without a done event (page reload or connection drop).">⚠ INTERRUPTED</span>
           </div>
@@ -868,6 +872,8 @@
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
             <span class="card-tag tag-context" ng-if="card._context && card._context.size"
               title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
+            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
           </div>
 
           <div class="card-text card-text-readonly">
@@ -1253,6 +1259,8 @@
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
             <span class="card-tag tag-context" ng-if="card._context && card._context.size"
               title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
+            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
           </div>
 
           <div class="card-text">
@@ -1333,6 +1341,8 @@
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
             <span class="card-tag tag-context" ng-if="card._context && card._context.size"
               title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
+            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
           </div>
           <div class="card-text card-text-readonly">{{card.text}}</div>
           <div class="card-tags" ng-if="card.priority">

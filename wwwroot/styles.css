@@ -3092,6 +3092,18 @@ h3 .small.ghost:hover {
 	cursor: help;
 }
 
+/* Live LLM spend counter — cumulative tokens the run actually used (prompt + response
+   across planner/verify/replanner rounds). Distinct amber so it reads as "cost" next to
+   the blue context-size tag; on OS/benchmark runs the context is tiny but the spend is
+   real, which is exactly why the two are shown separately. */
+.llm-spend-tag {
+	background: rgba(212, 175, 55, 0.14);
+	color: #fbbf24;
+	border: 1px solid rgba(212, 175, 55, 0.35);
+	font-variant-numeric: tabular-nums;
+	cursor: help;
+}
+
 .context-breakdown-pop {
 	position: absolute;
 	bottom: 150%;

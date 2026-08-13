@@ -30,11 +30,12 @@ namespace Weaver.UnitTests;
 ///      tool surface).
 ///   3. The step-2 planner turn must actually SEE the harvested results (the injection
 ///      feature), asserted on the recorded step-2 user prompt.
-///   4. When the planner then declares planComplete WITHOUT writing the demanded file (the
-///      observed "Now I need only create the final output file" hallucination), the
-///      OS-output gate auto-dumps the harvested web results to the target path — the run
-///      genuinely completes with the file on disk, zero repo edits, and every LLM call the
-///      script accounts for (Unmatched must be empty).
+///   4. When the task demands an OS output file, the successful _web_fetch step auto-dumps
+///      the harvested web results to the demanded target path IN THAT SAME STEP (the data
+///      is used up while fresh instead of being compacted through later steps, and CRUD on
+///      the demanded path happens right away) — the run genuinely completes with the file
+///      on disk, zero repo edits, and every LLM call the script accounts for (Unmatched
+///      must be empty).
 ///
 /// A second trace covers the steering path: a run that demands an OS output file but has no
 /// web content to dump; the premature planComplete is REJECTED with feedback and the planner
@@ -50,6 +51,9 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
     private readonly string _dumpTarget;   // test 1: the file the auto-dump must create
     private readonly string _steerTarget;  // test 2: the file the steered _command must create
     private readonly string _neverWrittenTarget; // test 3: the file NO run may ever create
+    private readonly string _newsTarget;   // test 4: the file the news-digest eager dump must create
+    private readonly string _folderPath;    // tests: repo-relative folder the planner must create first
+    private readonly string _csvPath;       // tests: the demanded data file inside _folderPath
     private readonly DatabaseService _db;
     private readonly BoardDataService _boardData;
     private readonly WebTaskScriptedClientFactory _clientFactory;
@@ -63,9 +67,13 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Directory.CreateDirectory(Path.Combine(_base, "dump"));
         Directory.CreateDirectory(Path.Combine(_base, "dump2"));
         Directory.CreateDirectory(Path.Combine(_base, "dump3"));
+        Directory.CreateDirectory(Path.Combine(_base, "dump4"));
         _dumpTarget = Path.Combine(_base, "dump", "ai_article_data.txt");
         _steerTarget = Path.Combine(_base, "dump2", "report.txt");
+        _folderPath = Path.Combine(_projectRoot, "benchmark_test_16");
+        _csvPath = Path.Combine(_folderPath, "pokemon_data.csv");
         _neverWrittenTarget = Path.Combine(_base, "dump3", "out.txt");
+        _newsTarget = Path.Combine(_base, "dump4", "news_roundup.txt");
 
         _db = new DatabaseService(
             Path.Combine(_base, "data", "weaver.db"),
@@ -82,19 +90,19 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task WebTask_PlanComplete_WithoutWritingFile_AutoDumpsHarvestedResults()
+    public async Task WebTask_FetchDemandsOsFile_AutoDumpsInTheSameFetchStep()
     {
         var controller = BuildController();
-        // The between-steps WEB assessment (new) runs after each successful web step and at
-        // the plan-complete recheck. Script it content-aware: incomplete until the demanded
-        // dump file exists — so the search/fetch steps keep planning, and only after the
-        // auto-dump lands does the recheck accept the planComplete.
+        // The between-steps WEB assessment (new) runs after each successful web step. Script
+        // it content-aware: incomplete until the demanded dump file exists — so the search
+        // step keeps planning, and only after the FETCH step lands its eager auto-dump does
+        // the assessment accept completion.
         _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
         // The target is an absolute temp path (quoted so spaces are safe) — the auto-dump
         // must write HERE, never to the real desktop.
         // Deliberately NOT a news-marked prompt ("…interesting and relevant AI article and
         // write the data into a text file…" now routes to the news digest via rule C) — this
-        // test locks the DuckDuckGo harvest → steer → command-dump machinery.
+        // test locks the DuckDuckGo harvest → fetch-step eager-dump machinery.
         var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\".";
 
         var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
@@ -125,25 +133,28 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.Contains("### WEB RESULTS ARE IN CONTEXT ###", step2Prompt);
         Assert.Contains("_web_fetch step with THAT exact URL from the results", step2Prompt);
 
-        // The plan is _web_search → _web_fetch → the auto-dumped _command write. The dump
-        // step was added deterministically by the OS-output gate, not planned by the LLM.
+        // The plan is _web_search → _web_fetch. The demanded file was written INSIDE the
+        // fetch step by the deterministic eager auto-dump — no extra LLM-planned write step
+        // exists and no plan-complete gate needed to add one.
         Assert.NotNull(plan);
-        Assert.Equal(new[] { "_web_search", "_web_fetch", "_command" }, plan!.Plan.Select(s => s.File).ToArray());
+        Assert.Equal(new[] { "_web_search", "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
         Assert.Equal("AI research breakthroughs latest", plan.Plan[0].Change);
         Assert.Equal("https://example.com/alphafold3", plan.Plan[1].Change);
-        Assert.Contains("Auto-dump web results", plan.Plan[2].Change);
 
-        // The auto-dump is recorded as an executed command step result.
+        // The eager auto-dump is recorded as a created OS-file step result (os=true — an
+        // OS-filesystem write, not a repo edit) carrying the demanded path.
         var dumpResult = allSteps.OfType<Dictionary<string, object?>>()
-            .Single(r => r.GetValueOrDefault("type")?.ToString() == "command");
-        Assert.Equal("done", dumpResult.GetValueOrDefault("status")?.ToString());
+            .Single(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+                         r.GetValueOrDefault("os") is true);
+        Assert.Equal("created", dumpResult.GetValueOrDefault("status")?.ToString());
         Assert.Equal(_dumpTarget, dumpResult.GetValueOrDefault("path")?.ToString());
 
         // ZERO repo file edits were applied — the core "not an invented edit" assertion. A
         // pre-fix run would have planned an edit to a repo file (or a _create_file for a
-        // scraper script) and applied it.
+        // scraper script) and applied it. The OS-file auto-dump (os=true) is not a repo edit.
         var editResults = allSteps.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+            .Where(r => r.GetValueOrDefault("os") is not true &&
+                        r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
                         r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
             .ToList();
         Assert.Empty(editResults);
@@ -151,17 +162,459 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // Every LLM call the pipeline made was one the script accounted for.
         Assert.Empty(_clientFactory.Unmatched);
 
-        // Sanity: the scripted LLM saw the expected call kinds (checklist + 3 planner turns;
-        // no verify/cohesion/post-verify — the dump is deterministic and no repo edits
-        // exist to verify).
+        // Sanity: the scripted LLM saw the expected call kinds (checklist + 2 planner turns
+        // — the search and the fetch; no verify/cohesion/post-verify — the dump is
+        // deterministic and no repo edits exist to verify).
         Assert.Contains("checklist", _clientFactory.Calls);
-        Assert.Equal(3, _clientFactory.Calls.Count(c => c == "planner-step"));
+        Assert.Equal(2, _clientFactory.Calls.Count(c => c == "planner-step"));
         Assert.DoesNotContain("verify", _clientFactory.Calls);
-        // The WEB-ONLY completion assessment RAN: after the search step, after the fetch
-        // step, at the plan-complete recheck, and at the final quality check — the gap this
-        // feature closes (IsLastEditVerifiedComplete never fires without an edit).
-        Assert.True(_clientFactory.Calls.Count(c => c == "web-assess") >= 3,
-            $"the web-only completion assessment should have run after each web step and at the recheck — calls=[{string.Join(",", _clientFactory.Calls)}]");
+        // The WEB-ONLY completion assessment RAN: after the search step (incomplete — the
+        // file does not exist yet) and after the fetch step (the eager dump landed → the
+        // demanded file exists → complete) — the gap this feature closes
+        // (IsLastEditVerifiedComplete never fires without an edit).
+        Assert.True(_clientFactory.Calls.Count(c => c == "web-assess") >= 2,
+            $"the web-only completion assessment should have run after each web step — calls=[{string.Join(",", _clientFactory.Calls)}]");
+    }
+
+    [Fact]
+    public async Task WebTask_NewsDigestSearch_DemandsOsFile_AutoDumpsInTheSameStep()
+    {
+        _clientFactory.Mode = PlannerMode.NewsDigestWrite;
+        // Incomplete until the demanded file exists — so the search step keeps the run going,
+        // and only after the eager dump lands (inside that same search step) does the
+        // between-steps assessment accept completion.
+        _clientFactory.WebAssessComplete = () => File.Exists(_newsTarget);
+        var controller = BuildController();
+        // News-marked phrasing (rule A: "news") + an OS-file demand — the _web_search step
+        // routes to the fresh-news DIGEST (Google News/Bing RSS answered by the scripted
+        // handler), and the eager OS-dump writes the digest straight to the demanded file IN
+        // THE SEARCH STEP: no fetch, no _command, no later step where the digest could be
+        // compacted or fabricated.
+        var prompt = $"Fetch a recent AI news article and create a text file with the data on my desktop at \"{_newsTarget}\"";
+        Assert.True(AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out _),
+            $"the test prompt must demand an OS output file: {prompt}");
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        // The run finished complete AND the demanded file exists with the digest data.
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(File.Exists(_newsTarget), $"eager dump should have written {_newsTarget}");
+        var dumped = File.ReadAllText(_newsTarget, Encoding.UTF8);
+        Assert.Contains("### WEB RESULTS", dumped);
+        // The digest item (real RSS title from the scripted feed) rode verbatim into the file.
+        Assert.Contains("AlphaFold 3 predicts protein structures with atom-level accuracy", dumped);
+        Assert.Contains("Task: Fetch a recent AI news article", dumped); // the dump header
+
+        // The run needed ONLY the search step — the digest WAS the demanded data, written in
+        // that step; no fetch or command write was ever planned.
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search" }, plan!.Plan.Select(s => s.File).ToArray());
+
+        // The eager dump is recorded as a created OS-file step result (os=true) with the
+        // demanded path.
+        var dumpResult = allSteps.OfType<Dictionary<string, object?>>()
+            .Single(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+                         r.GetValueOrDefault("os") is true);
+        Assert.Equal("created", dumpResult.GetValueOrDefault("status")?.ToString());
+        Assert.Equal(_newsTarget, dumpResult.GetValueOrDefault("path")?.ToString());
+
+        // ZERO repo edits — the OS-file auto-dump is not a repo edit.
+        var editResults = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("os") is not true &&
+                        r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+                        r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
+            .ToList();
+        Assert.Empty(editResults);
+
+        // Exactly ONE planner turn (the search) — the digest search itself satisfied the task.
+        Assert.Equal(1, _clientFactory.Calls.Count(c => c == "planner-step"));
+        Assert.Empty(_clientFactory.Step2PlannerPrompts);
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_HallucinatedUrlCommand_RejectedAndSteeredToWebFetchVerbatimUrl()
+    {
+        _clientFactory.Mode = PlannerMode.CommandFetchSteer;
+        // Incomplete until the demanded file exists — keeps the run going until the steered
+        // _web_fetch + eager dump lands.
+        _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
+        var controller = BuildController();
+        var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\"";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        // The run completed AND the demanded file exists (the eager dump after the fetch).
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(File.Exists(_dumpTarget), $"the eager dump should have written {_dumpTarget}");
+        Assert.Contains("AlphaFold 3", File.ReadAllText(_dumpTarget, Encoding.UTF8));
+
+        // The hallucinated Invoke-RestMethod _command NEVER executed — no _command step
+        // result exists and the invented domain was never hit over HTTP.
+        Assert.DoesNotContain(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() is "command" or "_command");
+        Assert.DoesNotContain(_clientFactory.FetchedUrls,
+            u => u.Contains("www.example.com", StringComparison.OrdinalIgnoreCase));
+
+        // The rejection feedback reached a LATER planner turn, naming the invented URL and
+        // demanding a verbatim result URL via _web_fetch.
+        Assert.True(_clientFactory.PlannerUserPrompts.Skip(1).Any(p =>
+                p.Contains("www.example.com/latest-ai-breakthrough", StringComparison.Ordinal) &&
+                p.Contains("verbatim", StringComparison.Ordinal) &&
+                p.Contains("_web_fetch", StringComparison.Ordinal) &&
+                p.Contains("NOT among the harvested search results", StringComparison.Ordinal)),
+            $"the fetch-in-command feedback should have reached a later planner prompt:\n{string.Join("\n---\n", _clientFactory.PlannerUserPrompts.Skip(1))}");
+
+        // The FINAL plan is search → fetch of the REAL URL from the results; no _command.
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search", "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
+        Assert.Equal("https://example.com/alphafold3", plan.Plan[1].Change);
+        Assert.DoesNotContain(plan.Plan, s => s.File == "_command");
+
+        // ZERO repo edits (the OS-file auto-dump result carries os=true and is not a repo edit).
+        var editResults = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("os") is not true &&
+                        r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+                        r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
+            .ToList();
+        Assert.Empty(editResults);
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_RepoRelativeDemand_FolderCreatedBeforeFetch_DumpWritesRealData()
+    {
+        // The benchmark-task shape: the task demands a folder + a data file at the PROJECT
+        // ROOT ("create a folder called benchmark_test_16 … pokemon_data.csv") AND a live
+        // fetch. Two things made this brittle before: (1) the missing-web-search guard
+        // rejected the mkdir/_create_directory proposals 3× before auto-injecting the search
+        // ("what's giving this a hard time?" — the planner could not even create the demanded
+        // folder), and (2) the eager dump only knew OS paths — a repo-relative demand was
+        // invisible, so nothing pre-created the destination and the fetched data had nowhere
+        // deterministic to land. Now: _create_directory is allowed as filesystem prep, and
+        // the web step pre-creates the demanded folder BEFORE the fetch, so the fetch's
+        // eager dump writes the real data into it — and a planned _create_file for the same
+        // file is skipped instead of erroring on "file already exists".
+        _clientFactory.Mode = PlannerMode.RepoRelativeDump;
+        // Never complete via the between-steps assessment — the plan runs to completion so
+        // the folder, the dump and the create_file-skip all execute.
+        _clientFactory.WebAssessComplete = () => false;
+        var controller = BuildController();
+        var folderPath = Path.Combine(_projectRoot, "benchmark_test_16");
+        var csvPath = Path.Combine(folderPath, "pokemon_data.csv");
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. " +
+                     "Search the web to find the PokeAPI endpoint, then fetch the live Pokemon data (id numbers, stats and types) and write the data into pokemon_data.csv.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        // The folder exists and the demanded file exists with the REAL fetched data — the
+        // web step pre-created the destination before the fetch and the eager dump filled it.
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(Directory.Exists(folderPath), $"the demanded folder should exist at {folderPath}");
+        Assert.True(File.Exists(csvPath), $"the demanded file should exist at {csvPath}");
+        var dumped = File.ReadAllText(csvPath, Encoding.UTF8);
+        Assert.Contains("### WEB RESULTS", dumped);   // structured dump section
+        Assert.Contains("AlphaFold 3", dumped);       // the real fetched content
+
+        // The plan LED with the folder (filesystem prep allowed BEFORE the web steps — the
+        // missing-web-search guard no longer bounces _create_directory), then search → fetch.
+        // The create_file the planner STILL proposed after the dump is pruned from the final
+        // plan as a no-op (the dump already wrote the file — see the skipped result below),
+        // so the effective plan is the 3 real steps.
+        Assert.NotNull(plan);
+        Assert.True(plan!.Plan.Count == 3,
+            $"plan={string.Join(",", plan.Plan.Select(s => s.File + ":" + s.Change))}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched=[{string.Join(";", _clientFactory.Unmatched)}]");
+        Assert.Equal(new[] { "_create_directory", "_web_search", "_web_fetch" }, plan.Plan.Select(s => s.File).ToArray());
+        Assert.Equal("benchmark_test_16", plan.Plan[0].Change);
+
+        // The eager dump result is a REPO edit (os != true — the file lives inside the
+        // project root, unlike a desktop/absolute-path OS dump) carrying the demanded path.
+        var dumpResult = allSteps.OfType<Dictionary<string, object?>>()
+            .Single(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+                         r.GetValueOrDefault("os") is not true &&
+                         string.Equals(r.GetValueOrDefault("path")?.ToString(),
+                             csvPath, StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("created", dumpResult.GetValueOrDefault("status")?.ToString());
+
+        // The planned _create_file for the SAME file was SKIPPED (the dump already created it
+        // with the demanded data) — not an error stall on "file already exists". The skip
+        // result stays in the run's results even though the no-op step is pruned from the
+        // final plan.
+        var createFileResult = allSteps.OfType<Dictionary<string, object?>>()
+            .Single(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+                         string.Equals(r.GetValueOrDefault("reason")?.ToString(),
+                             "file already created earlier in this run", StringComparison.Ordinal));
+        Assert.Equal("skipped", createFileResult.GetValueOrDefault("status")?.ToString());
+
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_MkdirCommand_AcceptedAsFilesystemPrep_NoDirectoryCreationBounce()
+    {
+        // The "failed over and over to create a directory" field report: the planner's FIRST
+        // step is a _command mkdir on a web-needing task. Before the fix, the missing-web-search
+        // guard rejected it (and a _create_file mislabel) up to 3× with generic web feedback
+        // before the planner stumbled onto _create_directory. Now mkdir-style _command steps are
+        // filesystem PREP like _create_directory: accepted on round 1, executed for real, and the
+        // folder exists before any web step runs.
+        _clientFactory.Mode = PlannerMode.MkdirCommandPrep;
+        _clientFactory.WebAssessComplete = () => File.Exists(_csvPath);
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. " +
+                     "Search the web to find the PokeAPI endpoint, then fetch the live Pokemon data (id numbers, stats and types) and write the data into pokemon_data.csv.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        // Regression lock: the mkdir _command ENTERED the plan at index 0 and EXECUTED — the old
+        // guard rejected it, so it never appeared in the plan (the run fell back to the
+        // web-step pre-create instead). The folder is on disk before any web step.
+        Assert.NotNull(plan);
+        Assert.Equal("_command", plan!.Plan[0].File);
+        Assert.Contains("mkdir", plan.Plan[0].Change, StringComparison.OrdinalIgnoreCase);
+        var mkdirResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "command" &&
+                 r.GetValueOrDefault("status")?.ToString() == "done");
+        Assert.Contains("mkdir", mkdirResult.GetValueOrDefault("command")?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
+        Assert.True(Directory.Exists(_folderPath), $"the mkdir _command must have created {_folderPath}");
+        Assert.True(File.Exists(_csvPath), $"the demanded file should exist at {_csvPath}");
+        Assert.Contains("### WEB RESULTS", File.ReadAllText(_csvPath, Encoding.UTF8));
+        Assert.Equal(new[] { "_command", "_web_search", "_web_fetch" }, plan.Plan.Select(s => s.File).ToArray());
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_CreateFileAsDirectory_RejectedWithCreateDirectorySteering()
+    {
+        // The same bounce from the other side: round 1 reaches for _create_file to make a
+        // FOLDER. The missing-web-search gate must reject with TARGETED steering
+        // ("FOLDER/DIRECTORY … _create_directory") instead of the generic web feedback, so
+        // round 2 lands _create_directory instead of burning another mislabeled attempt.
+        _clientFactory.Mode = PlannerMode.CreateFileAsDirectory;
+        _clientFactory.WebAssessComplete = () => File.Exists(_csvPath);
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. " +
+                     "Search the web to find the PokeAPI endpoint, then fetch the live Pokemon data (id numbers, stats and types) and write the data into pokemon_data.csv.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        // The round-1 rejection's steering reached the round-2 planner turn (PlannerUserPrompts
+        // records every planner user prompt, 0-based): it must name the FOLDER mislabel and
+        // _create_directory — the generic web feedback would not have.
+        Assert.True(_clientFactory.PlannerUserPrompts.Count >= 2,
+            $"expected at least 2 planner turns — got {_clientFactory.PlannerUserPrompts.Count}; calls=[{string.Join(",", _clientFactory.Calls)}]");
+        var round2Prompt = _clientFactory.PlannerUserPrompts[1];
+        Assert.Contains("FOLDER/DIRECTORY", round2Prompt);
+        Assert.Contains("_create_directory", round2Prompt);
+        // Round 2 landed _create_directory at the head of the plan and the folder exists.
+        Assert.NotNull(plan);
+        Assert.Equal("_create_directory", plan!.Plan[0].File);
+        Assert.Equal("benchmark_test_16", plan.Plan[0].Change);
+        Assert.True(Directory.Exists(_folderPath), $"the demanded folder should exist at {_folderPath}");
+        Assert.True(File.Exists(_csvPath), $"the demanded file should exist at {_csvPath}");
+        Assert.Contains("### WEB RESULTS", File.ReadAllText(_csvPath, Encoding.UTF8));
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_ScraperScriptRejected_SteeredToWebFetch_ScraperNeverLands()
+    {
+        // The "wrote a Python app to do a fetch" drift: round 1 plans a _create_file for a
+        // scraper script (requests.get + open(...,"w")) on a web-needing task — the planner
+        // forgot the _web_fetch step tool exists. The missing-web-search gate must reject it
+        // with SCRAPER steering (naming _web_fetch), NOT the generic web feedback, and the
+        // scraper file must never reach disk.
+        _clientFactory.Mode = PlannerMode.ScraperScriptRejected;
+        _clientFactory.WebAssessComplete = () => File.Exists(_csvPath);
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. " +
+                     "Search the web to find the PokeAPI endpoint, then fetch the live Pokemon data (id numbers, stats and types) and write the data into pokemon_data.csv.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        // The round-1 rejection's steering reached the round-2 planner turn: it must name the
+        // scraper and _web_fetch — the generic web feedback would not have.
+        Assert.True(_clientFactory.PlannerUserPrompts.Count >= 2,
+            $"expected at least 2 planner turns — got {_clientFactory.PlannerUserPrompts.Count}; calls=[{string.Join(",", _clientFactory.Calls)}]");
+        var round2Prompt = _clientFactory.PlannerUserPrompts[1];
+        Assert.Contains("SCRAPER/FETCH script", round2Prompt);
+        Assert.Contains("_web_fetch", round2Prompt);
+        // Round 2 landed the web chain; the plan is the two web steps (the web step
+        // pre-creates the demanded folder before its eager dump).
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search", "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
+        Assert.True(File.Exists(_csvPath), $"the demanded file should exist at {_csvPath}");
+        Assert.Contains("### WEB RESULTS", File.ReadAllText(_csvPath, Encoding.UTF8));
+        // The scraper script never landed on disk.
+        Assert.False(File.Exists(Path.Combine(_projectRoot, "benchmark_test_16", "fetch_pokemon.py")),
+            "the rejected scraper script must never be written");
+        Assert.False(File.Exists(Path.Combine(_projectRoot, "fetch_pokemon.py")),
+            "the rejected scraper script must never be written at the root either");
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_ScraperAfterWebSteps_RejectedByScraperFileGuard_NeverLands()
+    {
+        // The exact benchmark-run hole the missing-web-search gate can't see: search → fetch
+        // (the eager dump writes the demanded CSV), THEN the planner still proposes the
+        // Python scraper _create_file. The gate is silent once a web step exists, so the
+        // SCRAPER-FILE GUARD in ValidateIncrementalStepAsync must reject it — the file must
+        // never land, and round 4 must complete from the already-dumped data instead of
+        // burning a "run the scraper" step.
+        _clientFactory.Mode = PlannerMode.ScraperAfterWebSteps;
+        _clientFactory.WebAssessComplete = () => File.Exists(_csvPath);
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. " +
+                     "Search the web to find the PokeAPI endpoint, then fetch the live Pokemon data (id numbers, stats and types) and write the data into pokemon_data.csv.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        // The round-2 rejection's steering reached the round-3 planner turn (PlannerUserPrompts
+        // is 0-based per turn): it must name the scraper and _web_fetch.
+        Assert.True(_clientFactory.PlannerUserPrompts.Count >= 3,
+            $"expected at least 3 planner turns — got {_clientFactory.PlannerUserPrompts.Count}; calls=[{string.Join(",", _clientFactory.Calls)}]");
+        var round3Prompt = _clientFactory.PlannerUserPrompts[2];
+        Assert.Contains("SCRAPER/FETCH script", round3Prompt);
+        Assert.Contains("_web_fetch", round3Prompt);
+        // The plan is just the web chain — the scraper never entered it.
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search", "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
+        // The demanded file was written by the web step's eager dump, and the scraper never
+        // landed on disk.
+        Assert.True(File.Exists(_csvPath), $"the demanded file should exist at {_csvPath}");
+        Assert.Contains("### WEB RESULTS", File.ReadAllText(_csvPath, Encoding.UTF8));
+        Assert.False(File.Exists(Path.Combine(_projectRoot, "benchmark_test_16", "fetch_pokemon.py")),
+            "the post-web scraper script must never be written");
+        Assert.False(File.Exists(Path.Combine(_projectRoot, "fetch_pokemon.py")),
+            "the post-web scraper script must never be written at the root either");
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_RunScraperCommand_Rejected_SteeredToWebFetch()
+    {
+        // The "and then it ran the scraper" half: search commits, then the planner proposes
+        // `_command python fetch_poke_data.py`. No such script exists (the create was
+        // rejected), so the RUN-A-SCRAPER GUARD must reject it — previously this command
+        // executed (and died with an IndentationError). Round 3 must fetch the real URL.
+        _clientFactory.Mode = PlannerMode.RunScraperCommandRejected;
+        _clientFactory.WebAssessComplete = () => File.Exists(_csvPath);
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. " +
+                     "Search the web to find the PokeAPI endpoint, then fetch the live Pokemon data (id numbers, stats and types) and write the data into pokemon_data.csv.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        // The round-2 rejection's steering reached the round-3 planner turn: it must name the
+        // run and _web_fetch (and the _scraper fallback).
+        Assert.True(_clientFactory.PlannerUserPrompts.Count >= 3,
+            $"expected at least 3 planner turns — got {_clientFactory.PlannerUserPrompts.Count}; calls=[{string.Join(",", _clientFactory.Calls)}]");
+        var round3Prompt = _clientFactory.PlannerUserPrompts[2];
+        Assert.Contains("RUNS a scraper/fetch script", round3Prompt);
+        Assert.Contains("_web_fetch", round3Prompt);
+        // The plan is just the web chain — the run command never entered it, and the CSV was
+        // written by the fetch's eager dump.
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search", "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
+        Assert.True(File.Exists(_csvPath), $"the demanded file should exist at {_csvPath}");
+        Assert.Contains("### WEB RESULTS", File.ReadAllText(_csvPath, Encoding.UTF8));
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_ScraperFallbackStep_SystemBuildsAndRunsKnownGoodScraper()
+    {
+        // The sanctioned fallback: when web steps keep failing, the planner plans a "_scraper"
+        // step with the URL. The SYSTEM (not the LLM) builds + runs a known-good scraper via
+        // the injected fake service, which writes the demanded CSV — no scraper code ever
+        // lands as a repo file.
+        _clientFactory.Mode = PlannerMode.ScraperStepFallback;
+        _clientFactory.WebAssessComplete = () => File.Exists(_csvPath);
+        var fake = new FakeScraperService();
+        var controller = BuildController();
+        SetField(controller, "_scraperService", fake);
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. " +
+                     "Search the web to find the PokeAPI endpoint, then fetch the live Pokemon data (id numbers, stats and types) and write the data into pokemon_data.csv.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search", "_scraper" }, plan!.Plan.Select(s => s.File).ToArray());
+        // The system-built scraper ran against the URL and wrote the demanded file.
+        Assert.Equal(new[] { "https://example.com/alphafold3" }, fake.Urls.ToArray());
+        Assert.True(File.Exists(_csvPath), $"the demanded file should exist at {_csvPath}");
+        Assert.Contains("scraper", File.ReadAllText(_csvPath, Encoding.UTF8));
+        // No freehand scraper file ever landed.
+        Assert.False(File.Exists(Path.Combine(_projectRoot, "benchmark_test_16", "fetch_pokemon.py")),
+            "no freehand scraper script may land — the _scraper step owns the fallback");
+        // The run recorded the scraper step result.
+        var scraperResults = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "scraper")
+            .ToList();
+        Assert.Single(scraperResults);
+        Assert.Equal("done", scraperResults[0].GetValueOrDefault("status")?.ToString());
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_Replay_RebuildsDiscoveryContextFromPersistedWebResults()
+    {
+        const string cardId = "replay-web-results";
+        await _boardData.SaveRawAsync(BoardWithCard(cardId, "doing"));
+        _clientFactory.Mode = PlannerMode.WebChain;
+        _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
+        var controller = BuildController();
+        var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\"";
+
+        // PHASE 1 — the original run: search + fetch + eager dump, all persisted to the card.
+        var (phase1Steps, phase1Plan, complete1) = await InvokeOrchestrate(controller, prompt, cardId);
+        Assert.True(complete1, $"phase 1 should complete — plan summary: {phase1Plan?.Summary}");
+        Assert.True(File.Exists(_dumpTarget));
+        Assert.Equal(new[] { "_web_search", "_web_fetch" }, phase1Plan!.Plan.Select(s => s.File).ToArray());
+
+        // The card now carries the harvested web results (search + fetch outputs).
+        var rawAfterPhase1 = await _boardData.LoadRawAsync();
+        Assert.Contains("\"_webResults\"", rawAfterPhase1!);
+        Assert.Contains("AlphaFold 3 predicts protein structures", rawAfterPhase1);
+
+        // A restarted run loads the plan + the persisted web results together.
+        var (loadedPlan, loadedCompleted, _, loadedWeb) = LoadPlan(controller, cardId);
+        Assert.NotNull(loadedPlan);
+        Assert.NotNull(loadedCompleted);
+        Assert.True(loadedCompleted!.Count >= 2, $"both web steps should be done — {string.Join(",", loadedCompleted)}");
+        Assert.NotNull(loadedWeb);
+        Assert.Equal(2, loadedWeb!.Count); // the search digest AND the fetched body
+        var loadedSearch = Assert.Single(loadedWeb, w => w.GetValueOrDefault("type")?.ToString() == "_web_search");
+        Assert.Contains("https://example.com/alphafold3", loadedSearch.GetValueOrDefault("output")?.ToString() ?? "");
+        var loadedFetch = Assert.Single(loadedWeb, w => w.GetValueOrDefault("type")?.ToString() == "_web_fetch");
+        Assert.Equal("https://example.com/alphafold3", loadedFetch.GetValueOrDefault("url")?.ToString());
+
+        // PHASE 2 — the replay: both steps are skipped (already done), but the run must NOT
+        // start with an empty context — the persisted web data is seeded back in as replayed
+        // done results, so the remaining steps (and the edit-resolution injection) see it.
+        var (replaySteps, _, complete2) = await InvokeOrchestrate(controller, prompt, cardId,
+            existingPlan: loadedPlan, completedStepIndices: loadedCompleted, webResults: loadedWeb);
+        Assert.True(complete2, $"replay should complete — calls=[{string.Join(",", _clientFactory.Calls)}]");
+
+        var replayed = replaySteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("replayed") is true)
+            .ToList();
+        Assert.Equal(2, replayed.Count);
+        var replayedSearch = Assert.Single(replayed, r => r.GetValueOrDefault("type")?.ToString() == "_web_search");
+        Assert.Contains("AlphaFold 3 predicts protein structures", replayedSearch.GetValueOrDefault("output")?.ToString() ?? "");
+        Assert.Contains("https://example.com/alphafold3", replayedSearch.GetValueOrDefault("output")?.ToString() ?? "");
+        var replayedFetch = Assert.Single(replayed, r => r.GetValueOrDefault("type")?.ToString() == "_web_fetch");
+        Assert.Equal("https://example.com/alphafold3", replayedFetch.GetValueOrDefault("url")?.ToString());
+
+        // The replay made no new LLM calls the script didn't account for.
+        Assert.Empty(_clientFactory.Unmatched);
     }
 
     // ── Cross-tool state carry (the multi-turn eval extended to web values) ──────────────
@@ -404,9 +857,11 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.Contains("invented URL", failedFetch.GetValueOrDefault("error")?.ToString() ?? "");
 
         // The successful retry used the REAL URL from the search results — and the FINAL plan
-        // carries it (the failed step was removed from planSoFar, never repeated).
+        // carries it (the failed step was removed from planSoFar, never repeated). The
+        // demanded file was written INSIDE that successful fetch step by the eager auto-dump,
+        // so no extra _command write step exists in the plan.
         Assert.NotNull(plan);
-        Assert.Equal(new[] { "_web_search", "_web_fetch", "_command" }, plan!.Plan.Select(s => s.File).ToArray());
+        Assert.Equal(new[] { "_web_search", "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
         Assert.Equal("https://example.com/alphafold3", plan.Plan[1].Change);
         var successfulFetch = allSteps.OfType<Dictionary<string, object?>>()
             .Single(r => r.GetValueOrDefault("type")?.ToString() == "_web_fetch" &&
@@ -421,9 +876,11 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                 p.Contains("REAL URL", StringComparison.Ordinal)),
             $"the fetch-failure feedback should have reached a later planner prompt:\n{string.Join("\n---\n", _clientFactory.PlannerUserPrompts.Skip(1))}");
 
-        // ZERO repo edits — the run never invented application code to "write" the file.
+        // ZERO repo edits — the run never invented application code to "write" the file
+        // (the OS-file auto-dump result carries os=true and is not a repo edit).
         var editResults = allSteps.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+            .Where(r => r.GetValueOrDefault("os") is not true &&
+                        r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
                         r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
             .ToList();
         Assert.Empty(editResults);
@@ -471,9 +928,11 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                 p.Contains("already ran _web_search", StringComparison.Ordinal)),
             $"the web re-run rejection should have reached a later planner prompt; calls=[{string.Join(",", _clientFactory.Calls)}]; plannerCalls={_clientFactory.PlannerUserPrompts.Count}; got:\n{string.Join("\n---\n", _clientFactory.PlannerUserPrompts.Skip(1))}");
 
-        // ZERO repo edits — the run never invented application code to "write" the file.
+        // ZERO repo edits — the run never invented application code to "write" the file
+        // (the OS-file auto-dump result carries os=true and is not a repo edit).
         var editResults = allSteps.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
+            .Where(r => r.GetValueOrDefault("os") is not true &&
+                        r.GetValueOrDefault("type")?.ToString() is "edit" or "create" &&
                         r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created")
             .ToList();
         Assert.Empty(editResults);
@@ -635,7 +1094,9 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
     }
 
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> InvokeOrchestrate(
-        AgentController controller, string prompt, string? cardId = null)
+        AgentController controller, string prompt, string? cardId = null,
+        AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
+        List<Dictionary<string, object?>>? webResults = null)
     {
         var method = typeof(AgentController).GetMethod("Orchestrate", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new InvalidOperationException("Orchestrate not found");
@@ -644,10 +1105,20 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
             prompt, _projectRoot, /*emitSse*/ false, CancellationToken.None,
             /*attachedFiles*/ new List<string>(),
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
-            /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ cardId,
-            /*createTests*/ false, /*buildCommands*/ null
+            /*existingPlan*/ existingPlan, /*completedStepIndices*/ completedStepIndices, /*cardId*/ cardId,
+            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ webResults
         })!;
         return await task;
+    }
+
+    private static (AgentPlan? plan, HashSet<int>? completed, bool benchmark, List<Dictionary<string, object?>>? webResults) LoadPlan(
+        AgentController controller, string cardId)
+    {
+        var method = typeof(AgentController).GetMethod("LoadPlanFromBoardDataAsync", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("LoadPlanFromBoardDataAsync not found");
+        var task = (Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isBenchmark, List<Dictionary<string, object?>>? webResults)>)
+            method.Invoke(controller, new object?[] { cardId })!;
+        return task.GetAwaiter().GetResult();
     }
 
     private AgentController BuildController()
@@ -671,6 +1142,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         SetField(controller, "_emailService", new EmailService(new ConfigFileService(_db)));
         SetField(controller, "_push", new PushNotificationService(_db));
         SetField(controller, "_editKnowledge", new EditKnowledgeService(_db));
+        SetField(controller, "_scraperService", new ScraperEnvironmentService());
         // Skip the real TCP/HTTP connectivity probe (the run must not depend on the host
         // network): cache the "reachable" verdict directly.
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
@@ -703,7 +1175,32 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch }
+    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback }
+
+    /// <summary>
+    /// Fake system-built scraper: records the URLs it was asked to scrape and writes the
+    /// demanded output file, so the _scraper fallback step is testable without spawning a
+    /// real interpreter.
+    /// </summary>
+    private sealed class FakeScraperService : ScraperEnvironmentService
+    {
+        public readonly List<string> Urls = new();
+
+        public override async Task<ScraperResult> TryRunScraperAsync(
+            string url, string? outputPath, string workDir, string? metadataLine, CancellationToken ct)
+        {
+            Urls.Add(url);
+            if (outputPath != null)
+            {
+                var dir = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir);
+                await File.WriteAllTextAsync(outputPath,
+                    "### WEB RESULTS [scraper] ###\nAlphaFold 3 predicts protein structures with atom-level accuracy\n", ct);
+            }
+            return new ScraperResult(true, "import requests\n# system-built\n",
+                "WROTE " + (outputPath ?? "(none)") + " 79", null, outputPath);
+        }
+    }
 
     /// <summary>
     /// An <see cref="IHttpClientFactory"/> whose handler answers every LLM request from a
@@ -791,9 +1288,23 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                         // "error" and the interleaved loop exercises its fetch-failure retry.
                         throw new HttpRequestException($"fetch failed: invented URL on {host}");
                     }
-                    // Connectivity probes (/api/tags, /slots) and _web_fetch targets: a small
-                    // body is enough — the run must not depend on the real network.
-                    return Json(new { });
+                    if (host.Contains("news.google.com", StringComparison.OrdinalIgnoreCase) ||
+                        host.Contains("bing.com", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // The fresh-news DIGEST (NewsService.FetchNewsAsync) fetches Google News /
+                        // Bing News RSS — answer with a realistic feed so the digest is built from
+                        // real items (title/link/pubDate/description) instead of an empty digest.
+                        return Xml(RssFeed);
+                    }
+                    // Connectivity probes (/api/tags, /slots) and _web_fetch targets. The body
+                    // is deliberately long enough (> 80 chars after the HTTP header) that a
+                    // successful fetch's output gets harvested and persisted — so replay tests
+                    // can prove the previous run's web data survives a restart.
+                    return Json(new
+                    {
+                        title = "AlphaFold 3 predicts protein structures with atom-level accuracy",
+                        body = "A new open-weight model benchmarks above GPT-4 on reasoning tasks."
+                    });
                 }
                 var body = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? "";
                 var system = new StringBuilder();
@@ -837,10 +1348,20 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                 }
                 if (system.Contains("You are the deep-reasoning engine of an autonomous coding agent", StringComparison.Ordinal))
                     return ("The next step is scripted by the test harness. Keep the task minimal: implement exactly the scripted step.", "deep-reason");
+                if (system.Contains("You are a news research planner", StringComparison.Ordinal))
+                    return ("{\"query\": \"AI research breakthroughs latest\", \"topics\": [\"ai\"], \"places\": [], \"region\": \"\"}", "news-plan");
+                if (system.Contains("You are a news summarizer building a research digest", StringComparison.Ordinal))
+                    return ("## Summary\nA roundup of the latest AI research and industry news.\nITEM 1: A new open-weight model surpasses prior benchmarks.\nITEM 2: Protein-folding advances published this quarter.\n", "news-summary");
                 if (system.Contains("You are a strict plan-coherence validator", StringComparison.Ordinal))
                     return ("{\"valid\": true}", "plan-validator");
                 if (system.Contains("You are a task complexity assessor", StringComparison.Ordinal))
                     return ("{\"score\": 20, \"atomicSteps\": 2}", "complexity");
+                if (system.Contains("You extract file paths from instructions", StringComparison.Ordinal))
+                {
+                    // The _create_file arm extracts the target path with a tiny LLM call —
+                    // script it to echo the description back (the changeDesc IS the path).
+                    return (user.Trim().Trim('"', '\'', '`'), "extract-path");
+                }
                 if (system.Contains("You extract a short checklist of literal, testable requirements", StringComparison.Ordinal))
                 {
                     // The checklist is APPENDED to the task prompt (Pipeline.cs), so in the
@@ -855,7 +1376,19 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     return ($"{{\"requirements\": {req}}}", "checklist");
                 }
                 if (system.Contains("strict task classifier", StringComparison.Ordinal))
-                    return ("{\"needsWeb\": false, \"reason\": \"repo-local write\", \"query\": \"\"}", "web-need");
+                {
+                    // The web-need classifier is only consulted when the task does NOT
+                    // explicitly command the web (explicit commands bypass it entirely).
+                    // Script it content-aware like a real classifier: a task that says to
+                    // fetch/search for news genuinely needs current external info; repo-local
+                    // writes don't.
+                    var needsWeb = user.Contains("news article", StringComparison.OrdinalIgnoreCase) ||
+                                   user.Contains("Search the web", StringComparison.OrdinalIgnoreCase) ||
+                                   user.Contains("fetch the", StringComparison.OrdinalIgnoreCase);
+                    return (needsWeb
+                        ? "{\"needsWeb\": true, \"reason\": \"task requires current external news\", \"query\": \"AI research breakthroughs latest\"}"
+                        : "{\"needsWeb\": false, \"reason\": \"repo-local write\", \"query\": \"\"}", "web-need");
+                }
                 if (user.Contains("Evaluate the code changes against the ORIGINAL TASK ONLY", StringComparison.Ordinal))
                 {
                     // The between-steps completion assessment for web-only runs. Scripted
@@ -956,6 +1489,148 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     }
                     return ("{\"planComplete\": true, \"completionReason\": \"wrote the file from the results already in context\"}", "planner-step");
                 }
+                if (_owner.Mode == PlannerMode.NewsDigestWrite)
+                {
+                    // ONE search step — news-marked phrasing, so it routes to the fresh-news
+                    // digest — then the eager OS-dump writes the digest to the demanded file
+                    // IN THE SEARCH STEP and the between-steps assessment completes the run.
+                    // No fetch and no _command write are ever planned.
+                    if (n == 1)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"digest gathered and written\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.CommandFetchSteer)
+                {
+                    // Step 2 proposes a _command that pulls content from a HALLUCINATED URL
+                    // (the ".../haha-im-in-danger/" failure mode) — the fetch-in-command guard
+                    // must reject it with feedback that names the URL and demands a VERBATIM
+                    // result URL; step 3 must then plan a _web_fetch of a REAL URL from the
+                    // harvested results. The invented URL never executes as a command.
+                    if (n == 1)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_command",
+                            "Invoke-RestMethod -Uri \"https://www.example.com/latest-ai-breakthrough\" | Select-Object title,summary,publishedDate"), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"fetched the real URL from the results\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.RepoRelativeDump)
+                {
+                    // The benchmark-task shape, scripted: the planner LEADS with the folder
+                    // (filesystem prep — the missing-web-search guard must NOT bounce it on a
+                    // web-needing task), then search → fetch → a _create_file for the SAME
+                    // file the eager dump already wrote (which must be SKIPPED, not error).
+                    if (n == 1)
+                        return (PlannerStepJson("_create_directory", "benchmark_test_16"), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    if (n == 4)
+                        // The validator requires _create_file to carry file content in
+                        // newString — it is still SKIPPED at execution because the eager dump
+                        // already wrote the file with the demanded data.
+                        return (PlannerCreateFileStepJson("benchmark_test_16/pokemon_data.csv", "id,name,hp,attack,defense,speed,type_1,type_2"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"folder created, data fetched and written into the csv\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.MkdirCommandPrep)
+                {
+                    // The "failed over and over to create a directory" bounce: round 1
+                    // reaches for a _command mkdir. The missing-web-search guard must treat
+                    // mkdir-style _command steps as filesystem PREP (same as _create_directory)
+                    // and let them EXECUTE — no rejection, no auto-injected search first.
+                    // Then search → fetch → the eager dump fills the demanded csv.
+                    if (n == 1)
+                        return (PlannerStepJson("_command", "mkdir \"benchmark_test_16\""), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"folder created, data fetched and written into the csv\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.CreateFileAsDirectory)
+                {
+                    // Round 1 reaches for _create_file to make a FOLDER ("Create
+                    // benchmark_test_16 directory"). The missing-web-search gate must reject
+                    // with TARGETED steering toward _create_directory — not the generic web
+                    // feedback (which would bounce it again) — so round 2 lands cleanly.
+                    if (n == 1)
+                        return (PlannerCreateFileStepJson("Create benchmark_test_16 directory", "placeholder"), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_create_directory", "benchmark_test_16"), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 4)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"folder created, data fetched and written into the csv\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.ScraperScriptRejected)
+                {
+                    // Round 1 reaches for _create_file to write a PYTHON SCRAPER that does the
+                    // HTTP fetch itself (requests.get + open(...,"w") — the "wrote a Python app
+                    // to do a fetch" drift, the planner forgetting _web_fetch exists). The gate
+                    // must reject with SCRAPER steering; round 2 must then plan the real web
+                    // chain. The scraper file must NEVER land on disk.
+                    if (n == 1)
+                        return (PlannerCreateFileStepJson("benchmark_test_16/fetch_pokemon.py",
+                            "import requests\n" +
+                            "resp = requests.get(\"https://pokeapi.co/api/v2/pokemon?limit=1025\")\n" +
+                            "with open(\"pokemon_data.csv\", \"w\") as f:\n" +
+                            "    f.write(resp.text)\n"), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"folder created, data fetched and written into the csv\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.ScraperAfterWebSteps)
+                {
+                    // The exact benchmark-run shape: search commits, THEN the planner still
+                    // proposes the Python scraper _create_file. The missing-web-search gate is
+                    // silent here — a web step already ran — so the SCRAPER-FILE GUARD in
+                    // ValidateIncrementalStepAsync must reject it (previously it sailed
+                    // straight through, landed on disk, and then got "run"). The rejection
+                    // steers round 3 to a _web_fetch whose eager dump writes the demanded CSV.
+                    if (n == 1)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 2)
+                        return (PlannerCreateFileStepJson("benchmark_test_16/fetch_pokemon.py",
+                            "import requests\n" +
+                            "resp = requests.get(\"https://pokeapi.co/api/v2/pokemon?limit=1025\")\n" +
+                            "with open(\"pokemon_data.csv\", \"w\") as f:\n" +
+                            "    f.write(resp.text)\n"), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"data fetched and auto-written by the web step\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.RunScraperCommandRejected)
+                {
+                    // search commits, then the planner tries to RUN the scraper
+                    // (`python fetch_poke_data.py` — no such file exists, the create was
+                    // rejected) — the RUN-A-SCRAPER GUARD in ValidateIncrementalStepAsync
+                    // must reject it, so round 3 fetches the real URL and the eager dump
+                    // writes the CSV. The run command never enters the plan.
+                    if (n == 1)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_command", "python fetch_poke_data.py"), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"data fetched and auto-written by the web step\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.ScraperStepFallback)
+                {
+                    // search commits, then the planner falls back to a "_scraper" step (web
+                    // fetch keeps failing) — the system builds + runs a KNOWN-GOOD scraper
+                    // via the injected fake service, writing the demanded CSV. No scraper
+                    // code ever lands as a repo file.
+                    if (n == 1)
+                        return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 2)
+                        return (PlannerStepJson("_scraper", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"scraper wrote the demanded file\"}", "planner-step");
+                }
                 if (n == 1)
                     return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
                 if (_owner.Mode == PlannerMode.FetchRetry)
@@ -1021,11 +1696,46 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                 return JsonSerializer.Serialize(payload);
             }
 
+            private static string PlannerCreateFileStepJson(string file, string content)
+            {
+                var payload = new Dictionary<string, object?>
+                {
+                    ["thinking"] = $"Create file: {file}",
+                    ["planComplete"] = false,
+                    ["step"] = new Dictionary<string, object?>
+                    {
+                        ["file"] = "_create_file",
+                        ["change"] = file,
+                        ["newString"] = content
+                    }
+                };
+                return JsonSerializer.Serialize(payload);
+            }
+
             private static HttpResponseMessage Json(object obj)
                 => new(HttpStatusCode.OK)
                 {
                     Content = new StringContent(JsonSerializer.Serialize(obj), Encoding.UTF8, "application/json")
                 };
+
+            private static HttpResponseMessage Xml(string xml)
+                => new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(xml, Encoding.UTF8, "application/xml")
+                };
+
+            private const string RssFeed =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+                "<rss version=\"2.0\"><channel><title>Google News</title>" +
+                "<item><title>AlphaFold 3 predicts protein structures with atom-level accuracy</title>" +
+                "<link>https://example.com/alphafold3</link>" +
+                "<pubDate>Wed, 12 Aug 2026 10:00:00 GMT</pubDate>" +
+                "<description>A new open-weight model benchmarks above GPT-4 on reasoning tasks.</description></item>" +
+                "<item><title>A new open-weight LLM benchmarks above GPT-4 on reasoning tasks</title>" +
+                "<link>https://example.com/llm-benchmarks</link>" +
+                "<pubDate>Wed, 12 Aug 2026 09:00:00 GMT</pubDate>" +
+                "<description>Benchmark results published today.</description></item>" +
+                "</channel></rss>";
 
             private static HttpResponseMessage Sse(string content)
             {

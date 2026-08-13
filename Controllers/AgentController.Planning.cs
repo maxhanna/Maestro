@@ -1115,7 +1115,40 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
             ShouldRejectFetchCommand(originalPrompt, step.Change))
         {
-            return (false, FetchCommandFeedback);
+            return (false, FetchCommandFeedbackFor(originalPrompt, step, planSoFar, discoveryContext));
+        }
+        // SCRAPER-FILE GUARD: a _create_file whose payload is a scraper/fetch script
+        // (programs an HTTP request against a URL AND writes the result to a file) is the
+        // "wrote a Python app to do the fetch" failure mode — the deterministic sibling of
+        // the fetch-in-command guard above. It must fire EVEN AFTER a _web_search/_web_fetch
+        // already ran: the missing-web-search gate only rejects while NO web step is in the
+        // plan, so a scraper proposed after the search used to sail straight through, land on
+        // disk, and then get "run" (the benchmark run that created fetch_poke_data.py after
+        // the search and burned a whole planning round re-deriving it). On a web-needing task
+        // the fetch belongs to the _web_fetch step tool — the system fetches the URL and
+        // auto-writes the demanded file — never to a script. Scoped to TaskHintsWebNeed like
+        // the command guard: a task that explicitly asks for a standalone scraper utility on a
+        // non-web task (no live-data hint) still gets it.
+        // Both scraper guards honor the explicit-script escape hatch: when the task itself asks
+        // for a script ("write a python script …"), writing AND running it is the task, so the
+        // guards stand down. The generic missing-web-search gate still applies before any web
+        // step exists (research first, then script).
+        if (TaskHintsWebNeed(originalPrompt) && !TaskExplicitlyRequestsScript(originalPrompt) &&
+            ScraperScriptFeedback(step) is string scraperReason)
+        {
+            return (false, scraperReason);
+        }
+        // RUN-A-SCRAPER GUARD: a _command that RUNS a script via an interpreter
+        // (python/node/… fetch_poke_data.py) or pipes a fetched HTTP stream into one
+        // (curl … | python) is the execution half of the same drift — the run that followed
+        // the scraper _create_file landing. The script either IS a scraper (read from disk) or
+        // does not exist (the create was rejected, so running it is running nothing); both are
+        // rejected on web-needing tasks and steered to _web_fetch (or _scraper when web steps
+        // keep failing). An existing non-scraper script run stays legitimate.
+        if (TaskHintsWebNeed(originalPrompt) && !TaskExplicitlyRequestsScript(originalPrompt) &&
+            RunScraperScriptReason(step, projectRoot) is string runScraperReason)
+        {
+            return (false, runScraperReason);
         }
         // WINDOWS POWER-SHELL && GUARD: powershell.exe (PS 5.1) rejects `&&` as a statement
         // separator — the whole chained write fails with a parser error on the user's machine
@@ -1743,6 +1776,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // genuinely web-needing tasks always get the search.
             if (proposal.Step.File != null &&
                 !IsWebStep(proposal.Step.File) &&
+                // Filesystem PREP is not a refusal to use the web tools — a web-needing task
+                // that demands a folder ("create a folder called X …") must be able to create
+                // it up front instead of bouncing mkdir for 3 rejections before the search is
+                // auto-injected. _create_directory and mkdir-style _command steps qualify
+                // (the dump destination is additionally pre-created in the web step itself).
+                !IsFilesystemPrepStep(proposal.Step) &&
                 !planSoFar.Any(s => IsWebStep(s.File)) &&
                 TaskHintsWebNeed(prompt))
             {
@@ -1764,7 +1803,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 if (webNeedVerified == 1)
                 {
-                    var webFb = WebNeedFeedback;
+                    // When the task explicitly ASKS for a script, the scraper steering stands
+                    // down (writing it is the task) — only the generic web feedback remains.
+                    var webFb = DirectoryIntentFeedback(proposal.Step)
+                        ?? (TaskExplicitlyRequestsScript(prompt) ? null : ScraperScriptFeedback(proposal.Step))
+                        ?? WebNeedFeedback;
                     await EmitRejectedLog(emitSse,
                         $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — task needs current external info but the plan has no _web_search step",
                         webFb, ct);
@@ -1882,7 +1925,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     skipLlm: skipLlm, attachedFiles: attachedFiles);
                 if (!valid)
                 {
-                    if (string.Equals(reason, FetchCommandFeedback, StringComparison.Ordinal)) fetchCommandRejections++;
+                    if (reason != null && reason.StartsWith(FetchCommandFeedbackMarker, StringComparison.Ordinal)) fetchCommandRejections++;
                     var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";
                     await EmitRejectedLog(emitSse,
                         $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", stepFb, ct);
@@ -2121,6 +2164,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
+    /// True when the task EXPLICITLY asks for a script/program artifact ("write a python script
+    /// that fetches …", "create fetch_poke_data.py …", "add a node script …"). This is the
+    /// escape hatch the scraper guards honor: when the user demands a script, writing AND
+    /// running it is the task, not the "wrote a Python app to do a fetch" drift — so the
+    /// scraper-file guard, the run-a-scraper guard, and the gate's scraper steering all stand
+    /// down (the generic missing-web-search gate still applies: research first, then script).
+    /// The benchmark shape ("create a folder called X … create a file called data.csv … fetch
+    /// the live data") never matches — no interpreter or script artifact is demanded.
+    /// </summary>
+    private static readonly Regex ExplicitScriptRequestRegex = new Regex(
+        @"(?i)\b(write|create|build|implement|add|make|generate)\b[^\r\n]{0,80}\b(python|node|javascript|typescript|bash|powershell|script|program|\.py|\.js|\.ts|\.ps1|\.sh)\b"
+        + @"|\b(python|node|javascript|typescript|bash|powershell)\b[^\r\n]{0,60}\b(script|program|file)\b"
+        + @"|\b[\w./\\-]+\.(py|js|ts|ps1|sh|bash)\b[^\r\n]{0,80}\b(write|create|build|add|make|generate|run)\b",
+        RegexOptions.Compiled);
+
+    private static bool TaskExplicitlyRequestsScript(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        return ExplicitScriptRequestRegex.IsMatch(prompt);
+    }
+
+    /// <summary>
     /// The fetch-in-command guard is deliberately scoped: it rejects a URL-fetching
     /// _command step ONLY when the task hints at needing web data (the
     /// "api.current.ai" hallucination happens on web tasks). On a non-web task a
@@ -2138,16 +2203,162 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
+    /// True for steps that are filesystem PREP rather than a refusal to use the web tools:
+    /// a _create_directory step, or a _command whose leading verb creates a directory
+    /// (mkdir/md, New-Item -ItemType Directory). A web-needing task that demands a folder
+    /// ("create a folder called X …") must be able to create it up front — bouncing these
+    /// for "no web step yet" burned up to 3 planning rounds before the search was
+    /// auto-injected (and the _command variant is additionally converted to _create_directory
+    /// by ValidatePlanAsync on the batch path).
+    /// </summary>
+    private static bool IsFilesystemPrepStep(PlanStep step)
+    {
+        if (step.File == null) return false;
+        if (step.File.Equals("_create_directory", StringComparison.OrdinalIgnoreCase)) return true;
+        if (!step.File.Equals("_command", StringComparison.OrdinalIgnoreCase)) return false;
+        var cmd = step.Change?.TrimStart() ?? "";
+        return Regex.IsMatch(cmd, @"^(mkdir|md)\b", RegexOptions.IgnoreCase) ||
+               Regex.IsMatch(cmd, @"^new-item\b[^\r\n]*(directory|-itemtype)", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// When the missing-web-search gate is about to reject a _create_file step whose change
+    /// clearly asks for a FOLDER (the planner reached for _create_file to make a directory),
+    /// return targeted steering toward _create_directory instead of the generic web feedback —
+    /// otherwise the next proposal is another mislabeled attempt instead of the fix.
+    /// </summary>
+    private static string? DirectoryIntentFeedback(PlanStep step)
+    {
+        if (step.File == null ||
+            !step.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(step.Change))
+            return null;
+        var change = step.Change.ToLowerInvariant();
+        if (!Regex.IsMatch(change, @"\b(create|make|add|new)\b[^\r\n]{0,40}\b(folder|directory|dir)\b"))
+            return null;
+        return "This step creates a FOLDER/DIRECTORY — use a \"_create_directory\" step with the relative folder path in \"change\" (no newString). " +
+               "\"_create_file\" is for FILES with real content; folder-only creation belongs to _create_directory and needs no web step first.";
+    }
+
+    /// <summary>
+    /// When the missing-web-search gate is about to reject a _create_file that is really a
+    /// SCRAPER/FETCH script — application code that programs an HTTP fetch (requests.get /
+    /// urllib / fetch() / Invoke-RestMethod / HttpClient …) against a URL and writes the
+    /// result to a file — return targeted steering toward _web_fetch instead of the generic
+    /// web feedback. The "wrote a Python app to do a fetch" drift: the planner forgets the
+    /// _web_fetch step tool exists and plans a scraper program instead (the system fetches
+    /// the URL itself and auto-writes the harvested data to the demanded file).
+    /// </summary>
+    private static string? ScraperScriptFeedback(PlanStep step)
+    {
+        if (step.File == null ||
+            !step.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
+            !AgentProjectUtilities.LooksLikeScraperScriptContent(step.NewString))
+            return null;
+        return "This _create_file is a SCRAPER/FETCH script — application code that programs an HTTP request " +
+               "(requests.get / urllib / fetch() / Invoke-RestMethod / HttpClient …) to pull live data. On a task " +
+               "that needs current/live data, the fetch is a STEP TOOL, not a script: use a \"_web_fetch\" step with " +
+               "the real URL in \"change\" (or \"_web_search\" first if you don't have the URL yet). The system fetches " +
+               "the URL itself and auto-writes the harvested data to the demanded file — do NOT write code to do the fetching. " +
+               "If _web_fetch keeps failing, plan a \"_scraper\" step with the URL instead — the system builds and runs " +
+               "a working scraper for your OS and installed packages.";
+    }
+
+    /// <summary>
+    /// A _command that RUNS a script via an interpreter: <c>python fetch_poke_data.py</c>,
+    /// <c>python .\fetch_poke_data.py</c>, <c>cd X && node scripts/build.js</c>, or a
+    /// download-and-pipe into an interpreter (<c>curl &lt;url&gt; | python</c>). On a web-needing
+    /// task the RUN is the same "wrote a Python app to do a fetch" drift as the scraper-file
+    /// guard — the script either IS a scraper (read from disk) or does not exist (the scraper
+    /// was rejected, so running it is running nothing). Returns steering feedback, or null when
+    /// the command is legitimate (an existing non-scraper script, or no script run at all).
+    /// </summary>
+    private static readonly Regex RunScriptCommandRegex = new Regex(
+        @"(?i)\b(python3?|py|node|deno|bun|ruby|perl|php|bash|sh|pwsh|powershell)\b(?:\s+-[A-Za-z][A-Za-z0-9]*\s*)*\s+([\w.\\/:-]+\.(?:py|pyw|js|mjs|cjs|ts|rb|pl|php|sh|bash|ps1))\b",
+        RegexOptions.Compiled);
+
+    private static readonly Regex FetchPipeIntoInterpreterRegex = new Regex(
+        @"(?i)\b(curl|wget|curl\.exe|irm|iwr|invoke-restmethod|invoke-webrequest)\b[^\r\n]{0,150}\|\s*(?:&\s*)?\b(python3?|py|node|bash|sh|pwsh|powershell)\b",
+        RegexOptions.Compiled);
+
+    private static string? RunScraperScriptReason(PlanStep step, string projectRoot)
+    {
+        if (step.File == null || !step.File.Equals("_command", StringComparison.OrdinalIgnoreCase))
+            return null;
+        var cmd = step.Change?.Trim() ?? "";
+        var pipe = FetchPipeIntoInterpreterRegex.Match(cmd);
+        if (pipe.Success)
+            return ScraperRunFeedback($"a fetched HTTP stream piped into '{pipe.Groups[2].Value}'", pipe.Groups[2].Value);
+        var m = RunScriptCommandRegex.Match(cmd);
+        if (!m.Success) return null;
+        var interp = m.Groups[1].Value;
+        var script = m.Groups[2].Value.Trim().Trim('"', '\'', '`');
+        script = Regex.Replace(script, @"^[.]\\|^[.]/", "");
+        var scriptRel = script.Replace('\\', '/');
+        string? content = null;
+        try
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, scriptRel.Replace('/', Path.DirectorySeparatorChar)));
+            if (System.IO.File.Exists(full)) content = System.IO.File.ReadAllText(full);
+        }
+        catch { /* unreadable path — treat as nonexistent */ }
+        if (content != null)
+        {
+            if (!AgentProjectUtilities.LooksLikeScraperScriptContent(content))
+                return null; // an EXISTING, non-scraper script — a legitimate run
+            return ScraperRunFeedback($"'{scriptRel}' (it is a scraper/fetch script)", interp);
+        }
+        return ScraperRunFeedback(
+            $"'{scriptRel}' (the file does not exist — running a script that was never created cannot produce the data)", interp);
+    }
+
+    private static string ScraperRunFeedback(string what, string interpreter)
+    {
+        var envNote = ScraperEnvironmentService.StaticInterpreterAvailable(interpreter)
+            ? $"Your machine HAS \"{interpreter}\" installed, but the fetch still belongs to the step tool."
+            : $"Your machine does NOT have \"{interpreter}\" installed — the script could not run anyway.";
+        return $"This _command RUNS a scraper/fetch script ({what}). {envNote} " +
+               "On a task that needs current/live data, the fetch is a STEP TOOL: use a \"_web_fetch\" step with the real URL " +
+               "(or \"_web_search\" first if you don't have the URL yet). The system fetches the URL itself and auto-writes the " +
+               "demanded file. If _web_fetch keeps failing, plan a \"_scraper\" step with the URL instead — the system builds " +
+               "and runs a working scraper for your OS and installed packages. Do NOT write or run scraper code yourself.";
+    }
+
+    /// <summary>
+    // SMART WEB-CONTEXT BUDGET: the raw output a _web_fetch returns (a whole tag-stripped
+    // page) can be megabytes, but every prompt that consumes it is token-bounded. The budget
+    // is split by consumer instead of one hard chop:
+    //   - DISCOVERY CONTEXT (planner / thinking / assessment / replay seed): compact
+    //     20k-per-section with a SHARED 60k total — the decision-critical input (the
+    //     harvested search results' titles + URLs) lives in the first few kB of each
+    //     section, and the shared total bounds a long web chain instead of growing it
+    //     without limit.
+    //   - EDIT-RESOLUTION (HarvestWebResultsForEditContext): a LONGER 60k-per-section
+    //     prefix pulled straight from allResults ON DEMAND — this is the prompt that
+    //     actually generates file content, so it gets ~3x the fetched article to copy
+    //     facts from instead of fabricating them. allResults always keeps the FULL output.
+    private const int MaxWebSectionChars = 20000;
+    private const int MaxWebTotalChars = 60000;
+    private const int MaxWebSectionCharsForEdit = 60000;
+    private const int MaxWebTotalCharsForEdit = 60000;
+
+    /// <summary>
     /// Harvests executed _web_search/_web_fetch outputs from a step's results and appends
     /// them to the discovery context so the NEXT planning/thinking round can see what the
     /// search/fetch actually returned. ExecuteWebPlanStep accumulates results into a local
     /// webCtx that is only flushed via ReplanRemainingSteps when the SAME plan has further
     /// steps — in the interleaved loop each step runs as its own single-step plan, so that
     /// flush never fires and the model re-invented scraping code instead of using results.
+    /// Sections are capped per-section (20k) and against a shared total budget, so a long
+    /// web chain is bounded; callers needing more (the edit-resolution) pass a larger
+    /// per-section cap — the full output always stays in allResults.
     /// </summary>
     private static string AppendWebResultsToDiscoveryContext(
-        string discoveryContext, IEnumerable<Dictionary<string, object?>> newResults)
+        string discoveryContext, IEnumerable<Dictionary<string, object?>> newResults,
+        int maxSectionChars = MaxWebSectionChars, int maxTotalChars = MaxWebTotalChars)
     {
+        var remaining = maxTotalChars;
+        var dropped = 0;
         foreach (var r in newResults)
         {
             var type = r.GetValueOrDefault("type")?.ToString();
@@ -2158,23 +2369,65 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var query = r.GetValueOrDefault("query")?.ToString() ?? r.GetValueOrDefault("url")?.ToString() ?? "";
             var output = r.GetValueOrDefault("output")?.ToString();
             if (string.IsNullOrWhiteSpace(output) || output.Length <= 80) continue;
-            var capped = output.Length > 20000 ? output[..20000] + "…" : output;
+            if (remaining <= 0) { dropped++; continue; }
+            var alloc = Math.Min(output.Length, Math.Min(maxSectionChars, remaining));
+            var capped = alloc < output.Length ? output[..alloc] + "…" : output;
             discoveryContext += $"\n\n### WEB RESULTS [{query}] ###\n{capped}\n";
+            remaining -= alloc;
         }
+        if (dropped > 0)
+            discoveryContext += $"\n…[web-results budget exhausted — {dropped} later section(s) omitted from context]\n";
         return discoveryContext;
     }
 
     /// <summary>
     /// Harvests executed web results from the run's results for injection into the
     /// edit-resolution prompt, so FORMAT C/D / oldString-newString generation can copy real
-    /// titles, URLs, and facts into newString instead of inventing them. Reuses
-    /// AppendWebResultsToDiscoveryContext's filtering (done-status only, 20k cap) and returns
+    /// titles, URLs, and facts into newString instead of inventing them. This is the
+    /// ON-DEMAND consumer: it pulls a LONGER prefix (60k/section) straight from allResults
+    /// — where the full fetch output always lives — than the discovery context carries, so
+    /// an edit that writes fetched article data sees ~3x the article to copy from. Returns
     /// "" when there are no usable web results.
     /// </summary>
     private static string HarvestWebResultsForEditContext(IEnumerable<Dictionary<string, object?>> results)
     {
-        var ctx = AppendWebResultsToDiscoveryContext("", results);
+        var ctx = AppendWebResultsToDiscoveryContext("", results,
+            MaxWebSectionCharsForEdit, MaxWebTotalCharsForEdit);
         return ctx.TrimStart('\n', ' ', '\t');
+    }
+
+    /// <summary>
+    /// Appends '### CREATED {path} (… exists on disk, current state) ###' sections for
+    /// successfully created directories/files so later planning/thinking/verification turns
+    /// see the filesystem actually changed. A _create_directory result used to VANISH from
+    /// long-term context: web results and edits get appended after each step, but a bare
+    /// create result is neither a read nor an edit, and the FILES-IN inventory skips empty
+    /// directories — so the reasoning engine concluded "no confirmation this step actually
+    /// completed successfully — only its intent is recorded" and the planner re-proposed
+    /// mkdir, while the between-steps verifier claimed the folder was "never physically
+    /// created". Existence is verified on disk so a failed create is never reported as real.
+    /// </summary>
+    private static string AppendCreatedPathsToDiscoveryContext(
+        string discoveryContext, IEnumerable<Dictionary<string, object?>> newResults, string projectRoot)
+    {
+        var created = newResults
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "create")
+            .Where(r => r.GetValueOrDefault("status")?.ToString() is "done" or "created")
+            .Select(r => r.GetValueOrDefault("path")?.ToString())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (created.Count == 0) return discoveryContext;
+        var sb = new StringBuilder();
+        foreach (var rel in created)
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, rel!.Replace('/', Path.DirectorySeparatorChar)));
+            var kind = System.IO.Directory.Exists(full) ? "directory"
+                : System.IO.File.Exists(full) ? "file"
+                : "path (not found on disk)";
+            sb.AppendLine($"### CREATED {rel} ({kind} — exists on disk, current state) ###");
+        }
+        return discoveryContext + "\n" + sb.ToString().TrimEnd();
     }
 
     /// <summary>
@@ -2280,17 +2533,70 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "This task operates on the OS filesystem OUTSIDE the repository (desktop/home/Downloads/etc.) — the repository's source files are NOT the target. " +
         "Use \"_command\" (e.g. mkdir/New-Item for folders, rm/Move-Item for files) or \"_create_directory\" for the OS operation. Do NOT edit repository source files to perform it.";
 
+    /// <summary>Stable prefix identifying a fetch-in-command rejection so the
+    /// auto-inject counters can recognize it regardless of the dynamic detail
+    /// (the URL, whether a search already ran, whether the URL matches the
+    /// harvested results).</summary>
+    private const string FetchCommandFeedbackMarker =
+        "This _command step fetches content from a URL with a download tool";
+
     /// <summary>
     /// Feedback shown when a _command step tries to fetch web content instead of
     /// using the web tools (the "Invoke-RestMethod https://api.current.ai/..."
     /// failure mode). The fetched results must land in context via _web_search/
-    /// _web_fetch, not in a command's stdout/file.
+    /// _web_fetch, not in a command's stdout/file — and the URL a _web_fetch
+    /// eventually uses must be copied VERBATIM from the harvested search results
+    /// (the "wired ...haha-im-in-danger/" hallucinated-URL run fetched garbage and
+    /// PowerShell saved an empty object). The builder quotes the attempted URL and
+    /// tells the planner whether it matches the results, what a search-first path
+    /// looks like, and that inventing URLs is never allowed.
     /// </summary>
-    private const string FetchCommandFeedback =
-        "This _command step fetches content from a URL with a download tool (curl/wget/Invoke-RestMethod/Invoke-WebRequest/urllib/...). " +
-        "Fetching web content is NOT a shell command — use a \"_web_search\" step (put the query in \"change\") or a \"_web_fetch\" step " +
-        "(put the URL in \"change\") instead; the fetched results are injected into your context so you can use them. " +
-        "Reserve _command for real terminal commands (builds, tests, git, package installs).";
+    private static string FetchCommandFeedbackFor(
+        string originalPrompt, PlanStep step, List<PlanStep> planSoFar, string discoveryContext)
+    {
+        var url = ExtractCommandUrl(step.Change ?? "");
+        var resultsInContext = discoveryContext.Contains("### WEB RESULTS", StringComparison.Ordinal) ||
+                               planSoFar.Any(s => IsWebStep(s.File));
+        var urlMatchesResults = !string.IsNullOrWhiteSpace(url) &&
+                                discoveryContext.Contains(url, StringComparison.Ordinal);
+        var sb = new StringBuilder(FetchCommandFeedbackMarker);
+        sb.Append(" (curl/wget/Invoke-RestMethod/Invoke-WebRequest/urllib/...). ")
+          .Append("Fetching web content is NOT a shell command — the fetched results must land in your CONTEXT, ")
+          .Append("not in a command's stdout or in a file on disk.");
+        if (resultsInContext)
+        {
+            if (urlMatchesResults)
+            {
+                sb.Append(" The URL \"").Append(url).Append("\" you put in this command IS in the harvested search results — ")
+                  .Append("use a \"_web_fetch\" step instead and put THAT exact URL verbatim in its \"change\" field; ")
+                  .Append("the fetch output is injected into your context.");
+            }
+            else
+            {
+                sb.Append(" The URL \"").Append(url).Append("\" is NOT among the harvested search results in your DISCOVERY CONTEXT ")
+                  .Append("— it looks invented (a hallucinated URL fetches garbage and the run saves an empty object). ")
+                  .Append("Pick a REAL URL verbatim from the '### WEB RESULTS [...] ###' sections and use a \"_web_fetch\" step with that exact URL. ")
+                  .Append("NEVER invent, guess, or reconstruct a URL — copy it exactly from the results.");
+            }
+        }
+        else
+        {
+            sb.Append(" Run a \"_web_search\" step first to obtain REAL URLs, then use a \"_web_fetch\" step with one of those URLs ")
+              .Append("verbatim (copy it exactly — never invent, guess, or reconstruct a URL).");
+        }
+        sb.Append(" Reserve _command for real terminal commands (builds, tests, git, package installs).");
+        return sb.ToString();
+    }
+
+    /// <summary>Extracts the first http(s) URL from a command string, trimmed of
+    /// trailing punctuation, for quoting back in rejection feedback.</summary>
+    private static string? ExtractCommandUrl(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return null;
+        var m = Regex.Match(command, @"https?://[^\s""'`]+");
+        if (!m.Success) return null;
+        return m.Value.TrimEnd(')', ']', '}', ';', ',', '\"');
+    }
 
     /// <summary>
     /// Windows PowerShell 5.1 (powershell.exe) rejects `&&` as a statement separator
@@ -2337,13 +2643,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             : (demandDir.Length > 0 && newCmd.Contains(demandDir, StringComparison.OrdinalIgnoreCase)) ||
               (demandFile.Length > 0 && newCmd.Contains(demandFile, StringComparison.OrdinalIgnoreCase));
         if (!writesToDemand) return null;
-        var alreadyWritten = AgentOsOutputVerifier.IsOsOutputWritten(demand, committed.Select(s => new Dictionary<string, object?>
+        // Prompt-level "already targeted" check over the committed steps' command text (the
+        // same directory/file match used above). This deliberately does NOT consult the disk
+        // or AgentOsOutputVerifier.IsOsOutputWritten: the guard runs at planning time before
+        // anything executes, on machines where the demanded path may not exist at all.
+        var alreadyTargeted = committed.Any(s =>
         {
-            ["type"] = s.File,
-            ["command"] = s.Change,
-            ["status"] = "done"
-        }));
-        if (!alreadyWritten) return null;
+            var c = (s.Change ?? "").Replace('\\', '/');
+            return (demandDir.Length > 0 && c.Contains(demandDir, StringComparison.OrdinalIgnoreCase)) ||
+                   (demandFile.Length > 0 && c.Contains(demandFile, StringComparison.OrdinalIgnoreCase));
+        });
+        if (!alreadyTargeted) return null;
         var where = string.IsNullOrWhiteSpace(demand.FileNameHint)
             ? (demandDir.Length > 0 ? demandDir : "the demanded location")
             : Path.Combine(demand.DirectoryPath ?? "", demand.FileNameHint!);
@@ -2662,6 +2972,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "info",
                     $"DIAG: After queued step — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}", ct: ct);
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
+                discoveryContext = AppendCreatedPathsToDiscoveryContext(discoveryContext, newResults, projectRoot);
                 await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
@@ -3109,6 +3420,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // The verification is memoized so it costs at most one call per run.
             if (proposal.Step.File != null &&
                 !IsWebStep(proposal.Step.File) &&
+                // Filesystem PREP is not a refusal to use the web tools — a web-needing task
+                // that demands a folder ("create a folder called X …") must be able to create
+                // it up front instead of bouncing mkdir for 3 rejections before the search is
+                // auto-injected. _create_directory and mkdir-style _command steps qualify
+                // (the dump destination is additionally pre-created in the web step itself).
+                !IsFilesystemPrepStep(proposal.Step) &&
                 !planSoFar.Any(s => IsWebStep(s.File)) &&
                 TaskHintsWebNeed(prompt))
             {
@@ -3130,7 +3447,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 if (webNeedVerified == 1)
                 {
-                    var webFb = WebNeedFeedback;
+                    // When the task explicitly ASKS for a script, the scraper steering stands
+                    // down (writing it is the task) — only the generic web feedback remains.
+                    var webFb = DirectoryIntentFeedback(proposal.Step)
+                        ?? (TaskExplicitlyRequestsScript(prompt) ? null : ScraperScriptFeedback(proposal.Step))
+                        ?? WebNeedFeedback;
                     await EmitRejectedLog(emitSse,
                         $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — task needs current external info but the plan has no _web_search step",
                         webFb, ct);
@@ -3257,7 +3578,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 skipLlm: skipLlm, lastStepCompletionNote: completionNote, attachedFiles: attachedFiles);
             if (!valid)
             {
-                if (string.Equals(reason, FetchCommandFeedback, StringComparison.Ordinal)) fetchCommandRejections++;
+                if (reason != null && reason.StartsWith(FetchCommandFeedbackMarker, StringComparison.Ordinal)) fetchCommandRejections++;
                 var stepFb = $"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}";
                 await EmitRejectedLog(emitSse,
                     $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", stepFb, ct);
@@ -3428,6 +3749,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     $"DIAG: After ExecutePlan — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}, newResults.Count={newResults.Count}",
                     ct: ct);
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
+                discoveryContext = AppendCreatedPathsToDiscoveryContext(discoveryContext, newResults, projectRoot);
                 await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
@@ -4201,17 +4523,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return (null, new List<string>());
     }
-    private async Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isBenchmark)> LoadPlanFromBoardDataAsync(string? cardId)
+    private async Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isBenchmark, List<Dictionary<string, object?>>? webResults)> LoadPlanFromBoardDataAsync(string? cardId)
     {
         if (string.IsNullOrWhiteSpace(cardId))
-            return (null, null, false);
+            return (null, null, false, null);
         try
         {
             var raw = await _boardData.LoadRawAsync();
-            if (string.IsNullOrWhiteSpace(raw)) return (null, null, false);
+            if (string.IsNullOrWhiteSpace(raw)) return (null, null, false, null);
             using var jsonDoc = JsonDocument.Parse(raw);
             var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
-            if (root == null) return (null, null, false);
+            if (root == null) return (null, null, false, null);
             var columns = new[] { "todo", "doing", "done", "selfImproving" };
             foreach (var column in columns)
             {
@@ -4236,6 +4558,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             File = si["file"]?.GetValue<string>() ?? "",
                             Change = si["change"]?.GetValue<string>() ?? "",
+                            Status = si["status"]?.GetValue<string>(),
                             Priority = si["priority"]?.GetValue<int>() ?? 1,
                             OldString = si["oldString"]?.GetValue<string>() ?? "",
                             NewString = si["newString"]?.GetValue<string>() ?? "",
@@ -4246,13 +4569,38 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var done = si["done"]?.GetValue<bool>() ?? false;
                         if (done) completed.Add(idx);
                     }
-                    if (steps.Count == 0) return (null, null, isBenchmark);
+                    if (steps.Count == 0) return (null, null, isBenchmark, null);
                     var plan = new AgentPlan
                     {
                         Summary = planObj["summary"]?.GetValue<string>() ?? "",
                         Plan = steps
                     };
-                    return (plan, completed.Count > 0 ? completed : null, isBenchmark);
+                    // The card-level _webResults store (PersistWebResultsToCardAsync) rides
+                    // back out with the plan so a replayed run can seed its discovery context
+                    // with the previous run's harvested web data.
+                    List<Dictionary<string, object?>>? webResults = null;
+                    if (cardObj["_webResults"] is JsonArray wrArr && wrArr.Count > 0)
+                    {
+                        webResults = new List<Dictionary<string, object?>>();
+                        foreach (var wr in wrArr.OfType<JsonObject>())
+                        {
+                            var type = wr["type"]?.GetValue<string>() ?? "";
+                            if (type is not ("_web_search" or "_web_fetch")) continue;
+                            var d = new Dictionary<string, object?>
+                            {
+                                ["type"] = type,
+                                ["status"] = wr["status"]?.GetValue<string>() ?? "done",
+                                ["output"] = wr["output"]?.GetValue<string>() ?? ""
+                            };
+                            var q = wr["query"]?.GetValue<string>();
+                            if (!string.IsNullOrWhiteSpace(q)) d["query"] = q;
+                            var u = wr["url"]?.GetValue<string>();
+                            if (!string.IsNullOrWhiteSpace(u)) d["url"] = u;
+                            webResults.Add(d);
+                        }
+                        if (webResults.Count == 0) webResults = null;
+                    }
+                    return (plan, completed.Count > 0 ? completed : null, isBenchmark, webResults);
                 }
             }
         }
@@ -4260,7 +4608,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             await EmitLog(true, "warn", "Failed to load plan from board data", new { cardId, error = ex.Message });
         }
-        return (null, null, false);
+        return (null, null, false, null);
     }
     private sealed class IncrementalStepProposal
     {

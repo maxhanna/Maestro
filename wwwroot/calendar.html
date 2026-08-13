@@ -18,7 +18,9 @@
       <div class="cal-day-header">
         <span class="cal-day-num">{{day.num}}</span>
         <span class="cal-day-card-count" ng-if="day.cards.length">{{day.cards.length}}</span>
-        <span class="cal-day-nextfire" ng-if="day.nextFires.length" title="{{day.nextFiresTitle}}">
+        <span class="cal-day-nextfire" ng-if="day.nextFires.length" title="{{day.nextFiresTitle}}"
+          ng-click="vm.calOpenScheduled(day, $event)" role="button" tabindex="0"
+          ng-keydown="$event.key === 'Enter' && vm.calOpenScheduled(day, $event)">
           &#9201;<span class="cal-day-nextfire-count" ng-if="day.nextFires.length > 1">{{day.nextFires.length}}</span>
         </span>
         <span class="cal-day-lastrun" ng-if="day.lastRun" title="{{vm.calDayLastRunTitle(day.lastRun)}}">
@@ -246,6 +248,41 @@
         <button class="danger" ng-if="histCard && vm.cronRunCount(histCard) > 0"
           ng-click="vm.calClearHistory(histCard, $event)">Clear history</button>
         <button class="primary" ng-click="vm.calCloseHistory()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scheduled Events Popup (the ⏱ chip in the day header) -->
+  <div class="popup-overlay" ng-if="vm.calScheduledDay" ng-click="vm.calCloseScheduled($event)">
+    <div class="popup-panel cal-scheduled-panel" ng-click="$event.stopPropagation()">
+      <div class="popup-header">
+        <strong>⏱ Scheduled events</strong>
+        <button ng-click="vm.calCloseScheduled()">&times;</button>
+      </div>
+      <div class="popup-body">
+        <div class="cal-scheduled-date" ng-if="vm.calScheduledDay">{{vm.calScheduledDayLabel(vm.calScheduledDay)}}</div>
+        <div class="cal-scheduled-list" ng-if="vm.calScheduledDay && vm.calScheduledDay.nextFires.length">
+          <div class="cal-scheduled-entry" ng-repeat="entry in vm.calScheduledDay.nextFires track by entry.card.id + '|' + entry.fire.getTime()">
+            <div class="cal-scheduled-task">
+              <strong>{{entry.card.text}}</strong>
+              <span class="cal-history-schedule" ng-if="entry.card.cronExpression">{{entry.card.cronExpression}}</span>
+              <span class="cal-scheduled-when">&#9201; {{vm.calFireWhen(entry.fire)}}</span>
+              <span class="cal-card-project" ng-if="entry.card.filePath" title="{{entry.card.filePath}}">{{vm.projectName(entry.card.filePath)}}</span>
+            </div>
+            <div class="cal-scheduled-actions">
+              <button class="small success" ng-click="vm.calFireScheduled(entry, $event)"
+                title="Fire this schedule now — push to To Do and start it (or queue it if the agent is busy)">&#9654; Fire now</button>
+              <button class="small" ng-click="vm.calEditScheduled(entry, $event)"
+                title="Edit this calendar card">&#9998; Edit</button>
+            </div>
+          </div>
+        </div>
+        <div class="cal-history-empty" ng-if="vm.calScheduledDay && !vm.calScheduledDay.nextFires.length">
+          No scheduled events on this day.
+        </div>
+      </div>
+      <div class="popup-footer">
+        <button class="primary" ng-click="vm.calCloseScheduled()">Close</button>
       </div>
     </div>
   </div>

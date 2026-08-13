@@ -676,7 +676,7 @@ public class ToolSelectionEvalTests : IDisposable
             /*attachedFiles*/ attachedFiles.ToList(),
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ null,
-            /*createTests*/ false, /*buildCommands*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
         })!;
         return await task;
     }

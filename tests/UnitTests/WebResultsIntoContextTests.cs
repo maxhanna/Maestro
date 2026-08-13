@@ -23,7 +23,7 @@ public class WebResultsIntoContextTests
         "ExtractWebResultSectionsForThinking", BindingFlags.NonPublic | BindingFlags.Static)!;
 
     private static string Append(string ctx, List<Dictionary<string, object?>> results)
-        => (string)AppendMethod.Invoke(null, new object[] { ctx, results })!;
+        => (string)AppendMethod.Invoke(null, new object?[] { ctx, results, 20000, 60000 })!;
 
     private static string Extract(string ctx)
         => (string)ExtractMethod.Invoke(null, new object[] { ctx })!;

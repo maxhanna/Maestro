@@ -30,7 +30,7 @@ public class WebResultsUiTests
     }
 
     private static string Append(string ctx, List<Dictionary<string, object?>> results)
-        => (string)AppendMethod.Invoke(null, new object[] { ctx, results })!;
+        => (string)AppendMethod.Invoke(null, new object?[] { ctx, results, 20000, 60000 })!;
 
     private static string Harvest(List<Dictionary<string, object?>> results)
         => (string)HarvestMethod.Invoke(null, new object[] { results })!;
@@ -89,12 +89,16 @@ public class WebResultsUiTests
     [Fact]
     public void FullOutput_StillReachesTheAgentsContextDespiteClientCap()
     {
-        // Regression lock: the client SSE payload is capped at 12k, but allResults must keep the
-        // FULL output — AppendWebResultsToDiscoveryContext re-harvests it for the interleaved
-        // loop's thinking context (the "web results into thinking" feature). Capping allResults
-        // too would starve the model of a fetched article's body.
-        var longArticle = "HTTP 200\n" + string.Concat(Enumerable.Repeat("The agent needs every sentence of this fetched article body. ", 600));
+        // Regression lock: the client SSE payload is capped at 12k, but the discovery context
+        // must carry MORE of the fetched article — AppendWebResultsToDiscoveryContext re-harvests
+        // it for the interleaved loop's thinking context (the "web results into thinking"
+        // feature). The fixture uses UNIQUE text (a repeating sentence would make the tail a
+        // vacuous substring of the prefix), ~25k long: past the 12k client cap, inside the 20k
+        // per-section discovery cap.
+        var longArticle = "HTTP 200\n" + string.Concat(Enumerable.Range(0, 160)
+            .Select(i => $"Sentence {i}: the fetched article body keeps going with unique content for the model to read. "));
         Assert.True(longArticle.Length > 12000, "test fixture must exceed the client cap");
+        Assert.True(longArticle.Length <= 20000, "test fixture must stay inside the discovery per-section cap");
 
         var (_, truncated) = Cap(longArticle);
         Assert.True(truncated);
@@ -109,9 +113,10 @@ public class WebResultsUiTests
                 ["output"] = longArticle
             }
         });
-        // Content well past the 12k client cap must still be present in the context.
+        // Content well past the 12k client cap must still be present in the context (and the
+        // unique fixture guarantees the match is real, not a repeated-sentence artifact).
         Assert.Contains("### WEB RESULTS [https://example.com/article] ###", updated);
-        Assert.Contains(longArticle[^200..], updated);
+        Assert.Contains("Sentence 159:", updated);
     }
 
     [Fact]

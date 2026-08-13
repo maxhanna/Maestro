@@ -1324,7 +1324,8 @@ partial class AgentController
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
-        string? cardId = null, bool createTests = false, string? buildCommands = null)
+        string? cardId = null, bool createTests = false, string? buildCommands = null,
+        List<Dictionary<string, object?>>? webResults = null)
     {
         var runKey = !string.IsNullOrWhiteSpace(cardId) ? "card:" + cardId : "anon:" + Guid.NewGuid().ToString("N");
         _executingCards[runKey] = DateTime.UtcNow.Ticks;
@@ -1332,7 +1333,8 @@ partial class AgentController
         try
         {
             return await OrchestrateCore(prompt, projectRoot, emitSse, ct, attachedFiles, skipContextReview,
-                steeringContext, skipQualityCheck, existingPlan, completedStepIndices, cardId, createTests, buildCommands);
+                steeringContext, skipQualityCheck, existingPlan, completedStepIndices, cardId, createTests, buildCommands,
+                webResults: webResults);
         }
         finally
         {
@@ -1345,7 +1347,8 @@ partial class AgentController
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
-        string? cardId = null, bool createTests = false, string? buildCommands = null)
+        string? cardId = null, bool createTests = false, string? buildCommands = null,
+        List<Dictionary<string, object?>>? webResults = null)
     {
         _gracefulStop = false;
         var connectivityTask = CheckLlmConnectivity(projectRoot, emitSse, ct);
@@ -1376,7 +1379,31 @@ partial class AgentController
             if (!await connectivityTask)
                 throw new InvalidOperationException("LLM connectivity check failed.");
             var resumeSteps = new List<object>();
-            await ExecutePlan(prompt, projectRoot, emitSse, "", existingPlan, ct, resumeSteps,
+            // REBUILD the previous run's harvested web data into the replay: completed
+            // _web_search/_web_fetch steps are skipped on replay (never re-executed), so
+            // without the persisted _webResults the discovery context would start EMPTY and
+            // the remaining steps would lose the previous run's web data (allResults is
+            // session-only). The persisted outputs ride back in as done web results (marked
+            // replayed) — they feed both the discovery context and the edit-resolution
+            // injection for whatever steps remain.
+            string replayContext = "";
+            if (webResults != null && webResults.Count > 0)
+            {
+                var seedIndex = 0;
+                foreach (var wr in webResults)
+                {
+                    var copy = new Dictionary<string, object?>(wr)
+                    {
+                        ["index"] = seedIndex++,
+                        ["replayed"] = true
+                    };
+                    resumeSteps.Add(copy);
+                }
+                replayContext = AppendWebResultsToDiscoveryContext("", webResults);
+                await EmitLog(emitSse, "info",
+                    $"♻ Seeding {webResults.Count} harvested web result(s) from the previous run into the replay context", ct: ct);
+            }
+            await ExecutePlan(prompt, projectRoot, emitSse, replayContext, existingPlan, ct, resumeSteps,
                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                 completedStepIndices: completedStepIndices, cardId: cardId);
             var resumeHasErrors = resumeSteps.OfType<Dictionary<string, object?>>()

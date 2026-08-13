@@ -325,6 +325,16 @@ body.dragging-active .card:hover {
 .card .card-meta .card-tag.tag-context {
     margin-left: 6px;
 }
+.card .card-tag.tag-spend {
+    background: rgba(212, 175, 55, 0.14);
+    color: #fbbf24;
+    font-weight: 700;
+    border: 1px solid rgba(212, 175, 55, 0.35);
+    font-variant-numeric: tabular-nums;
+}
+.card .card-meta .card-tag.tag-spend {
+    margin-left: 6px;
+}
 
 /* Bughosted feedback-sent chip — done/archived cards that had feedback successfully
    submitted to the bughosted server show a small green check next to the Feedback

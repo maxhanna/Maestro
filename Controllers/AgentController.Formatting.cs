@@ -25,6 +25,93 @@ namespace Weaver.Controllers;
 
 partial class AgentController
 {
+    /// <summary>
+    /// Persists the run's harvested _web_search/_web_fetch outputs onto the card as a
+    /// card-level "_webResults" array (separate from the plan items, so it survives plan
+    /// rebuilds). A replayed run (restart) skips completed web steps without re-executing
+    /// them, so without this store the discovery context would rebuild EMPTY and lose the
+    /// previous run's web data — the fix seeds the replay's results + context from this
+    /// store. Entries carry type/status/query-or-url/output; outputs are capped at 20k
+    /// (the same cap the discovery-context append applies) and merged idempotently by
+    /// (type|query|url) so a re-executed step replaces its own entry instead of duplicating.
+    /// </summary>
+    private async Task PersistWebResultsToCardAsync(string? cardId, List<object> allResults)
+    {
+        if (string.IsNullOrWhiteSpace(cardId)) return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    var existing = cardObj["_webResults"] as JsonArray ?? new JsonArray();
+                    var existingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var existingByIdx = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    for (var i = 0; i < existing.Count; i++)
+                    {
+                        if (existing[i] is not JsonObject eo) continue;
+                        var key = (eo["type"]?.GetValue<string>() ?? "") + "|" +
+                                  (eo["query"]?.GetValue<string>() ?? eo["url"]?.GetValue<string>() ?? "");
+                        if (key == "|") continue;
+                        existingKeys.Add(key);
+                        existingByIdx[key] = i;
+                    }
+                    var changed = false;
+                    foreach (var r in allResults.OfType<Dictionary<string, object?>>())
+                    {
+                        var type = r.GetValueOrDefault("type")?.ToString();
+                        if (type is not ("_web_search" or "_web_fetch")) continue;
+                        if (r.GetValueOrDefault("status")?.ToString() != "done") continue;
+                        var output = r.GetValueOrDefault("output")?.ToString();
+                        if (string.IsNullOrWhiteSpace(output) || output.Length <= 80) continue;
+                        var isSearch = type == "_web_search";
+                        var query = isSearch
+                            ? r.GetValueOrDefault("query")?.ToString() ?? ""
+                            : r.GetValueOrDefault("url")?.ToString() ?? "";
+                        var key = type + "|" + query;
+                        var capped = output.Length > 20000 ? output[..20000] + "…" : output;
+                        var entry = new JsonObject
+                        {
+                            ["type"] = type,
+                            ["status"] = "done",
+                            [isSearch ? "query" : "url"] = query,
+                            ["output"] = capped
+                        };
+                        if (existingByIdx.TryGetValue(key, out var idx))
+                            existing[idx] = entry;
+                        else
+                        {
+                            existing.Add(entry);
+                            existingByIdx[key] = existing.Count - 1;
+                        }
+                        changed = true;
+                    }
+                    if (changed)
+                    {
+                        cardObj["_webResults"] = existing;
+                        var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                        await _boardData.SaveRawAsync(saved);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to persist web results to boarddata", new { cardId, error = ex.Message });
+        }
+    }
+
     private async Task PersistBoardDataPlanStepAsync(string? cardId, int planItemIndex, bool emitSse, CancellationToken ct,
         List<string>? diffs = null, string? projectRoot = null)
     {

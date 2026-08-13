@@ -290,6 +290,11 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
               // the cron run log can attribute outcomes to the right schedule.
               _cronSourceId: cal.id
             };
+            // The endpoint is already running a card — mark this fire as endpoint-parked so
+            // the queue drain (processQueuedCards) starts it the moment the current run
+            // clears, and the board renders a ⏳ QUEUED chip instead of parking an
+            // invisible card in To Do. Persisted by the saveCards call below.
+            if (_vm.streamingActive) newCard._endpointQueued = true;
             _vm.state.todo.push(newCard);
             _vm.saveCards();
             changed = true;
@@ -327,6 +332,7 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
       vm.calWeekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       vm.calEditCardData = null;
       vm.calShowHistory = null; // calendar card id whose run-history popup is open
+      vm.calScheduledDay = null; // day whose scheduled events (⏱ chip) popup is open
 
       // ── Cron run log (audit trail for scheduled jobs) ───────────────────
       // Entries live in board data (vm.state._cronRunLog) so they survive
@@ -395,6 +401,51 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         if (event) event.stopPropagation();
         vm.calShowHistory = null;
         scheduleUpdate();
+      };
+
+      // ── Scheduled-events popup (the ⏱ chip in the day header) ───────────
+      // Clicking a day's next-fire ⏱ chip opens a list of every scheduled event
+      // due that day — same data the chip count/tooltip render from
+      // (day.nextFires = [{ card, fire }], built in calBuildDays) — with Fire
+      // now / Edit actions so a recurring day's events can be inspected, fired
+      // ahead of schedule, or edited without hunting for the card.
+      vm.calOpenScheduled = function (day, $event) {
+        if ($event) $event.stopPropagation();
+        vm.calScheduledDay = day || null;
+        scheduleUpdate();
+      };
+      vm.calCloseScheduled = function (event) {
+        if (event) event.stopPropagation();
+        vm.calScheduledDay = null;
+        scheduleUpdate();
+      };
+      // "When" label for a scheduled row (formatFireDateTime is module-scoped;
+      // expose it for the popup template).
+      vm.calFireWhen = function (fire) { return fire ? formatFireDateTime(fire) : ''; };
+      // Friendly header for the popup — parse the day's "YYYY-MM-DD" string
+      // with LOCAL components (dateToLocal) so no timezone can shift the date.
+      vm.calScheduledDayLabel = function (day) {
+        if (!day || !day.date) return '';
+        var dt = dateToLocal(day.date);
+        return dt ? dt.toLocaleDateString('default', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : day.date;
+      };
+      // Fire a scheduled event from the popup: same push path as "Run now"
+      // (fireCalCard), then close the list so the fresh To Do card is visible.
+      vm.calFireScheduled = function (entry, $event) {
+        if ($event) $event.stopPropagation();
+        if (!entry || !entry.card) return;
+        var pushed = vm.fireCalCard(entry.card, 'Fired manually (scheduled list) — card pushed to To Do.');
+        if (_vm.showSideToast) _vm.showSideToast('⏰ Fired — added to To Do' + (_vm.streamingActive ? ' (queued)' : ' and started'));
+        if (!_vm.streamingActive && _vm.executeAgent) _vm.executeAgent(pushed);
+        vm.calCloseScheduled();
+      };
+      // Edit a scheduled event from the popup: drop the list and open the
+      // calendar card in the normal add/edit popup.
+      vm.calEditScheduled = function (entry, $event) {
+        if ($event) $event.stopPropagation();
+        if (!entry || !entry.card) return;
+        vm.calCloseScheduled();
+        vm.calEditCard(entry.card);
       };
       vm.calClearHistory = function (card, $event) {
         if ($event) $event.stopPropagation();
@@ -841,6 +892,49 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         scheduleUpdate();
       };
 
+      // Shared To Do-card builder for a manual fire — used by "Run once now",
+      // "Requeue now" and the scheduled-events popup's Fire button so the push
+      // path (flags, source linkage, cron label) can't drift between them.
+      // Accepts cards in either model: normalized strings (from vm.calCards) or
+      // Date objects (from the add/edit form) for date/time.
+      function buildCronFireCard(calCard) {
+        var datePart = calCard.date instanceof Date ? localDateStr(calCard.date) : (calCard.date || '');
+        var timePart = calCard.time instanceof Date ? timeStr(calCard.time) : (calCard.time || '');
+        return {
+          id: uid(),
+          text: calCard.text,
+          filePath: calCard.filePath || calCard.project || _vm.selectedProject,
+          createdAt: new Date().toISOString(),
+          priority: calCard.priority || 'medium',
+          ready: true,
+          attached: [],
+          selfImproving: false,
+          isDecomposing: false,
+          _fromCron: true,
+          _cronExpression: calCard.cronExpression || (timePart ? datePart + ' ' + timePart : ''),
+          _cronLabel: calCard.label || '',
+          _cronSourceId: calCard.id
+        };
+      }
+
+      // Pushes a calendar card to To Do as a fire and records the audit entry.
+      // Endpoint busy → park the fire as queued (⏳ QUEUED) so the drain starts
+      // it when the current run clears — mirrors the cron processor's fire path.
+      // Returns the pushed To Do card so callers can auto-start it when idle.
+      vm.fireCalCard = function (calCard, summary) {
+        var newCard = buildCronFireCard(calCard);
+        if (_vm.streamingActive) newCard._endpointQueued = true;
+        if (!_vm.state.todo) _vm.state.todo = [];
+        _vm.state.todo.push(newCard);
+        _vm.saveCards();
+        // Audit trail: a manual fire — record it so the calendar card's history
+        // shows when it was fired by hand vs on schedule.
+        cronRunLogAdd(_vm, cronRunLogKey(calCard), { outcome: 'ran', cardId: newCard.id, summary: summary });
+        // The interval runs outside a digest — apply so the card shows immediately.
+        try { if (_scope && !_scope.$$phase) _scope.$applyAsync(); } catch (e) {}
+        return newCard;
+      };
+
       // ── "Run once now" — fire the card immediately ─────────────────────
       // Mirrors what the cron processor does on schedule: persist the calendar
       // entry, then push a To Do card (marked _fromCron) and start it if the
@@ -852,30 +946,7 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           if (!data.date) return $window.alert('A date is required');
           // Persist first so an unsaved (new) card isn't lost when we close the editor.
           vm.calSaveCard();
-          var now = new Date();
-          var newCard = {
-            id: uid(),
-            text: data.text,
-            filePath: data.filePath || data.project || _vm.selectedProject,
-            createdAt: now.toISOString(),
-            priority: data.priority || 'medium',
-            ready: true,
-            attached: [],
-            selfImproving: false,
-            isDecomposing: false,
-            _fromCron: true,
-            _cronExpression: data.cronExpression || (data.time ? (data.date instanceof Date ? localDateStr(data.date) : data.date) + ' ' + (data.time instanceof Date ? timeStr(data.time) : data.time) : ''),
-            _cronLabel: data.label || '',
-            _cronSourceId: data.id
-          };
-          if (!_vm.state.todo) _vm.state.todo = [];
-          _vm.state.todo.push(newCard);
-          _vm.saveCards();
-          // Audit trail: 'Run now' is a manual fire — record it so the calendar
-          // card's history shows when it was fired by hand vs on schedule.
-          cronRunLogAdd(_vm, cronRunLogKey(data), { outcome: 'ran', cardId: newCard.id, summary: 'Fired manually (Run now) — card pushed to To Do.' });
-          // The interval runs outside a digest — apply so the card shows immediately.
-          try { if (_scope && !_scope.$$phase) _scope.$applyAsync(); } catch (e) {}
+          var newCard = vm.fireCalCard(data, 'Fired manually (Run now) — card pushed to To Do.');
           if (_vm.showSideToast) _vm.showSideToast('⏰ Calendar card fired now — added to To Do' + (_vm.streamingActive ? ' (queued)' : ' and started'));
           if (!_vm.streamingActive && _vm.executeAgent) _vm.executeAgent(newCard);
         } catch (e) {
@@ -900,32 +971,9 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           if (_vm.showSideToast) _vm.showSideToast('⏰ This schedule already has a live card on the board — no duplicate created.');
           return;
         }
-        var now = new Date();
-        var newCard = {
-          id: uid(),
-          text: calCard.text,
-          filePath: calCard.filePath || calCard.project || _vm.selectedProject,
-          createdAt: now.toISOString(),
-          priority: calCard.priority || 'medium',
-          ready: true,
-          attached: [],
-          selfImproving: false,
-          isDecomposing: false,
-          _fromCron: true,
-          _cronExpression: calCard.cronExpression || (calCard.time ? calCard.date + ' ' + calCard.time : ''),
-          _cronLabel: calCard.label || '',
-          _cronSourceId: calCard.id
-        };
-        if (!_vm.state.todo) _vm.state.todo = [];
-        _vm.state.todo.push(newCard);
-        _vm.saveCards();
-        // Audit trail: a manual retry — record it like a manual fire so the
-        // history shows the retry right after the failed entry.
-        cronRunLogAdd(_vm, cronRunLogKey(calCard), { outcome: 'ran', cardId: newCard.id, summary: 'Requeued after ' + (entry && entry.outcome === 'error' ? 'error' : 'stop') + ' — card pushed to To Do.' });
-        // The interval runs outside a digest — apply so the card shows immediately.
-        try { if (_scope && !_scope.$$phase) _scope.$applyAsync(); } catch (e) {}
+        var pushed = vm.fireCalCard(calCard, 'Requeued after ' + (entry && entry.outcome === 'error' ? 'error' : 'stop') + ' — card pushed to To Do.');
         if (_vm.showSideToast) _vm.showSideToast('⏰ Requeued — added to To Do' + (_vm.streamingActive ? ' (queued)' : ' and started'));
-        if (!_vm.streamingActive && _vm.executeAgent) _vm.executeAgent(newCard);
+        if (!_vm.streamingActive && _vm.executeAgent) _vm.executeAgent(pushed);
         // Keep the popup open so the fresh '▶ Fired' entry is visible.
         scheduleUpdate();
       };
