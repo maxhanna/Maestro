@@ -270,13 +270,14 @@ public class BenchmarkService
             },
             new()
             {
-                Level = 4, Name = "Benchmark 4", Description = "Create a folder called 'benchmark_test_4'. Create 'server.py' that runs a simple HTTP server on port 9999 serving 'index.html' at / with basic content, plus a /api/hello endpoint that returns JSON {\"message\": \"Hello\"}.",
+                Level = 4, Name = "Benchmark 4", Description = "Create a folder called 'benchmark_test_4' at the project root. Create a simple HTTP server on port 9969 serving 'index.html' at / with basic content, plus a /api/hello endpoint that returns JSON {\"message\": \"Hello\"}. Choose whatever language, runtime, or library you prefer — the implementation is up to you.",
                 AcceptanceChecks =
                 [
-                    Check.File("Server script exists", "benchmark_test_4/server.py"),
-                    Check.Contains("Server uses port 9999", "benchmark_test_4/server.py", "9999"),
-                    Check.Contains("Hello endpoint exists", "benchmark_test_4/server.py", "/api/hello"),
-                    Check.File("Index page exists", "benchmark_test_4/index.html")
+                    Check.Dir("Benchmark directory exists", "benchmark_test_4"),
+                    Check.File("Index page exists", "benchmark_test_4/index.html"),
+                    Check.AnyFileContains("Server binds port 9969", "benchmark_test_4", "9969"),
+                    Check.AnyFileContains("Hello endpoint exists", "benchmark_test_4", "/api/hello"),
+                    Check.AnyFileContains("Hello JSON message", "benchmark_test_4", "Hello")
                 ]
             },
             new()
@@ -678,6 +679,34 @@ public class BenchmarkService
                         ? $"Run-time date {embedded.Value:yyyy-MM-dd} matches the file write date and is within {check.MaxDaysOld} day(s) of today."
                         : $"Stale or mismatched run-time date: file says {embedded.Value:yyyy-MM-dd}, file was written {writeDate:yyyy-MM-dd}, today is {todayDate:yyyy-MM-dd}.";
                     break;
+                case BenchmarkCheckType.DirectoryContains:
+                    if (!Directory.Exists(path)) { result.Message = $"Missing directory: {check.Path}"; break; }
+                    var needle = check.Value ?? "";
+                    if (needle.Length == 0) { result.Message = "Empty search value."; break; }
+                    var hit = false;
+                    var scanned = 0;
+                    foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    {
+                        scanned++;
+                        try
+                        {
+                            // Skip obvious binaries (images, archives) — reading them as text can
+                            // throw or produce noise; only text-ish files matter for content checks.
+                            if (IsLikelyBinary(file)) continue;
+                            var text = await File.ReadAllTextAsync(file, ct);
+                            if (text.Contains(needle, StringComparison.Ordinal))
+                            {
+                                hit = true;
+                                break;
+                            }
+                        }
+                        catch { /* unreadable file — skip it */ }
+                    }
+                    result.Passed = hit;
+                    result.Message = hit
+                        ? $"Found '{needle}' in a file under {check.Path}."
+                        : $"'{needle}' not found in any of the {scanned} file(s) under {check.Path}.";
+                    break;
                 default:
                     result.Message = $"Unsupported check type: {check.Type}.";
                     break;
@@ -707,6 +736,30 @@ public class BenchmarkService
     /// Returns null when nothing looks like a date, so a file without any run-time timestamp
     /// fails the freshness check.
     /// </summary>
+    /// <summary>
+    /// Heuristic for skipping non-text files during directory-wide content scans: checks the
+    /// extension against a small binary blocklist plus a NUL-byte probe of the first 8 KB.
+    /// Text files (py/js/cs/html/json/csv/md/txt/...) fall through and get scanned.
+    /// </summary>
+    private static bool IsLikelyBinary(string file)
+    {
+        var ext = Path.GetExtension(file).ToLowerInvariant();
+        if (ext is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".ico" or ".webp"
+            or ".zip" or ".gz" or ".tar" or ".7z" or ".rar" or ".pdf" or ".exe" or ".dll"
+            or ".so" or ".dylib" or ".woff" or ".woff2" or ".ttf" or ".mp3" or ".mp4"
+            or ".wav" or ".ogg" or ".bin" or ".dat" or ".db" or ".sqlite") return true;
+        try
+        {
+            using var fs = File.OpenRead(file);
+            var buf = new byte[Math.Min(8192, fs.Length)];
+            var read = fs.Read(buf, 0, buf.Length);
+            for (var i = 0; i < read; i++)
+                if (buf[i] == 0) return true; // NUL byte — not text
+        }
+        catch { return true; }
+        return false;
+    }
+
     private static DateTime? ExtractRunDate(string content)
     {
         // Optional quote slots around the separator make the marker work both as a plain
@@ -751,7 +804,7 @@ public class BenchmarkPlanDefinition
     public List<BenchmarkAcceptanceCheck> AcceptanceChecks { get; set; } = new();
 }
 
-public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals, FileFreshTimestamp }
+public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals, FileFreshTimestamp, DirectoryContains }
 
 public static class Check
 {
@@ -780,6 +833,14 @@ public static class Check
     /// </summary>
     public static BenchmarkAcceptanceCheck FreshTimestamp(string name, string path, int maxDaysOld = 2, double weight = 2) =>
         new() { Name = name, Type = BenchmarkCheckType.FileFreshTimestamp, Path = path, Weight = weight, MaxDaysOld = maxDaysOld };
+
+    /// <summary>
+    /// Language-agnostic content check: passes when ANY file under the directory contains
+    /// the value. Lets benchmarks stay platform-neutral (e.g. a server could be server.py,
+    /// server.js, app.py, or main.cs) without pinning a specific filename.
+    /// </summary>
+    public static BenchmarkAcceptanceCheck AnyFileContains(string name, string dir, string value, double weight = 1) =>
+        new() { Name = name, Type = BenchmarkCheckType.DirectoryContains, Path = dir, Value = value, Weight = weight };
 }
 
 public class BenchmarkAcceptanceCheck

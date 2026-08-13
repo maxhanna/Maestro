@@ -42,6 +42,11 @@ public partial class AgentController : ControllerBase
     // installed scraping packages) when _web_fetch keeps failing — the "_scraper" fallback
     // step. Tests swap this via reflection with a fake runner.
     private ScraperEnvironmentService _scraperService = new();
+    // Probes the host for installed runtimes/tools (python, node, dotnet, …) so discovery can
+    // tell the planner what actually exists on this machine — the antidote to a benchmark that
+    // freehands a Python/Flask server on a box with no Python. Cached per project in the DB;
+    // tests swap this via reflection with a fake runner.
+    private RuntimeProbeService _runtimeProbe = new();
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
     private async Task<FrontendConfig> LoadConfigAsync()

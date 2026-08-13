@@ -233,4 +233,34 @@ public class DatabaseServiceTests : IDisposable
         db.SetLocalVersion("13");
         Assert.Equal("13", db.GetLocalVersion());
     }
+
+    // ── Runtime probe cache (per project) ──────────────────────────────────
+
+    [Fact]
+    public void RuntimeProbe_MissingProject_ReturnsNull()
+    {
+        var db = new DatabaseService(DbPath, _root, ConfigPath);
+        Assert.Null(db.GetRuntimeProbe("no-such-project"));
+    }
+
+    [Fact]
+    public void RuntimeProbe_RoundTripsPerProject_WithoutCrossContamination()
+    {
+        var db = new DatabaseService(DbPath, _root, ConfigPath);
+        db.SetRuntimeProbe("proj-a", "{\"probes\":[{\"name\":\"python\"}]}");
+        db.SetRuntimeProbe("proj-b", "{\"probes\":[{\"name\":\"node\"}]}");
+
+        Assert.Contains("python", db.GetRuntimeProbe("proj-a"));
+        Assert.Contains("node", db.GetRuntimeProbe("proj-b"));
+        Assert.DoesNotContain("node", db.GetRuntimeProbe("proj-a"));
+    }
+
+    [Fact]
+    public void RuntimeProbe_OverwriteUpdatesInPlace()
+    {
+        var db = new DatabaseService(DbPath, _root, ConfigPath);
+        db.SetRuntimeProbe("proj", "v1");
+        db.SetRuntimeProbe("proj", "v2");
+        Assert.Equal("v2", db.GetRuntimeProbe("proj"));
+    }
 }

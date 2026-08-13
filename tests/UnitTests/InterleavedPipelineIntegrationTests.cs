@@ -212,6 +212,8 @@ public class InterleavedPipelineIntegrationTests : IDisposable
         SetField(controller, "_emailService", new EmailService(new ConfigFileService(_db)));
         SetField(controller, "_push", new PushNotificationService(_db));
         SetField(controller, "_editKnowledge", new EditKnowledgeService(_db));
+        // Hermetic runtime probe: nothing installed (no real process spawns in tests).
+        SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         // Skip the real TCP/HTTP connectivity probe: the run must not depend on the host
         // network. Cache the "reachable" verdict directly (_nextConnectivityCheck is static;
         // _lastConnectionCheckResult is an instance field on the controller).

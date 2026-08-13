@@ -510,8 +510,111 @@ partial class AgentController
                 files = fileList
             }, ct);
         }
+        // Host runtime availability (DB-cached per project) also rides the attached-files fast
+        // path, so the planner knows which language can actually run here even when the task is
+        // anchored to attached files.
+        var runtimeSection = await BuildRuntimeAvailabilityAsync(projectRoot, emitSse, ct);
+        if (!string.IsNullOrWhiteSpace(runtimeSection))
+        {
+            sb.AppendLine();
+            sb.AppendLine(runtimeSection.TrimEnd());
+        }
         return (sb.ToString(), allResults);
     }
+    /// <summary>
+    /// Probes the host for installed runtimes/tools (python, node, dotnet, …) and formats a
+    /// compact "RUNTIME AVAILABILITY" section for the discovery context, so the planner knows
+    /// what actually exists on this machine before choosing a language — the antidote to a
+    /// benchmark that freehands a Python/Flask server on a box with no Python. The probe result
+    /// is CACHED PER PROJECT in the DB (24h TTL) so discovery is cheap after the first run and
+    /// the information survives restarts; the cached copy is used when fresh, a fresh probe
+    /// only runs when the cache is stale or absent. Never throws — a probe failure yields an
+    /// empty section rather than breaking discovery.
+    /// </summary>
+    private async Task<string> BuildRuntimeAvailabilityAsync(
+        string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            var probes = await LoadOrProbeRuntimesAsync(projectRoot, emitSse, ct);
+            if (probes == null || probes.Count == 0) return "";
+            var section = RuntimeProbeService.FormatForContext(probes);
+            await EmitLog(emitSse, "info",
+                $"Phase 1 — runtime availability: {RuntimeProbeService.ShortSummary(probes)}", ct: ct);
+            return section;
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "info", $"Phase 1 — runtime probe skipped: {ex.Message}", ct: ct);
+            return "";
+        }
+    }
+
+    /// <summary>DB-cached runtime probe for a project (24h TTL); probes fresh only when stale/missing.</summary>
+    private async Task<List<RuntimeProbeService.RuntimeInfo>?> LoadOrProbeRuntimesAsync(
+        string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        const int cacheTtlHours = 24;
+        var projectKey = _editKnowledge?.GetProjectKey(projectRoot)
+            ?? Path.GetFileName(projectRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        try
+        {
+            var cached = _db.GetRuntimeProbe(projectKey);
+            if (!string.IsNullOrWhiteSpace(cached))
+            {
+                using var doc = JsonDocument.Parse(cached);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("probedAtUtc", out var at) &&
+                    at.TryGetDateTime(out var probedAt) &&
+                    (DateTime.UtcNow - probedAt).TotalHours < cacheTtlHours &&
+                    root.TryGetProperty("probes", out var probesEl) &&
+                    probesEl.ValueKind == JsonValueKind.Array)
+                {
+                    var list = new List<RuntimeProbeService.RuntimeInfo>();
+                    foreach (var p in probesEl.EnumerateArray())
+                    {
+                        var name = p.GetProperty("name").GetString() ?? "";
+                        var version = p.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.String
+                            ? v.GetString() : null;
+                        list.Add(new RuntimeProbeService.RuntimeInfo(name, version));
+                    }
+                    await EmitLog(emitSse, "info", "Phase 1 — runtime availability from per-project cache", ct: ct);
+                    return list;
+                }
+            }
+        }
+        catch { /* corrupt/old cache — fall through to a fresh probe */ }
+
+        // GetUninitializedObject-built controllers (tests) skip field initializers, so
+        // _runtimeProbe may be null — fall back to a real probe so production never NREs.
+        var probe = _runtimeProbe ?? new RuntimeProbeService();
+        var probes = probe.ProbeAll();
+        try
+        {
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                writer.WriteString("probedAtUtc", DateTime.UtcNow.ToString("o"));
+                writer.WritePropertyName("probes");
+                writer.WriteStartArray();
+                foreach (var p in probes)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("name", p.Name);
+                    if (p.Version != null) writer.WriteString("version", p.Version);
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+            }
+            _db.SetRuntimeProbe(projectKey, System.Text.Encoding.UTF8.GetString(stream.ToArray()));
+            await EmitLog(emitSse, "info", "Phase 1 — runtime availability probed fresh + cached per project", ct: ct);
+        }
+        catch { /* cache write failure is non-fatal */ }
+        return probes;
+    }
+
     private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
         string prompt, string projectRoot, bool emitSse,
         List<string>? attachedFiles = null, CancellationToken ct = default)
@@ -524,9 +627,16 @@ partial class AgentController
         var listResults = await ExecuteDiscoveryStepsConcurrent(
             new List<AgentStep> { listStep }, projectRoot, 0, emitSse);
         allSteps.AddRange(listResults);
-        if (!Directory.Exists(projectRoot)) return ("", allSteps);
+        // Host runtime availability (python/node/dotnet/… versions, DB-cached per project) —
+        // surfaced in the discovery context on EVERY path below (normal repo task, empty
+        // sandbox, OS-filesystem task) so the planner picks a language that actually exists
+        // here instead of freehanding a Python/Flask server on a box with no Python.
+        var runtimeSection = await BuildRuntimeAvailabilityAsync(projectRoot, emitSse, ct);
+        if (!Directory.Exists(projectRoot))
+            return (string.IsNullOrWhiteSpace(runtimeSection) ? "" : runtimeSection + "\n", allSteps);
         var allFiles = EnumerateProjectFiles(projectRoot);
-        if (allFiles.Count == 0) return ("", allSteps);
+        if (allFiles.Count == 0)
+            return (string.IsNullOrWhiteSpace(runtimeSection) ? "" : runtimeSection + "\n", allSteps);
         // OS-filesystem tasks (folders/files on the desktop, home dir, Downloads, etc.)
         // need ZERO repo knowledge. Pulling in top-BM25 files only anchors the planner on
         // unrelated code — the classic "wrote an HTTP endpoint to create a desktop folder"
@@ -570,6 +680,11 @@ partial class AgentController
             }
             osSb.AppendLine("Never write application code (Python/JS/C# scripts) to perform the operation.");
             osSb.AppendLine();
+            if (!string.IsNullOrWhiteSpace(runtimeSection))
+            {
+                osSb.AppendLine(runtimeSection.TrimEnd());
+                osSb.AppendLine();
+            }
             await EmitLog(emitSse, "info",
                 $"Phase 1 complete — {allSteps.Count} step(s), OS-filesystem task — no repo files auto-read", ct: ct);
             return (osSb.ToString(), allSteps);
@@ -725,6 +840,11 @@ partial class AgentController
         {
             await EmitLog(emitSse, "info",
                 $"Phase 1 complete — {allSteps.Count} step(s), no files auto-read (BM25 found no strong task matches; exploration is on-demand via _explore/_discover)", ct: ct);
+        }
+        if (!string.IsNullOrWhiteSpace(runtimeSection))
+        {
+            sb.AppendLine();
+            sb.AppendLine(runtimeSection.TrimEnd());
         }
         return (sb.ToString(), allSteps);
     }

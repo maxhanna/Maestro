@@ -901,6 +901,8 @@ public class AdversarialUserScenarioTests : IDisposable
         SetField(controller, "_emailService", new EmailService(new ConfigFileService(_db)));
         SetField(controller, "_push", new PushNotificationService(_db));
         SetField(controller, "_editKnowledge", new EditKnowledgeService(_db));
+        // Hermetic runtime probe: nothing installed (no real process spawns in tests).
+        SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
         SetField(controller, "_lastConnectionCheckResult", true);
         return controller;

@@ -17,6 +17,7 @@ namespace Weaver.Services;
 ///   system_info       — single-row custom system info JSON blob
 ///   improvement_data  — per-project improvement data JSON blob
 ///   edit_knowledge    — per-project edit knowledge JSON blob
+///   runtime_probe     — per-project host runtime availability cache (JSON blob)
 /// </summary>
 public class DatabaseService
 {
@@ -100,6 +101,11 @@ public class DatabaseService
             );
 
             CREATE TABLE IF NOT EXISTS edit_knowledge (
+                project_name TEXT PRIMARY KEY NOT NULL,
+                data TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_probe (
                 project_name TEXT PRIMARY KEY NOT NULL,
                 data TEXT NOT NULL
             );
@@ -612,6 +618,30 @@ public class DatabaseService
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             INSERT INTO edit_knowledge (project_name, data) VALUES (@name, @data)
+            ON CONFLICT(project_name) DO UPDATE SET data = @data;
+        ";
+        cmd.Parameters.AddWithValue("@name", projectName);
+        cmd.Parameters.AddWithValue("@data", json);
+        cmd.ExecuteNonQuery();
+    }
+
+    // ─── Runtime probe (per project) ────────────────────────────────────────
+
+    public string? GetRuntimeProbe(string projectName)
+    {
+        using var conn = CreateConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT data FROM runtime_probe WHERE project_name = @name;";
+        cmd.Parameters.AddWithValue("@name", projectName);
+        return cmd.ExecuteScalar()?.ToString();
+    }
+
+    public void SetRuntimeProbe(string projectName, string json)
+    {
+        using var conn = CreateConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO runtime_probe (project_name, data) VALUES (@name, @data)
             ON CONFLICT(project_name) DO UPDATE SET data = @data;
         ";
         cmd.Parameters.AddWithValue("@name", projectName);

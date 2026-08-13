@@ -1406,6 +1406,8 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         SetField(controller, "_push", new PushNotificationService(_db));
         SetField(controller, "_editKnowledge", new EditKnowledgeService(_db));
         SetField(controller, "_scraperService", new ScraperEnvironmentService());
+        // Hermetic runtime probe: nothing installed (no real process spawns in tests).
+        SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         // Skip the real TCP/HTTP connectivity probe (the run must not depend on the host
         // network): cache the "reachable" verdict directly.
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));

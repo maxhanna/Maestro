@@ -180,7 +180,9 @@ byte-identical; bad input fails closed.**
 |---|---|---|
 | `RejectedPlanStepPersistenceTests` | 3 | Rejected plan steps persist with the card, survive a board-data rebuild with **re-anchored indexes**, appends don't duplicate. |
 | `BughostedFeedbackProxyTests` | 8 | The `POST api/bughosted/feedback` proxy (audit §5.1): unknown clientId → 401, empty message → 400, a valid message forwards token/cardId/cardText/message/planSummary/filesEdited/**steps** (each step's type/change/status, camelCase) to `{url}/weaver/feedback`, the upstream body is passed through verbatim, upstream non-success surfaces status + body, an upstream throw returns 500, **and the fixed payload caps** — an oversized planSummary is truncated to 2,000 chars and an oversized filesEdited list is trimmed to the first 100 entries with each path truncated to 300 chars before forwarding (a huge run can never bloat the payload). |
-| `DatabaseServiceTests` | 12 | Legacy flat-file → SQLite migration (import + delete originals), version file seeding, local version round-trip. |
+| `DatabaseServiceTests` | 15 | Legacy flat-file → SQLite migration (import + delete originals), version file seeding, local version round-trip, per-project runtime probe cache (missing, round-trip per project, overwrite in place). |
+| `RuntimeProbeServiceTests` | 9 | Host runtime-availability probe (injectable process runner, no real spawns): finds python/node/dotnet versions, stderr version capture (python2/java), non-zero exit = not found, throwing runner never throws, all 19 runtimes reported, per-instance probe caching, planner-facing `RUNTIME AVAILABILITY` formatting (available + NOT available + "do NOT assume"), nothing-installed shape, short summary. |
+| `RuntimeProbeDiscoveryTests` | 2 | Real `RunBootstrapDiscovery` surfaces the runtime-availability section into the discovery context (fake probe: python/node present, go missing) and caches per project in the DB — a second discovery on the same project reuses the cache with zero new probe calls. |
 | `SqlMigrationServiceTests` | 12 | SQL migration service: statement extraction (plain SQL, inside C# verbatim strings, nested parens), timestamped migration-file writing, already-covered detection, strip. |
 
 ### 2.8 Config, retries, and resilience
@@ -219,6 +221,7 @@ byte-identical; bad input fails closed.**
 | `HeuristicComplexityScoreTests` | 15 | The complexity heuristic (baseline 20, micro/large signals, length fallback, monotonic step estimates, never-zero). |
 | `BenchmarkFreshnessTests` | 13 | Benchmark data-freshness marker enforcement (today passes, stale/hardcoded/future fail, `fetchedAt` variants). |
 | `BenchmarkProjectTests` | 8 | Benchmark project root resolution, create/reuse/adopt idempotency. |
+| `BenchmarkAgnosticPlanTests` | 8 | Benchmark 4 is platform-agnostic (description pins no language/filename, checks scan the whole folder), plus the new `DirectoryContains` check type: found in any file, nested subdirs, missing value, missing dir, binary-file skipping, and binary-only failure. |
 
 ### 2.12 File tree
 
