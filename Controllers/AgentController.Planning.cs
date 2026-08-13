@@ -1033,12 +1033,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // The generic edit-step dedup below (0.82 Jaccard) lets reworded queries slip through.
         if (RepeatedWebStepReason(step, planSoFar, discoveryContext) is string webDupReason)
             return (false, webDupReason);
-        foreach (var existing in planSoFar)
+        // TABULAR-FILE EXEMPTION: structured CSV/TSV/XLSX edits are sequential ops whose change
+        // descriptions share vocabulary ("add a type column" → "add a row with id=1026…" →
+        // "replace all 'unknown' with 'normal' in column type"). The 0.82-Jaccard / exact-match
+        // dedup below would flag near-similar follow-up ops as duplicates; tabular steps dedup
+        // by EXACT change only (the ops are deterministic — a re-proposed identical op no-ops
+        // or repeats at APPLY time, where the CSV editor is the arbiter).
+        if (TabularFileService.IsTabularFile(step.File))
         {
-            if (!string.Equals(existing.File, step.File, StringComparison.OrdinalIgnoreCase)) continue;
-            var normExisting = NormalizeChangeForDedup(existing.Change);
-            if (normNew == normExisting || CalculateChangeSimilarity(normNew, normExisting) >= 0.82)
-                return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
+            foreach (var existing in planSoFar)
+            {
+                if (!string.Equals(existing.File, step.File, StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(NormalizeChangeForDedup(existing.Change), normNew, StringComparison.OrdinalIgnoreCase))
+                    return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
+            }
+        }
+        else
+        {
+            foreach (var existing in planSoFar)
+            {
+                if (!string.Equals(existing.File, step.File, StringComparison.OrdinalIgnoreCase)) continue;
+                var normExisting = NormalizeChangeForDedup(existing.Change);
+                if (normNew == normExisting || CalculateChangeSimilarity(normNew, normExisting) >= 0.82)
+                    return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
+            }
         }
         // Reject _create_file steps with no actual content (hallucinated file creation)
         if (string.Equals(step.File, "_sql_migration", StringComparison.OrdinalIgnoreCase))
@@ -2189,6 +2207,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         TaskHintsWebNeed(prompt) &&
         AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out _) &&
         !TaskExplicitlyRequestsScript(prompt);
+
+    /// <summary>
+    /// True when the prompt demands post-fetch STRUCTURED edits to the demanded file
+    /// (tabular columns/rows/values — the benchmark-21 shape: fetch, then add a column,
+    /// add rows, mass-edit values). Such a task is a DUMP + EDIT hybrid: the fetch's
+    /// eager dump writes the file, but the task is only satisfied after the deterministic
+    /// tabular edits land. The dump-task short-circuit (which completes the run the moment
+    /// the demanded file exists) must NOT fire for these — it would end the run right after
+    /// the fetch and the edits would never execute.
+    /// </summary>
+    private static readonly Regex[] StructuredEditDemandRegexes =
+    {
+        new(@"\b(?:add|remove|delete|drop|rename)\b[^.\n]{0,80}\bcolumn\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"\b(?:add|append|insert|delete|remove)\b[^.\n]{0,80}\brows?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"\b(?:mass\s*edit|set\s+.+\s+to\s+.+\s+where|replace\s+.+\s+(?:in|within)\s+(?:the\s+)?column|fill\s+(?:the\s+)?[A-Za-z0-9_]+\s+column)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)
+    };
+
+    private static bool TaskDemandsStructuredEdits(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        return StructuredEditDemandRegexes.Any(r => r.IsMatch(prompt));
+    }
+
+    /// <summary>A dump task with NO post-fetch structured edits demanded — the only shape the
+    /// deterministic dump short-circuit may complete (the demanded file alone satisfies it).</summary>
+    private static bool IsPureDumpTask(string? prompt, string projectRoot) =>
+        IsDumpTask(prompt, projectRoot) && !TaskDemandsStructuredEdits(prompt);
 
     /// <summary>
     /// The up-front dump-vs-build classification surfaced on the kanban card as a badge:
@@ -3362,9 +3407,27 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 else
                 {
                     // No oldString (full-file / FORMAT C/D style): fall back to the token-overlap proxy.
-                    duplicateOf = planSoFar.FirstOrDefault(s =>
-                        string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
-                        TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35);
+                    // EXEMPTION — TABULAR DATA FILES: CSV/TSV/XLSX steps are a SEQUENCE of structured
+                    // ops (add a column → add rows → mass edit → per-row edits) whose change
+                    // descriptions legitimately share vocabulary ("add a type column" vs
+                    // "add a row with id=1026, name=weavmon, type=unknown" share {add,type} →
+                    // TokenOverlap 0.67 > 0.35). The proxy flags the second op as a duplicate and
+                    // kills the whole edit sequence after the first edit. Tabular ops are
+                    // deterministic and applied structurally (zero-LLM), so dedup here is
+                    // EXACT-CHANGE only — a re-proposed identical op is a duplicate; a different
+                    // op on the same file is legitimate follow-up work.
+                    if (TabularFileService.IsTabularFile(proposal.Step.File))
+                    {
+                        duplicateOf = planSoFar.FirstOrDefault(s =>
+                            string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(s.Change, proposal.Step.Change, StringComparison.OrdinalIgnoreCase));
+                    }
+                    else
+                    {
+                        duplicateOf = planSoFar.FirstOrDefault(s =>
+                            string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
+                            TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35);
+                    }
                 }
                 if (duplicateOf != null)
                 {

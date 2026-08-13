@@ -352,6 +352,104 @@ public class TabularFileServiceTests
         Assert.Equal("plant", t.Rows[1][1]);
     }
 
+    // ── Structured operations: MASS edit (set-cell contains / where-in / fill) ──
+
+    [Fact]
+    public void Edit_SetCell_Contains_UpdatesMatchingRows()
+    {
+        var ok = TabularFileService.TryEditDelimited(
+            "id,name,type\n1,bulbasaur,\n25,pikachu,\n", ',',
+            "set type to electric where name contains chu", out var csv, out var reason);
+        Assert.True(ok);
+        Assert.Contains("contains", reason);
+        var t = TabularFileService.ParseCsv(csv!);
+        Assert.Equal("", t.Rows[0][2]);        // bulbasaur untouched
+        Assert.Equal("electric", t.Rows[1][2]); // pikachu matched via contains
+    }
+
+    [Fact]
+    public void Edit_SetCell_WhereInList_UpdatesMatchingRows()
+    {
+        var ok = TabularFileService.TryEditDelimited(
+            "id,name,type\n1,bulbasaur,\n25,pikachu,\n448,lucario,\n", ',',
+            "set type to legendary where name is in (bulbasaur, lucario)", out var csv, out var reason);
+        Assert.True(ok);
+        Assert.Contains("is in", reason);
+        var t = TabularFileService.ParseCsv(csv!);
+        Assert.Equal("legendary", t.Rows[0][2]);
+        Assert.Equal("", t.Rows[1][2]);          // pikachu not in the list
+        Assert.Equal("legendary", t.Rows[2][2]);
+    }
+
+    [Fact]
+    public void Edit_FillColumn_ForAllRows_SetsEveryRow()
+    {
+        var ok = TabularFileService.TryEditDelimited(
+            "id,name,type\n1,bulbasaur,\n25,pikachu,\n", ',',
+            "set the type column to normal for all rows", out var csv, out var reason);
+        Assert.True(ok);
+        Assert.Contains("filled column 'type'", reason);
+        var t = TabularFileService.ParseCsv(csv!);
+        Assert.Equal("normal", t.Rows[0][2]);
+        Assert.Equal("normal", t.Rows[1][2]);
+    }
+
+    [Fact]
+    public void Edit_FillColumn_SimpleForm_WithValue()
+    {
+        var ok = TabularFileService.TryEditDelimited(
+            "id,name,type\n1,bulbasaur,\n", ',', "fill the type column with normal", out var csv, out _);
+        Assert.True(ok);
+        var t = TabularFileService.ParseCsv(csv!);
+        Assert.Equal("normal", t.Rows[0][2]);
+    }
+
+    // ── Benchmark-21 shape: the full fetch → add column → add rows → mass edit →
+    // ── edit-rows sequence against a FETCHED_AT-preamble CSV, all structural ops ──
+
+    [Fact]
+    public void Edit_Benchmark21Sequence_AddColumnAddRowsMassEditAndEditRows()
+    {
+        var csv = "FETCHED_AT: 2026-08-13\nid,name,url\n1,bulbasaur,https://pokeapi.co/api/v2/pokemon/1/\n25,pikachu,https://pokeapi.co/api/v2/pokemon/25/\n";
+
+        // STEP 2 — add a type column (empty for existing rows).
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',', "add a type column", out csv, out _));
+        // STEP 3 — add the three custom rows with the placeholder type.
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+            "add a row with id=1026, name=weavmon, type=unknown", out csv, out _));
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+            "add a row with id=1027, name=kanbanite, type=unknown", out csv, out _));
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+            "add a row with id=1028, name=bugcatcher, type=unknown", out csv, out _));
+        // STEP 4 — MASS EDIT: one op fills the ORIGINAL rows' empty type cells with 'normal',
+        // leaving the three custom rows' 'unknown' placeholder untouched.
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+            "set type to 'normal' where type is empty", out csv, out var massReason));
+        Assert.Contains("2 row(s)", massReason);
+        Assert.Contains("(empty)", massReason);
+        // STEP 5 — EDIT ROWS: each custom pokemon gets its real type (overwrites the placeholder).
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+            "set type to 'electric' where name is 'weavmon'", out csv, out _));
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+            "set type to 'ghost' where name is 'kanbanite'", out csv, out _));
+        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+            "set type to 'fairy' where name is 'bugcatcher'", out csv, out _));
+
+        var t = TabularFileService.ParseCsv(csv);
+        Assert.Equal(new[] { "FETCHED_AT: 2026-08-13" }, t.Preamble);
+        Assert.Equal(new[] { "id", "name", "url", "type" }, t.Header);
+        Assert.Equal(5, t.Rows.Count);
+        // Original rows: their EMPTY type cells were mass-edited to 'normal'.
+        Assert.Equal("normal", t.Rows[0][3]);
+        Assert.Equal("bulbasaur", t.Rows[0][1]);
+        Assert.Equal("normal", t.Rows[1][3]);
+        // The three custom rows (indexes 2-4): placeholder overwritten by the per-row edits.
+        Assert.Equal(new[] { "1026", "weavmon", "", "electric" }, t.Rows[2]);
+        Assert.Equal(new[] { "1027", "kanbanite", "", "ghost" }, t.Rows[3]);
+        Assert.Equal(new[] { "1028", "bugcatcher", "", "fairy" }, t.Rows[4]);
+        Assert.DoesNotContain("unknown", csv); // the per-row edits replaced the placeholder
+    }
+
     // ── Decline paths ─────────────────────────────────────────────────────────
 
     [Fact]

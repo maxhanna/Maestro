@@ -1584,6 +1584,39 @@ partial class AgentController
         // deterministic check below reports the missing file so the repair loop writes it.
         var osOutputIssue = AgentOsOutputVerifier.CheckOsOutputWritten(
             originalPrompt, allResults.OfType<Dictionary<string, object?>>());
+        // PURE-DUMP DETERMINISTIC COMPLETION — a dump task (web data demanded into a file,
+        // no script, no structured edits) whose demanded file was ALREADY written with
+        // meaningful content is complete BY CONSTRUCTION: the file IS the fetched data, and
+        // extra columns/rows are the correct superset outcome (the eager dump writes
+        // id,name,url for PokeAPI — url is a bonus, never a defect). The between-steps
+        // assessor already short-circuits these; the post-run verifier must too. The verifier
+        // LLM has proven it can hallucinate an invented requirement over a deterministically
+        // produced dump ("NO url column per requirements" — text that never appears in the
+        // task — and "Missing header row" for a file that has one) and drive a corrective
+        // step that STRIPS good data. Only the deterministic OS-output check above can fail
+        // a pure dump — a missing/hollow demanded file — and it already ran.
+        if (IsPureDumpTask(originalPrompt, projectRoot) &&
+            AgentOsOutputVerifier.TryGetFileOutputTarget(originalPrompt, projectRoot, out var pureDumpDemand) &&
+            AgentOsOutputVerifier.IsOsOutputWritten(pureDumpDemand, allResults.OfType<Dictionary<string, object?>>()))
+        {
+            // Keep the clean-pass ground-truth contract: an OS-demand pure dump publishes
+            // the deterministic "✓ OS output" pass (same wording as the no-edit clean path
+            // below), so the card still shows the file write was verified.
+            if (cardId != null && AgentOsOutputVerifier.TryGetOsFileOutputDemand(originalPrompt, out var pdDemand))
+            {
+                var pdTarget = string.IsNullOrWhiteSpace(pdDemand.FileNameHint)
+                    ? Path.Combine(pdDemand.DirectoryPath, AgentOsOutputVerifier.DefaultDumpFileName)
+                    : Path.Combine(pdDemand.DirectoryPath, pdDemand.FileNameHint);
+                await PublishGroundTruthAsync(cardId,
+                    new List<string> { $"✓ OS output: the demanded file at \"{pdTarget}\" was written by the run" },
+                    emitSse, ct);
+            }
+            await EmitLog(emitSse, "info",
+                "Verification: complete=true — pure dump task — the demanded output file was already written with the fetched data by the deterministic web-step dump (extra columns/rows in a dump are the correct superset, never a defect)", ct: ct);
+            return (true,
+                "dump task — the demanded output file was already written with the fetched data by the deterministic web-step dump",
+                new List<string>(), new List<string>(), new List<string>());
+        }
         if (modifiedPaths.Count == 0)
         {
             var exploredPaths = allResults

@@ -525,6 +525,8 @@ public static class TabularFileService
         if (reason.Length > 0) declinedReason = reason;
         if (TrySetCell(table, desc, out reason)) return true;
         if (reason.Length > 0) declinedReason = reason;
+        if (TryFillColumn(table, desc, out reason)) return true;
+        if (reason.Length > 0) declinedReason = reason;
         if (TryAddRow(table, desc, out reason)) return true;
         if (reason.Length > 0) declinedReason = reason;
         if (TryRenameValues(table, desc, out reason)) return true;
@@ -722,9 +724,10 @@ public static class TabularFileService
         return removed > 0;
     }
 
-    // "set|update|change COL to|as VALUE where KEYCOL (is|=) KEY"
+    // "set|update|change COL to|as VALUE where KEYCOL (is|=|==|equals|contains|is in (...)) KEY"
+    // — a MASS edit: every row whose key cell matches the operator is updated in one pass.
     private static readonly Regex SetCellRegex = new(
-        @"\b(?:set|update|change)\b\s+(?:the\s+)?['""]?(?<col>[A-Za-z_][A-Za-z0-9_\-]*)['""]?\s+(?:to|as|=)\s*(?<value>.+?)\s+(?:where|when|if|for)\s+['""]?(?<keycol>[A-Za-z_][A-Za-z0-9_\-]*)['""]?\s*(?:(?:is|=|==|equals)\s*)?['""]?(?<key>.+?)['""]?\s*$",
+        @"\b(?:set|update|change)\b\s+(?:the\s+)?['""]?(?<col>[A-Za-z_][A-Za-z0-9_\-]*)['""]?\s+(?:to|as|=)\s*(?<value>.+?)\s+(?:where|when|if|for)\s+['""]?(?<keycol>[A-Za-z_][A-Za-z0-9_\-]*)['""]?\s*(?:(?<op>contains|equals|is in|in|is|=|==)\s*)?(?:\(\s*)?['""]?(?<key>.+?)['""]?\s*\)?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static bool TrySetCell(CsvTable table, string desc, out string reason)
@@ -735,6 +738,7 @@ public static class TabularFileService
         var col = m.Groups["col"].Value.Trim();
         var value = UnquoteToken(m.Groups["value"].Value.Trim());
         var keyCol = m.Groups["keycol"].Value.Trim();
+        var op = m.Groups["op"].Success ? m.Groups["op"].Value.Trim() : "";
         var key = UnquoteToken(m.Groups["key"].Value.Trim());
 
         var colIdx = ColumnIndex(table, col);
@@ -745,17 +749,71 @@ public static class TabularFileService
             reason = $"column '{missing}' not found";
             return false;
         }
+        var contains = op.Equals("contains", StringComparison.OrdinalIgnoreCase);
+        var inList = op.Equals("in", StringComparison.OrdinalIgnoreCase) ||
+                     op.Equals("is in", StringComparison.OrdinalIgnoreCase);
+        // EMPTY-TOKEN support: "where type is empty" / "''" / "(empty)" matches rows whose
+        // cell is blank — the benchmark-21 STEP 4 shape (fill the original rows' empty type
+        // cells WITHOUT touching rows that already carry a value).
+        var isEmptyKey = key.Length == 0 ||
+                         key.Equals("(empty)", StringComparison.OrdinalIgnoreCase) ||
+                         key.Equals("empty", StringComparison.OrdinalIgnoreCase) ||
+                         key.Equals("blank", StringComparison.OrdinalIgnoreCase);
+        var keys = inList
+            ? key.Split(',', ';').Select(k => k.Trim()).Where(k => k.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : null;
         var updated = 0;
         foreach (var row in table.Rows)
         {
-            if (keyIdx < row.Count && string.Equals(row[keyIdx].Trim(), key, StringComparison.OrdinalIgnoreCase))
-            {
-                while (row.Count <= colIdx) row.Add("");
-                row[colIdx] = value;
-                updated++;
-            }
+            if (keyIdx >= row.Count) continue;
+            var cell = row[keyIdx];
+            var matches = isEmptyKey
+                ? string.IsNullOrWhiteSpace(cell)
+                : contains
+                    ? cell.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0
+                    : inList
+                        ? keys!.Contains(cell.Trim())
+                        : string.Equals(cell.Trim(), key, StringComparison.OrdinalIgnoreCase);
+            if (!matches) continue;
+            while (row.Count <= colIdx) row.Add("");
+            row[colIdx] = value;
+            updated++;
         }
-        reason = $"set {col} to '{value}' in {updated} row(s) where {keyCol} is '{key}'";
+        var opWord = isEmptyKey ? "is (empty)" : contains ? "contains" : inList ? "is in" : "is";
+        var keyLabel = isEmptyKey ? "(empty)" : key;
+        reason = $"set {col} to '{value}' in {updated} row(s) where {keyCol} {opWord} '{keyLabel}'";
+        return updated > 0;
+    }
+
+    // MASS FILL: "fill (the) COL (column) with VALUE" / "set (the) COL (column) to VALUE
+    // for|in all|every|each rows" — one op that sets the column's value in EVERY row.
+    private static readonly Regex FillColumnSimpleRegex = new(
+        @"\bfill\b\s+(?:the\s+)?['""]?(?<col>[A-Za-z_][A-Za-z0-9_\-]*)['""]?\s+(?:column\s+)?(?:with|to|=)\s*['""]?(?<value>.+?)['""]?\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex FillColumnForAllRegex = new(
+        @"\b(?:set|update|fill)\b\s+(?:the\s+)?['""]?(?<col>[A-Za-z_][A-Za-z0-9_\-]*)['""]?\s+(?:column\s+)?(?:to|with|as|=)\s*['""]?(?<value>.+?)['""]?\s+(?:for|in)\s+(?:all|every|each|any)\s+rows?\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool TryFillColumn(CsvTable table, string desc, out string reason)
+    {
+        reason = "";
+        var m1 = FillColumnSimpleRegex.Match(desc);
+        var m2 = FillColumnForAllRegex.Match(desc);
+        var m = m1.Success ? m1 : m2.Success ? m2 : null;
+        if (m == null) return false;
+        var col = UnquoteToken(m.Groups["col"].Value.Trim());
+        var value = UnquoteToken(m.Groups["value"].Value.Trim());
+        var idx = ColumnIndex(table, col);
+        if (idx < 0) { reason = $"column '{col}' not found"; return false; }
+        var updated = 0;
+        foreach (var row in table.Rows)
+        {
+            while (row.Count <= idx) row.Add("");
+            row[idx] = value;
+            updated++;
+        }
+        reason = $"filled column '{col}' with '{value}' in {updated} row(s)";
         return updated > 0;
     }
 

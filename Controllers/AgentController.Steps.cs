@@ -678,7 +678,11 @@ partial class AgentController
         // planner to re-emit the whole dataset inline). IsOsOutputWritten re-verifies the file
         // ON DISK, so a failed/empty dump still falls through to the real assessment.
         var resultDicts = executedSteps.OfType<Dictionary<string, object?>>().ToList();
-        if (IsDumpTask(prompt, projectRoot) &&
+        // A PURE dump completes deterministically the moment the demanded file is written;
+        // a dump + edit hybrid (e.g. "fetch … then add a type column / add rows / mass-edit")
+        // must NOT short-circuit — the tabular edits still have to execute, and the LLM
+        // assessment (which sees the full task text) keeps the run going until they land.
+        if (IsPureDumpTask(prompt, projectRoot) &&
             AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out var dumpDemand) &&
             AgentOsOutputVerifier.IsOsOutputWritten(dumpDemand, resultDicts))
         {

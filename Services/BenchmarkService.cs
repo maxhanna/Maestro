@@ -530,6 +530,27 @@ public class BenchmarkService
                     Check.Contains("Mid dex pokemon present", "benchmark_test_20/pokemon_data.csv", "mewtwo"),
                     Check.Contains("Late dex pokemon present", "benchmark_test_20/pokemon_data.csv", "lucario")
                 ]
+            },
+            new()
+            {
+                Level = 21, Name = "Data Fetch 3: Pokemon CSV edits (add rows + mass edit)", Description = "Create a folder called 'benchmark_test_21' at the project root. Inside it, create a file called 'pokemon_data.csv'. This benchmark extends the simple fetch (benchmark 16) with structured CSV EDITS — the CSV editor must add a column, add rows, and mass-edit row values.\n\nSTEP 1 — FETCH: Call the PokeAPI list endpoint exactly ONCE (https://pokeapi.co/api/v2/pokemon?limit=1025) and write one row per Pokemon containing its id number and its name. Do not invent or fabricate the data.\n\nSTEP 2 — ADD A COLUMN: Add a 'type' column to pokemon_data.csv (every existing row starts with an empty type value).\n\nSTEP 3 — ADD ROWS: Append three new rows for these custom Pokemon, one row each (key=value pairs): id=1026 name='weavmon' type='unknown'; id=1027 name='kanbanite' type='unknown'; id=1028 name='bugcatcher' type='unknown'.\n\nSTEP 4 — MASS EDIT: In a SINGLE change, set the type to 'normal' for every original Pokemon row (the rows whose type cell is currently EMPTY — NOT the three custom rows, which already have 'unknown').\n\nSTEP 5 — EDIT ROWS: Change the type of each custom Pokemon to its real type: set type to 'electric' where name is 'weavmon'; set type to 'ghost' where name is 'kanbanite'; set type to 'fairy' where name is 'bugcatcher'.\n\nFRESHNESS REQUIREMENT: Begin the file with a metadata line in this exact format — FETCHED_AT: YYYY-MM-DD — where YYYY-MM-DD is the current date at the moment you actually perform the fetch. Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the data was freshly fetched during this run.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_21"),
+                    Check.File("Pokemon CSV exists", "benchmark_test_21/pokemon_data.csv"),
+                    Check.FreshTimestamp("Fetch timestamp is fresh and run-time", "benchmark_test_21/pokemon_data.csv"),
+                    Check.Contains("CSV has id column", "benchmark_test_21/pokemon_data.csv", "id"),
+                    Check.Contains("CSV has name column", "benchmark_test_21/pokemon_data.csv", "name"),
+                    Check.Contains("CSV has type column", "benchmark_test_21/pokemon_data.csv", "type"),
+                    Check.Contains("Added row weavmon present", "benchmark_test_21/pokemon_data.csv", "weavmon"),
+                    Check.Contains("Added row kanbanite present", "benchmark_test_21/pokemon_data.csv", "kanbanite"),
+                    Check.Contains("Added row bugcatcher present", "benchmark_test_21/pokemon_data.csv", "bugcatcher"),
+                    Check.Contains("Mass-edited normal value present", "benchmark_test_21/pokemon_data.csv", "normal"),
+                    Check.Contains("Edited cell electric present", "benchmark_test_21/pokemon_data.csv", "electric"),
+                    Check.Contains("Edited cell ghost present", "benchmark_test_21/pokemon_data.csv", "ghost"),
+                    Check.Contains("Edited cell fairy present", "benchmark_test_21/pokemon_data.csv", "fairy"),
+                    Check.NotContains("Mass edit replaced the placeholder", "benchmark_test_21/pokemon_data.csv", "unknown")
+                ]
             }
         };
     }

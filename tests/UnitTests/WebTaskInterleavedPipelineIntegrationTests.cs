@@ -441,6 +441,107 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task WebTask_Benchmark21_FetchThenCsvEdits_DumpBadge_TabularFastPath_NoCorrectiveSteps()
+    {
+        // The live benchmark-21 shape run through the REAL interleaved pipeline: the prompt
+        // is the actual benchmark plan description (from BenchmarkService), the planner is
+        // scripted to propose the exact step sequence (folder → search → fetch → 8 tabular
+        // CSV edits), and the fake HTTP answers the PokeAPI list with list-shaped JSON so
+        // the fetch's eager dump writes a CLEAN id,name,url CSV the tabular editor can edit.
+        //
+        // This run must prove four things end-to-end:
+        //  1. DUMP BADGE — the task classifies as a "dump" (web need + demanded file) and the
+        //     badge lands on the card BEFORE planning.
+        //  2. NO PREMATURE SHORT-CIRCUIT — despite the eager dump writing the file in the
+        //     fetch step, the run does NOT complete there (the task also demands structured
+        //     edits, so IsPureDumpTask is false) — the between-steps assessment keeps the run
+        //     going until the edits land.
+        //  3. TABULAR FAST-PATH — every edit step is claimed by the tabular fast-path with
+        //     zero LLM (each result carries tabular:true), so the CSV is edited structurally.
+        //  4. NO CORRECTIVE STEPS — the plan is exactly the 11 scripted steps, the last
+        //     planner turn completes the plan, and the final CSV passes every benchmark-21
+        //     acceptance check.
+        const string cardId = "benchmark-21-card";
+        await _boardData.SaveRawAsync(BoardWithCard(cardId, "doing"));
+        _clientFactory.Mode = PlannerMode.FetchThenCsvEdits;
+        var csvPath = Path.Combine(_projectRoot, "benchmark_test_21", "pokemon_data.csv");
+        // Incomplete until every edit has landed: the between-steps assessment after the
+        // search/fetch steps must keep the run going; only the fully-edited CSV (mass edit
+        // filled the original rows' empty type cells and the per-row edits overwrote the
+        // custom rows' 'unknown' placeholder) satisfies it.
+        _clientFactory.WebAssessComplete = () =>
+        {
+            if (!File.Exists(csvPath)) return false;
+            var content = File.ReadAllText(csvPath, Encoding.UTF8);
+            return content.Contains("electric", StringComparison.Ordinal) &&
+                   content.Contains("ghost", StringComparison.Ordinal) &&
+                   content.Contains("fairy", StringComparison.Ordinal) &&
+                   !content.Contains("unknown", StringComparison.Ordinal);
+        };
+        var controller = BuildController();
+        var prompt = BenchmarkService.GetBenchmarkPlans().First(p => p.Level == 21).Description;
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt, cardId);
+
+        // 1. The dump badge landed on the card.
+        var raw = await _boardData.LoadRawAsync();
+        Assert.Equal("dump", ReadCardProperty(raw!, cardId, "_taskKind"));
+
+        // 2 + 4. The run completed with EXACTLY the scripted plan — the fetch's eager dump
+        // did NOT short-circuit it, and no corrective step was ever proposed.
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.NotNull(plan);
+        var planFiles = plan!.Plan.Select(s => s.File).ToArray();
+        Assert.Equal(11, planFiles.Length); // the 11 scripted steps — no corrective steps added
+        Assert.Equal(new[]
+        {
+            "_create_directory", "_web_search", "_web_fetch",
+            "benchmark_test_21/pokemon_data.csv", "benchmark_test_21/pokemon_data.csv", "benchmark_test_21/pokemon_data.csv",
+            "benchmark_test_21/pokemon_data.csv", "benchmark_test_21/pokemon_data.csv", "benchmark_test_21/pokemon_data.csv",
+            "benchmark_test_21/pokemon_data.csv", "benchmark_test_21/pokemon_data.csv"
+        }, planFiles);
+        // 11 step turns + 1 planComplete turn — no corrective step was ever proposed.
+        Assert.Equal(12, _clientFactory.Calls.Count(c => c == "planner-step"));
+        // The between-steps completion assessment ran after the two web steps (both
+        // incomplete — the fetch did NOT short-circuit the dump+edit hybrid), plus the
+        // planComplete re-check once every edit had landed.
+        Assert.Equal(3, _clientFactory.Calls.Count(c => c == "web-assess"));
+
+        // 3. Every edit step was claimed by the TABULAR fast-path (zero-LLM structural edit).
+        var editResults = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
+            .ToList();
+        Assert.Equal(8, editResults.Count);
+        Assert.All(editResults, r => Assert.True(
+            Assert.IsType<bool>(r.GetValueOrDefault("tabular")),
+            $"expected tabular flag on edit result — {r.GetValueOrDefault("reason")}"));
+        Assert.All(editResults, r => Assert.Equal("done", r.GetValueOrDefault("status")?.ToString()));
+
+        // The final CSV satisfies every benchmark-21 acceptance check (mass edit replaced the
+        // placeholder; the per-row edits applied; the new rows landed).
+        var final = File.ReadAllText(csvPath, Encoding.UTF8);
+        Assert.StartsWith("FETCHED_AT:", final);
+        Assert.Contains("type", final);
+        Assert.Contains("weavmon", final);
+        Assert.Contains("kanbanite", final);
+        Assert.Contains("bugcatcher", final);
+        Assert.Contains("normal", final);
+        Assert.Contains("electric", final);
+        Assert.Contains("ghost", final);
+        Assert.Contains("fairy", final);
+        Assert.DoesNotContain("unknown", final);
+
+        // The real benchmark evaluation: every acceptance check passes → status "completed".
+        var score = await new BenchmarkService(_db).EvaluateAsync(
+            21, _projectRoot, successfulEdits: 8, failedEdits: 0, stepCount: 11,
+            durationMs: 0, modelUsed: "scripted-test");
+        Assert.Equal("completed", score.Status);
+        Assert.Empty(score.FailedSteps);
+
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
     public async Task WebTask_MkdirCommand_AcceptedAsFilesystemPrep_NoDirectoryCreationBounce()
     {
         // The "failed over and over to create a directory" field report: the planner's FIRST
@@ -1201,6 +1302,24 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         return JsonSerializer.Serialize(board);
     }
 
+    private static string? ReadCardProperty(string? raw, string cardId, string property)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        using var doc = JsonDocument.Parse(raw);
+        foreach (var col in new[] { "todo", "doing", "done", "selfImproving" })
+        {
+            if (!doc.RootElement.TryGetProperty(col, out var arr) || arr.ValueKind != JsonValueKind.Array) continue;
+            foreach (var card in arr.EnumerateArray())
+            {
+                if (!card.TryGetProperty("id", out var id) || id.GetString() != cardId) continue;
+                return card.TryGetProperty(property, out var prop) && prop.ValueKind == JsonValueKind.String
+                    ? prop.GetString()
+                    : null;
+            }
+        }
+        return null;
+    }
+
     private static List<string>? ReadCardGroundTruth(string? raw, string cardId)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -1319,7 +1438,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds }
+    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds, FetchThenCsvEdits }
 
     /// <summary>
     /// Fake system-built scraper: records the URLs it was asked to scrape and writes the
@@ -1445,6 +1564,26 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                         // Bing News RSS — answer with a realistic feed so the digest is built from
                         // real items (title/link/pubDate/description) instead of an empty digest.
                         return Xml(RssFeed);
+                    }
+                    if (host.Contains("pokeapi.co", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // PokeAPI list-endpoint shape — {"results":[{"name":…,"url":…}]} — so the
+                        // eager dump's list-shaped-JSON → CSV path writes CLEAN id,name,url rows
+                        // (not the sectioned dump), which is exactly what the tabular editor then
+                        // operates on for the benchmark-21 fetch → add column → add rows → mass
+                        // edit → edit-rows sequence.
+                        return Json(new
+                        {
+                            count = 1351,
+                            next = (string?)null,
+                            previous = (string?)null,
+                            results = new object[]
+                            {
+                                new { name = "bulbasaur", url = "https://pokeapi.co/api/v2/pokemon/1/" },
+                                new { name = "pikachu", url = "https://pokeapi.co/api/v2/pokemon/25/" },
+                                new { name = "lucario", url = "https://pokeapi.co/api/v2/pokemon/448/" }
+                            }
+                        });
                     }
                     // Connectivity probes (/api/tags, /slots) and _web_fetch targets. The body
                     // is deliberately long enough (> 80 chars after the HTTP header) that a
@@ -1791,6 +1930,30 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     if (n == 2)
                         return (PlannerStepJson("_scraper", "https://example.com/alphafold3"), "planner-step");
                     return ("{\"planComplete\": true, \"completionReason\": \"scraper wrote the demanded file\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.FetchThenCsvEdits)
+                {
+                    // The benchmark-21 shape: create the folder, search, fetch the PokeAPI list
+                    // (whose eager dump writes the clean id,name,url CSV), then the tabular edit
+                    // steps — add a column, add rows, MASS edit (fill the original rows' EMPTY
+                    // type cells — the "where type is empty" token), and per-row edits. The
+                    // dump-task short-circuit must NOT fire after the fetch (the task demands
+                    // structured edits — IsPureDumpTask is false), so the run continues through
+                    // the tabular fast-path and completes only after the last edit, with the
+                    // planner's planComplete ending it (no corrective steps).
+                    const string csv = "benchmark_test_21/pokemon_data.csv";
+                    if (n == 1) return (PlannerStepJson("_create_directory", "benchmark_test_21"), "planner-step");
+                    if (n == 2) return (PlannerStepJson("_web_search", SearchQuery), "planner-step");
+                    if (n == 3) return (PlannerStepJson("_web_fetch", "https://pokeapi.co/api/v2/pokemon?limit=1025"), "planner-step");
+                    if (n == 4) return (PlannerStepJson(csv, "add a type column"), "planner-step");
+                    if (n == 5) return (PlannerStepJson(csv, "add a row with id=1026, name=weavmon, type=unknown"), "planner-step");
+                    if (n == 6) return (PlannerStepJson(csv, "add a row with id=1027, name=kanbanite, type=unknown"), "planner-step");
+                    if (n == 7) return (PlannerStepJson(csv, "add a row with id=1028, name=bugcatcher, type=unknown"), "planner-step");
+                    if (n == 8) return (PlannerStepJson(csv, "set type to 'normal' where type is empty"), "planner-step");
+                    if (n == 9) return (PlannerStepJson(csv, "set type to 'electric' where name is 'weavmon'"), "planner-step");
+                    if (n == 10) return (PlannerStepJson(csv, "set type to 'ghost' where name is 'kanbanite'"), "planner-step");
+                    if (n == 11) return (PlannerStepJson(csv, "set type to 'fairy' where name is 'bugcatcher'"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"fetched the data and applied all the CSV edits\"}", "planner-step");
                 }
                 if (n == 1)
                     return (PlannerStepJson("_web_search", SearchQuery), "planner-step");

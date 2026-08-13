@@ -1493,6 +1493,64 @@ public class SyntheticGroundTruthEvalTests : IDisposable
     }
 
     [Fact]
+    public async Task PostExecuteVerify_PureDumpWithExtraUrlColumn_CompletesWithoutVerifierLlm()
+    {
+        // The live benchmark-16 failure: a PURE DUMP task (fetch → demanded file, no
+        // structured edits) whose eager dump wrote the file WITH an extra 'url' column. The
+        // between-steps assessor already short-circuits pure dumps, but PostExecuteVerify
+        // used to hand the deterministically-produced CSV to the verifier LLM anyway — and
+        // the real verifier HALLUCINATED an invented requirement ("NO url column per
+        // requirements" — text that never appears in the task) plus "Missing header row" for
+        // a file that has one, driving a corrective step that would STRIP good data. The
+        // prompt-guidance approach (EXTRA DATA IS NOT A DEFECT) is not enough — an LLM can
+        // ignore it. PostExecuteVerify now short-circuits pure dumps DETERMINISTICALLY the
+        // moment the demanded file is written: complete with ZERO verifier LLM calls.
+        //
+        // This test uses the REAL benchmark-16 description (web-hinted via the FRESHNESS
+        // "current date" line, no structured-edit demands → IsPureDumpTask=true) and feeds the
+        // exact extra-column CSV shape the eager dump produces. It asserts the verifier LLM
+        // was NEVER consulted — VerifierUserPrompts stays empty — so the hallucination class
+        // cannot happen at all, not merely that a scripted verifier chose to comply.
+        const string cardId = "gt-card-csv-pure-dump";
+        await _boardData.SaveRawAsync(BoardWithCard(cardId, "doing"));
+
+        const string csvRel = "benchmark_test_16/pokemon_data.csv";
+        var csv = "FETCHED_AT: 2026-08-13\n" +
+                  "id,name,url\n" +
+                  "1,bulbasaur,https://pokeapi.co/api/v2/pokemon/1/\n" +
+                  "25,pikachu,https://pokeapi.co/api/v2/pokemon/25/\n";
+        Write(csvRel, csv);
+
+        var results = new List<object>
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "create", ["status"] = "created",
+                ["path"] = csvRel, ["newStringPreview"] = csv
+            }
+        };
+
+        var prompt = BenchmarkService.GetBenchmarkPlans().First(p => p.Level == 16).Description;
+        // The real description must classify as a PURE dump for this regression to exercise
+        // the deterministic short-circuit (and for the pre-fix bug to have fired the verifier).
+        Assert.True(WebNeedClassifier.IsWebNeed(prompt),
+            "benchmark-16 must classify as a web need (the FRESHNESS 'current date' line)");
+
+        // Deliberately leave VerifierReply unscripted — if the verifier LLM were consulted,
+        // the harness would record the call and the test fails.
+        var (complete, details, confirmed, speculative, _) = await InvokePostExecuteVerify(prompt, results, cardId);
+
+        Assert.True(complete, $"pure dump must complete deterministically — details={details}");
+        Assert.Empty(confirmed);
+        Assert.Empty(speculative);
+        // THE regression: the verifier LLM was never called. The deterministic short-circuit
+        // (not the scripted guidance-compliance) completed the run.
+        Assert.Empty(_clientFactory.VerifierUserPrompts);
+        Assert.Empty(_clientFactory.Calls);
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
     public async Task CleanPass_NoOsDemandAndNoEdits_PublishesNothing()
     {
         // When NO deterministic check ran (no edits, no OS demand), the ground-truth section
