@@ -159,7 +159,7 @@ public class BenchmarkFreshnessTests
     [Fact]
     public void DataFetchLevels_IncludeFreshnessCheck()
     {
-        foreach (var level in new[] { 16, 17, 18, 19 })
+        foreach (var level in new[] { 16, 17, 18, 19, 20 })
         {
             var plan = BenchmarkService.GetBenchmarkPlans().First(p => p.Level == level);
             Assert.Contains(plan.AcceptanceChecks,

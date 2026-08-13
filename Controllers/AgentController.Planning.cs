@@ -2111,16 +2111,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             live = true
         }, ct);
     }
-    // Trigger phrases that hint a task may want CURRENT EXTERNAL information.
-    // Deliberately broad — "search for"/"look up" often mean searching the repo,
-    // so a hit only opens the LLM verification gate, never rejects by itself.
-    private static readonly string[] WebNeedHints =
-    {
-        "web search", "search the web", "web_search", "web fetch", "web_fetch",
-        "internet", "online", "current", "up to date", "up-to-date", "latest",
-        "live data", "today's", "todays", "fetch from", "fetch the", "google",
-        "api docs", "search for", "look up", "find out"
-    };
+
 
     /// <summary>Feedback shown whenever a step is rejected because the task needs current external info.</summary>
     private const string WebNeedFeedback =
@@ -2133,14 +2124,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "Work from the DISCOVERY CONTEXT and the repo files already in context: propose a concrete repo edit, _create_file, or _command step instead. " +
         "Only use _web_search/_web_fetch when the task genuinely requires data that cannot come from the project.";
 
-    private static bool TaskHintsWebNeed(string? prompt)
-    {
-        if (string.IsNullOrWhiteSpace(prompt)) return false;
-        var lower = prompt.ToLowerInvariant();
-        foreach (var hint in WebNeedHints)
-            if (lower.Contains(hint)) return true;
-        return false;
-    }
+    /// <summary>
+    /// True when the task hints at needing CURRENT EXTERNAL information. Delegates to the ONE
+    /// web-need classifier (WebNeedClassifier) that both this gate and the news-digest routing
+    /// read from — a single source of truth, so dump-task classification and RSS routing can
+    /// never drift apart (a news-shaped prompt is inherently a web need).
+    /// </summary>
+    private static bool TaskHintsWebNeed(string? prompt) => WebNeedClassifier.IsWebNeed(prompt);
 
     /// <summary>
     /// Decisive detector for EXPLICIT web-search commands ("search the web for…",
@@ -2183,6 +2173,36 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
         return ExplicitScriptRequestRegex.IsMatch(prompt);
+    }
+
+    /// <summary>
+    /// Up-front "dump task" classification: the prompt wants fetched web data written into a
+    /// demanded output FILE (not a script/function/artifact). A dump task is satisfied by the
+    /// deterministic web-step auto-dump — once the demanded file is written with the fresh
+    /// data, the completion assessment must NOT route that data back through the LLM (the real
+    /// assessor concluded "needs a Python parser to turn the JSON into CSV rows" for a file
+    /// that was already written, and forced the planner to re-emit the whole dataset inline).
+    /// A script/program request ("write a python script that fetches…") is a BUILD task —
+    /// those carry on with the normal planning/editing loop.
+    /// </summary>
+    private static bool IsDumpTask(string? prompt, string projectRoot) =>
+        TaskHintsWebNeed(prompt) &&
+        AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out _) &&
+        !TaskExplicitlyRequestsScript(prompt);
+
+    /// <summary>
+    /// The up-front dump-vs-build classification surfaced on the kanban card as a badge:
+    /// "dump" when the task wants fetched web data written straight into a demanded file
+    /// (the deterministic short-circuit applies), "build" when it explicitly asks for a
+    /// script/program (normal planning/editing continues). Null for ordinary edit tasks
+    /// (no badge).
+    /// </summary>
+    private static string? ClassifyTaskKind(string? prompt, string projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return null;
+        if (IsDumpTask(prompt, projectRoot)) return "dump";
+        if (TaskExplicitlyRequestsScript(prompt)) return "build";
+        return null;
     }
 
     /// <summary>
@@ -2854,6 +2874,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // the cap the run halts into post-execution verification like any other failure.
         var webStepFailures = 0;
         const int MaxWebStepRetries = 2;
+        // Once the fetch retry budget is exhausted and the task still demands data, the loop
+        // auto-injects ONE _scraper step (system-built scraper) for the failed URL instead of
+        // halting straight into repair — the web tool and the scraper are different fetch
+        // mechanisms, so a URL the tool chokes on can still succeed here. The flag bounds it:
+        // a failing scraper falls through to the halt + deterministic repair auto-dump.
+        var scraperInjected = false;
         if (emitSse)
         {
             await SendSse(Response, "plan", new
@@ -3978,6 +4004,35 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             fb, ct);
                         rejectionFeedback.Add(fb);
                         continue;
+                    }
+                    // AUTO-INJECT _scraper: the fetch retry budget is exhausted and the task
+                    // still demands data (a file output). Give the SYSTEM-BUILT scraper one
+                    // deterministic attempt at the failed URL before halting — the web fetch
+                    // tool and the scraper are different mechanisms (different UA, redirect and
+                    // JS handling), so a URL the tool fails on can still be scraped. Gated on a
+                    // real _web_fetch URL, a file output demand, and never more than once per
+                    // run; a failing scraper falls through to the halt + repair auto-dump.
+                    var failedUrl = stepToRun?.File?.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) == true
+                        ? stepToRun.Change?.Trim()
+                        : null;
+                    if (!string.IsNullOrWhiteSpace(failedUrl) &&
+                        failedUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase) &&
+                        !scraperInjected &&
+                        AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out _) &&
+                        !planSoFar.Any(s => s.File?.Equals("_scraper", StringComparison.OrdinalIgnoreCase) == true) &&
+                        !pendingSteps.Any(s => s.File?.Equals("_scraper", StringComparison.OrdinalIgnoreCase) == true))
+                    {
+                        scraperInjected = true;
+                        // Drop the failed fetch from the committed plan (like the retry path
+                        // does) so the final plan shows only the steps that actually worked.
+                        if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                        pendingSteps.Enqueue(new PlanStep { File = "_scraper", Change = failedUrl });
+                        await EmitLog(emitSse, "warn",
+                            $"Fetch retry budget exhausted ({webStepFailures}/{MaxWebStepRetries}) — auto-injecting a _scraper step for {failedUrl} " +
+                            "(system-built scraper) before halting", ct: ct);
+                        if (emitSse)
+                            await SendSse(Response, "phase", new { message = "Falling back to a system-built scraper…" }, ct);
+                        continue; // loop top drains the queued _scraper step and executes it
                     }
                     await EmitLog(emitSse, "warn",
                         $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +

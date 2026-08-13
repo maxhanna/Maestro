@@ -6,7 +6,7 @@ Weaver is an intelligent, agent‑driven development environment that can **modi
 
 Control your agent remotely on Bughosted.com/Weaver
 
-Documentation: https://maxhanna.github.io/weaver/
+Documentation: https://maxhanna.github.io/
 
 Download EXE: https://Bughosted.com/assets/Weaver.exe
 

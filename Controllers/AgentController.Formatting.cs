@@ -376,6 +376,51 @@ partial class AgentController
     }
 
     /// <summary>
+    /// Persists the up-front dump-vs-build classification onto the card as _taskKind
+    /// ("dump" or "build") so a run that short-circuits deterministically is visibly
+    /// distinguishable from a script/program run. Mirrors <see cref="PublishVerificationAsync"/>:
+    /// display-only (failures are logged, never fatal), survives a reload via boarddata, and
+    /// emits a live 'taskKind' SSE event so the card shows the badge DURING the run.
+    /// </summary>
+    private async Task PublishTaskKindAsync(string cardId, string? taskKind, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId))
+            return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    if (taskKind == null)
+                        cardObj.Remove("_taskKind");
+                    else
+                        cardObj["_taskKind"] = taskKind;
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                        await SendSse(Response, "taskKind", new { cardId, taskKind }, ct);
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn", "Failed to persist task kind to card", new { cardId, error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Persists a DELIVERED live steer onto the card as _steers — a running transcript of
     /// what was injected into the planner, and at which turn — and emits a live
     /// 'steerDelivered' SSE event so the card shows it DURING the run. Mirrors

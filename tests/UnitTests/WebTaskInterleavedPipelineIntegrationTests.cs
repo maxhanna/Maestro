@@ -168,12 +168,12 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.Contains("checklist", _clientFactory.Calls);
         Assert.Equal(2, _clientFactory.Calls.Count(c => c == "planner-step"));
         Assert.DoesNotContain("verify", _clientFactory.Calls);
-        // The WEB-ONLY completion assessment RAN: after the search step (incomplete — the
-        // file does not exist yet) and after the fetch step (the eager dump landed → the
-        // demanded file exists → complete) — the gap this feature closes
-        // (IsLastEditVerifiedComplete never fires without an edit).
-        Assert.True(_clientFactory.Calls.Count(c => c == "web-assess") >= 2,
-            $"the web-only completion assessment should have run after each web step — calls=[{string.Join(",", _clientFactory.Calls)}]");
+        // The WEB-ONLY completion assessment ran after the SEARCH step (incomplete — the
+        // demanded file did not exist yet). After the FETCH step the eager dump had ALREADY
+        // written the file, so the dump-task short-circuit completed the run DETERMINISTICALLY
+        // — no second assessment, and the fetched data never round-trips through the LLM (the
+        // fix for the "planner re-emits the whole dataset inline" failure).
+        Assert.Equal(1, _clientFactory.Calls.Count(c => c == "web-assess"));
     }
 
     [Fact]
@@ -229,6 +229,51 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // Exactly ONE planner turn (the search) — the digest search itself satisfied the task.
         Assert.Equal(1, _clientFactory.Calls.Count(c => c == "planner-step"));
         Assert.Empty(_clientFactory.Step2PlannerPrompts);
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_NewsArticlePrompt_DumpShortCircuit_ZeroAssessmentCallsAndNoFollowUp()
+    {
+        // The news-article field failure: "Fetch a recent AI news article and create a text
+        // file on the desktop…" was NOT classified as a dump task (TaskHintsWebNeed missed
+        // the "news" phrasing), so the run did web_search → _web_fetch of a bot-walled site
+        // instead of the RSS digest → straight-to-file dump. With the fix the prompt IS a
+        // dump task: the _web_search routes to the RSS digest, the digest auto-dumps to the
+        // demanded file IN that search step, and the deterministic dump short-circuit
+        // completes the run — ZERO completion-assessment LLM calls, ZERO follow-up steps.
+        _clientFactory.Mode = PlannerMode.NewsDigestWrite;
+        // Deliberately leave WebAssessComplete null — the dump-task short-circuit (not the
+        // scripted assessor) must complete the run; any "web-assess" call proves it fired.
+        var controller = BuildController();
+        var prompt = $"Fetch a recent AI news article and create a text file with the data on my desktop at \"{_newsTarget}\"";
+        Assert.True(AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out _),
+            $"the test prompt must demand an OS output file: {prompt}");
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(File.Exists(_newsTarget), $"the eager dump should have written {_newsTarget}");
+        var dumped = File.ReadAllText(_newsTarget, Encoding.UTF8);
+        Assert.Contains("AlphaFold 3 predicts protein structures with atom-level accuracy", dumped);
+
+        // ZERO completion-assessment LLM calls — the dump-task short-circuit replaced the
+        // assessment, so the planner never got a chance to re-open the case.
+        Assert.DoesNotContain(_clientFactory.Calls, c => c is "web-assess" or "assess");
+
+        // ZERO follow-up steps: exactly ONE planner turn, the plan is just the search, and
+        // no fetch/_command/_create_file step was ever proposed after it.
+        Assert.Equal(1, _clientFactory.Calls.Count(c => c == "planner-step"));
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search" }, plan!.Plan.Select(s => s.File).ToArray());
+        Assert.Empty(_clientFactory.Step2PlannerPrompts);
+
+        // The dump is recorded as a created OS-file result at the demanded path.
+        var dumpResult = allSteps.OfType<Dictionary<string, object?>>()
+            .Single(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+                         r.GetValueOrDefault("os") is true);
+        Assert.Equal(_newsTarget, dumpResult.GetValueOrDefault("path")?.ToString());
+
         Assert.Empty(_clientFactory.Unmatched);
     }
 
@@ -293,11 +338,14 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // invisible, so nothing pre-created the destination and the fetched data had nowhere
         // deterministic to land. Now: _create_directory is allowed as filesystem prep, and
         // the web step pre-creates the demanded folder BEFORE the fetch, so the fetch's
-        // eager dump writes the real data into it — and a planned _create_file for the same
-        // file is skipped instead of erroring on "file already exists".
+        // eager dump writes the real data into it. And because this is a DUMP task, the run
+        // completes DETERMINISTICALLY the moment the dump lands — the scripted redundant
+        // _create_file is never proposed, so the fetched data never round-trips through the
+        // planner/LLM (the "re-emit 1025 rows inline" failure).
         _clientFactory.Mode = PlannerMode.RepoRelativeDump;
-        // Never complete via the between-steps assessment — the plan runs to completion so
-        // the folder, the dump and the create_file-skip all execute.
+        // The between-steps assessment is scripted to NEVER complete — but the dump-task
+        // short-circuit must complete the run anyway (the demanded file already exists with
+        // real data), WITHOUT consulting this scripted assessor for the fetch step.
         _clientFactory.WebAssessComplete = () => false;
         var controller = BuildController();
         var folderPath = Path.Combine(_projectRoot, "benchmark_test_16");
@@ -318,9 +366,9 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
 
         // The plan LED with the folder (filesystem prep allowed BEFORE the web steps — the
         // missing-web-search guard no longer bounces _create_directory), then search → fetch.
-        // The create_file the planner STILL proposed after the dump is pruned from the final
-        // plan as a no-op (the dump already wrote the file — see the skipped result below),
-        // so the effective plan is the 3 real steps.
+        // The dump-task short-circuit completed the run the moment the fetch's eager dump wrote
+        // the demanded file, so the scripted redundant _create_file was NEVER proposed — the
+        // final plan is the 3 real steps, and no LLM re-emitted the data.
         Assert.NotNull(plan);
         Assert.True(plan!.Plan.Count == 3,
             $"plan={string.Join(",", plan.Plan.Select(s => s.File + ":" + s.Change))}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched=[{string.Join(";", _clientFactory.Unmatched)}]");
@@ -336,15 +384,58 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                              csvPath, StringComparison.OrdinalIgnoreCase));
         Assert.Equal("created", dumpResult.GetValueOrDefault("status")?.ToString());
 
-        // The planned _create_file for the SAME file was SKIPPED (the dump already created it
-        // with the demanded data) — not an error stall on "file already exists". The skip
-        // result stays in the run's results even though the no-op step is pruned from the
-        // final plan.
-        var createFileResult = allSteps.OfType<Dictionary<string, object?>>()
-            .Single(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+        // NO redundant _create_file (the planner's n==4 turn is never reached) and no
+        // "file already created earlier in this run" skip result — the short-circuit completed
+        // the run first. The only create results are the demanded folder and the dump itself.
+        var createFileResults = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "create" &&
+                        string.Equals(r.GetValueOrDefault("reason")?.ToString(),
+                            "file already created earlier in this run", StringComparison.Ordinal))
+            .ToList();
+        Assert.Empty(createFileResults);
+
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_DumpTask_FileWritten_CompletesWithZeroAssessmentCalls()
+    {
+        // The "1025-row inline re-emit" regression: after the fetch's eager dump writes the
+        // demanded file, the dump-task short-circuit must complete the run DETERMINISTICALLY —
+        // the completion-assessment LLM ("web-assess") is NEVER called, so the planner can never
+        // re-emit the whole dataset inline as a _create_file. Step 1 is a DIRECT _web_fetch (a
+        // web step, so the missing-web-search guard admits it without forcing a search first),
+        // and the dump writes the demanded file in that same step.
+        _clientFactory.Mode = PlannerMode.FetchFirstDump;
+        var controller = BuildController();
+        var prompt = $"Fetch the live data from the API and write the data into a text file at \"{_dumpTarget}\".";
+        Assert.True(AgentOsOutputVerifier.TryGetOsFileOutputDemand(prompt, out _),
+            $"the test prompt must demand an OS output file: {prompt}");
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(File.Exists(_dumpTarget), $"the eager dump should have written {_dumpTarget}");
+        Assert.Contains("AlphaFold 3", File.ReadAllText(_dumpTarget, Encoding.UTF8));
+
+        // THE regression: zero completion-assessment LLM calls. The dump-task short-circuit
+        // replaced the assessment — no "web-assess", no "assess", no "post-verify"-style
+        // completion round that could reopen the case and make the planner re-emit the data.
+        Assert.DoesNotContain(_clientFactory.Calls, c => c is "web-assess" or "assess");
+
+        // And no re-emit: exactly ONE planner turn (the fetch), the plan is just that fetch,
+        // and no _create_file/edit step was ever proposed.
+        Assert.Equal(1, _clientFactory.Calls.Count(c => c == "planner-step"));
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_fetch" }, plan!.Plan.Select(s => s.File).ToArray());
+        var createFileSteps = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "_create_file" ||
+                        (r.GetValueOrDefault("type")?.ToString() == "create" &&
+                         r.GetValueOrDefault("os") is not true &&
                          string.Equals(r.GetValueOrDefault("reason")?.ToString(),
-                             "file already created earlier in this run", StringComparison.Ordinal));
-        Assert.Equal("skipped", createFileResult.GetValueOrDefault("status")?.ToString());
+                             "file already created earlier in this run", StringComparison.Ordinal)))
+            .ToList();
+        Assert.Empty(createFileSteps);
 
         Assert.Empty(_clientFactory.Unmatched);
     }
@@ -951,6 +1042,10 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         _clientFactory.Mode = PlannerMode.FetchAlwaysFails;
         _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
         var controller = BuildController();
+        // The environment's scraper ALSO fails (consistent with "always fails") — so after the
+        // fetch budget is exhausted the auto-injected _scraper runs, fails, and the run still
+        // falls to the deterministic repair auto-dump. The replanner must never be called.
+        SetField(controller, "_scraperService", new FakeScraperService(succeed: false));
         // Non-news phrasing — the news-marked variant routes to the digest, not DuckDuckGo.
         var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\".";
 
@@ -980,6 +1075,55 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                         r.GetValueOrDefault("status")?.ToString() == "error")
             .ToList();
         Assert.True(failedFetches.Count >= 2, $"expected the retry budget to be exhausted with ≥2 failed fetches — got {failedFetches.Count}");
+
+        // The fetch budget was exhausted BEFORE the halt, so the system auto-injected ONE
+        // _scraper attempt at the failing URL (deterministic, no LLM call) — and it failed
+        // too, which is what let the repair auto-dump close the run.
+        var scraperResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "scraper"));
+        Assert.Equal("error", scraperResult.GetValueOrDefault("status")?.ToString());
+        Assert.Equal("https://www.example.com/latest-ai-breakthrough", scraperResult.GetValueOrDefault("url")?.ToString());
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_FetchExhausted_AutoInjectsScraper_AndCompletes()
+    {
+        // The positive arm of the auto-inject: the fetch budget is exhausted on the invented
+        // URL, and the loop AUTO-INJECTS a _scraper step (no planner call — the system builds
+        // and runs a known-good scraper for the failed URL). The fake scraper succeeds and
+        // writes the demanded file, so the run completes without any repair round.
+        _clientFactory.Mode = PlannerMode.FetchExhaustedScraperSucceeds;
+        _clientFactory.WebAssessComplete = () => File.Exists(_dumpTarget);
+        var fake = new FakeScraperService(succeed: true);
+        var controller = BuildController();
+        SetField(controller, "_scraperService", fake);
+        var prompt = $"Search the web for recent AI breakthroughs and write the data into a text file at \"{_dumpTarget}\".";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete via the auto-injected scraper — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(File.Exists(_dumpTarget), $"the scraper should have written {_dumpTarget}");
+        Assert.Contains("scraper", File.ReadAllText(_dumpTarget, Encoding.UTF8));
+
+        // The auto-injected _scraper step landed in the plan and ran against the failed URL.
+        Assert.NotNull(plan);
+        Assert.Equal(new[] { "_web_search", "_scraper" }, plan!.Plan.Select(s => s.File).ToArray());
+        Assert.Equal("https://www.example.com/latest-ai-breakthrough", plan.Plan[1].Change);
+        Assert.Equal(new[] { "https://www.example.com/latest-ai-breakthrough" }, fake.Urls.ToArray());
+        var scraperResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "scraper"));
+        Assert.Equal("done", scraperResult.GetValueOrDefault("status")?.ToString());
+
+        // Exactly the 3 planned fetch attempts (first fetch + the 2 retries) — the budget
+        // was burned, then the scraper took over. No repair round was needed (the file
+        // already exists).
+        var failedFetches = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "_web_fetch" &&
+                        r.GetValueOrDefault("status")?.ToString() == "error")
+            .ToList();
+        Assert.Equal(3, failedFetches.Count);
+        Assert.Empty(_clientFactory.RepairUserPrompts);
         Assert.Empty(_clientFactory.Unmatched);
     }
 
@@ -1175,7 +1319,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback }
+    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds }
 
     /// <summary>
     /// Fake system-built scraper: records the URLs it was asked to scrape and writes the
@@ -1185,20 +1329,26 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
     private sealed class FakeScraperService : ScraperEnvironmentService
     {
         public readonly List<string> Urls = new();
+        private readonly bool _succeed;
+
+        public FakeScraperService(bool succeed = true) => _succeed = succeed;
 
         public override async Task<ScraperResult> TryRunScraperAsync(
             string url, string? outputPath, string workDir, string? metadataLine, CancellationToken ct)
         {
             Urls.Add(url);
-            if (outputPath != null)
+            if (_succeed && outputPath != null)
             {
                 var dir = Path.GetDirectoryName(outputPath);
                 if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir);
                 await File.WriteAllTextAsync(outputPath,
                     "### WEB RESULTS [scraper] ###\nAlphaFold 3 predicts protein structures with atom-level accuracy\n", ct);
             }
-            return new ScraperResult(true, "import requests\n# system-built\n",
-                "WROTE " + (outputPath ?? "(none)") + " 79", null, outputPath);
+            return _succeed
+                ? new ScraperResult(true, "import requests\n# system-built\n",
+                    "WROTE " + (outputPath ?? "(none)") + " 79", null, outputPath)
+                : new ScraperResult(false, "import requests\n# system-built\n", "",
+                    "scraper failed: site blocked", null);
         }
     }
 
@@ -1519,8 +1669,10 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                 {
                     // The benchmark-task shape, scripted: the planner LEADS with the folder
                     // (filesystem prep — the missing-web-search guard must NOT bounce it on a
-                    // web-needing task), then search → fetch → a _create_file for the SAME
-                    // file the eager dump already wrote (which must be SKIPPED, not error).
+                    // web-needing task), then search → fetch. The n==4 _create_file turn is
+                    // DEAD — the dump-task short-circuit completes the run the moment the
+                    // fetch's eager dump writes the demanded file, so the planner never gets
+                    // to propose the redundant file (that's the asserted behavior).
                     if (n == 1)
                         return (PlannerStepJson("_create_directory", "benchmark_test_16"), "planner-step");
                     if (n == 2)
@@ -1528,11 +1680,20 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     if (n == 3)
                         return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
                     if (n == 4)
-                        // The validator requires _create_file to carry file content in
-                        // newString — it is still SKIPPED at execution because the eager dump
-                        // already wrote the file with the demanded data.
                         return (PlannerCreateFileStepJson("benchmark_test_16/pokemon_data.csv", "id,name,hp,attack,defense,speed,type_1,type_2"), "planner-step");
                     return ("{\"planComplete\": true, \"completionReason\": \"folder created, data fetched and written into the csv\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.FetchFirstDump)
+                {
+                    // Step 1 is a DIRECT _web_fetch (a web step, so the missing-web-search
+                    // guard admits it without forcing a search first). The eager dump writes the
+                    // demanded file in that same step, and the dump-task short-circuit completes
+                    // the run with ZERO completion-assessment LLM calls — the regression for the
+                    // "planner re-emits the whole dataset inline" failure. The n==2 turn is
+                    // DEAD (the run completes before the planner can propose another step).
+                    if (n == 1)
+                        return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"fetched and dumped the data\"}", "planner-step");
                 }
                 if (_owner.Mode == PlannerMode.MkdirCommandPrep)
                 {
@@ -1654,6 +1815,17 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     // harvested search results — the replanner must NEVER be called.
                     lock (_owner.Step2PlannerPrompts) _owner.Step2PlannerPrompts.Add(user);
                     return (PlannerStepJson("_web_fetch", "https://www.example.com/latest-ai-breakthrough"), "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.FetchExhaustedScraperSucceeds)
+                {
+                    // The planner burns the fetch budget on the invented URL (turns 2-4: the
+                    // first fetch plus the two retries all fail), then — with no planner call —
+                    // the loop AUTO-INJECTS a _scraper step for the failed URL. The fake
+                    // scraper succeeds and writes the demanded file; the next turn declares
+                    // the plan complete.
+                    if (n is >= 2 and <= 4)
+                        return (PlannerStepJson("_web_fetch", "https://www.example.com/latest-ai-breakthrough"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"scraper wrote the demanded file after the fetch budget was exhausted\"}", "planner-step");
                 }
                 if (n == 2)
                 {

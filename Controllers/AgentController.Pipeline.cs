@@ -1956,6 +1956,10 @@ partial class AgentController
         sb.AppendLine("   Example: if the task says 'wrap in details/summary' but the file already has per-column");
         sb.AppendLine("   collapse buttons, report that details/summary is missing — do NOT report that");
         sb.AppendLine("   toggleColumnCollapse is unimplemented, because the task has nothing to do with that.");
+        sb.AppendLine("   EXTRA DATA IS NOT A DEFECT: if the task asked for specific columns/fields (e.g. 'id and name') and the");
+        sb.AppendLine("   produced file ALSO contains extra columns (e.g. a 'url' column) or extra rows/fields, that superset is FINE —");
+        sb.AppendLine("   do NOT flag it, do NOT set complete=false, and do NOT request a corrective step for it. Only MISSING");
+        sb.AppendLine("   explicitly-requested data/columns is a CONFIRMED issue.");
         sb.AppendLine("2. Do ALL property accesses in the code exist on their respective types/interfaces?");
         sb.AppendLine("3. Are ALL referenced methods, functions, and classes defined or imported?");
         sb.AppendLine("4. Are ALL imports present for every type used?");
@@ -1982,6 +1986,7 @@ partial class AgentController
        "Styling preferences are never CONFIRMED: do not flag an existing CSS value or demand a different property unless the task explicitly asked for it. " +
        "Distinguish CONFIRMED issues (objectively unmet requirements you can see broken in the code above) from SPECULATIVE ones " +
        "(hypothetical risks like 'might not be initialized' with no evidence of an actual bug). ONLY CONFIRMED issues cause a repair. " +
+       "Extra data or columns beyond the explicit request are never a CONFIRMED issue — only missing required content fails the task. " +
        "Output ONLY a JSON object: {\"complete\": true/false, \"reason\": \"...\", \"issues\": [{\"type\": \"CONFIRMED\" | \"SPECULATIVE\", \"text\": \"...\"}]}.";
         var (raw, _, error) = await CallLlmRawStreaming(
             verifySystemPrompt, sb.ToString(), emitSse, ct,

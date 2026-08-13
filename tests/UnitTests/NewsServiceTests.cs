@@ -14,8 +14,8 @@ namespace Weaver.UnitTests;
 
 /// <summary>
 /// The NewsService: fresh-news fetching (parallel RSS/API sources, URL+title dedup,
-/// round-robin interleave, snippet/LLM summaries, markdown digest) plus the "news marker"
-/// routing inside ExecuteWebPlanStep. The guard behind "a model asked for the latest AI
+/// round-robin interleave, snippet/LLM summaries, markdown digest) plus the
+/// news-digest routing inside ExecuteWebPlanStep (the news marker now lives in WebNeedClassifier). The guard behind "a model asked for the latest AI
 /// news and invented a headline with a fake example.com URL": with the marker, the search
 /// step returns REAL dated items with REAL URLs the agent can fetch or paste; without it,
 /// the search stays on the plain DuckDuckGo path.
@@ -31,40 +31,6 @@ public class NewsServiceTests
     private const string PlainPrompt =
         "Search the web for recent AI breakthroughs and verify each result is a real published paper.";
     private const string Query = "latest AI news";
-
-    // ── The routing marker: news-y phrasing routes to the digest, generic web prompts stay put ──
-    [Theory]
-    [InlineData("Get a latest AI news article from the web and paste the article in a text file on the desktop", true)]
-    [InlineData("Search the web for the latest AI news and add a summary line to NOTES.md.", true)]
-    [InlineData("What are today's top stories in AI?", true)]
-    [InlineData("Show me the latest AI headlines", true)]
-    [InlineData("Breaking news in technology", true)]
-    [InlineData("Show HN: top trending stories this week", true)]
-    // The exact "invented article" failure class — topic + "article" + persist-to-file, with
-    // NO recency word and NO literal "news", so only rule C catches it.
-    [InlineData("Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.", true)]
-    [InlineData("Search the web for an AI article and write it to a text file on my desktop.", true)]
-    // Every non-news web prompt already in the suite must stay on the plain search path.
-    [InlineData("Search the web for the current weather in London.", false)]
-    [InlineData("Search the web for the latest release notes of .NET 10.", false)]
-    [InlineData("Check the latest weaver release version online and save the version to a file", false)]
-    [InlineData("Fetch the URL https://example.com/pricing from the internet and summarize the Pro plan price.", false)]
-    [InlineData("Search for recent AI articles about machine learning advancements", false)]
-    [InlineData("Search for recent AI articles about machine learning advancements and summarize the top three", false)]
-    [InlineData("Search the web for recent AI breakthroughs and verify each result is a real published paper", false)]
-    [InlineData("Search the web for the latest release notes for weaver and add a summary line to NOTES.md.", false)]
-    // Widened topic vocabulary: general-topic news must route to the digest, not plain search.
-    [InlineData("Find the local Montreal news and insert it into a text document on desktop", true)]
-    [InlineData("Get the latest food news and write it to a text file", true)]
-    [InlineData("What are today's top stories in sports?", true)]
-    [InlineData("Find the latest business headlines and save them to a document", true)]
-    [InlineData("Show me today's sports updates", true)]
-    // …but a topic alone is not news — no news word/noun, no recency, no persist intent.
-    [InlineData("Find the best pizza place in Montreal", false)]
-    public void LooksLikeNewsQuery_Marker(string prompt, bool expected)
-    {
-        Assert.Equal(expected, NewsService.LooksLikeNewsQuery(prompt));
-    }
 
     // ── Topic/place-aware planning: the prompt becomes a plan (query + topics + places + region) ──
     [Fact]
@@ -255,6 +221,44 @@ public class NewsServiceTests
         Assert.Contains("Thin Snippet Story", digest);
     }
 
+    // ── Full-article dump support (the "dump the article" untruncated fix) ──
+    [Fact]
+    public void FirstArticleUrl_ExtractsTopItemSourceUrl()
+    {
+        var digest =
+            "# AI News — 2026-08-13 — \"AI news\"\n" +
+            "8 item(s) from VentureBeat.\n\n" +
+            "## Summary\nA roundup.\n\n" +
+            "## AI Startup Raises $200M\n" +
+            "Source: https://vb.example.com/1\n" +
+            "Published: Wed, 12 Aug 2026 10:00:00 GMT\n" +
+            "Feed: VentureBeat\nsummary\n\n" +
+            "## Second item\nSource: https://vb.example.com/2\nsummary";
+
+        Assert.Equal("https://vb.example.com/1", NewsService.FirstArticleUrl(digest));
+        Assert.Null(NewsService.FirstArticleUrl("no source line here"));
+        Assert.Null(NewsService.FirstArticleUrl(null));
+    }
+
+    [Fact]
+    public async Task FetchFullArticleAsync_ReturnsUntruncatedArticleText()
+    {
+        var factory = new NewsScriptedClientFactory { ServeArticleHtml = true };
+        var service = new NewsService(factory, "http://localhost:8080", "test-model");
+
+        var full = await service.FetchFullArticleAsync("https://example.com/thin-story", CancellationToken.None);
+
+        // The whole <article> body (300 x's) — untruncated, no "…" chop marker.
+        Assert.NotNull(full);
+        Assert.Equal(300, full.Length);
+        Assert.Equal(new string('x', 300), full);
+        Assert.DoesNotContain("…", full);
+
+        // A non-http(s) URL and an empty URL never fetch.
+        Assert.Null(await service.FetchFullArticleAsync("ftp://example.com/x", CancellationToken.None));
+        Assert.Null(await service.FetchFullArticleAsync("", CancellationToken.None));
+    }
+
     // ── Routing inside ExecuteWebPlanStep (the live _web_search step) ──
     [Fact]
     public async Task ExecuteWebPlanStep_NewsPrompt_ReturnsFreshDigest_NotInventedHeadline()
@@ -291,6 +295,39 @@ public class NewsServiceTests
         Assert.Contains("# AI News — ", outp);
         Assert.Contains("AI Startup Raises $200M", outp);
         Assert.DoesNotContain("example.com/fakearticle", outp);
+    }
+
+    [Fact]
+    public async Task ExecuteWebPlanStep_NewsDumpTask_AppendsFullArticleText_Untruncated()
+    {
+        // The "dump the article" task: the digest summaries land first, then the FULL article
+        // body is fetched and appended — the file must carry the whole article, untruncated.
+        var factory = new NewsScriptedClientFactory { ServeArticleHtml = true };
+        var dir = Path.Combine(Path.GetTempPath(), "weaver_newsdump_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var controller = BuildRoutingController(factory, Path.GetTempPath());
+            var method = typeof(AgentController).GetMethod("ExecuteWebPlanStep", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            var allResults = new List<object>();
+            var prompt = "Fetch the latest AI news and write the article data into news_article.txt";
+            var task = (Task<(int, string)>)method.Invoke(controller, new object?[]
+            {
+                "_web_search", "latest AI news", prompt, dir, /*emitSse*/ false, CancellationToken.None,
+                allResults, new List<PlanStep>(), /*itemIdx*/ 0, /*stepIndex*/ 0, /*discoveryContext*/ "", new StringBuilder()
+            })!;
+            await task;
+
+            var file = Path.Combine(dir, "news_article.txt");
+            Assert.True(File.Exists(file), "the repo-relative demanded file should have been dumped");
+            var content = File.ReadAllText(file);
+            Assert.Contains("## Full article text", content);
+            Assert.Contains(new string('x', 300), content); // the whole <article> body, untruncated
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
     }
 
     [Fact]

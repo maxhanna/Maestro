@@ -1231,7 +1231,7 @@ partial class AgentController
     /// </summary>
     private async Task<(string output, string? error)> ExecuteWebSearchAsync(string query, string? prompt, CancellationToken ct)
     {
-        if (NewsService.LooksLikeNewsQuery(prompt) || NewsService.LooksLikeNewsQuery(query))
+        if (WebNeedClassifier.IsNews(prompt) || WebNeedClassifier.IsNews(query))
         {
             var digest = await (await GetNewsServiceAsync()).FetchNewsAsync(prompt ?? query, query, NewsService.DefaultLimit, ct);
             return (digest, null);
@@ -1325,14 +1325,14 @@ partial class AgentController
         //
         // WHICH steps trigger it: a successful _web_fetch always (its output IS the demanded
         // data), and a _web_search ONLY when it routed to the news digest (the same
-        // LooksLikeNewsQuery predicate ExecuteWebSearchAsync uses) — a digest search already
+        // WebNeedClassifier.IsNews predicate ExecuteWebSearchAsync uses) — a digest search already
         // returns the finished, dated article list with real URLs, so for a news-marked task
         // demanding an OS file that IS the data, used up right here. A plain DuckDuckGo
         // search is intermediate research — the fetch that follows owns the content — so it
         // must not dump (that keeps the fetch-retry and repeated-search paths intact).
         var allResultDicts = allResults.OfType<Dictionary<string, object?>>().ToList();
         var isNewsDigestSearch = isSearch &&
-            (NewsService.LooksLikeNewsQuery(prompt) || NewsService.LooksLikeNewsQuery(query));
+            (WebNeedClassifier.IsNews(prompt) || WebNeedClassifier.IsNews(query));
         if (err == null && (isNewsDigestSearch || !isSearch) &&
             AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out var osDemand) &&
             !AgentOsOutputVerifier.IsOsOutputWritten(osDemand, allResultDicts))
@@ -1341,6 +1341,27 @@ partial class AgentController
                 prompt, osDemand, allResultDicts);
             if (dumped && dumpPath != null)
             {
+                // NEWS FULL-ARTICLE DUMP — the digest above carries only 1-2 sentence
+                // summaries; a "dump the article" task wants the COMPLETE article. Fetch the
+                // top item's full text and append it (untruncated) to the just-written file.
+                // Best-effort: any fetch/extract failure leaves the summary digest on disk.
+                if (isNewsDigestSearch)
+                {
+                    var topUrl = NewsService.FirstArticleUrl(outp);
+                    if (topUrl != null)
+                    {
+                        var full = await (await GetNewsServiceAsync()).FetchFullArticleAsync(topUrl, ct);
+                        if (!string.IsNullOrWhiteSpace(full))
+                        {
+                            try
+                            {
+                                await System.IO.File.AppendAllTextAsync(
+                                    dumpPath, "\n\n## Full article text\n\n" + full, System.Text.Encoding.UTF8, ct);
+                            }
+                            catch { /* best-effort — the summary digest is already on disk */ }
+                        }
+                    }
+                }
                 // "os" marks an OS-filesystem write (outside the repo) so repo-edit filters
                 // can exclude it; a repo-relative dump (LocationKind "repo") IS a repo edit.
                 var isOsWrite = !string.Equals(osDemand.LocationKind, "repo", StringComparison.OrdinalIgnoreCase);

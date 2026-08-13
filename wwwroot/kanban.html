@@ -5,7 +5,8 @@
     <button ng-click="vm.toggleColumn('todo')" class="{{vm.showTodo ? 'active' : 'ghost'}}" title="Toggle To Do column">
       📋 To Do ({{vm.cardsForProject('todo').length}})
     </button>
-    <button ng-click="vm.toggleColumn('doing')" class="{{vm.showDoing ? 'active' : 'ghost'}}" title="Toggle Doing column">
+    <button ng-click="vm.toggleColumn('doing')" class="{{vm.showDoing ? 'active' : 'ghost'}}"
+      title="Toggle Doing column">
       ⚡ Doing ({{vm.cardsForProject('doing').length}})
     </button>
     <button ng-click="vm.toggleColumn('done')" class="{{vm.showDone ? 'active' : 'ghost'}}" title="Toggle Done column">
@@ -16,17 +17,21 @@
       title="Self-improving cards — {{vm.selfImprovingAgentActive ? 'cycle ACTIVE (runs while no regular card is active)' : 'cycle off'}}">
       📈 Improve ({{vm.cardsForProject('selfImproving').length}}){{vm.selfImprovingAgentActive ? ' ♾️' : ''}}
     </button>
-    <button ng-click="vm.toggleColumn('archived')" class="{{vm.showArchived ? 'active' : 'ghost'}}" title="Toggle Archived view">
+    <button ng-click="vm.toggleColumn('archived')" class="{{vm.showArchived ? 'active' : 'ghost'}}"
+      title="Toggle Archived view">
       🗄 Archived ({{vm.cardsForProject('archived').length}})
     </button>
-    <span class="idle-suggest-chip" ng-if="(vm._idleSuggestionPending > 0 || vm._suggestionIdleChainActive) && !vm.suggestionSystemBlocked()"
+    <span class="idle-suggest-chip"
+      ng-if="(vm._idleSuggestionPending > 0 || vm._suggestionIdleChainActive) && !vm.suggestionSystemBlocked()"
       ng-class="{running: vm._suggestionIdleChainActive, paused: vm._suggestionIdlePaused}"
-      ng-click="vm.toggleIdleSuggestions()" ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleIdleSuggestions()"
-      role="button" tabindex="0"
+      ng-click="vm.toggleIdleSuggestions()"
+      ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleIdleSuggestions()" role="button"
+      tabindex="0"
       title="{{vm._suggestionIdleChainActive ? 'Idle suggestion loop running — click to pause' : (vm._suggestionIdlePaused ? 'Idle suggestions paused — click to resume' : 'Idle suggestion loop paused (agent busy) — resumes when idle. Click to pause until you resume it.')}}: {{vm._idleSuggestionPending}} Done card(s) still need suggestion(s)">
       <span class="idle-suggest-spin" ng-if="vm._suggestionIdleChainActive">⟳</span>
       {{vm._suggestionIdleChainActive ? '⏸' : (vm._suggestionIdlePaused ? '▶' : '⏸')}}
-      💡 {{vm._idleSuggestionPending}} Done card{{vm._idleSuggestionPending === 1 ? '' : 's'}} need suggestion{{vm._idleSuggestionPending === 1 ? '' : 's'}}
+      💡 {{vm._idleSuggestionPending}} Done card{{vm._idleSuggestionPending === 1 ? '' : 's'}} need
+      suggestion{{vm._idleSuggestionPending === 1 ? '' : 's'}}
     </span>
     <button class="close-button" ng-click="vm.showKanban = false; vm.saveSettings()" title="Close board">✕</button>
   </div>
@@ -48,18 +53,28 @@
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
-              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻<span
+                class="tag-label"> recovered {{vm.recoveredCount(card)}}×</span></span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
-            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
-              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
-            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
-              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
+            <span class="card-tag-container">
+              <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+                title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡<span
+                  class="tag-label"> {{card._context.size}} tok</span></span>
+              <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+                title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨<span
+                  class="tag-label"> ~{{card._llmSpend.totalTokens | formatNumber}} used</span></span>
+              <span class="card-tag tag-dump" ng-if="card._taskKind === 'dump'"
+                title="Data-dump task — the fetched web data is written straight to the demanded file and the run short-circuits the completion assessment.">⤓<span
+                  class="tag-label"> dump</span></span>
+              <span class="card-tag tag-build" ng-if="card._taskKind === 'build'"
+                title="Script/program task — the prompt explicitly asks for a script, so normal planning and editing steps apply.">🛠<span
+                  class="tag-label"> build</span></span>
+            </span>
           </div>
 
           <div class="card-text">
             <textarea ng-model="card.text" ng-change="vm.saveCardText(card)" rows="2"
-              ng-click="vm.todoTextAreaClicked($event)"
-              placeholder="Spin a thread with Weaver."></textarea>
+              ng-click="vm.todoTextAreaClicked($event)" placeholder="Spin a thread with Weaver."></textarea>
           </div>
           <div class="card-text-tools">
             <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
@@ -73,22 +88,32 @@
               <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
               <span class="card-tag tag-queued" ng-if="card.ready && (card._endpointQueued || card._autoQueued)"
                 title="Queued — starts when the current card finishes.">⏳ QUEUED</span>
-              <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
-                title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
-              <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
-              <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
-              <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
-              <label class="pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create a branch then PR on completion">
+              <span class="card-tag tag-endpoint"
+                ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
+                title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) |
+                limitTo:14}}</span>
+              <span class="card-tag tag-bench" ng-if="card._benchmark"
+                style="color:#e5c07b;font-weight:700;">BENCH</span>
+              <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion"
+                title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
+              <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰
+                {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) :
+                'SCHEDULED'}}</span>
+              <label class="pr-toggle" ng-click="$event.stopPropagation()"
+                title="Auto-create a branch then PR on completion">
                 <input type="checkbox" ng-model="card.autoPr" ng-change="vm.onAutoPrToggle(card)" /> BRANCH
               </label>
-              <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()" title="Self-improving card — queued when agent is idle">
-                <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
+              <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()"
+                title="Self-improving card — queued when agent is idle">
+                <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" />
+                IMPROVE
               </label>
-              <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()" title="Auto-create tests for the code changes">
+              <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()"
+                title="Auto-create tests for the code changes">
                 <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
               </label>
             </div>
-          </div> 
+          </div>
 
           <!-- Plan -->
           <details class="card-section" ng-if="card._plan && card._plan.items && card._plan.items.length">
@@ -96,7 +121,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}</span>
               <span class="section-badge">{{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}}</span>
-              <button class="section-clear" ng-click="vm.clearPlan(card); $event.stopPropagation(); $event.preventDefault();"
+              <button class="section-clear"
+                ng-click="vm.clearPlan(card); $event.stopPropagation(); $event.preventDefault();"
                 title="Delete entire plan and start fresh">🗑</button>
             </summary>
             <div class="section-body">
@@ -105,14 +131,18 @@
                   ng-class="{'plan-done': item.done, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && item.status!=='rejected'}"
                   title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.metaGroup ? item.metaGroup + ' — ' : ''}}{{item.file}}:{{item.line}} {{item.change}}">
                   <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
-                    title="{{item.status==='rejected' ? 'Rejected step' : (item.done ? 'Mark not done' : 'Mark done')}}">{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}}</span>
+                    title="{{item.status==='rejected' ? 'Rejected step' : (item.done ? 'Mark not done' : 'Mark done')}}">{{item.status==='rejected'
+                    ? '✗' : (item.done ? '✅' : '⬜')}}</span>
                   <div class="plan-item-body">
                     <div class="plan-item-heading">
                       <div class="plan-item-text">
-                        <span ng-if="item.metaGroup" class="plan-item-metagroup" title="Sub-plan group">{{item.metaGroup}}</span>
-                        <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                        <span ng-if="item.metaGroup" class="plan-item-metagroup"
+                          title="Sub-plan group">{{item.metaGroup}}</span>
+                        <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) :
+                          item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
                         <span class="plan-item-change" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
-                        <span class="plan-item-change plan-item-thinking" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
+                        <span class="plan-item-change plan-item-thinking"
+                          ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       </div>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
@@ -123,21 +153,26 @@
                         ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
-                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
+                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail"
+                      style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
                     <!-- Per-step computed ground truth — this step's own deterministic expected outcome -->
                     <div class="plan-item-gt" ng-if="item.groundTruth && item.groundTruth.length">
                       <div ng-repeat="gt in item.groundTruth track by $index" class="plan-item-gt-entry"
                         ng-class="{'gt-verified': gt.verified === true, 'gt-missed': gt.verified === false}"
                         title="Deterministic expected outcome for this step — {{gt.verified === true ? 'verified on disk' : (gt.verified === false ? 'NOT found on disk after this step' : 'checked when the step completes')}}">
-                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' : '🎯')}}</span>
+                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' :
+                          '🎯')}}</span>
                         <span>{{gt.text}}</span>
                       </div>
                     </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
-                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
+                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)"
+                          title="Click to preview diff">
                           <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
-                          <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <span
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                            && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                           <code>{{d.split('/').pop()}}</code>
                         </span>
                         <span class="diff-tools">
@@ -146,7 +181,7 @@
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
                           <span class="diff-applied"
                             ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
-                             title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
+                            title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
                             ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
@@ -154,17 +189,21 @@
                           <button ng-click="vm.openDiffInIde(d, item, card, $event)"
                             ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
-                          <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
+                          <span class="diff-deleting"
+                            ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>
                         <div class="diff-preview" ng-if="item._previews && item._previews[d] && item._previews[d].show">
                           <pre>{{item._previews[d].content}}</pre>
                         </div>
-                        <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">{{item._previews[d].error}}</div>
+                        <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">
+                          {{item._previews[d].error}}</div>
                       </div>
                     </div>
                     <div ng-if="item._showDetail" class="plan-item-detail">
-                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ? item.oldString.slice(0,200) + '…' : item.oldString}}</div>
-                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ? item.newString.slice(0,200) + '…' : item.newString}}</div>
+                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                        item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                        item.newString.slice(0,200) + '…' : item.newString}}</div>
                     </div>
                   </div>
                 </div>
@@ -189,7 +228,8 @@
           <details class="card-section" ng-if="card._verification">
             <summary>
               <span class="section-caret">▶</span>
-              <span class="section-title" ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
+              <span class="section-title"
+                ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
                 {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
               </span>
             </summary>
@@ -219,12 +259,14 @@
           </details>
 
           <!-- Meta-plan -->
-          <details class="card-section" ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length">
+          <details class="card-section"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length">
             <summary>
               <span class="section-caret">▶</span>
               <span class="section-title">🧠 Meta-Plan: {{card._metaPlan.summary}}</span>
               <span class="section-badge" ng-if="card._metaPlan.complexity">{{card._metaPlan.complexity}}/10</span>
-              <button class="section-clear" ng-click="vm.clearMetaPlan(card); $event.stopPropagation(); $event.preventDefault();"
+              <button class="section-clear"
+                ng-click="vm.clearMetaPlan(card); $event.stopPropagation(); $event.preventDefault();"
                 title="Clear meta-plan and restart">🗑</button>
             </summary>
             <div class="section-body">
@@ -243,8 +285,10 @@
           </details>
 
           <!-- Cohesion warnings -->
-          <div class="card-section card-section-warn" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length">
-            <div class="section-warn-title">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}</div>
+          <div class="card-section card-section-warn"
+            ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length">
+            <div class="section-warn-title">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}
+            </div>
             <div class="section-body">
               <div ng-repeat="issue in card._cohesion.issues track by $index" class="cohesion-issue">⚠ {{issue}}</div>
             </div>
@@ -260,8 +304,11 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f.path || f}}">{{f.path || f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
-                  <span class="remove" ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
+                  <span class="open-in-ide"
+                    ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()"
+                    title="Open in IDE">📄</span>
+                  <span class="remove"
+                    ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
                 </div>
               </div>
             </div>
@@ -273,13 +320,16 @@
               ng-click="$event.stopPropagation()" class="card-endpoint-select"
               title="LLM endpoint for this card (Default = settings endpoint)">
               <option value="">⚡ Default{{vm.endpointBadgeText(vm.llamaUrl)}}</option>
-              <option ng-repeat="ep in vm.llamaEndpoints" value="{{ep.id}}" title="{{vm.endpointBadgeTitle(ep.url)}}">{{ep.name || ep.url}}{{vm.endpointBadgeText(ep.url)}}</option>
+              <option ng-repeat="ep in vm.llamaEndpoints" value="{{ep.id}}" title="{{vm.endpointBadgeTitle(ep.url)}}">
+                {{ep.name || ep.url}}{{vm.endpointBadgeText(ep.url)}}</option>
             </select>
             <span ng-if="vm.llamaEndpoints.length === 0" class="card-endpoint-disabled"
               title="Only the default LLM endpoint is configured — add more endpoints in Settings.">⚡</span>
-            <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small" title="Attach file">📎</button>
+            <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
+              title="Attach file">📎</button>
             <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
-              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶ Run'}}</button>
+              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶
+              Run'}}</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card"
               ng-if="!card._benchmark || vm.activeCardId === card.id">✕ Delete</button>
           </div>
@@ -298,13 +348,15 @@
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
                     <summary>
-                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
                       <span class="step-title"
                         ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
                         <span ng-if="s.type==='verified_complete' && s.reason" class="step-verification-reason"
                           title="Final post-execution verification reason">— {{s.reason}}</span>
-                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> —
+                          {{s.thinking}}</span>
                       </span>
                       <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
                         ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
@@ -313,13 +365,19 @@
                     <div class="step-body">
                       <details class="step-web-inline" ng-if="vm.isWebStep(s) && s.output"
                         ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
-                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? ' (truncated)' : ''}}<span ng-if="s.query || s.url"> — {{(s.query || s.url) | limitTo:40}}</span></summary>
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)"
+                            title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? '
+                          (truncated)' : ''}}<span ng-if="s.query || s.url"> — {{(s.query || s.url) |
+                            limitTo:40}}</span></summary>
                         <pre class="step-output">{{s.output}}</pre>
                       </details>
-                      <pre class="step-output" ng-if="s.output && !vm.isWebStep(s) && !(s.type==='read' && s.focused)">{{s.output}}</pre>
+                      <pre class="step-output"
+                        ng-if="s.output && !vm.isWebStep(s) && !(s.type==='read' && s.focused)">{{s.output}}</pre>
                       <details class="step-focused-inline" ng-if="s.type==='read' && s.focused && s.focusedOutput"
                         ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
-                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy focused region">📋</button>🎯 read {{s.path}}<span ng-if="s.focusIds"> — focused: {{s.focusIds}}</span></summary>
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)"
+                            title="Copy focused region">📋</button>🎯 read {{s.path}}<span ng-if="s.focusIds"> —
+                            focused: {{s.focusIds}}</span></summary>
                         <pre class="step-output">{{s.focusedOutput}}</pre>
                         <details class="focused-full-file" ng-if="s.output">
                           <summary>📄 Full file ({{s.output.length}} chars)</summary>
@@ -341,7 +399,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Log</span>
               <span class="section-badge">{{card.agentLog.length}}</span>
-              <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋 Copy</button>
+              <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋
+                Copy</button>
             </summary>
             <div class="section-body">
               <div class="log-entries">
@@ -373,14 +432,29 @@
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
-              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻<span
+                class="tag-label"> recovered {{vm.recoveredCount(card)}}×</span></span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
-            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
-              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
-            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
-              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
-            <span class="card-tag tag-ready" ng-if="vm.isCardActive(card.id)" style="margin-left:auto;">▶ ACTIVE</span>
-            <span class="card-tag tag-interrupted" ng-if="!vm.isCardActive(card.id) && vm.cardRunInterrupted(card)" style="margin-left:auto;" title="This card's run is no longer live — the stream ended without a done event (page reload or connection drop).">⚠ INTERRUPTED</span>
+            <span class="card-tag-container">
+              <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+                title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡<span
+                  class="tag-label"> {{card._context.size}} tok</span></span>
+              <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+                title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨<span
+                  class="tag-label"> ~{{card._llmSpend.totalTokens | formatNumber}} used</span></span>
+              <span class="card-tag tag-dump" ng-if="card._taskKind === 'dump'"
+                title="Data-dump task — the fetched web data is written straight to the demanded file and the run short-circuits the completion assessment.">⤓<span
+                  class="tag-label"> dump</span></span>
+              <span class="card-tag tag-build" ng-if="card._taskKind === 'build'"
+                title="Script/program task — the prompt explicitly asks for a script, so normal planning and editing steps apply.">🛠<span
+                  class="tag-label"> build</span></span>
+              <span class="card-tag tag-ready" ng-if="vm.isCardActive(card.id)" style="margin-left:auto;">▶<span
+                  class="tag-label"> ACTIVE</span></span>
+              <span class="card-tag tag-interrupted" ng-if="!vm.isCardActive(card.id) && vm.cardRunInterrupted(card)"
+                style="margin-left:auto;"
+                title="This card's run is no longer live — the stream ended without a done event (page reload or connection drop).">⚠<span
+                  class="tag-label"> INTERRUPTED</span></span>
+            </span>
           </div>
 
           <div class="card-text card-text-readonly">
@@ -390,18 +464,25 @@
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
             <!-- Status chips -->
             <div class="card-tags">
-              <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
-              <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
-              <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
-              <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
-                title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
+              <span class="card-tag tag-bench" ng-if="card._benchmark"
+                style="color:#e5c07b;font-weight:700;">BENCH</span>
+              <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion"
+                title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
+              <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰
+                {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) :
+                'SCHEDULED'}}</span>
+              <span class="card-tag tag-endpoint"
+                ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
+                title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) |
+                limitTo:14}}</span>
               <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
                 SELF-IMPROVING</span>
               <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
                 title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
               <button class="card-tag tag-pr-abort" ng-if="card.prStatus && card.prStatus.branch"
                 ng-click="vm.abortBranch(card); $event.stopPropagation();"
-                title="Abort branch '{{card.prStatus.branch}}' — check out the original branch, restore the pre-branch stash, and delete the branch (mid-run changes are kept in a weaver-abort stash).">↩ Abort</button>
+                title="Abort branch '{{card.prStatus.branch}}' — check out the original branch, restore the pre-branch stash, and delete the branch (mid-run changes are kept in a weaver-abort stash).">↩
+                Abort</button>
             </div>
           </div>
 
@@ -409,9 +490,12 @@
           <div class="card-section card-section-live" ng-if="vm.isCardActive(card.id)">
             <div class="section-live-row">🤖 <strong>{{vm.streamingPhase || 'Working…'}}</strong>
               <span ng-if="vm.streamingContextSize" class="section-live-context context-tag"
-                ng-mouseenter="vm.showContextBreakdown = true" ng-mouseleave="vm.showContextBreakdown = false">{{vm.streamingContextSize}} tokens
-                <span class="context-breakdown-pop" ng-if="vm.showContextBreakdown && vm.streamingContextBreakdown.length">
-                  <span class="ctxb-title">Context — {{vm.streamingContextSize}} tokens (~{{vm.streamingContextChars}} chars)</span>
+                ng-mouseenter="vm.showContextBreakdown = true"
+                ng-mouseleave="vm.showContextBreakdown = false">{{vm.streamingContextSize}} tokens
+                <span class="context-breakdown-pop"
+                  ng-if="vm.showContextBreakdown && vm.streamingContextBreakdown.length">
+                  <span class="ctxb-title">Context — {{vm.streamingContextSize}} tokens (~{{vm.streamingContextChars}}
+                    chars)</span>
                   <span class="ctxb-row" ng-repeat="b in vm.streamingContextBreakdown">
                     <span class="ctxb-name" title="{{b.name}}">{{b.name}}</span>
                     <span class="ctxb-num">{{b.tokens}} tk</span>
@@ -419,11 +503,14 @@
                 </span>
               </span>
               <span ng-if="vm.focusStats && vm.focusStats.files > 0" class="section-live-context focus-stat-tag"
-                title="Discovery focus: {{vm.focusStats.files}} file(s) read as focused regions, saved ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ', effective focus threshold ' + (vm.focusStats.threshold) + ' chars' : ''}}">📊 {{vm.focusStats.files}} · ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ' · thr ' + (vm.focusStats.threshold) : ''}}</span>
+                title="Discovery focus: {{vm.focusStats.files}} file(s) read as focused regions, saved ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ', effective focus threshold ' + (vm.focusStats.threshold) + ' chars' : ''}}">📊
+                {{vm.focusStats.files}} · ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ' · thr ' +
+                (vm.focusStats.threshold) : ''}}</span>
             </div>
             <div class="section-body" ng-if="vm.streamingSteps.length">
               <div class="analysis-step" ng-repeat="s in vm.streamingSteps track by s.index" ng-class="s.status">
-                <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                <span
+                  class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
                 <span class="step-title"
                   ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                   <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
@@ -434,11 +521,14 @@
                     ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
                     title="{{s.batchApplied}}/{{s.batchTotal}} {{s.batchUnit}} updated">{{s.batchApplied}}/{{s.batchTotal}}</span>
                   <span class="step-llm-tokens" ng-if="s.llmTokens && s.llmTokens.calls"
-                    title="LLM token spend for this step — {{s.llmTokens.calls}} call(s): ~{{s.llmTokens.promptTokens}} prompt + ~{{s.llmTokens.responseTokens}} response">⚡ ~{{s.llmTokens.totalTokens}} tok</span>
+                    title="LLM token spend for this step — {{s.llmTokens.calls}} call(s): ~{{s.llmTokens.promptTokens}} prompt + ~{{s.llmTokens.responseTokens}} response">⚡
+                    ~{{s.llmTokens.totalTokens}} tok</span>
                 </span>
                 <details class="step-web-inline" ng-if="vm.isWebStep(s) && s.output" style="flex-basis:100%;"
                   ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
-                  <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? ' (truncated)' : ''}}</summary>
+                  <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)"
+                      title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? ' (truncated)' :
+                    ''}}</summary>
                   <pre class="step-output">{{s.output}}</pre>
                 </details>
               </div>
@@ -450,9 +540,12 @@
             ng-if="(card._plan && card._plan.items && card._plan.items.length) || (vm.isCardActive(card.id) && vm.streamingSteps.length)">
             <summary>
               <span class="section-caret">▶</span>
-              <span class="section-title">📋 Plan{{card._plan && card._plan.summary ? ': ' + card._plan.summary : ''}}</span>
-              <span class="section-badge" ng-if="card._plan && card._plan.items">{{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}}</span>
-              <button class="section-clear" ng-click="vm.clearPlan(card); $event.stopPropagation(); $event.preventDefault();"
+              <span class="section-title">📋 Plan{{card._plan && card._plan.summary ? ': ' + card._plan.summary :
+                ''}}</span>
+              <span class="section-badge"
+                ng-if="card._plan && card._plan.items">{{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}}</span>
+              <button class="section-clear"
+                ng-click="vm.clearPlan(card); $event.stopPropagation(); $event.preventDefault();"
                 title="Delete entire plan and start fresh">🗑</button>
             </summary>
             <div class="section-body">
@@ -461,13 +554,16 @@
                   ng-class="{'plan-done': item.done, 'plan-cancelled': item.cancelled, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && !item.cancelled && item.status!=='rejected'}"
                   title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.file}}:{{item.line}} {{item.change}}">
                   <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
-                    title="{{item.status==='rejected' ? 'Rejected step' : (item.done ? 'Mark not done' : 'Mark done')}}">{{item.status==='rejected' ? '✗' : (item.done ? '✅' : item.cancelled ? '⏭' : '⬜')}}</span>
+                    title="{{item.status==='rejected' ? 'Rejected step' : (item.done ? 'Mark not done' : 'Mark done')}}">{{item.status==='rejected'
+                    ? '✗' : (item.done ? '✅' : item.cancelled ? '⏭' : '⬜')}}</span>
                   <div class="plan-item-body">
                     <div class="plan-item-heading">
                       <div class="plan-item-text">
-                        <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                        <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) :
+                          item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
                         <span class="plan-item-change" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
-                        <span class="plan-item-change plan-item-thinking" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
+                        <span class="plan-item-change plan-item-thinking"
+                          ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       </div>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
@@ -476,33 +572,41 @@
                       </span>
                       <span ng-if="vm.isCardActive(card.id) && !item.done && !item.cancelled"
                         ng-click="vm.cancelPlanStep(card, item.index); $event.stopPropagation();"
-                        style="cursor:pointer;opacity:.7;color:#e06c75;font-size:11px;flex-shrink:0;" title="Cancel this step">⏹</span>
-                      <span class="plan-item-icon" ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
+                        style="cursor:pointer;opacity:.7;color:#e06c75;font-size:11px;flex-shrink:0;"
+                        title="Cancel this step">⏹</span>
+                      <span class="plan-item-icon"
+                        ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
-                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
+                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail"
+                      style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
                     <!-- Per-step computed ground truth — this step's own deterministic expected outcome -->
                     <div class="plan-item-gt" ng-if="item.groundTruth && item.groundTruth.length">
                       <div ng-repeat="gt in item.groundTruth track by $index" class="plan-item-gt-entry"
                         ng-class="{'gt-verified': gt.verified === true, 'gt-missed': gt.verified === false}"
                         title="Deterministic expected outcome for this step — {{gt.verified === true ? 'verified on disk' : (gt.verified === false ? 'NOT found on disk after this step' : 'checked when the step completes')}}">
-                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' : '🎯')}}</span>
+                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' :
+                          '🎯')}}</span>
                         <span>{{gt.text}}</span>
                       </div>
                     </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
-                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
+                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)"
+                          title="Click to preview diff">
                           <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
-                          <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <span
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                            && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                           <code>{{d.split('/').pop()}}</code>
                         </span>
                         <span class="diff-tools">
                           <button class="diff-apply-btn" ng-click="vm.applyDiff(d, item, card)"
                             ng-disabled="item._applyingDiff || vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleting)"
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
-                          <span class="diff-applied" ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
-                             title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
+                          <span class="diff-applied"
+                            ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
+                            title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
                             ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
@@ -510,17 +614,21 @@
                           <button ng-click="vm.openDiffInIde(d, item, card, $event)"
                             ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
-                          <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
+                          <span class="diff-deleting"
+                            ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>
                         <div class="diff-preview" ng-if="item._previews && item._previews[d] && item._previews[d].show">
                           <pre>{{item._previews[d].content}}</pre>
                         </div>
-                        <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">{{item._previews[d].error}}</div>
+                        <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">
+                          {{item._previews[d].error}}</div>
                       </div>
                     </div>
                     <div ng-if="item._showDetail" class="plan-item-detail">
-                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ? item.oldString.slice(0,200) + '…' : item.oldString}}</div>
-                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ? item.newString.slice(0,200) + '…' : item.newString}}</div>
+                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                        item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                        item.newString.slice(0,200) + '…' : item.newString}}</div>
                     </div>
                   </div>
                 </div>
@@ -528,16 +636,19 @@
                 <div ng-repeat="s in vm.streamingSteps track by s.index"
                   ng-if="vm.isCardActive(card.id) && (s.type==='plan' || s.type==='explore')" class="plan-item-row"
                   ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
-                  <span class="plan-item-icon">{{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}</span>
+                  <span
+                    class="plan-item-icon">{{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}</span>
                   <div class="plan-item-body">
                     <div class="plan-item-heading">
                       <div class="plan-item-text">
-                        <span class="plan-item-file">{{s.path || s.file || '?'}}<span ng-if="s.line">:{{s.line}}</span></span>
+                        <span class="plan-item-file">{{s.path || s.file || '?'}}<span
+                            ng-if="s.line">:{{s.line}}</span></span>
                         <span class="plan-item-change">{{s.description || s.change || ''}}</span>
                       </div>
                     </div>
                     <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail">{{s.thinking}}</div>
-                    <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail" style="color:#e06c75;">{{s.error}}</div>
+                    <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail" style="color:#e06c75;">
+                      {{s.error}}</div>
                   </div>
                 </div>
               </div>
@@ -561,7 +672,8 @@
           <details class="card-section" ng-if="card._verification">
             <summary>
               <span class="section-caret">▶</span>
-              <span class="section-title" ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
+              <span class="section-title"
+                ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
                 {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
               </span>
             </summary>
@@ -591,15 +703,18 @@
           </details>
 
           <!-- Meta-plan -->
-          <details class="card-section" ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length">
+          <details class="card-section"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length">
             <summary>
               <span class="section-caret">▶</span>
               <span class="section-title">🧠 Meta-Plan: {{card._metaPlan.summary}}</span>
               <span class="section-badge" ng-if="card._metaPlan.complexity">{{card._metaPlan.complexity}}/10</span>
-              <button class="section-clear" ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" title="Clear meta-plan and restart">🗑</button>
+              <button class="section-clear" ng-click="vm.clearMetaPlan(card); $event.stopPropagation();"
+                title="Clear meta-plan and restart">🗑</button>
             </summary>
             <div class="section-body">
-              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item" ng-class="{'meta-plan-done': sp.done}">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}">
                 <span class="meta-plan-icon">{{sp.done ? '✅' : '⬜'}}</span>
                 <div class="meta-plan-body" title="{{sp.description}}">
                   <div class="meta-plan-title">{{sp.title}}</div>
@@ -613,12 +728,14 @@
           </details>
 
           <!-- Cohesion warnings -->
-          <div class="card-section card-section-warn" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length">
-            <div class="section-warn-title">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}</div>
+          <div class="card-section card-section-warn"
+            ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length">
+            <div class="section-warn-title">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}
+            </div>
             <div class="section-body">
               <div ng-repeat="issue in card._cohesion.issues track by $index" class="cohesion-issue">⚠ {{issue}}</div>
             </div>
-          </div> 
+          </div>
 
           <!-- Attachments -->
           <details class="card-section" ng-if="card.attached && vm.getAttachedFiles(card).length">
@@ -630,7 +747,9 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
+                  <span class="open-in-ide"
+                    ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()"
+                    title="Open in IDE">📄</span>
                 </div>
               </div>
             </div>
@@ -668,7 +787,8 @@
               <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
                 <strong>Summary:</strong> {{card.agentAnalysis.summary}}
               </div>
-              <div class="analysis-files" ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
+              <div class="analysis-files"
+                ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
                 <strong>Files changed:</strong>
                 <span class="file-edit-chip" ng-repeat="f in card.agentAnalysis.filesEdited">
                   <span class="chip-path">{{f.path}}</span>
@@ -679,13 +799,15 @@
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
                     <summary>
-                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
                       <span class="step-title"
                         ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
                         <span ng-if="s.type==='verified_complete' && s.reason" class="step-verification-reason"
                           title="Final post-execution verification reason">— {{s.reason}}</span>
-                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> —
+                          {{s.thinking}}</span>
                       </span>
                       <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
                         ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
@@ -693,11 +815,14 @@
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
-                        <div class="diff-meta" ng-if="s.editAction && s.batchApplied === undefined">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
-                        <div class="diff-meta batch-meta" ng-if="s.batchApplied !== undefined" ng-class="{'batch-partial': s.batchApplied < s.batchTotal}">
-                          <span>{{s.batchApplied < s.batchTotal ? '⚠' : '⚡'}}</span>
-                          <span><strong>{{s.batchApplied}}/{{s.batchTotal}}</strong> {{s.batchUnit}} updated</span>
-                          <span class="batch-skip-note" ng-if="s.batchApplied < s.batchTotal">{{s.batchTotal - s.batchApplied}} skipped</span>
+                        <div class="diff-meta" ng-if="s.editAction && s.batchApplied === undefined">{{s.editAction}} —
+                          +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
+                        <div class="diff-meta batch-meta" ng-if="s.batchApplied !== undefined"
+                          ng-class="{'batch-partial': s.batchApplied < s.batchTotal}">
+                          <span>{{s.batchApplied < s.batchTotal ? '⚠' : '⚡' }}</span>
+                              <span><strong>{{s.batchApplied}}/{{s.batchTotal}}</strong> {{s.batchUnit}} updated</span>
+                              <span class="batch-skip-note" ng-if="s.batchApplied < s.batchTotal">{{s.batchTotal -
+                                s.batchApplied}} skipped</span>
                         </div>
                         <div class="batch-edit-list" ng-if="s.batchEdits && s.batchEdits.length">
                           <div class="batch-edit-row" ng-repeat="e in s.batchEdits track by $index">
@@ -715,7 +840,8 @@
                           <div class="diff-wrapper">
                             <div class="diff-col diff-col-old">
                               <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
-                                <div class="diff-cell diff-cell-old" ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                                <div class="diff-cell diff-cell-old"
+                                  ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                   <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
                                   <span>{{line.oldLine || ''}}</span>
                                 </div>
@@ -723,7 +849,8 @@
                             </div>
                             <div class="diff-col diff-col-new">
                               <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
-                                <div class="diff-cell diff-cell-new" ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                                <div class="diff-cell diff-cell-new"
+                                  ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                   <span class="diff-lineno">{{line.newLineNum + 1}}</span>
                                   <span>{{line.newLine || ''}}</span>
                                 </div>
@@ -737,13 +864,19 @@
                       </div>
                       <details class="step-web-inline" ng-if="vm.isWebStep(s) && s.output"
                         ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
-                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? ' (truncated)' : ''}}<span ng-if="s.query || s.url"> — {{(s.query || s.url) | limitTo:40}}</span></summary>
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)"
+                            title="Copy web results to clipboard">📋</button>🌐 Web results{{s.truncated ? '
+                          (truncated)' : ''}}<span ng-if="s.query || s.url"> — {{(s.query || s.url) |
+                            limitTo:40}}</span></summary>
                         <pre class="step-output">{{s.output}}</pre>
                       </details>
-                      <pre class="step-output" ng-if="s.output && !vm.isWebStep(s) && !(s.type==='read' && s.focused)">{{s.output}}</pre>
+                      <pre class="step-output"
+                        ng-if="s.output && !vm.isWebStep(s) && !(s.type==='read' && s.focused)">{{s.output}}</pre>
                       <details class="step-focused-inline" ng-if="s.type==='read' && s.focused && s.focusedOutput"
                         ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
-                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)" title="Copy focused region">📋</button>🎯 read {{s.path}}<span ng-if="s.focusIds"> — focused: {{s.focusIds}}</span></summary>
+                        <summary><button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)"
+                            title="Copy focused region">📋</button>🎯 read {{s.path}}<span ng-if="s.focusIds"> —
+                            focused: {{s.focusIds}}</span></summary>
                         <pre class="step-output">{{s.focusedOutput}}</pre>
                         <details class="focused-full-file" ng-if="s.output">
                           <summary>📄 Full file ({{s.output.length}} chars)</summary>
@@ -760,19 +893,26 @@
                 <details>
                   <summary style="cursor:pointer;opacity:.6;font-size:11px;">Reasoning</summary>
                   <pre>{{card.agentAnalysis.thinking}}</pre>
-                  <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
+                  <div class="plan-items-list"
+                    ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
                       title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
-                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                        '⬜'}}</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) :
+                        item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
                       <span class="plan-item-change" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
+                      <span class="plan-item-change plan-item-thinking"
+                        ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                         <div ng-repeat="d in item.diffs" class="diff-row-inline">
-                          <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
+                          <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)"
+                            title="Click to preview diff">
                             <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
-                            <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                            <span
+                              ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                              && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                             <code>{{d.split('/').pop()}}</code>
                           </span>
                           <span class="diff-tools">
@@ -781,7 +921,7 @@
                               ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
                             <span class="diff-applied"
                               ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
-                               title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
+                              title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                             <button ng-click="vm.deleteDiff(d, item, card, $event)"
                               ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
                               ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
@@ -789,12 +929,16 @@
                             <button ng-click="vm.openDiffInIde(d, item, card, $event)"
                               ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                               style="color:#61afef;" title="Open diff in IDE">📄</button>
-                            <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
+                            <span class="diff-deleting"
+                              ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                           </span>
-                          <div class="diff-preview" ng-if="item._previews && item._previews[d] && item._previews[d].show">
+                          <div class="diff-preview"
+                            ng-if="item._previews && item._previews[d] && item._previews[d].show">
                             <pre>{{item._previews[d].content}}</pre>
                           </div>
-                          <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">{{item._previews[d].error}}</div>
+                          <div class="diff-error"
+                            ng-if="item._previews && item._previews[d] && item._previews[d].error">
+                            {{item._previews[d].error}}</div>
                         </div>
                       </div>
                     </div>
@@ -810,7 +954,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Log</span>
               <span class="section-badge">{{card.agentLog.length}}</span>
-              <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋 Copy</button>
+              <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋
+                Copy</button>
             </summary>
             <div class="section-body">
               <div class="log-entries">
@@ -837,16 +982,18 @@
               class="small {{ vm.isCardActive(card.id) ? 'ghost' : (card._fromCron ? 'btn-cron-done' : '') }}"
               ng-style="{'color': vm.isCardActive(card.id) ? '' : (card._fromCron ? '#fbbf24' : '#e5c07b') }"
               title="{{ vm.isCardActive(card.id) ? 'Disabled while active' : (card._fromCron ? 'Deletes the scheduled card once its task is complete.' : 'Deletes the card.') }}"
-              ng-disabled="vm.isCardActive(card.id)">{{ card._fromCron ? '⏰ Done &amp; Delete' : '🗑 Done &amp; Delete' }}</button>
-            <button ng-if="card._benchmark && !vm.isCardActive(card.id) && !vm.benchmarkAllActive && vm.cardRunInterrupted(card)"
-              ng-click="vm.rerunBenchmark(card)"
-              class="small"
+              ng-disabled="vm.isCardActive(card.id)">{{ card._fromCron ? '⏰ Done &amp; Delete' : '🗑 Done &amp; Delete'
+              }}</button>
+            <button
+              ng-if="card._benchmark && !vm.isCardActive(card.id) && !vm.benchmarkAllActive && vm.cardRunInterrupted(card)"
+              ng-click="vm.rerunBenchmark(card)" class="small"
               title="This benchmark is interrupted — rerun it from scratch.">↻ Rerun</button>
             <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.isCardActive(card.id)">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost"
               title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}"
-              ng-disabled="vm.activeCardId === card.id" ng-if="!card._benchmark || vm.activeCardId === card.id">✕ Delete</button>
+              ng-disabled="vm.activeCardId === card.id" ng-if="!card._benchmark || vm.activeCardId === card.id">✕
+              Delete</button>
           </div>
         </div>
       </div>
@@ -868,12 +1015,23 @@
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
-              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻<span
+                class="tag-label"> recovered {{vm.recoveredCount(card)}}×</span></span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
-            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
-              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
-            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
-              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
+            <span class="card-tag-container">
+              <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+                title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡<span
+                  class="tag-label"> {{card._context.size}} tok</span></span>
+              <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+                title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨<span
+                  class="tag-label"> ~{{card._llmSpend.totalTokens | formatNumber}} used</span></span>
+              <span class="card-tag tag-dump" ng-if="card._taskKind === 'dump'"
+                title="Data-dump task — the fetched web data is written straight to the demanded file and the run short-circuits the completion assessment.">⤓<span
+                  class="tag-label"> dump</span></span>
+              <span class="card-tag tag-build" ng-if="card._taskKind === 'build'"
+                title="Script/program task — the prompt explicitly asks for a script, so normal planning and editing steps apply.">🛠<span
+                  class="tag-label"> build</span></span>
+            </span>
           </div>
 
           <div class="card-text card-text-readonly">
@@ -899,9 +1057,11 @@
                   <div class="plan-item-body">
                     <div class="plan-item-heading">
                       <div class="plan-item-text">
-                        <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                        <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) :
+                          item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
                         <span class="plan-item-change" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
-                        <span class="plan-item-change plan-item-thinking" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
+                        <span class="plan-item-change plan-item-thinking"
+                          ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       </div>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
@@ -912,21 +1072,26 @@
                         ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
                         style="cursor:pointer;opacity:.5;flex-shrink:0;" title="Remove this step">✕</span>
                     </div>
-                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail" style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
+                    <div ng-if="item.status==='rejected' && item.error" class="plan-item-detail"
+                      style="color:#e06c75;white-space:pre-wrap;">✗ {{item.error}}</div>
                     <!-- Per-step computed ground truth — this step's own deterministic expected outcome -->
                     <div class="plan-item-gt" ng-if="item.groundTruth && item.groundTruth.length">
                       <div ng-repeat="gt in item.groundTruth track by $index" class="plan-item-gt-entry"
                         ng-class="{'gt-verified': gt.verified === true, 'gt-missed': gt.verified === false}"
                         title="Deterministic expected outcome for this step — {{gt.verified === true ? 'verified on disk' : (gt.verified === false ? 'NOT found on disk after this step' : 'checked when the step completes')}}">
-                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' : '🎯')}}</span>
+                        <span class="plan-item-gt-mark">{{gt.verified === true ? '✓' : (gt.verified === false ? '✗' :
+                          '🎯')}}</span>
                         <span>{{gt.text}}</span>
                       </div>
                     </div>
                     <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                       <div ng-repeat="d in item.diffs" class="diff-row-inline">
-                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
+                        <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)"
+                          title="Click to preview diff">
                           <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
-                          <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                          <span
+                            ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                            && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                           <code>{{d.split('/').pop()}}</code>
                         </span>
                         <span class="diff-tools">
@@ -935,7 +1100,7 @@
                             ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
                           <span class="diff-applied"
                             ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
-                             title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
+                            title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                           <button ng-click="vm.deleteDiff(d, item, card, $event)"
                             ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
                             ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
@@ -943,17 +1108,21 @@
                           <button ng-click="vm.openDiffInIde(d, item, card, $event)"
                             ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                             style="color:#61afef;" title="Open diff in IDE">📄</button>
-                          <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
+                          <span class="diff-deleting"
+                            ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                         </span>
                         <div class="diff-preview" ng-if="item._previews && item._previews[d] && item._previews[d].show">
                           <pre>{{item._previews[d].content}}</pre>
                         </div>
-                        <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">{{item._previews[d].error}}</div>
+                        <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">
+                          {{item._previews[d].error}}</div>
                       </div>
                     </div>
                     <div ng-if="item._showDetail" class="plan-item-detail">
-                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ? item.oldString.slice(0,200) + '…' : item.oldString}}</div>
-                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ? item.newString.slice(0,200) + '…' : item.newString}}</div>
+                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                        item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                        item.newString.slice(0,200) + '…' : item.newString}}</div>
                     </div>
                   </div>
                 </div>
@@ -978,7 +1147,8 @@
           <details class="card-section" ng-if="card._verification">
             <summary>
               <span class="section-caret">▶</span>
-              <span class="section-title" ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
+              <span class="section-title"
+                ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
                 {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
               </span>
             </summary>
@@ -1008,16 +1178,19 @@
           </details>
 
           <!-- Meta-plan -->
-          <details class="card-section" ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length">
+          <details class="card-section"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length">
             <summary>
               <span class="section-caret">▶</span>
               <span class="section-title">🧠 Meta-Plan: {{card._metaPlan.summary}}</span>
               <span class="section-badge" ng-if="card._metaPlan.complexity">{{card._metaPlan.complexity}}/10</span>
-              <button class="section-clear" ng-click="vm.clearMetaPlan(card); $event.stopPropagation(); $event.preventDefault();"
+              <button class="section-clear"
+                ng-click="vm.clearMetaPlan(card); $event.stopPropagation(); $event.preventDefault();"
                 title="Clear meta-plan and restart">🗑</button>
             </summary>
             <div class="section-body">
-              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item" ng-class="{'meta-plan-done': sp.done}">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}">
                 <span class="meta-plan-icon">{{sp.done ? '✅' : '⬜'}}</span>
                 <div class="meta-plan-body" title="{{sp.description}}">
                   <div class="meta-plan-title">{{sp.title}}</div>
@@ -1031,8 +1204,10 @@
           </details>
 
           <!-- Cohesion warnings -->
-          <div class="card-section card-section-warn" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length">
-            <div class="section-warn-title">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}</div>
+          <div class="card-section card-section-warn"
+            ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length">
+            <div class="section-warn-title">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}
+            </div>
             <div class="section-body">
               <div ng-repeat="issue in card._cohesion.issues track by $index" class="cohesion-issue">⚠ {{issue}}</div>
             </div>
@@ -1041,12 +1216,20 @@
           <!-- Status chips -->
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
-            <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion" title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
-            <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰ {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) : 'SCHEDULED'}}</span>
-            <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
-            <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
+            <span class="card-tag tag-suggestion" ng-if="card._fromSuggestion"
+              title="This card was created from an improvement suggestion on a completed card.">💡 SUGGESTION</span>
+            <span class="card-tag tag-cron" ng-if="card._fromCron" title="{{vm.cronChipTitle(card)}}">⏰
+              {{card._cronLabel ? ((card._cronLabel | limitTo:18) + (card._cronLabel.length > 18 ? '…' : '')) :
+              'SCHEDULED'}}</span>
+            <span class="card-tag tag-endpoint"
+              ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
+              title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) |
+              limitTo:14}}</span>
+            <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
+              title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
-              <a ng-href="{{card.prStatus.prUrl}}" target="_blank" rel="noopener" ng-click="$event.stopPropagation()">🔗 PR</a>
+              <a ng-href="{{card.prStatus.prUrl}}" target="_blank" rel="noopener" ng-click="$event.stopPropagation()">🔗
+                PR</a>
             </span>
           </div>
 
@@ -1055,38 +1238,64 @@
             <span class="suggest-spinner"></span> 💡 Suggesting improvements…
           </div>
           <div class="suggest-error" ng-if="card._suggestionsError">💡 {{card._suggestionsError}}</div>
-          <div class="card-section card-section-suggestions" ng-if="card._suggestions && (card._suggestions.length || card._suggestionsRequested)">
+          <div class="card-section card-section-suggestions"
+            ng-if="card._suggestions && (card._suggestions.length || card._suggestionsRequested)">
             <div class="section-suggest-title">💡 Suggestions ({{card._suggestions.length}})
-              <a class="suggest-more" ng-if="card._suggestions.length < vm.projectMaxSuggestions(card.filePath) && !card._suggestionsGenerating && !card._suggestionsNone" href="javascript:void(0)" ng-click="vm.moreLikeThis(card); $event.stopPropagation()" title="Generate more suggestions in the same vein — topped up to the project's suggestion cap">More like this…</a>
-              <a class="suggest-why" ng-if="vm.suggestionContext(card)" ng-click="vm.toggleSuggestionContext(card); $event.stopPropagation()" title="Why were these proposed?">ℹ</a>
+              <a class="suggest-more"
+                ng-if="card._suggestions.length < vm.projectMaxSuggestions(card.filePath) && !card._suggestionsGenerating && !card._suggestionsNone"
+                href="javascript:void(0)" ng-click="vm.moreLikeThis(card); $event.stopPropagation()"
+                title="Generate more suggestions in the same vein — topped up to the project's suggestion cap">More like
+                this…</a>
+              <a class="suggest-why" ng-if="vm.suggestionContext(card)"
+                ng-click="vm.toggleSuggestionContext(card); $event.stopPropagation()"
+                title="Why were these proposed?">ℹ</a>
             </div>
             <div class="section-body">
-              <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length && card._suggestionsNone" title="The model found no relevant follow-up work for this card — it will not be re-asked.">No relevant suggestions possible for this card.</div>
-              <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length && !card._suggestionsNone">No suggestions yet — try <b>More like this</b> above to have the model dig deeper.</div>
-              <div class="suggestion" ng-repeat="s in card._suggestions track by s.id"
-                ng-class="{queued: s._queued}"
-                ng-click="vm.suggestionToCard(card, s); $event.stopPropagation()"
-                role="button" tabindex="0"
+              <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length && card._suggestionsNone"
+                title="The model found no relevant follow-up work for this card — it will not be re-asked.">No relevant
+                suggestions possible for this card.</div>
+              <div class="suggestion suggestion-empty" ng-if="!card._suggestions.length && !card._suggestionsNone">No
+                suggestions yet — try <b>More like this</b> above to have the model dig deeper.</div>
+              <div class="suggestion" ng-repeat="s in card._suggestions track by s.id" ng-class="{queued: s._queued}"
+                ng-click="vm.suggestionToCard(card, s); $event.stopPropagation()" role="button" tabindex="0"
                 ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.suggestionToCard(card, s); $event.preventDefault()"
                 title="{{s._queued ? 'Already queued as a To Do card' : 'Click to queue this as a new To Do card'}}">
                 <div class="suggestion-desc">{{s.description}}</div>
                 <div class="suggestion-conn" ng-if="s.connection" role="button" tabindex="0"
                   ng-click="vm.jumpToConnectionCard(s.connection); $event.stopPropagation()"
                   ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.jumpToConnectionCard(s.connection); $event.preventDefault(); $event.stopPropagation()"
-                  title="Builds on other work — click to jump to the card this suggestion is connected to.">🔗 {{s.connection}}</div>
+                  title="Builds on other work — click to jump to the card this suggestion is connected to.">🔗
+                  {{s.connection}}</div>
                 <div class="suggestion-action" ng-if="!s._queued">＋ Queue</div>
                 <div class="suggestion-action queued" ng-if="s._queued">✓ Queued</div>
                 <div class="suggestion-files" ng-if="s.files && s.files.length">
                   <span class="file-edit-chip" ng-repeat="f in s.files" title="{{f}}">{{f}}</span>
                 </div>
               </div>
-              <div class="suggestion-context" ng-if="card._showSuggestionContext && vm.suggestionContext(card)" ng-init="sctx = vm.suggestionContext(card)">
+              <div class="suggestion-context" ng-if="card._showSuggestionContext && vm.suggestionContext(card)"
+                ng-init="sctx = vm.suggestionContext(card)">
                 <div class="suggestion-context-title">📌 Why these were proposed</div>
-                <div class="suggestion-context-field" ng-if="sctx.summary"><span class="suggestion-context-label">Completion summary</span><div class="suggestion-context-text">{{sctx.summary}}</div></div>
-                <div class="suggestion-context-field" ng-if="sctx.thinking"><span class="suggestion-context-label">Agent thinking</span><div class="suggestion-context-text sc-collapsed">{{sctx.thinking}}</div></div>
-                <div class="suggestion-context-field" ng-if="sctx.planItems && sctx.planItems.length"><span class="suggestion-context-label">Plan items</span><div class="suggestion-context-text"><span ng-repeat="pi in sctx.planItems">{{pi}}<br></span></div></div>
-                <div class="suggestion-context-field" ng-if="sctx.steps && sctx.steps.length"><span class="suggestion-context-label">Steps executed</span><div class="suggestion-context-text"><span ng-repeat="st in sctx.steps">{{st}}<br></span></div></div>
-                <div class="suggestion-context-field" ng-if="sctx.filesEdited && sctx.filesEdited.length"><span class="suggestion-context-label">Files changed</span><div class="suggestion-context-files"><span class="file-edit-chip" ng-repeat="f in sctx.filesEdited" title="{{f}}">{{f}}</span></div></div>
+                <div class="suggestion-context-field" ng-if="sctx.summary"><span
+                    class="suggestion-context-label">Completion summary</span>
+                  <div class="suggestion-context-text">{{sctx.summary}}</div>
+                </div>
+                <div class="suggestion-context-field" ng-if="sctx.thinking"><span class="suggestion-context-label">Agent
+                    thinking</span>
+                  <div class="suggestion-context-text sc-collapsed">{{sctx.thinking}}</div>
+                </div>
+                <div class="suggestion-context-field" ng-if="sctx.planItems && sctx.planItems.length"><span
+                    class="suggestion-context-label">Plan items</span>
+                  <div class="suggestion-context-text"><span ng-repeat="pi in sctx.planItems">{{pi}}<br></span></div>
+                </div>
+                <div class="suggestion-context-field" ng-if="sctx.steps && sctx.steps.length"><span
+                    class="suggestion-context-label">Steps executed</span>
+                  <div class="suggestion-context-text"><span ng-repeat="st in sctx.steps">{{st}}<br></span></div>
+                </div>
+                <div class="suggestion-context-field" ng-if="sctx.filesEdited && sctx.filesEdited.length"><span
+                    class="suggestion-context-label">Files changed</span>
+                  <div class="suggestion-context-files"><span class="file-edit-chip" ng-repeat="f in sctx.filesEdited"
+                      title="{{f}}">{{f}}</span></div>
+                </div>
               </div>
             </div>
           </div>
@@ -1101,7 +1310,9 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
+                  <span class="open-in-ide"
+                    ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()"
+                    title="Open in IDE">📄</span>
                 </div>
               </div>
             </div>
@@ -1117,7 +1328,8 @@
               <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
                 <strong>Summary:</strong> {{card.agentAnalysis.summary}}
               </div>
-              <div class="analysis-files" ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
+              <div class="analysis-files"
+                ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
                 <strong>Files changed:</strong>
                 <span class="file-edit-chip" ng-repeat="f in card.agentAnalysis.filesEdited">
                   <span class="chip-path">{{f.path}}</span>
@@ -1128,13 +1340,15 @@
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
                     <summary>
-                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
                       <span class="step-title"
                         ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
                         <strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}
                         <span ng-if="s.type==='verified_complete' && s.reason" class="step-verification-reason"
                           title="Final post-execution verification reason">— {{s.reason}}</span>
-                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> —
+                          {{s.thinking}}</span>
                       </span>
                       <span class="step-summary-batch" ng-if="s.batchApplied !== undefined"
                         ng-class="{'batch-partial': s.batchApplied < s.batchTotal}"
@@ -1152,19 +1366,26 @@
                 <details>
                   <summary style="cursor:pointer;opacity:.6;font-size:11px;">Reasoning</summary>
                   <pre>{{card.agentAnalysis.thinking}}</pre>
-                  <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
+                  <div class="plan-items-list"
+                    ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
                       title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
-                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) : item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                        '⬜'}}</span>
+                      <span class="plan-item-file">{{vm.isPlanMarker(item.file) ? vm.planMarkerIcon(item.file) :
+                        item.file}}<span ng-if="item.line && !vm.isPlanMarker(item.file)">:{{item.line}}</span></span>
                       <span class="plan-item-change" ng-if="!vm.isPlanMarker(item.file)">{{item.change}}</span>
-                      <span class="plan-item-change plan-item-thinking" ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
+                      <span class="plan-item-change plan-item-thinking"
+                        ng-if="vm.isPlanMarker(item.file)">{{vm.planMarkerLabel(item.file, item.change)}}</span>
                       <div class="plan-item-diffs" ng-if="item.diffs && item.diffs.length">
                         <div ng-repeat="d in item.diffs" class="diff-row-inline">
-                          <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)" title="Click to preview diff">
+                          <span class="diff-toggle" ng-click="vm.previewDiff(d, item, card)"
+                            title="Click to preview diff">
                             <span ng-if="(item._previews && item._previews[d] && item._previews[d].loading)">⏳</span>
-                            <span ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
+                            <span
+                              ng-if="!(item._previews && item._previews[d] && item._previews[d].loading)">{{(item._previews
+                              && item._previews[d] && item._previews[d].show) ? '▼' : '▶'}}</span>
                             <code>{{d.split('/').pop()}}</code>
                           </span>
                           <span class="diff-tools">
@@ -1173,7 +1394,7 @@
                               ng-if="!vm.diffIsApplied(item, d, card) && !(item._previews && item._previews[d] && item._previews[d].deleted)">Apply</button>
                             <span class="diff-applied"
                               ng-if="vm.diffIsApplied(item, d, card) || (item._previews && item._previews[d] && item._previews[d].deleted)"
-                               title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
+                              title="{{vm.diffAppliedByAgent(item, d, card) ? 'Applied by the agent during the run' : 'Applied'}}">✓</span>
                             <button ng-click="vm.deleteDiff(d, item, card, $event)"
                               ng-disabled="item._applyingDiff || (item._previews && item._previews[d] && item._previews[d].deleting)"
                               ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
@@ -1181,12 +1402,16 @@
                             <button ng-click="vm.openDiffInIde(d, item, card, $event)"
                               ng-if="!(item._previews && item._previews[d] && item._previews[d].deleted)"
                               style="color:#61afef;" title="Open diff in IDE">📄</button>
-                            <span class="diff-deleting" ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
+                            <span class="diff-deleting"
+                              ng-if="item._previews && item._previews[d] && item._previews[d].deleting">deleting…</span>
                           </span>
-                          <div class="diff-preview" ng-if="item._previews && item._previews[d] && item._previews[d].show">
+                          <div class="diff-preview"
+                            ng-if="item._previews && item._previews[d] && item._previews[d].show">
                             <pre>{{item._previews[d].content}}</pre>
                           </div>
-                          <div class="diff-error" ng-if="item._previews && item._previews[d] && item._previews[d].error">{{item._previews[d].error}}</div>
+                          <div class="diff-error"
+                            ng-if="item._previews && item._previews[d] && item._previews[d].error">
+                            {{item._previews[d].error}}</div>
                         </div>
                       </div>
                     </div>
@@ -1202,7 +1427,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Log</span>
               <span class="section-badge">{{card.agentLog.length}}</span>
-              <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋 Copy</button>
+              <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋
+                Copy</button>
             </summary>
             <div class="section-body">
               <div class="log-entries">
@@ -1221,11 +1447,14 @@
 
           <!-- Actions -->
           <div class="card-actions">
-            <button ng-if="!card._benchmark && !card._fromCron" ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
-            <button ng-if="card._benchmark || card._fromCron" ng-click="vm.deleteCard(card.id, 'done')" class="small" style="color:#e5c07b;">🗑 Delete</button>
-            <button ng-if="vm.cardDiffPaths(card).length" ng-click="vm.deleteAllCardDiffs(card, $event)" class="small ghost"
-              ng-disabled="card._deletingAllDiffs"
-              title="Delete all diff files for this card">{{card._deletingAllDiffs ? '🗑 Deleting…' : '🗑 Diffs (' + vm.cardDiffPaths(card).length + ')'}}</button>
+            <button ng-if="!card._benchmark && !card._fromCron" ng-click="vm.moveCard(card.id,'done','todo')"
+              class="small">← Reopen</button>
+            <button ng-if="card._benchmark || card._fromCron" ng-click="vm.deleteCard(card.id, 'done')" class="small"
+              style="color:#e5c07b;">🗑 Delete</button>
+            <button ng-if="vm.cardDiffPaths(card).length" ng-click="vm.deleteAllCardDiffs(card, $event)"
+              class="small ghost" ng-disabled="card._deletingAllDiffs"
+              title="Delete all diff files for this card">{{card._deletingAllDiffs ? '🗑 Deleting…' : '🗑 Diffs (' +
+              vm.cardDiffPaths(card).length + ')'}}</button>
             <button ng-click="vm.openFeedback(card); $event.stopPropagation()" class="small ghost"
               title="Send feedback to bughosted about what went wrong with this run">💬 Feedback</button>
             <span ng-if="vm.feedbackSentCount(card)" class="feedback-sent-indicator"
@@ -1240,11 +1469,15 @@
     <!-- ══════════════ SELF-IMPROVING COLUMN ══════════════ -->
     <div class="column" data-col="selfImproving" ng-if="vm.showSelfImproving">
       <h3>
-        <span class="col-header">📈 Self-Improving <span class="col-badge">{{vm.cardsForProject('selfImproving').length}}</span></span>
+        <span class="col-header">📈 Self-Improving <span
+            class="col-badge">{{vm.cardsForProject('selfImproving').length}}</span></span>
         <span>
-          <button class="small {{vm.selfImprovingAgentActive ? 'success' : 'ghost'}}" ng-click="vm.toggleSelfImprovingAgent()"
-            title="{{vm.selfImprovingAgentActive ? 'Self-improving cycle ACTIVE — cards run 1-by-1 while no regular card is active. Click to stop.' : 'Self-improving cycle OFF — click to arm it. Runs only while no regular card is active.'}}">♾️ {{vm.selfImprovingAgentActive ? 'ACTIVE' : 'OFF'}}</button>
-          <button class="small ghost" ng-click="vm.showSelfImproving = false" title="Close self-improving view">✕</button>
+          <button class="small {{vm.selfImprovingAgentActive ? 'success' : 'ghost'}}"
+            ng-click="vm.toggleSelfImprovingAgent()"
+            title="{{vm.selfImprovingAgentActive ? 'Self-improving cycle ACTIVE — cards run 1-by-1 while no regular card is active. Click to stop.' : 'Self-improving cycle OFF — click to arm it. Runs only while no regular card is active.'}}">♾️
+            {{vm.selfImprovingAgentActive ? 'ACTIVE' : 'OFF'}}</button>
+          <button class="small ghost" ng-click="vm.showSelfImproving = false"
+            title="Close self-improving view">✕</button>
         </span>
       </h3>
       <div class="cards" id="col-selfImproving" dropzone="move"
@@ -1255,12 +1488,23 @@
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
-              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻<span
+                class="tag-label"> recovered {{vm.recoveredCount(card)}}×</span></span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
-            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
-              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
-            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
-              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
+            <span class="card-tag-container">
+              <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+                title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡<span
+                  class="tag-label"> {{card._context.size}} tok</span></span>
+              <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+                title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨<span
+                  class="tag-label"> ~{{card._llmSpend.totalTokens | formatNumber}} used</span></span>
+              <span class="card-tag tag-dump" ng-if="card._taskKind === 'dump'"
+                title="Data-dump task — the fetched web data is written straight to the demanded file and the run short-circuits the completion assessment.">⤓<span
+                  class="tag-label"> dump</span></span>
+              <span class="card-tag tag-build" ng-if="card._taskKind === 'build'"
+                title="Script/program task — the prompt explicitly asks for a script, so normal planning and editing steps apply.">🛠<span
+                  class="tag-label"> build</span></span>
+            </span>
           </div>
 
           <div class="card-text">
@@ -1274,8 +1518,12 @@
           <!-- Status chips -->
           <div class="card-tags">
             <span class="card-tag tag-self-improving" style="color: var(--accent2);">🔄 SELF-IMPROVING</span>
-            <span class="card-tag tag-queued" ng-if="card.ready && (card._endpointQueued || card._autoQueued)" title="Queued — starts when the current card finishes.">⏳ QUEUED</span>
-            <span class="card-tag tag-endpoint" ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'" title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) | limitTo:14}}</span>
+            <span class="card-tag tag-queued" ng-if="card.ready && (card._endpointQueued || card._autoQueued)"
+              title="Queued — starts when the current card finishes.">⏳ QUEUED</span>
+            <span class="card-tag tag-endpoint"
+              ng-if="card.llmEndpointId && vm.endpointLabel(card.llmEndpointId) !== 'Default'"
+              title="LLM: {{vm.endpointLabel(card.llmEndpointId)}}">⚡ {{vm.endpointLabel(card.llmEndpointId) |
+              limitTo:14}}</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
           </div>
 
@@ -1289,8 +1537,11 @@
               <div class="attachments">
                 <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                   <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-                  <span class="open-in-ide" ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()" title="Open in IDE">📄</span>
-                  <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
+                  <span class="open-in-ide"
+                    ng-click="vm.openInIde(f.path || f, card.filePath); $event.stopPropagation()"
+                    title="Open in IDE">📄</span>
+                  <span class="remove"
+                    ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
                 </div>
               </div>
             </div>
@@ -1298,11 +1549,14 @@
 
           <!-- Actions -->
           <div class="card-actions">
-            <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small" title="Attach file">📎</button>
+            <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
+              title="Attach file">📎</button>
             <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
-              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶ Run'}}</button>
+              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶
+              Run'}}</button>
             <button ng-click="vm.moveCard(card.id,'selfImproving','todo')" class="small ghost">← To Todo</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'selfImproving')" class="small ghost" title="Delete card">✕ Delete</button>
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'selfImproving')" class="small ghost"
+              title="Delete card">✕ Delete</button>
           </div>
 
           <!-- Previous analysis -->
@@ -1324,9 +1578,11 @@
     <!-- ══════════════ ARCHIVED COLUMN ══════════════ -->
     <div class="column" data-col="archived" ng-if="vm.showArchived">
       <h3>
-        <span class="col-header">🗄 Archived <span class="col-badge">{{vm.cardsForProject('archived').length}}</span></span>
+        <span class="col-header">🗄 Archived <span
+            class="col-badge">{{vm.cardsForProject('archived').length}}</span></span>
         <span>
-          <button class="small ghost" ng-click="vm.clearAllArchivedCards()" title="Delete all archived cards">🗑️</button>
+          <button class="small ghost" ng-click="vm.clearAllArchivedCards()"
+            title="Delete all archived cards">🗑️</button>
           <button class="small ghost" ng-click="vm.showArchived = false" title="Close archived view">✕</button>
         </span>
       </h3>
@@ -1337,12 +1593,23 @@
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="vm.recoveredCount(card) > 0" class="card-tag tag-recovering"
-              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻ recovered {{vm.recoveredCount(card)}}×</span>
+              title="{{vm.recoveredCount(card)}} self-healing recovery event(s) in this run — the stream dropped or hit the token cap and the agent repaired itself.">♻<span
+                class="tag-label"> recovered {{vm.recoveredCount(card)}}×</span></span>
             <span ng-if="card.createdAt" class="card-date">{{card.createdAt | date:'MMM d, HH:mm'}}</span>
-            <span class="card-tag tag-context" ng-if="card._context && card._context.size"
-              title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡ {{card._context.size}} tok</span>
-            <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
-              title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨ ~{{card._llmSpend.totalTokens | formatNumber}} used</span>
+            <span class="card-tag-container">
+              <span class="card-tag tag-context" ng-if="card._context && card._context.size"
+                title="Peak context size during the run: {{card._context.size}} tokens (~{{card._context.chars}} chars)">⚡<span
+                  class="tag-label"> {{card._context.size}} tok</span></span>
+              <span class="card-tag tag-spend" ng-if="card._llmSpend && card._llmSpend.totalTokens"
+                title="LLM tokens used by this run — {{card._llmSpend.calls}} call(s): ~{{card._llmSpend.promptTokens | formatNumber}} prompt + ~{{card._llmSpend.responseTokens | formatNumber}} response">♨<span
+                  class="tag-label"> ~{{card._llmSpend.totalTokens | formatNumber}} used</span></span>
+              <span class="card-tag tag-dump" ng-if="card._taskKind === 'dump'"
+                title="Data-dump task — the fetched web data is written straight to the demanded file and the run short-circuits the completion assessment.">⤓<span
+                  class="tag-label"> dump</span></span>
+              <span class="card-tag tag-build" ng-if="card._taskKind === 'build'"
+                title="Script/program task — the prompt explicitly asks for a script, so normal planning and editing steps apply.">🛠<span
+                  class="tag-label"> build</span></span>
+            </span>
           </div>
           <div class="card-text card-text-readonly">{{card.text}}</div>
           <div class="card-tags" ng-if="card.priority">
@@ -1371,33 +1638,34 @@
       </div>
     </div>
 
-  <!-- CARD FEEDBACK POPUP — sent to the bughosted server for weaver admins -->
-  <div class="popup-overlay" ng-if="vm.feedbackCard" ng-click="vm.closeFeedback()">
-    <div class="popup-panel" ng-click="$event.stopPropagation()">
-      <div class="popup-body">
-        <h3 style="margin-top:0;">💬 Card Feedback</h3>
-        <div class="smallFont secondaryFontColor" style="margin-bottom:8px;">
-          Sends a note to the bughosted server about what went wrong with this card's execution — weaver admins review these messages.
-        </div>
-        <div class="smallFont" style="margin-bottom:8px;">Card: {{vm.feedbackCard.text | limitTo:120}}{{vm.feedbackCard.text.length > 120 ? '…' : ''}}</div>
-        <div ng-if="vm.feedbackPrevious.length" class="feedback-previous">
-          <div class="feedback-previous-title">Previously reported:</div>
-          <div ng-repeat="entry in vm.feedbackPrevious" class="feedback-previous-entry">
-            <span class="feedback-previous-time">{{entry.at | date:'short'}}</span> — {{entry.message}}
+    <!-- CARD FEEDBACK POPUP — sent to the bughosted server for weaver admins -->
+    <div class="popup-overlay" ng-if="vm.feedbackCard" ng-click="vm.closeFeedback()">
+      <div class="popup-panel" ng-click="$event.stopPropagation()">
+        <div class="popup-body">
+          <h3 style="margin-top:0;">💬 Card Feedback</h3>
+          <div class="smallFont secondaryFontColor" style="margin-bottom:8px;">
+            Sends a note to the bughosted server about what went wrong with this card's execution — weaver admins review
+            these messages.
           </div>
+          <div class="smallFont" style="margin-bottom:8px;">Card: {{vm.feedbackCard.text |
+            limitTo:120}}{{vm.feedbackCard.text.length > 120 ? '…' : ''}}</div>
+          <div ng-if="vm.feedbackPrevious.length" class="feedback-previous">
+            <div class="feedback-previous-title">Previously reported:</div>
+            <div ng-repeat="entry in vm.feedbackPrevious" class="feedback-previous-entry">
+              <span class="feedback-previous-time">{{entry.at | date:'short'}}</span> — {{entry.message}}
+            </div>
+          </div>
+          <textarea ng-model="vm.feedbackText" rows="5" style="width:100%;box-sizing:border-box;"
+            placeholder="What went wrong during this run? (e.g. the agent ignored a requirement, edited the wrong file, stopped early…)"></textarea>
+          <div ng-if="vm.feedbackError" style="color:#e06c75;margin-top:6px;">{{vm.feedbackError}}</div>
+          <div ng-if="vm.feedbackSending" class="smallFont" style="margin-top:6px;">Sending…</div>
         </div>
-        <textarea ng-model="vm.feedbackText" rows="5"
-          style="width:100%;box-sizing:border-box;"
-          placeholder="What went wrong during this run? (e.g. the agent ignored a requirement, edited the wrong file, stopped early…)"></textarea>
-        <div ng-if="vm.feedbackError" style="color:#e06c75;margin-top:6px;">{{vm.feedbackError}}</div>
-        <div ng-if="vm.feedbackSending" class="smallFont" style="margin-top:6px;">Sending…</div>
-      </div>
-      <div class="popup-footer">
-        <button ng-click="vm.closeFeedback()" ng-disabled="vm.feedbackSending">Cancel</button>
-        <button ng-click="vm.sendFeedback()" class="primary"
-          ng-disabled="vm.feedbackSending || !vm.feedbackText || !vm.feedbackText.trim()">Send Feedback</button>
+        <div class="popup-footer">
+          <button ng-click="vm.closeFeedback()" ng-disabled="vm.feedbackSending">Cancel</button>
+          <button ng-click="vm.sendFeedback()" class="primary"
+            ng-disabled="vm.feedbackSending || !vm.feedbackText || !vm.feedbackText.trim()">Send Feedback</button>
+        </div>
       </div>
     </div>
-  </div>
   </div>
 </div>

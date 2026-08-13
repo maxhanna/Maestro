@@ -26,7 +26,7 @@
     height: 100%;
 }
 
-.column > h3 {
+.column>h3 {
     font-size: 13px;
     font-weight: 600;
     text-transform: uppercase;
@@ -293,6 +293,7 @@ body.dragging-active .card:hover {
     font-weight: 700;
     border: 1px solid rgba(251, 191, 36, 0.35);
 }
+
 .card .card-meta .card-tag.tag-recovering {
     margin-right: auto;
     margin-left: 6px;
@@ -307,14 +308,17 @@ body.dragging-active .card:hover {
     font-weight: 700;
     border: 1px solid rgba(251, 191, 36, 0.45);
 }
+
 .card .card-meta .card-tag.tag-interrupted {
     margin-right: auto;
     margin-left: 6px;
 }
 
-/* Peak-context badge — the run's final discovery-context size, persisted onto the
-   card (_context) so completed cards keep showing the counter instead of it
-   disappearing/resetting once the run ends. Blue like the live context tag. */
+.card-tag-container {
+    display: flex;
+    justify-content: flex-end;
+}
+
 .card .card-tag.tag-context {
     background: rgba(97, 175, 239, 0.14);
     color: #61afef;
@@ -322,9 +326,11 @@ body.dragging-active .card:hover {
     border: 1px solid rgba(97, 175, 239, 0.35);
     font-variant-numeric: tabular-nums;
 }
+
 .card .card-meta .card-tag.tag-context {
     margin-left: 6px;
 }
+
 .card .card-tag.tag-spend {
     background: rgba(212, 175, 55, 0.14);
     color: #fbbf24;
@@ -332,8 +338,49 @@ body.dragging-active .card:hover {
     border: 1px solid rgba(212, 175, 55, 0.35);
     font-variant-numeric: tabular-nums;
 }
+
 .card .card-meta .card-tag.tag-spend {
     margin-left: 6px;
+}
+
+/* Dump-vs-build classification badge — a "dump" run short-circuits deterministically
+   (fetched data written straight to the demanded file), a "build" run asks for a
+   script/program. Teal for dump, amber for build. */
+.card .card-tag.tag-dump {
+    background: rgba(45, 212, 191, 0.14);
+    color: #2dd4bf;
+    font-weight: 700;
+    border: 1px solid rgba(45, 212, 191, 0.35);
+}
+
+.card .card-meta .card-tag.tag-dump {
+    margin-left: 6px;
+}
+
+.card .card-tag.tag-build {
+    background: rgba(251, 146, 60, 0.14);
+    color: #fb923c;
+    font-weight: 700;
+    border: 1px solid rgba(251, 146, 60, 0.35);
+}
+
+.card .card-meta .card-tag.tag-build {
+    margin-left: 6px;
+}
+
+/* Collapse meta badges to icon-only until hovered. The emoji is kept outside the
+   .tag-label span, so the pill shows just the icon by default; hovering reveals
+   the full label. card-id and card-date carry no icon and stay readable. */
+.card .card-meta .card-tag {
+    gap: 0;
+}
+
+.card .card-meta .card-tag .tag-label {
+    display: none;
+}
+
+.card .card-meta .card-tag:hover .tag-label {
+    display: inline;
 }
 
 /* Bughosted feedback-sent chip — done/archived cards that had feedback successfully
@@ -365,6 +412,7 @@ body.dragging-active .card:hover {
     background: rgba(97, 175, 239, 0.08);
     border: 1px solid rgba(97, 175, 239, 0.25);
 }
+
 .feedback-previous-title {
     font-size: 11px;
     font-weight: 700;
@@ -373,15 +421,18 @@ body.dragging-active .card:hover {
     color: var(--secondary-font-color, #98a1b3);
     margin-bottom: 3px;
 }
+
 .feedback-previous-entry {
     font-size: 12px;
     line-height: 1.45;
     padding: 2px 0;
     border-top: 1px solid rgba(97, 175, 239, 0.12);
 }
+
 .feedback-previous-entry:first-of-type {
     border-top: 0;
 }
+
 .feedback-previous-time {
     color: var(--secondary-font-color, #98a1b3);
     font-size: 11px;
@@ -413,8 +464,15 @@ body.dragging-active .card:hover {
 }
 
 @keyframes tag-queued-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.55; }
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.55;
+    }
 }
 
 .card .suggest-generating {
@@ -453,12 +511,22 @@ body.dragging-active .card:hover {
 }
 
 @keyframes suggestPulse {
-    0%, 100% { opacity: 0.55; }
-    50% { opacity: 1; box-shadow: 0 0 10px rgba(192, 132, 252, 0.35); }
+
+    0%,
+    100% {
+        opacity: 0.55;
+    }
+
+    50% {
+        opacity: 1;
+        box-shadow: 0 0 10px rgba(192, 132, 252, 0.35);
+    }
 }
 
 @keyframes suggestSpin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .card .card-section-suggestions {
@@ -613,9 +681,20 @@ body.dragging-active .card:hover {
 }
 
 @keyframes cardFlashGlow {
-    0% { outline: 2px solid rgba(56, 189, 248, 0.9); outline-offset: 3px; }
-    60% { outline: 2px solid rgba(56, 189, 248, 0.35); outline-offset: 3px; }
-    100% { outline: 2px solid rgba(56, 189, 248, 0); outline-offset: 3px; }
+    0% {
+        outline: 2px solid rgba(56, 189, 248, 0.9);
+        outline-offset: 3px;
+    }
+
+    60% {
+        outline: 2px solid rgba(56, 189, 248, 0.35);
+        outline-offset: 3px;
+    }
+
+    100% {
+        outline: 2px solid rgba(56, 189, 248, 0);
+        outline-offset: 3px;
+    }
 }
 
 .card .suggestion-action {
@@ -671,7 +750,7 @@ body.dragging-active .card:hover {
     overflow: hidden;
 }
 
-.card-section > summary {
+.card-section>summary {
     list-style: none;
     cursor: pointer;
     display: flex;
@@ -685,27 +764,27 @@ body.dragging-active .card:hover {
     transition: background .12s ease;
 }
 
-.card-section > summary::-webkit-details-marker {
+.card-section>summary::-webkit-details-marker {
     display: none;
 }
 
-.card-section > summary:hover {
+.card-section>summary:hover {
     background: rgba(255, 255, 255, 0.04);
     color: var(--text);
 }
 
-.card-section > summary .section-caret {
+.card-section>summary .section-caret {
     font-size: 9px;
     opacity: .5;
     transition: transform .15s ease;
     flex-shrink: 0;
 }
 
-.card-section[open] > summary .section-caret {
+.card-section[open]>summary .section-caret {
     transform: rotate(90deg);
 }
 
-.card-section > summary .log-copy-btn {
+.card-section>summary .log-copy-btn {
     flex-shrink: 0;
     font-size: 10.5px;
     font-weight: 600;
@@ -719,13 +798,13 @@ body.dragging-active .card:hover {
     transition: background .12s ease, color .12s ease, border-color .12s ease;
 }
 
-.card-section > summary .log-copy-btn:hover {
+.card-section>summary .log-copy-btn:hover {
     background: rgba(255, 255, 255, 0.12);
     color: var(--text);
     border-color: rgba(255, 255, 255, 0.25);
 }
 
-.card-section > summary .section-title {
+.card-section>summary .section-title {
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -733,7 +812,7 @@ body.dragging-active .card:hover {
     white-space: nowrap;
 }
 
-.card-section > summary .section-badge {
+.card-section>summary .section-badge {
     background: rgba(255, 255, 255, 0.08);
     padding: 0 7px;
     border-radius: 999px;
@@ -743,7 +822,7 @@ body.dragging-active .card:hover {
     flex-shrink: 0;
 }
 
-.card-section > summary .section-clear {
+.card-section>summary .section-clear {
     font-size: 11px;
     padding: 0 2px;
     background: none;
@@ -755,7 +834,7 @@ body.dragging-active .card:hover {
     line-height: 1.2;
 }
 
-.card-section > summary .section-clear:hover {
+.card-section>summary .section-clear:hover {
     opacity: 1;
     color: var(--error);
 }
@@ -769,7 +848,7 @@ body.dragging-active .card:hover {
     background: rgba(255, 100, 50, 0.06);
 }
 
-.card-section.card-section-warn > summary {
+.card-section.card-section-warn>summary {
     color: #ff8a62;
 }
 
@@ -1253,7 +1332,7 @@ body.dragging-active .card:hover {
     border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.card .card-analysis > summary,
+.card .card-analysis>summary,
 .card .card-analysis summary.step-toggle {
     cursor: pointer;
     list-style: none;
@@ -1378,12 +1457,29 @@ body.dragging-active .card:hover {
     margin-bottom: 2px;
 }
 
-.log-entry.error { color: #f87171; }
-.log-entry.warn { color: #fbbf24; }
-.log-entry.error summary { color: #f87171; }
-.log-entry.warn summary { color: #fbbf24; }
-.log-entry.think { color: #7dd3fc; }
-.log-entry.think summary { color: #7dd3fc; }
+.log-entry.error {
+    color: #f87171;
+}
+
+.log-entry.warn {
+    color: #fbbf24;
+}
+
+.log-entry.error summary {
+    color: #f87171;
+}
+
+.log-entry.warn summary {
+    color: #fbbf24;
+}
+
+.log-entry.think {
+    color: #7dd3fc;
+}
+
+.log-entry.think summary {
+    color: #7dd3fc;
+}
 
 .log-entry.bypass {
     color: #4ade80;
@@ -1392,7 +1488,9 @@ body.dragging-active .card:hover {
     padding: 2px 4px;
 }
 
-.log-entry.bypass summary { color: #4ade80; }
+.log-entry.bypass summary {
+    color: #4ade80;
+}
 
 .log-entry.metric {
     color: #c084fc;
@@ -1401,7 +1499,9 @@ body.dragging-active .card:hover {
     padding: 2px 4px;
 }
 
-.log-entry.metric summary { color: #c084fc; }
+.log-entry.metric summary {
+    color: #c084fc;
+}
 
 .log-entry-body {
     padding: 2px 0 2px 12px;
@@ -1513,9 +1613,19 @@ body.dragging-active .card:hover {
     margin-top: 2px;
 }
 
-.step-proposing { opacity: .85; }
-.step-rejected { opacity: .6; text-decoration: line-through; }
-.step-exploring { opacity: .8; font-style: italic; }
+.step-proposing {
+    opacity: .85;
+}
+
+.step-rejected {
+    opacity: .6;
+    text-decoration: line-through;
+}
+
+.step-exploring {
+    opacity: .8;
+    font-style: italic;
+}
 
 .step-thinking {
     font-size: 10.5px;
@@ -1615,10 +1725,21 @@ body.dragging-active .card:hover {
     gap: 8px;
 }
 
-.diff-cell.diff-changed { background: rgba(234, 179, 8, 0.1); }
-.diff-cell.diff-removed { background: rgba(239, 68, 68, 0.12); }
-.diff-cell.diff-added { background: rgba(34, 197, 94, 0.12); }
-.diff-cell.diff-empty { background: rgba(255, 255, 255, 0.01); }
+.diff-cell.diff-changed {
+    background: rgba(234, 179, 8, 0.1);
+}
+
+.diff-cell.diff-removed {
+    background: rgba(239, 68, 68, 0.12);
+}
+
+.diff-cell.diff-added {
+    background: rgba(34, 197, 94, 0.12);
+}
+
+.diff-cell.diff-empty {
+    background: rgba(255, 255, 255, 0.01);
+}
 
 .diff-lineno {
     color: var(--text);
@@ -1773,7 +1894,9 @@ body.dragging-active .card:hover {
 }
 
 @keyframes idle-suggest-spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .close-button {

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text;
 using Weaver.Services;
 using Xunit;
 
@@ -85,6 +86,88 @@ public class ScraperEnvironmentServiceTests
         Assert.Contains("with open(out, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n    f.write(", script);
         Assert.Contains("FETCHED_AT: 2026-08-13", script);
         Assert.DoesNotContain("def fetch_and_write_csv(filename):\n with open", script);
+    }
+
+    // ── Pagination: a ?limit=/offset= URL gets the page-looping template ──
+
+    [Theory]
+    [InlineData("https://pokeapi.co/api/v2/pokemon?limit=1025", true)]
+    [InlineData("https://api.example.com/list?limit=100&offset=0", true)]
+    [InlineData("https://api.example.com/list?offset=200", true)]
+    [InlineData("https://api.example.com/list&limit=50", true)]
+    [InlineData("https://example.com/alphafold3", false)]
+    [InlineData("https://pokeapi.co/api/v2/pokemon/25", false)]
+    [InlineData("", false)]
+    public void ShouldPaginate_DetectsLimitOrOffsetUrls(string url, bool expected)
+    {
+        Assert.Equal(expected, ScraperEnvironmentService.ShouldPaginate(url));
+    }
+
+    [Fact]
+    public void GenerateScript_PaginatedPython_LoopsOverOffsetAndFollowsNext()
+    {
+        var script = new ScraperEnvironmentService().GenerateScript(
+            ScraperEnvironmentService.Toolchain.PythonRequests,
+            "https://pokeapi.co/api/v2/pokemon?limit=1025", "benchmark_test_16/pokemon_data.json", null,
+            paginate: true);
+        // The pagination loop, the cursor/offset advance, the merge, and the JSON output.
+        Assert.Contains("while cur and page < 50:", script);
+        Assert.Contains("data.get(\"next\")", script);
+        Assert.Contains("offset=" + "\" + str(off + n)", script);
+        Assert.Contains("\"results\" in data", script);
+        Assert.Contains("\"count\": count, \"results\": all_items", script);
+        Assert.Contains("json.dumps(payload, indent=2)", script);
+        // Still the correct write shape (no IndentationError, metadata handled).
+        Assert.Contains("with open(out, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n    f.write(", script);
+        // Non-paginated payloads degrade to verbatim output.
+        Assert.Contains("all_items = data", script);
+    }
+
+    [Fact]
+    public void GenerateScript_PaginatedNode_LoopsOverOffsetAndFollowsNext()
+    {
+        var script = new ScraperEnvironmentService().GenerateScript(
+            ScraperEnvironmentService.Toolchain.NodeFetch,
+            "https://api.example.com/list?limit=100&offset=0", "out.json", null,
+            paginate: true);
+        Assert.Contains("while (cur && page < 50) {", script);
+        Assert.Contains("data.next", script);
+        Assert.Contains("offset=\" + (off + items.length)", script);
+        Assert.Contains("{ count, results: all }", script);
+        Assert.Contains("JSON.stringify(payload, null, 2)", script);
+    }
+
+    [Fact]
+    public void GenerateScript_PaginatedPowerShell_LoopsOverOffsetAndFollowsNext()
+    {
+        var script = new ScraperEnvironmentService().GenerateScript(
+            ScraperEnvironmentService.Toolchain.PowerShell,
+            "https://api.example.com/list?limit=100", "out.json", null,
+            paginate: true);
+        Assert.Contains("while ($cur -and $page -lt 50) {", script);
+        Assert.Contains("$data.next", script);
+        Assert.Contains("offset=\" + ($off + $n)", script);
+        Assert.Contains("ConvertTo-Json -Depth 10", script);
+    }
+
+    [Fact]
+    public void GenerateScript_MetadataLine_EscapedIntoValidStringLiteral()
+    {
+        // The meta line contains a REAL newline; embedded raw it produced a Python
+        // SyntaxError inside the "known-good" script (a literal line break inside
+        // f.write("...")). It must be escaped to backslash-n in the generated literal.
+        var script = new ScraperEnvironmentService().GenerateScript(
+            ScraperEnvironmentService.Toolchain.PythonRequests,
+            "https://pokeapi.co/api/v2/pokemon?limit=1025", "out.json", "FETCHED_AT: 2026-08-13");
+        // Backslash-n inside the string literal (two characters), not a real newline.
+        Assert.Contains("f.write(\"FETCHED_AT: 2026-08-13\\n\" + data)", script);
+        // No real newline between the date and the closing quote anywhere.
+        Assert.DoesNotContain("FETCHED_AT: 2026-08-13\n\"", script);
+
+        var node = new ScraperEnvironmentService().GenerateScript(
+            ScraperEnvironmentService.Toolchain.NodeFetch,
+            "https://pokeapi.co/api/v2/pokemon?limit=1025", "out.json", "FETCHED_AT: 2026-08-13");
+        Assert.Contains("text = \"FETCHED_AT: 2026-08-13\\n\" + text;", node);
     }
 
     [Fact]
@@ -196,5 +279,52 @@ public class ScraperEnvironmentServiceTests
         var summary = svc.EnvironmentSummary();
         Assert.Contains("python", summary);
         Assert.Contains("pwsh", summary);
+    }
+
+    // ── Real-interpreter syntax check (gated on availability) ──
+    // The templates must be MORE than shape-plausible: they are code the system will actually
+    // run against real APIs, so when a real interpreter is present this test compiles every
+    // generated script (single + paginated, with the metadata line) and fails on any syntax
+    // error — the IndentationError run's exact failure class.
+
+    [Fact]
+    public void GeneratedScripts_CompileWithTheRealInterpreter_WhenAvailable()
+    {
+        var py = ScraperEnvironmentService.StaticInterpreterAvailable("python")
+            ? "python"
+            : ScraperEnvironmentService.StaticInterpreterAvailable("python3") ? "python3" : null;
+        var node = ScraperEnvironmentService.StaticInterpreterAvailable("node") ? "node" : null;
+        if (py == null && node == null) return; // no interpreter on this host — nothing to compile
+
+        var dir = Path.Combine(Path.GetTempPath(), "scraper-syntax-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var svc = new ScraperEnvironmentService();
+            var url = "https://pokeapi.co/api/v2/pokemon?limit=1025";
+            var cases = new List<(string file, string script, string? checkWith)>
+            {
+                ("single_py_requests.py", svc.GenerateScript(ScraperEnvironmentService.Toolchain.PythonRequests, url, "out.json", "FETCHED_AT: 2026-08-13"), py),
+                ("single_py_urllib.py", svc.GenerateScript(ScraperEnvironmentService.Toolchain.PythonUrllib, url, "out.json", "FETCHED_AT: 2026-08-13"), py),
+                ("paged_py.py", svc.GenerateScript(ScraperEnvironmentService.Toolchain.PythonRequests, url, "out.json", "FETCHED_AT: 2026-08-13", paginate: true), py),
+                ("paged_node.js", svc.GenerateScript(ScraperEnvironmentService.Toolchain.NodeFetch, url, "out.json", "FETCHED_AT: 2026-08-13", paginate: true), node)
+            };
+            foreach (var (file, script, checkWith) in cases)
+            {
+                if (checkWith == null) continue;
+                var path = Path.Combine(dir, file);
+                File.WriteAllText(path, script, Encoding.UTF8);
+                var checkArgs = file.EndsWith(".py", StringComparison.Ordinal)
+                    ? $"-m py_compile \"{path}\""
+                    : $"--check \"{path}\"";
+                var (code, stdout, stderr) = svc.ProcessRunner(checkWith, checkArgs, dir);
+                Assert.True(code == 0,
+                    $"{file} failed the real-interpreter syntax check ({checkWith} {checkArgs}):\n{stderr}\n{stdout}\n--- script ---\n{script}");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
     }
 }

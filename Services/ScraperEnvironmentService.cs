@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Weaver.Services;
 
@@ -175,14 +176,48 @@ public class ScraperEnvironmentService
     }
 
     /// <summary>
+    /// True when a URL looks like a paginated list endpoint (has a ?limit= / &amp;limit= or
+    /// offset param) — the signal that the scraper should loop over pages instead of a single
+    /// fetch. A plain article/endpoint URL (no pagination params) stays a single fetch.
+    /// </summary>
+    public static bool ShouldPaginate(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        return Regex.IsMatch(url, @"[?&](?:limit|offset)=\d+", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// Escapes the demanded metadata line ("FETCHED_AT: yyyy-MM-dd\n") into a correct
+    /// double-quoted string literal for the generated Python/Node script. The OLD inline
+    /// embedding put a REAL newline inside the literal ("FETCHED_AT: 2026-08-13
+    /// " + data) — a guaranteed SyntaxError in the very script that was supposed to be
+    /// known-good. PowerShell double-quoted strings allow real newlines, so it embeds raw.
+    /// </summary>
+    private static string StringLiteralFor(string? text) =>
+        "\"" + (text ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n") + "\"";
+
+    /// <summary>
     /// Generates a KNOWN-GOOD scraper script for the given toolchain: fixed template, correct
     /// syntax, correct quoting, timeout, a User-Agent, and the demanded metadata line (e.g.
     /// "FETCHED_AT: yyyy-MM-dd") prepended to the output. Script takes (url, outputPath) as
-    /// argv/parameters. This is what the LLM's freehand scraper never was — tested shape.
+    /// argv/parameters. When <paramref name="paginate"/> is set (a ?limit=/offset URL like the
+    /// full-Pokedex benchmark), the template loops over pages — following the API's own
+    /// "next" cursor when present, else advancing offset by the page size — merging the
+    /// results into one JSON output ({count, results} when the API reports a count), capped at
+    /// 50 pages so a broken cursor can't loop forever. Non-paginated responses degrade to a
+    /// single fetch that emits the payload verbatim. This is what the LLM's freehand scraper
+    /// never was — tested shape.
     /// </summary>
-    public string GenerateScript(Toolchain toolchain, string url, string outputPath, string? metadataLine)
+    public string GenerateScript(Toolchain toolchain, string url, string outputPath, string? metadataLine, bool paginate = false)
     {
         var meta = string.IsNullOrWhiteSpace(metadataLine) ? "" : metadataLine.TrimEnd('\n') + "\n";
+        return paginate
+            ? GeneratePaginatedScript(toolchain, meta)
+            : GenerateSingleScript(toolchain, meta);
+    }
+
+    private string GenerateSingleScript(Toolchain toolchain, string meta)
+    {
         switch (toolchain)
         {
             case Toolchain.PythonRequests:
@@ -194,7 +229,7 @@ public class ScraperEnvironmentService
                        "r.raise_for_status()\n" +
                        "data = r.text\n" +
                        "with open(out, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n" +
-                       "    f.write(" + (string.IsNullOrEmpty(meta) ? "data" : "\"" + meta + "\" + data") + ")\n" +
+                       "    f.write(" + (string.IsNullOrEmpty(meta) ? "data" : StringLiteralFor(meta) + " + data") + ")\n" +
                        "print(\"WROTE\", out, len(data))\n";
             case Toolchain.PythonUrllib:
                 return "import sys\n" +
@@ -205,7 +240,7 @@ public class ScraperEnvironmentService
                        "with urllib.request.urlopen(req, timeout=30) as resp:\n" +
                        "    data = resp.read().decode(\"utf-8\", \"replace\")\n" +
                        "with open(out, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n" +
-                       "    f.write(" + (string.IsNullOrEmpty(meta) ? "data" : "\"" + meta + "\" + data") + ")\n" +
+                       "    f.write(" + (string.IsNullOrEmpty(meta) ? "data" : StringLiteralFor(meta) + " + data") + ")\n" +
                        "print(\"WROTE\", out, len(data))\n";
             case Toolchain.NodeFetch:
                 return "const url = process.argv[2];\n" +
@@ -215,7 +250,7 @@ public class ScraperEnvironmentService
                        "  const res = await fetch(url, { headers: { \"User-Agent\": \"Weaver-scraper/1.0\" } });\n" +
                        "  if (!res.ok) throw new Error(\"HTTP \" + res.status);\n" +
                        "  let text = await res.text();\n" +
-                       (string.IsNullOrEmpty(meta) ? "" : "  text = " + "\"" + meta + "\" + text;\n") +
+                       (string.IsNullOrEmpty(meta) ? "" : "  text = " + StringLiteralFor(meta) + " + text;\n") +
                        "  fs.writeFileSync(out, text, \"utf8\");\n" +
                        "  console.log(\"WROTE\", out, text.length);\n" +
                        "})().catch((e) => { console.error(e.message); process.exit(1); });\n";
@@ -228,6 +263,204 @@ public class ScraperEnvironmentService
             default:
                 throw new ArgumentOutOfRangeException(nameof(toolchain));
         }
+    }
+
+    private string GeneratePaginatedScript(Toolchain toolchain, string meta)
+    {
+        switch (toolchain)
+        {
+            case Toolchain.PythonRequests:
+            case Toolchain.PythonUrllib:
+                return GeneratePaginatedPythonScript(meta);
+            case Toolchain.NodeFetch:
+                return GeneratePaginatedNodeScript(meta);
+            case Toolchain.PowerShell:
+                return GeneratePaginatedPowerShellScript(meta);
+            default:
+                throw new ArgumentOutOfRangeException(nameof(toolchain));
+        }
+    }
+
+    private string GeneratePaginatedPythonScript(string meta)
+    {
+        // One body for both python toolchains: uses requests when importable, else stdlib
+        // urllib. Follows the API's "next" cursor when present, else advances ?offset= by the
+        // page size when the URL has one; stops on a short page, on count exhaustion, or after
+        // 50 pages. Non-paginated payloads (no results/next/offset) emit verbatim.
+        var lit = StringLiteralFor(meta);
+        return "import sys, json, re, time\n" +
+               "try:\n" +
+               "    import requests as _r\n" +
+               "except ImportError:\n" +
+               "    _r = None\n" +
+               "    import urllib.request as _u\n" +
+               "\n" +
+               "url = sys.argv[1]\n" +
+               "out = sys.argv[2]\n" +
+               "limit = 100\n" +
+               "_m = re.search(r\"[?&]limit=(\\d+)\", url)\n" +
+               "if _m:\n" +
+               "    limit = int(_m.group(1))\n" +
+               "count = None\n" +
+               "all_items = []\n" +
+               "page = 0\n" +
+               "\n" +
+               "def _fetch(u):\n" +
+               "    if _r is not None:\n" +
+               "        _resp = _r.get(u, timeout=30, headers={\"User-Agent\": \"Weaver-scraper/1.0\"})\n" +
+               "        _resp.raise_for_status()\n" +
+               "        return _resp.json()\n" +
+               "    _req = _u.Request(u, headers={\"User-Agent\": \"Weaver-scraper/1.0\"})\n" +
+               "    with _u.urlopen(_req, timeout=30) as _resp:\n" +
+               "        return json.loads(_resp.read().decode(\"utf-8\", \"replace\"))\n" +
+               "\n" +
+               "def _advance(cur, data, n):\n" +
+               "    nxt = data.get(\"next\") if isinstance(data, dict) else None\n" +
+               "    if nxt:\n" +
+               "        return None if nxt == cur else nxt\n" +
+               "    if not re.search(r\"[?&]offset=\", cur):\n" +
+               "        return None\n" +
+               "    off = int(re.search(r\"[?&]offset=(\\d+)\", cur).group(1))\n" +
+               "    if count is not None and off + n >= count:\n" +
+               "        return None\n" +
+               "    if n < limit:\n" +
+               "        return None\n" +
+               "    base = re.sub(r\"[?&]offset=\\d+\", \"\", cur)\n" +
+               "    sep = \"&\" if \"?\" in base else \"?\"\n" +
+               "    return base + sep + \"offset=\" + str(off + n)\n" +
+               "\n" +
+               "cur = url\n" +
+               "while cur and page < 50:\n" +
+               "    data = _fetch(cur)\n" +
+               "    if isinstance(data, dict) and (\"results\" in data or \"next\" in data or re.search(r\"[?&]offset=\", cur)):\n" +
+               "        if count is None and isinstance(data.get(\"count\"), int):\n" +
+               "            count = data[\"count\"]\n" +
+               "        items = data.get(\"results\") if isinstance(data.get(\"results\"), list) else []\n" +
+               "        all_items.extend(items)\n" +
+               "        cur = _advance(cur, data, len(items))\n" +
+               "    else:\n" +
+               "        all_items = data\n" +
+               "        cur = None\n" +
+               "    page += 1\n" +
+               "    time.sleep(0.05)\n" +
+               "\n" +
+               "if isinstance(all_items, list) and count is not None:\n" +
+               "    payload = {\"count\": count, \"results\": all_items}\n" +
+               "elif isinstance(all_items, list):\n" +
+               "    payload = all_items\n" +
+               "else:\n" +
+               "    payload = all_items\n" +
+               "text = json.dumps(payload, indent=2) if not isinstance(payload, str) else payload\n" +
+               "with open(out, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n" +
+               "    f.write(" + (string.IsNullOrEmpty(meta) ? "text" : lit + " + text") + ")\n" +
+               "print(\"WROTE\", out, len(all_items) if isinstance(all_items, list) else 1)\n";
+    }
+
+    private string GeneratePaginatedNodeScript(string meta)
+    {
+        var lit = StringLiteralFor(meta);
+        return "const url = process.argv[2];\n" +
+               "const out = process.argv[3];\n" +
+               "const fs = require(\"fs\");\n" +
+               "(async () => {\n" +
+               "  const limit = parseInt((url.match(/[?&]limit=(\\d+)/) || [])[1] || \"100\", 10);\n" +
+               "  const hasOffset = /[?&]offset=/.test(url);\n" +
+               "  let cur = url;\n" +
+               "  let page = 0;\n" +
+               "  let count = null;\n" +
+               "  const all = [];\n" +
+               "  const fetchJson = async (u) => {\n" +
+               "    const res = await fetch(u, { headers: { \"User-Agent\": \"Weaver-scraper/1.0\" } });\n" +
+               "    if (!res.ok) throw new Error(\"HTTP \" + res.status + \" at \" + u);\n" +
+               "    return res.json();\n" +
+               "  };\n" +
+               "  while (cur && page < 50) {\n" +
+               "    const data = await fetchJson(cur);\n" +
+               "    let items = [];\n" +
+               "    let next = null;\n" +
+               "    if (data && typeof data === \"object\" && !Array.isArray(data) && (data.results || data.next || hasOffset)) {\n" +
+               "      if (typeof data.count === \"number\" && count === null) count = data.count;\n" +
+               "      items = data.results || [];\n" +
+               "      if (data.next && data.next !== cur) next = data.next;\n" +
+               "      else if (hasOffset && items.length >= limit) {\n" +
+               "        const m = cur.match(/[?&]offset=(\\d+)/);\n" +
+               "        const off = m ? parseInt(m[1], 10) : 0;\n" +
+               "        if (count !== null && off + items.length >= count) next = null;\n" +
+               "        else {\n" +
+               "          const base = cur.replace(/[?&]offset=\\d+/, \"\");\n" +
+               "          const sep = base.includes(\"?\") ? \"&\" : \"?\";\n" +
+               "          next = base + sep + \"offset=\" + (off + items.length);\n" +
+               "        }\n" +
+               "      }\n" +
+               "      if (items.length) all.push(...items);\n" +
+               "    } else if (Array.isArray(data)) {\n" +
+               "      all.push(...data);\n" +
+               "    } else {\n" +
+               "      const text = typeof data === \"string\" ? data : JSON.stringify(data, null, 2);\n" +
+               "      fs.writeFileSync(out, " + (string.IsNullOrEmpty(meta) ? "text" : lit + " + text") + ", \"utf8\");\n" +
+               "      console.log(\"WROTE\", out, 1);\n" +
+               "      return;\n" +
+               "    }\n" +
+               "    cur = next;\n" +
+               "    page++;\n" +
+               "  }\n" +
+               "  const payload = count !== null ? { count, results: all } : all;\n" +
+               "  fs.writeFileSync(out, " + (string.IsNullOrEmpty(meta) ? "JSON.stringify(payload, null, 2)" : lit + " + JSON.stringify(payload, null, 2)") + ", \"utf8\");\n" +
+               "  console.log(\"WROTE\", out, all.length);\n" +
+               "})().catch((e) => { console.error(e.message); process.exit(1); });\n";
+    }
+
+    private string GeneratePaginatedPowerShellScript(string meta)
+    {
+        // PowerShell double-quoted strings allow real newlines, so the metadata line embeds
+        // raw (matching the single-fetch template).
+        var metaCmd = string.IsNullOrEmpty(meta) ? "" : $"Set-Content -Path $Out -Value \"{meta}\" -Encoding UTF8 -NoNewline\n";
+        return "param([string]$Url = $args[0], [string]$Out = $args[1])\n" +
+               "$limit = 100\n" +
+               "if ($Url -match '[?&]limit=(\\d+)') { $limit = [int]$Matches[1] }\n" +
+               "$hasOffset = $Url -match '[?&]offset='\n" +
+               "$cur = $Url\n" +
+               "$all = @()\n" +
+               "$count = $null\n" +
+               "$page = 0\n" +
+               "while ($cur -and $page -lt 50) {\n" +
+               "  $r = Invoke-WebRequest -Uri $cur -Headers @{ \"User-Agent\" = \"Weaver-scraper/1.0\" } -TimeoutSec 30 -UseBasicParsing\n" +
+               "  $data = $r.Content | ConvertFrom-Json\n" +
+               "  $paginated = ($null -ne $data.results) -or ($null -ne $data.next) -or $hasOffset\n" +
+               "  if ($paginated) {\n" +
+               "    if ($null -eq $count -and $null -ne $data.count) { $count = $data.count }\n" +
+               "    if ($data.results) { $all += $data.results }\n" +
+               "    $next = $null\n" +
+               "    if ($data.next -and $data.next -ne $cur) { $next = $data.next }\n" +
+               "    elseif ($hasOffset) {\n" +
+               "      $m = [regex]::Match($cur, '[?&]offset=(\\d+)')\n" +
+               "      $off = if ($m.Success) { [int]$m.Groups[1].Value } else { 0 }\n" +
+               "      $n = @($data.results).Count\n" +
+               "      if (($null -eq $count -or ($off + $n -lt $count)) -and $n -ge $limit) {\n" +
+               "        $base = [regex]::Replace($cur, '[?&]offset=\\d+', '')\n" +
+               "        $sep = if ($base -match '\\?') { '&' } else { '?' }\n" +
+               "        $next = \"$base$sep\" + \"offset=\" + ($off + $n)\n" +
+               "      }\n" +
+               "    }\n" +
+               "    $cur = $next\n" +
+               "  } else {\n" +
+               "    $all = $data\n" +
+               "    $cur = $null\n" +
+               "  }\n" +
+               "  $page++\n" +
+               "  Start-Sleep -Milliseconds 50\n" +
+               "}\n" +
+               "if ($all -is [array] -and $null -ne $count) {\n" +
+               "  $payload = @{ count = $count; results = @($all) }\n" +
+               "} elseif ($all -is [array]) {\n" +
+               "  $payload = @($all)\n" +
+               "} else {\n" +
+               "  $payload = $all\n" +
+               "}\n" +
+               "$json = if ($payload -is [string]) { $payload } else { $payload | ConvertTo-Json -Depth 10 }\n" +
+               metaCmd +
+               "Add-Content -Path $Out -Value $json -Encoding UTF8\n" +
+               "Write-Output \"WROTE $Out $($all.Count)\"\n";
     }
 
     public string MetadataLineForNow() => $"FETCHED_AT: {DateTime.Now:yyyy-MM-dd}";
@@ -258,7 +491,9 @@ public class ScraperEnvironmentService
             _ => ".txt"
         };
         var scriptPath = Path.Combine(workDir, "weaver_scraper_run" + ext);
-        var script = GenerateScript(toolchain.Value, url, target, metadataLine);
+        // A ?limit=/offset= URL (e.g. the full-Pokedex benchmark) gets the paginating template
+        // that loops over pages; a plain URL keeps the single-fetch template.
+        var script = GenerateScript(toolchain.Value, url, target, metadataLine, ShouldPaginate(url));
         try
         {
             var parentDir = Path.GetDirectoryName(target);

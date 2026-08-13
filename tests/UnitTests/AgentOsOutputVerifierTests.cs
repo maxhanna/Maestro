@@ -390,6 +390,9 @@ public class AgentOsOutputVerifierTests
             Assert.Contains("AI research breakthroughs latest", content);
             Assert.Contains("### WEB RESULTS", content);
             Assert.Contains("Task: search the web and write", content);
+            // The fresh-file header must carry the demanded freshness line (the data-fetch
+            // benchmarks require a literal "FETCHED_AT: YYYY-MM-DD" capture).
+            Assert.Matches(@"FETCHED_AT:\s*\d{4}-\d{2}-\d{2}", content);
         }
         finally
         {
@@ -577,6 +580,127 @@ public class AgentOsOutputVerifierTests
         {
             try { Directory.Delete(dir, true); } catch { }
         }
+    }
+
+    // ── List-shaped JSON → CSV dump ─────────────────────────────────────────────
+
+    [Fact]
+    public void AutoDump_CsvDemand_ListShapedJson_WritesTypedRowsWithDerivedId()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver_osv_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var demand = new AgentOsOutputVerifier.OsOutputDemand("repo", dir, "pokemon_data.csv");
+            var results = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "_web_fetch",
+                    ["status"] = "done",
+                    ["url"] = "https://pokeapi.co/api/v2/pokemon?limit=1025",
+                    ["output"] = "{\"count\":1025,\"results\":[{\"name\":\"bulbasaur\",\"url\":\"https://pokeapi.co/api/v2/pokemon/1/\"},{\"name\":\"pikachu\",\"url\":\"https://pokeapi.co/api/v2/pokemon/25/\"}]}"
+                }
+            };
+            var (dumped, path, error) = AgentOsOutputVerifier.TryAutoDumpWebResults("dummy", demand, results);
+            Assert.True(dumped, error);
+            var content = File.ReadAllText(path!, Encoding.UTF8);
+            Assert.Contains("FETCHED_AT:", content);
+            Assert.Contains("id,name,url", content);       // header with the derived id first
+            Assert.Contains("1,bulbasaur", content);       // derived id + name row
+            Assert.Contains("25,pikachu", content);
+            Assert.DoesNotContain("### WEB RESULTS", content); // pure CSV, not a sectioned dump
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void AutoDump_CsvDemand_HttpPrefixedJson_WritesTypedRowsNotSectionedDump()
+    {
+        // Regression: WebFetchAsync prefixes its body with "HTTP 200\n", which used to
+        // break JsonDocument.Parse and silently drop the CSV transform back to the
+        // sectioned dump ("# Weaver web results" + raw JSON) — the benchmark-16 mess.
+        var dir = Path.Combine(Path.GetTempPath(), "weaver_osv_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var demand = new AgentOsOutputVerifier.OsOutputDemand("repo", dir, "pokemon_data.csv");
+            var results = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "_web_fetch",
+                    ["status"] = "done",
+                    ["url"] = "https://pokeapi.co/api/v2/pokemon?limit=1025",
+                    ["output"] = "HTTP 200\n{\"count\":1351,\"next\":\"https://pokeapi.co/api/v2/pokemon?offset=1025&limit=326\",\"previous\":null,\"results\":[{\"name\":\"bulbasaur\",\"url\":\"https://pokeapi.co/api/v2/pokemon/1/\"},{\"name\":\"pikachu\",\"url\":\"https://pokeapi.co/api/v2/pokemon/25/\"},{\"name\":\"lucario\",\"url\":\"https://pokeapi.co/api/v2/pokemon/448/\"}]}"
+                }
+            };
+            var (dumped, path, error) = AgentOsOutputVerifier.TryAutoDumpWebResults("dummy", demand, results);
+            Assert.True(dumped, error);
+            var content = File.ReadAllText(path!, Encoding.UTF8);
+            Assert.Contains("FETCHED_AT:", content);
+            Assert.Contains("id,name,url", content);   // header with the derived id first
+            Assert.Contains("1,bulbasaur", content);   // derived id + name row
+            Assert.Contains("448,lucario", content);
+            Assert.DoesNotContain("### WEB RESULTS", content);  // not the sectioned dump
+            Assert.DoesNotContain("HTTP 200", content);         // status line stripped
+            Assert.DoesNotContain("Task:", content);            // no dump header
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void AutoDump_CsvDemand_TopLevelArray_WritesTypedRows()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver_osv_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var demand = new AgentOsOutputVerifier.OsOutputDemand("repo", dir, "rows.csv");
+            var results = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "_web_fetch",
+                    ["status"] = "done",
+                    ["output"] = "[{\"id\":1,\"name\":\"alpha\"},{\"id\":2,\"name\":\"beta\"}]"
+                }
+            };
+            var (dumped, path, error) = AgentOsOutputVerifier.TryAutoDumpWebResults("dummy", demand, results);
+            Assert.True(dumped, error);
+            var content = File.ReadAllText(path!, Encoding.UTF8);
+            Assert.Contains("id,name", content);
+            Assert.Contains("1,alpha", content);
+            Assert.Contains("2,beta", content);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void AutoDump_CsvDemand_ScalarObject_FallsBackToSectionedDump()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver_osv_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var demand = new AgentOsOutputVerifier.OsOutputDemand("repo", dir, "data.csv");
+            var results = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "_web_fetch",
+                    ["status"] = "done",
+                    ["output"] = "{\"title\":\"AlphaFold 3 predicts protein structures with atom-level accuracy\",\"body\":\"A survey of recent AI research breakthroughs across the field.\"}"
+                }
+            };
+            var (dumped, path, error) = AgentOsOutputVerifier.TryAutoDumpWebResults("search the web and write", demand, results);
+            Assert.True(dumped, error);
+            var content = File.ReadAllText(path!, Encoding.UTF8);
+            // A scalar object is not list-shaped → the sectioned dump is kept.
+            Assert.Contains("### WEB RESULTS", content);
+            Assert.Contains("AlphaFold 3", content);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
     private static AgentOsOutputVerifier.OsOutputDemand NewDemand(string dir)

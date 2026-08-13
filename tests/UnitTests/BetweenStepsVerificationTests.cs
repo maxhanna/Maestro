@@ -258,8 +258,102 @@ public class BetweenStepsVerificationTests
         Assert.Contains("failed", reason);
     }
 
+    /// <summary>
+    /// The dump-task short-circuit: a task that demands fetched web data be written into a
+    /// file (not a script) whose demanded file ALREADY exists with real content on disk is
+    /// complete DETERMINISTICALLY — no LLM assessment, so the fetched data never round-trips
+    /// through the completion LLM (the "needs a python parser to generate CSV rows" drift).
+    /// </summary>
+    [Fact]
+    public async Task AssessCompletion_DumpTaskFileAlreadyWritten_CompletesDeterministically()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "weaver_dump_" + Guid.NewGuid().ToString("N"));
+        var dir = Path.Combine(root, "benchmark_test_16");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "pokemon_data.csv"), "id,name\n1,bulbasaur\n");
+            var prompt = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. Fetch the live Pokemon data from PokeAPI and write the data into benchmark_test_16/pokemon_data.csv.";
+            var executedSteps = new List<object>
+            {
+                new Dictionary<string, object?> { ["type"] = "_web_fetch", ["status"] = "done", ["url"] = "https://pokeapi.co/api/v2/pokemon" }
+            };
+            var (isComplete, reason) = await InvokeAssessCompletionWithPrompt(executedSteps, root, prompt);
+            Assert.True(isComplete);
+            Assert.Contains("dump task", reason, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
+    /// <summary>IsDumpTask: web need + a demanded output file + no script request = a dump task.</summary>
+    [Fact]
+    public void IsDumpTask_WebFileDemandNoScript_True()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "weaver_dumptask_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            Assert.True(InvokeIsDumpTask(
+                "Fetch the live Pokemon data from PokeAPI and write the data into benchmark_test_16/pokemon_data.csv.", root));
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
+    /// <summary>
+    /// IsDumpTask: the news-article dump prompt ("fetch a recent AI news article … to a desktop
+    /// text file") carries none of the literal WebNeedHints words (no "latest"/"current"/
+    /// "fetch the"), so it must still classify as a dump via the news-shaped-prompt detection.
+    /// This is the field failure where the task did web_search → web_fetch of a bot-walled site
+    /// instead of the RSS digest + straight-to-file dump.
+    /// </summary>
+    [Fact]
+    public void IsDumpTask_NewsArticleDesktopDump_True()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "weaver_dumptask_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            Assert.True(InvokeIsDumpTask(
+                "Fetch a recent AI news article and create a text file on the desktop and dump article the data in there.", root));
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
+    /// <summary>IsDumpTask: a script/program request is a BUILD task, not a dump — normal steps continue.</summary>
+    [Fact]
+    public void IsDumpTask_ScriptRequest_False()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "weaver_dumptask_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            Assert.False(InvokeIsDumpTask(
+                "Write a python script that fetches the live Pokemon data and writes benchmark_test_16/pokemon_data.csv.", root));
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
+    /// <summary>IsDumpTask: no demanded output file (pure search) is not a dump task.</summary>
+    [Fact]
+    public void IsDumpTask_NoFileDemand_False()
+    {
+        Assert.False(InvokeIsDumpTask("Search the web for recent AI breakthroughs.", Path.GetTempPath()));
+    }
+
+    private static bool InvokeIsDumpTask(string prompt, string projectRoot)
+    {
+        var method = typeof(AgentController).GetMethod(
+            "IsDumpTask", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("IsDumpTask not found");
+        return (bool)(method.Invoke(null, new object?[] { prompt, projectRoot }) ?? false);
+    }
+
     private static async Task<(bool isComplete, string reason)> InvokeAssessCompletion(
         List<object> executedSteps, string projectRoot)
+        => await InvokeAssessCompletionWithPrompt(executedSteps, projectRoot, "Make the button work");
+
+    private static async Task<(bool isComplete, string reason)> InvokeAssessCompletionWithPrompt(
+        List<object> executedSteps, string projectRoot, string prompt)
     {
         var controller = RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
         var method = typeof(AgentController).GetMethod(
@@ -269,7 +363,7 @@ public class BetweenStepsVerificationTests
         var task = (Task<(bool, string)>)method.Invoke(controller,
             new object?[]
             {
-                "Make the button work", executedSteps, projectRoot,
+                prompt, executedSteps, projectRoot,
                 CancellationToken.None, new AgentPlan(), new List<string>(),
                 /* atomicStepEstimate */ null,
                 /* steeringContext */ null

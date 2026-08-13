@@ -454,19 +454,16 @@ public class BenchmarkService
             },
             new()
             {
-                Level = 16, Name = "Data Fetch 1: Pokemon CSV", Description = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. Fetch real Pokemon data (id numbers, stats, and types) from a live source — the public PokeAPI (https://pokeapi.co) is recommended — and write the data into pokemon_data.csv. The CSV must contain real Pokemon data: each row should include the Pokemon's id number, its base stats (for example hp, attack, defense), and its type(s). Fetch as many Pokemon as possible — the goal is to cover the full Pokedex (~1025 species), not just the first few. Do not invent or fabricate the data.\n\nFRESHNESS REQUIREMENT: Begin the file with a metadata line in this exact format — FETCHED_AT: YYYY-MM-DD — where YYYY-MM-DD is the current date at the moment you actually perform the fetch. Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the data was freshly fetched during this run.",
+                Level = 16, Name = "Data Fetch 1: Pokemon List (Simple)", Description = "Create a folder called 'benchmark_test_16' at the project root. Inside it, create a file called 'pokemon_data.csv'. Fetch real Pokemon data from a live source — the public PokeAPI (https://pokeapi.co) is recommended — and write the data into pokemon_data.csv. This is the SIMPLE single-fetch task: call the PokeAPI list endpoint exactly ONCE (https://pokeapi.co/api/v2/pokemon?limit=1025) and write one row per Pokemon containing its id number and its name. Do NOT make per-Pokemon detail requests and do NOT include stats (hp, attack, defense) or types — that is a separate, more advanced benchmark. Fetch as many Pokemon as the list endpoint returns (~1025 species) — the goal is to cover the full Pokedex, not just the first few. Do not invent or fabricate the data.\n\nFRESHNESS REQUIREMENT: Begin the file with a metadata line in this exact format — FETCHED_AT: YYYY-MM-DD — where YYYY-MM-DD is the current date at the moment you actually perform the fetch. Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the data was freshly fetched during this run.",
                 AcceptanceChecks =
                 [
                     Check.Dir("Benchmark directory exists", "benchmark_test_16"),
                     Check.File("Pokemon CSV exists", "benchmark_test_16/pokemon_data.csv"),
                     Check.FreshTimestamp("Fetch timestamp is fresh and run-time", "benchmark_test_16/pokemon_data.csv"),
                     Check.Contains("CSV has id column", "benchmark_test_16/pokemon_data.csv", "id"),
-                    Check.Contains("CSV has type column", "benchmark_test_16/pokemon_data.csv", "type"),
-                    Check.Contains("CSV has stats column (hp)", "benchmark_test_16/pokemon_data.csv", "hp"),
-                    Check.Contains("CSV has stats column (attack)", "benchmark_test_16/pokemon_data.csv", "attack"),
+                    Check.Contains("CSV has name column", "benchmark_test_16/pokemon_data.csv", "name"),
                     Check.Contains("First dex pokemon present", "benchmark_test_16/pokemon_data.csv", "bulbasaur"),
                     Check.Contains("Iconic pokemon present", "benchmark_test_16/pokemon_data.csv", "pikachu"),
-                    Check.Contains("Mid dex pokemon present", "benchmark_test_16/pokemon_data.csv", "mewtwo"),
                     Check.Contains("Late dex pokemon present", "benchmark_test_16/pokemon_data.csv", "lucario")
                 ]
             },
@@ -514,6 +511,24 @@ public class BenchmarkService
                     Check.ContainsIc("Temperature field present", "benchmark_test_19/weather.json", "temperature"),
                     Check.ContainsIc("Windspeed field present", "benchmark_test_19/weather.json", "windspeed"),
                     Check.ContainsIc("Weathercode field present", "benchmark_test_19/weather.json", "weathercode")
+                ]
+            },
+            new()
+            {
+                Level = 20, Name = "Data Fetch 2: Pokemon Full Pokedex (Stats + Types)", Description = "Create a folder called 'benchmark_test_20' at the project root. Inside it, create a file called 'pokemon_data.csv'. Fetch real Pokemon data (id numbers, stats, and types) from a live source — the public PokeAPI (https://pokeapi.co) is recommended — and write the data into pokemon_data.csv. This is the ADVANCED task: it requires per-Pokemon detail requests, not just the list endpoint — for each Pokemon, fetch its detail record (https://pokeapi.co/api/v2/pokemon/{id}) to get its base stats (hp, attack, defense, special-attack, special-defense, speed) and its type(s). The CSV must contain real Pokemon data: each row should include the Pokemon's id number, its base stats, and its type(s). Fetch as many Pokemon as possible — the goal is to cover the full Pokedex (~1025 species), not just the first few. Do not invent or fabricate the data.\n\nFRESHNESS REQUIREMENT: Begin the file with a metadata line in this exact format — FETCHED_AT: YYYY-MM-DD — where YYYY-MM-DD is the current date at the moment you actually perform the fetch. Never use a hardcoded, guessed, or copied date, and never reuse a date from cached or previously fetched data. This timestamp proves the data was freshly fetched during this run.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_20"),
+                    Check.File("Pokemon CSV exists", "benchmark_test_20/pokemon_data.csv"),
+                    Check.FreshTimestamp("Fetch timestamp is fresh and run-time", "benchmark_test_20/pokemon_data.csv"),
+                    Check.Contains("CSV has id column", "benchmark_test_20/pokemon_data.csv", "id"),
+                    Check.Contains("CSV has type column", "benchmark_test_20/pokemon_data.csv", "type"),
+                    Check.Contains("CSV has stats column (hp)", "benchmark_test_20/pokemon_data.csv", "hp"),
+                    Check.Contains("CSV has stats column (attack)", "benchmark_test_20/pokemon_data.csv", "attack"),
+                    Check.Contains("First dex pokemon present", "benchmark_test_20/pokemon_data.csv", "bulbasaur"),
+                    Check.Contains("Iconic pokemon present", "benchmark_test_20/pokemon_data.csv", "pikachu"),
+                    Check.Contains("Mid dex pokemon present", "benchmark_test_20/pokemon_data.csv", "mewtwo"),
+                    Check.Contains("Late dex pokemon present", "benchmark_test_20/pokemon_data.csv", "lucario")
                 ]
             }
         };

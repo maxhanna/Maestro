@@ -750,6 +750,18 @@ angular.module('kanbanApp')
                                                                     }
                                                                 }
                                                                 break;
+                                                            case 'taskKind':
+                                                                // Up-front dump-vs-build classification — surfaced live on the card as a
+                                                                // badge ('⤓ dump' / '🛠 build') and persisted to boarddata so it survives a
+                                                                // reload. A dump run short-circuits the completion assessment.
+                                                                if (parsed && parsed.cardId) {
+                                                                    var kindCard = vm.findCardById ? vm.findCardById(parsed.cardId) : null;
+                                                                    if (kindCard) {
+                                                                        kindCard._taskKind = parsed.taskKind || null;
+                                                                        if (vm.saveCards) vm.saveCards();
+                                                                    }
+                                                                }
+                                                                break;
                                                             case 'steerDelivered':
                                                                 // A live steer was injected into the planner — persisted as a card transcript
                                                                 // (_steers) so it survives a reload and shows what was injected at which turn.

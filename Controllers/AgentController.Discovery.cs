@@ -1353,6 +1353,12 @@ partial class AgentController
         _gracefulStop = false;
         var connectivityTask = CheckLlmConnectivity(projectRoot, emitSse, ct);
 
+        // Surface the up-front dump-vs-build classification on the card (a "dump" badge) so a
+        // run that will short-circuit deterministically is distinguishable from a script/build
+        // run — before any planning, matching the "is the prompt asking for a dump?" decision.
+        if (!string.IsNullOrWhiteSpace(cardId))
+            await PublishTaskKindAsync(cardId, ClassifyTaskKind(prompt, projectRoot), emitSse, ct);
+
         var lower = prompt.ToLowerInvariant();
         var mightBeBuildRepair = lower.Contains("build") || lower.Contains("compile") ||
                                  lower.Contains("error") || lower.Contains("warning");
@@ -1447,7 +1453,7 @@ partial class AgentController
         var hasFatalStepErrors = allSteps.OfType<Dictionary<string, object?>>()
             .Any(s => s.TryGetValue("status", out var status) && s.TryGetValue("type", out var type)
                 && status?.ToString() == "error"
-                && type?.ToString() is not ("list" or "_web_search" or "_web_fetch" or "web_search" or "web_fetch"));
+                && type?.ToString() is not ("list" or "_web_search" or "_web_fetch" or "web_search" or "web_fetch" or "scraper"));
         if (hasFatalStepErrors)
         {
             complete = false;

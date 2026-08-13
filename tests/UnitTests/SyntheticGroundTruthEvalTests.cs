@@ -1440,6 +1440,59 @@ public class SyntheticGroundTruthEvalTests : IDisposable
     }
 
     [Fact]
+    public async Task PostExecuteVerify_ExtraCsvColumn_CompletesWithNoConfirmedIssue()
+    {
+        // Regression for the benchmark-16 "extra url column" guard: the simple dump task asks
+        // for id + name, but the eager dump ALSO writes a 'url' column (the source of the
+        // derived id). The verifier used to flag that superset column as a defect and drive a
+        // corrective step to strip it. Now the verifier prompt explicitly declares extra data a
+        // non-issue — so feeding a CSV with the extra column through PostExecuteVerify must
+        // complete cleanly (no CONFIRMED issue). The scripted verifier follows the guidance;
+        // the prompt-content assertions prove the guidance (and the CSV with the extra column)
+        // actually reached the verifier, so this is a real lock and not a vacuous pass.
+        const string cardId = "gt-card-csv-extra";
+        await _boardData.SaveRawAsync(BoardWithCard(cardId, "doing"));
+
+        const string csvRel = "benchmark_test_16/pokemon_data.csv";
+        var csv = "FETCHED_AT: 2026-08-13\n" +
+                  "id,name,url\n" +
+                  "1,bulbasaur,https://pokeapi.co/api/v2/pokemon/1/\n" +
+                  "25,pikachu,https://pokeapi.co/api/v2/pokemon/25/\n";
+        Write(csvRel, csv);
+
+        var results = new List<object>
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "create", ["status"] = "created",
+                ["path"] = csvRel, ["newStringPreview"] = csv
+            }
+        };
+
+        var prompt = "Create a folder called 'benchmark_test_16' at the project root. " +
+                     "Inside it, create a file called 'pokemon_data.csv' containing each Pokemon's " +
+                     "id number and its name.";
+
+        // The scripted verifier behaves as the guidance instructs: the extra url column is fine.
+        _clientFactory.VerifierReply = () =>
+            "{\"complete\": true, \"reason\": \"id and name are present\", \"issues\": []}";
+
+        var (complete, _, confirmed, speculative, _) = await InvokePostExecuteVerify(prompt, results, cardId);
+
+        Assert.True(complete,
+            $"extra url column must not fail verification — calls=[{string.Join(",", _clientFactory.Calls)}]");
+        Assert.Empty(confirmed);
+        Assert.Empty(speculative);
+
+        // The guidance that makes this trustworthy reached the verifier, and the CSV — extra
+        // url column included — was actually shown in the prompt.
+        var verifierPrompt = Assert.Single(_clientFactory.VerifierUserPrompts);
+        Assert.Contains("EXTRA DATA IS NOT A DEFECT", verifierPrompt);
+        Assert.Contains("id,name,url", verifierPrompt);
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
     public async Task CleanPass_NoOsDemandAndNoEdits_PublishesNothing()
     {
         // When NO deterministic check ran (no edits, no OS demand), the ground-truth section

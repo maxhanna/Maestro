@@ -57,6 +57,119 @@ partial class AgentController
         return null;
     }
 
+    /// <summary>Applies a STRUCTURAL tabular edit (CSV/TSV/XLSX) via <see cref="TabularFileService"/>
+    /// and writes the file. Returns the next step index when the step was handled (done or
+    /// skipped), or null to fall through to the normal pipeline (only for text formats whose
+    /// operation was unrecognized — binary spreadsheets are always handled here to prevent
+    /// corruption).</summary>
+    private async Task<int?> ApplyTabularEditAsync(
+        PlanStep step, string relPath, string fullPath, string projectRoot, bool emitSse,
+        CancellationToken ct, List<object> allResults, int stepIndex, int planItemIndex, string? cardId)
+    {
+        var change = step.Change ?? "";
+        var isBinary = TabularFileService.IsSpreadsheetBinary(relPath);
+        string? reason;
+        string? oldText = null, newText = null;
+        byte[]? newBytes = null;
+        var applied = false;
+
+        if (isBinary)
+        {
+            byte[] bytes;
+            try { bytes = await System.IO.File.ReadAllBytesAsync(fullPath, ct); }
+            catch (Exception ex)
+            {
+                await EmitLog(emitSse, "warn", $"Could not read binary spreadsheet {relPath}: {ex.Message}", ct: ct);
+                return null;
+            }
+            applied = TabularFileService.TryEditXlsx(bytes, change, out newBytes, out reason);
+        }
+        else
+        {
+            var text = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            oldText = text;
+            applied = TabularFileService.TryEditDelimited(text, TabularFileService.DelimiterFor(relPath),
+                change, out newText, out reason);
+        }
+
+        if (!applied || reason == null)
+        {
+            if (isBinary)
+            {
+                // A binary spreadsheet with an unrecognized operation must NOT fall through
+                // to the text pipeline (it would corrupt the ZIP). Mark it skipped with a
+                // steering reason so verification can guide the agent toward a supported op.
+                await EmitLog(emitSse, "warn",
+                    $"Binary spreadsheet {relPath} — no recognized tabular operation for: {change}. " +
+                    "Supported: add/remove/rename column, add/delete row, set cell, replace value.", ct: ct);
+                var skip = new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex,
+                    ["type"] = "edit",
+                    ["status"] = "skipped",
+                    ["path"] = relPath,
+                    ["reason"] = "binary spreadsheet — unrecognized tabular operation",
+                    ["planItemIndex"] = planItemIndex
+                };
+                if (emitSse) await SendSse(Response, "step", skip, ct);
+                allResults.Add(skip);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
+                return stepIndex + 1;
+            }
+            return null; // text tabular file: fall through to the anchored text edit path
+        }
+
+        if (isBinary)
+        {
+            var existingBytes = await System.IO.File.ReadAllBytesAsync(fullPath, ct);
+            if (newBytes != null && !newBytes.SequenceEqual(existingBytes))
+                await System.IO.File.WriteAllBytesAsync(fullPath, newBytes, ct);
+            await EmitLog(emitSse, "success", $"🧮 Tabular edit on {relPath}: {reason}", ct: ct);
+            var r = new Dictionary<string, object?>();
+            PopulateEditResult(r, "modified", relPath, null, null, "");
+            r["index"] = stepIndex;
+            r["planItemIndex"] = planItemIndex;
+            r["reason"] = reason;
+            r["tabular"] = true;
+            if (emitSse) await SendSse(Response, "step", r, ct);
+            allResults.Add(r);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
+            return stepIndex + 1;
+        }
+
+        if (string.Equals(newText, oldText, StringComparison.Ordinal))
+        {
+            await EmitLog(emitSse, "info", $"✓ Already done (no-op): {relPath} — tabular edit produced no change", ct: ct);
+            var skip = new Dictionary<string, object?>
+            {
+                ["index"] = stepIndex,
+                ["type"] = "edit",
+                ["status"] = "skipped",
+                ["path"] = relPath,
+                ["reason"] = "already done",
+                ["planItemIndex"] = planItemIndex
+            };
+            if (emitSse) await SendSse(Response, "step", skip, ct);
+            allResults.Add(skip);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
+            return stepIndex + 1;
+        }
+
+        await System.IO.File.WriteAllTextAsync(fullPath, newText!, Encoding.UTF8, ct);
+        await EmitLog(emitSse, "success", $"🧮 Tabular edit on {relPath}: {reason}", ct: ct);
+        var res = new Dictionary<string, object?>();
+        PopulateEditResult(res, "modified", relPath, oldText, newText, newText!);
+        res["index"] = stepIndex;
+        res["planItemIndex"] = planItemIndex;
+        res["reason"] = reason;
+        res["tabular"] = true;
+        if (emitSse) await SendSse(Response, "step", res, ct);
+        allResults.Add(res);
+        await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct, projectRoot: projectRoot);
+        try { _fileHints.LearnFromAppliedEdit(projectRoot, fullPath, newText!); } catch { }
+        return stepIndex + 1;
+    }
+
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -116,6 +229,19 @@ partial class AgentController
         string? stepExtraStepFile = relPath;
         var createIdx = await TryCreateFileAsync(step, projectRoot, emitSse, ct, allResults, stepIndex, planItemIndex, cardId, relPath, fullPath);
         if (createIdx != null) return createIdx.Value;
+        // ── TABULAR DATA FAST-PATH ────────────────────────────────────────────────
+        // CSV/TSV/XLSX files are edited STRUCTURALLY (parse → operation → serialize),
+        // never through the text-replace pipeline, which corrupts RFC-4180 quoting (and
+        // destroys an .xlsx ZIP outright). A recognized tabular operation is applied here
+        // deterministically — zero LLM. For .csv/.tsv an UNRECOGNIZED operation falls
+        // through to the normal anchored text path (still safe); .xlsx/.xls are binary and
+        // are handled here exclusively so a text read-modify-write can never corrupt them.
+        if (TabularFileService.IsTabularFile(relPath) && System.IO.File.Exists(fullPath))
+        {
+            var tabIdx = await ApplyTabularEditAsync(step, relPath, fullPath, projectRoot, emitSse, ct,
+                allResults, stepIndex, planItemIndex, cardId);
+            if (tabIdx != null) return tabIdx.Value;
+        }
         var cfg8 = await LoadConfigAsync();
         var attemptScores = new List<(int attempt, int score, string reason, string failedNew)>();
         var bestScore = 0;

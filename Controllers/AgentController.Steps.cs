@@ -670,6 +670,21 @@ partial class AgentController
             .GroupBy(s => s.GetValueOrDefault("path")?.ToString() ?? Guid.NewGuid().ToString())
             .Select(g => g.Last())
             .ToList();
+        // DETERMINISTIC DUMP SHORT-CIRCUIT — a "dump" task (web data demanded into a file,
+        // not a script) whose demanded file was ALREADY written with meaningful content by the
+        // eager auto-dump is satisfied: return complete WITHOUT the LLM. The fetched data must
+        // never round-trip through the completion assessment (the real assessor said "needs a
+        // Python parser to generate CSV rows" for an already-written file and forced the
+        // planner to re-emit the whole dataset inline). IsOsOutputWritten re-verifies the file
+        // ON DISK, so a failed/empty dump still falls through to the real assessment.
+        var resultDicts = executedSteps.OfType<Dictionary<string, object?>>().ToList();
+        if (IsDumpTask(prompt, projectRoot) &&
+            AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out var dumpDemand) &&
+            AgentOsOutputVerifier.IsOsOutputWritten(dumpDemand, resultDicts))
+        {
+            return (true,
+                "dump task — the demanded output file was already written with the fetched data by the deterministic web-step dump");
+        }
         if (editSteps.Count == 0 && webSteps.Count == 0) return (true, "No edit steps — command-only task");
         var failed = editSteps.Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "skipped")).ToList();
         if (failed.Count > 0)
@@ -806,6 +821,7 @@ user did not ask for. Check for:
 4. Check files in ""Unmodified attached files"" ONLY against the explicit request — mark incomplete only if the user's request clearly required changing them.
 5. A newly added CSS rule IS a valid way to style existing markup — do NOT require adding classes or attributes to the HTML when a selector already targets the element (e.g. '.titleCell > div:last-child' targets the URL div without touching the HTML). CSS-only changes fully satisfy styling tasks; the OLD→NEW diffs above show exactly what was added.
 A task is complete when the explicit request is satisfied, even if you can imagine further improvements. When in doubt, mark complete=true.
+PRODUCING MORE THAN REQUESTED IS NOT A DEFECT: extra CSV columns, extra fields, or extra data the task did not explicitly ask for are a NON-ISSUE — do NOT flag them, do NOT mark incomplete, and do NOT plan a corrective step for them. Only MISSING explicitly-requested data/columns is a defect.
 A WEB-ONLY run: judge completion against the WEB STEP RESULTS above and the user's request. If the task demanded an OUTPUT (e.g. write the gathered data to a file on disk), that output must have been produced — mark incomplete if the demanded write has not happened yet, even though the web steps themselves succeeded.
 Respond with JSON only:
 ```json
@@ -815,7 +831,7 @@ Respond with JSON only:
   ""issues"": [""description of each bug or remaining work""]
 }
 ```");
-        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, and syntax mistakes that would break the requested change. Judge completion ONLY against what the user explicitly requested — never invent new requirements, features, or scope the user did not ask for. When the explicit request is met, mark complete=true even if further improvements are imaginable. Output ONLY valid JSON in the format specified.";
+        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, and syntax mistakes that would break the requested change. Judge completion ONLY against what the user explicitly requested — never invent new requirements, features, or scope the user did not ask for. When the explicit request is met, mark complete=true even if further improvements are imaginable. Extra data or columns beyond the explicit request are never a defect — only MISSING requested content fails completion. Output ONLY valid JSON in the format specified.";
         // Use the configurable LLM timeout (not a hard 30s cap): on slow local models a 30s
         // deadline turns a healthy completion assessment into a fake "timed out" verdict,
         // which then forces the interleaved loop to plan a redundant follow-up step.

@@ -190,6 +190,7 @@ public sealed class NewsService
     private const int MaxSnippetChars = 1500;
     private const int MaxArticleChars = 6000;
     private const int MaxDigestChars = 25000;
+    private const int MaxFullArticleChars = 50000;
     private const int BatchSnippetChars = 400;
     private const int BatchMaxPromptChars = 12000;
     private const int BatchMaxTokens = 900;
@@ -238,42 +239,6 @@ public sealed class NewsService
             : "Custom Feed";
         return new NewsSource(name, url.Trim(), FeedType.Rss, Array.Empty<string>());
     }
-
-    /// <summary>
-    /// The "news marker": true for news-y phrasing, false for generic web searches. Three rules:
-    /// (A) a strong news word outright (news/headline/breaking/trending/top stories/front page);
-    /// (B) a recency word (latest/today's/fresh) + a topic + a news noun (stories/articles/
-    /// headlines/updates/events) — the topic list spans AI/tech, business, sports, food,
-    /// entertainment, gaming, health, climate, politics, local, … so "latest food news" routes;
-    /// (C) a topic + a news noun + a persist intent (write/save/paste/… to a file/desktop/
-    /// document) — catches the exact failure class the digest was built for: "Search the web for
-    /// an interesting and relevant AI article and write the data into a text file on my desktop"
-    /// has a topic and "article" but NO recency word, so rules A/B both miss it. The topic + noun
-    /// requirement is what keeps "release notes", "weather", "pricing" and bare research prompts
-    /// ("recent AI breakthroughs … verify each result") on the plain search path.
-    /// </summary>
-    public static bool LooksLikeNewsQuery(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return false;
-        var t = " " + text.ToLowerInvariant() + " ";
-        if (Regex.IsMatch(t, @"\b(news|headlines?|breaking|trending|top stories|front[- ]page)\b")) return true;
-        if (Regex.IsMatch(t, @"\b(latest|today's|todays|fresh)\b") &&
-            Regex.IsMatch(t, @"\b(" + MarkerTopics + @")\b") &&
-            Regex.IsMatch(t, @"\b(stories?|articles?|headlines?|updates?|events?)\b"))
-            return true;
-        if (Regex.IsMatch(t, @"\b(" + MarkerTopics + @")\b") &&
-            Regex.IsMatch(t, @"\b(stories?|articles?|headlines?|updates?|events?)\b") &&
-            Regex.IsMatch(t, @"\b(write|save|paste|dump|put|create|copy|fetch|insert)\b.{0,60}\b(file|desktop|document|notes?\.md)\b"))
-            return true;
-        return false;
-    }
-
-    private const string MarkerTopics =
-        @"ai|a\.i\.|artificial intelligence|machine learning|tech|technology|startups?|crypto|blockchain|" +
-        @"security|software|gadgets?|science|research|papers?|business|finance|economy|markets?|stocks?|" +
-        @"sports?|football|soccer|hockey|nba|nfl|food|cooking|recipes?|restaurants?|entertainment|movies?|" +
-        @"films?|tv|television|music|gaming|video games|health|medical|medicine|climate|environment|" +
-        @"politics|elections?|government|local|city|travel|fashion|education|real estate";
 
     /// <summary>
     /// Fetches and assembles the fresh-news digest. The full PROMPT is turned into a news plan
@@ -327,6 +292,38 @@ public sealed class NewsService
             SnapshotLlmStats();
             return $"# News — {DateTime.Now:yyyy-MM-dd} — \"{query ?? prompt}\"\nNews fetch failed: {ex.Message}\n";
         }
+    }
+
+    /// <summary>
+    /// Fetches ONE article URL and returns its extracted full text (≤ MaxFullArticleChars) —
+    /// the whole article body, NOT the 1-2 sentence digest summary. Used by the eager dump for
+    /// a "dump the article" news task so the file carries the complete, untruncated article
+    /// instead of only the digest summaries. Returns null on any failure (non-http(s) URL,
+    /// fetch error, or no extractable article text).
+    /// </summary>
+    public async Task<string?> FetchFullArticleAsync(string url, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != "http" && uri.Scheme != "https")) return null;
+        try
+        {
+            var html = await GetStringAsync(uri.ToString(), ct);
+            var text = ExtractArticleText(html);
+            return text.Length >= 80 ? Cap(text, MaxFullArticleChars) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Extracts the first "Source: &lt;url&gt;" line from a news digest — the top
+    /// item's article URL, used to fetch the full article for a dump task.</summary>
+    internal static string? FirstArticleUrl(string? digest)
+    {
+        if (string.IsNullOrWhiteSpace(digest)) return null;
+        var m = Regex.Match(digest, @"(?im)^Source:\s*(\S+)\s*$");
+        return m.Success ? m.Groups[1].Value.Trim() : null;
     }
 
     private void ResetLlmStats() { _llmCalls = _llmPromptTokens = _llmCompletionTokens = 0; LastLlmStats = null; }

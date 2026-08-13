@@ -110,7 +110,8 @@ public static class EditStrategyResolver
                 or ".json" or ".jsonc"
                 or ".yaml" or ".yml"
                 or ".xml" or ".svg"
-                or ".md" or ".txt")
+                or ".md" or ".txt"
+                or ".csv" or ".tsv")
             return new EditPlanDecision(EditStrategy.AnchoredEdit, null, null, null,
                 $"{ext} — anchored text edit (no AST)");
 
