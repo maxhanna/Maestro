@@ -75,6 +75,8 @@ angular.module('kanbanApp')
         var STANDOFF_SPOT = { x: 0.54, y: 0.86 };
         var SHOUT_SPOT_EDITOR = { x: 0.48, y: 0.86 };   
         var SHOUT_SPOT_VERIFIER = { x: 0.60, y: 0.86 }; 
+        var CONTEXT_FIGHT_SPOT_COMPLEXITY = { x: 0.50, y: 0.86 };
+        var CONTEXT_FIGHT_SPOT_EXPLORER = { x: 0.58, y: 0.86 };
         var BOARD_RECT = { x: 0.60, y: 0.05, w: 0.34, h: 0.20 };
         var MOOD_RECT = { x: 0.71, y: 0.28, w: 0.24, h: 0.18 };
         var TABLE_RECT = { x: 0.30, y: 0.56, w: 0.46, h: 0.10 };
@@ -88,6 +90,10 @@ angular.module('kanbanApp')
         var raf = null;
         var canvas = null;
         var ctx = null;
+        var _bgCache = null;   
+        var _bgCacheW = 0;     
+        var _bgCacheH = 0;     
+        var _bgCacheDpr = 0;   
         var lastTs = 0;
         var destroyed = false;
         var _lastRankIdx = -1;
@@ -656,6 +662,28 @@ angular.module('kanbanApp')
           "Estimate said {est}, code said {actual}. That's math, not opinion.",
           "Anytime you want a rematch, my desk is right across the room.",
           "I don't need to win the argument. The diff already did."
+        ];
+        var CONTEXT_FIGHT_COMPLEXITY = [
+          "Oh LOOK — {ctx} tokens of context because SOMEONE kept 'exploring' every file in the repo.",
+          "The context window is {pct}% full and I know EXACTLY whose explorations did this.",
+          "You read {files} files 'just to be safe' and now we're {pct}% of the way to the {max}-token ceiling.",
+          "'One more file, just to be sure.' That's what you said. {pct}% full now. HAPPY?",
+          "Explorer, the max is {max} tokens. We're at {ctx}. Do the math. I did. It's your fault."
+        ];
+        var CONTEXT_FIGHT_EXPLORER = [
+          "I read files so the PLANNER doesn't plan into a void. The void is cheaper.",
+          "If you'd stop demanding 'full context, please', we'd have room. But nooo.",
+          "You think {ctx} tokens is bad? YOU asked for the whole git history in discovery.",
+          "I explore so the agent doesn't hallucinate. You're welcome. {max} tokens of budget left to spare.",
+          "Context is a team sport. The Planner drafts the essays. I just deliver the files."
+        ];
+        var CONTEXT_FIGHT_COMPLEXITY_LAST = [
+          "Good. Stay. At. Your. Desk. The context thanks you.",
+          "One less 'quick peek' and maybe we'll fit under {max} tokens."
+        ];
+        var CONTEXT_FIGHT_EXPLORER_LAST = [
+          "Fine. I'll stop reading files. We'll see how the plan likes being made blind.",
+          "I'm going back to my desk. Enjoy your {ctx} tokens of file-less speculation."
         ];
         var GOSSIP_VERDICT_RIGHT = [
           "The reviewer had to tell the Complexity spider he was right. You could hear the grinding from here.",
@@ -1398,6 +1426,17 @@ angular.module('kanbanApp')
           if (/plan/.test(t)) return spiderFor('planner');
           if (/verif|review|check/.test(t)) return spiderFor('verifier') || spiderFor('reviewer');
           if (/edit|create|rename|sql|write|delete/.test(t)) return spiderFor('editor');
+          return null;
+        }
+        function roleForStreamingPhase(phase) {
+          // Maps the human-readable phase banner (vm.streamingPhase) to the spider
+          // whose job it is right now, so that spider can narrate the raw LLM stream.
+          var p = String(phase || '').toLowerCase();
+          if (/verif|review|repair|evaluat/.test(p)) return 'verifier';
+          if (/command|terminal|build|checkpoint|scraper|compile|\btest\b/.test(p)) return 'commander';
+          if (/edit|writ|creat|rename|sql|generat/.test(p)) return 'editor';
+          if (/explor|discover|scan|search/.test(p)) return 'explorer';
+          if (/plan|think|meta|strateg|step \d/.test(p)) return 'planner';
           return null;
         }
         function fireReaction(kind, text) {
@@ -3021,6 +3060,126 @@ angular.module('kanbanApp')
           g.reviewer.speech = ''; g.reviewer.speechTtl = 0;
           g.complexity.speech = ''; g.complexity.speechTtl = 0;
           scene.glare = null;
+        }
+        function fmtCtxFight(tpl, v) {
+          return tpl
+            .replace(/\{ctx\}/g, v.ctx)
+            .replace(/\{pct\}/g, v.pct)
+            .replace(/\{max\}/g, v.max)
+            .replace(/\{files\}/g, v.files);
+        }
+        function ctxFightVals() {
+          var maxChars = (typeof vm.maxContextChars === 'number' && vm.maxContextChars > 0) ? vm.maxContextChars : 22000;
+          var maxTokens = Math.max(1000, Math.round(maxChars / 4));
+          var size = vm.streamingContextSize || 0;
+          var pct = Math.round(Math.min(100, (size / maxTokens) * 100));
+          var exp = spiderFor('explorer');
+          return {
+            ctx: size.toLocaleString(),
+            pct: pct,
+            max: maxTokens.toLocaleString(),
+            files: exp ? (exp.steps || 0) : 0
+          };
+        }
+        function startContextFight(rec) {
+          if (!scene || scene.ctxFight || scene.ctxFightFired) return;
+          if (!rec && _replay) return;
+          var complexity = spiderFor('complexity');
+          var explorer = spiderFor('explorer');
+          if (!complexity || !explorer) return;
+          if (!rec) {
+            if (scene.writer || scene.queue.length) return;
+            if (scene.gossip || scene.watching || scene.standoff || scene.coolerTrip || scene.glare || scene.editorMeltdown || scene.shoutMatch || scene.verifierVictory || scene.gripeSession) return;
+          }
+          var v = ctxFightVals();
+          var lines;
+          if (rec && rec.lines) {
+            lines = rec.lines.map(function (l) {
+              return { spider: l.role === 'complexity' ? complexity : explorer, text: l.text, ttl: l.ttl };
+            });
+          } else {
+            lines = [
+              { spider: complexity, text: fmtCtxFight(pick(CONTEXT_FIGHT_COMPLEXITY), v), ttl: 4.0 },
+              { spider: explorer, text: fmtCtxFight(pick(CONTEXT_FIGHT_EXPLORER), v), ttl: 3.6 },
+              { spider: complexity, text: fmtCtxFight(pick(CONTEXT_FIGHT_COMPLEXITY_LAST), v), ttl: 3.2 },
+              { spider: explorer, text: fmtCtxFight(pick(CONTEXT_FIGHT_EXPLORER_LAST), v), ttl: 3.2 }
+            ];
+            recordEvent({
+              type: 'ctxfight',
+              lines: lines.map(function (l) { return { role: l.spider.role, text: l.text, ttl: l.ttl }; })
+            });
+          }
+          scene.ctxFightFired = true;
+          complexity.stomping = true;
+          complexity.state = 'walk';
+          complexity.target = { x: CONTEXT_FIGHT_SPOT_COMPLEXITY.x, y: CONTEXT_FIGHT_SPOT_COMPLEXITY.y };
+          complexity.speech = ''; complexity.speechTtl = 0;
+          explorer.state = 'walk';
+          explorer.target = { x: CONTEXT_FIGHT_SPOT_EXPLORER.x, y: CONTEXT_FIGHT_SPOT_EXPLORER.y };
+          explorer.speech = ''; explorer.speechTtl = 0;
+          scene.ctxFight = { phase: 'walk', ttl: 2.4, complexity: complexity, explorer: explorer, lines: lines, li: 0, lineTtl: 0 };
+          if (!_replay) {
+            vm.meetingSpeaker = '🤯 Complexity vs 🔍 Explorer — THE CONTEXT FIGHT!';
+            pushTicker('feud', '🤯 Complexity vs 🔍 Explorer — context ' + v.pct + '% of max (' + v.max + ' tokens)', true);
+            bumpComplexityRage(15);
+            $scope.$applyAsync();
+          }
+        }
+        function advanceContextFight(dt) {
+          if (!scene || !scene.ctxFight) return;
+          var f = scene.ctxFight;
+          if (f.phase === 'walk') {
+            f.ttl -= dt;
+            if (f.ttl <= 0) {
+              f.phase = 'glare';
+              f.beatTtl = 1.2;
+              f.complexity.glaringAt = f.explorer;
+              f.explorer.glaringAt = f.complexity;
+            }
+            return;
+          }
+          if (f.phase === 'glare') {
+            f.beatTtl -= dt;
+            if (f.beatTtl <= 0) { f.phase = 'talk'; f.li = 0; f.lineTtl = 0; }
+            return;
+          }
+          if (f.phase === 'talk') {
+            f.lineTtl -= dt;
+            if (f.lineTtl > 0) return;
+            if (f.li < f.lines.length) {
+              var ln = f.lines[f.li];
+              setSpeech(ln.spider, ln.text, ln.ttl, ln.spider.icon + ' ' + ln.spider.name + ' — the context fight');
+              logGossipEntry(ln.spider.icon + ' ' + ln.spider.name, ln.text);
+              if (!_replay) recordEvent({ type: 'chat', who: ln.spider.icon + ' ' + ln.spider.name, text: ln.text });
+              f.lineTtl = ln.ttl;
+              f.li++;
+            } else {
+              f.phase = 'leave';
+            }
+            return;
+          }
+          f.complexity.glaringAt = null;
+          f.explorer.glaringAt = null;
+          f.complexity.speech = ''; f.complexity.speechTtl = 0;
+          f.explorer.speech = ''; f.explorer.speechTtl = 0;
+          f.complexity.stomping = true;
+          f.complexity.state = 'walk';
+          f.complexity.target = { x: f.complexity.home.x, y: f.complexity.home.y };
+          f.explorer.state = 'walk';
+          f.explorer.target = { x: f.explorer.home.x, y: f.explorer.home.y };
+          scene.ctxFight = null;
+          scene.ctxFightCd = 60 + Math.random() * 40;
+          vm.meetingSpeaker = '🤯 the Complexity spider stomps back to its desk — context fight over';
+          $scope.$applyAsync();
+        }
+        function endContextFightNow() {
+          if (!scene || !scene.ctxFight) return;
+          var f = scene.ctxFight;
+          f.complexity.glaringAt = null;
+          f.explorer.glaringAt = null;
+          f.complexity.speech = ''; f.complexity.speechTtl = 0;
+          f.explorer.speech = ''; f.explorer.speechTtl = 0;
+          scene.ctxFight = null;
         }
         function buildShoutLines() {
           var lines = [];
@@ -4845,6 +5004,8 @@ angular.module('kanbanApp')
             scene.editorDrunk = 0; 
             scene.meltdownFired = false; 
             scene.shoutFired = false;    
+            scene.ctxFightFired = false; 
+            scene.ctxFight = null;       
             scene.jokeCd = 45;           
             scene.jokeFires = 0;
             scene.jokeReactT = 0;
@@ -4975,6 +5136,7 @@ angular.module('kanbanApp')
               else if (ev.type === 'meltdown') startEditorMeltdown(ev); 
               else if (ev.type === 'victory') startVerifierVictory(ev); 
               else if (ev.type === 'shout') startShoutMatch(ev); 
+              else if (ev.type === 'ctxfight') startContextFight(ev); 
               else if (ev.type === 'gripe') startGripeSession(ev); 
               else if (ev.type === 'meter') {
                 var _me = spiderFor('editor');
@@ -5174,24 +5336,48 @@ angular.module('kanbanApp')
             scene.writer.speechTtl = Math.max(scene.writer.speechTtl, 2);
           }
           if (scene.reactLockT > 0) scene.reactLockT -= dt;
-          if (!_replay && !scene.writer && !scene.watching && scene.reactLockT <= 0) {
+          if (!_replay) {
+            // Live LLM narration — the spider whose role matches the current
+            // streaming phase reads the raw LLM stream out loud, its bubble
+            // tracking the streamed text as it arrives (the planner narrates
+            // during planning, the editor during edits, etc). Runs even while
+            // a spider is writing to the board, so the plan phase reads live.
             var streaming = !!vm.streamingActive;
             var buf = vm.streamingTokenBuffer || '';
+            if (buf.length < (scene.lastStreamLen || 0)) scene.lastStreamLen = 0;
             var newStream = buf.length > (scene.lastStreamLen || 0);
-            if (streaming && buf.length > 30 && newStream) {
-              scene.streamReadCd = (scene.streamReadCd === undefined || scene.streamReadCd === null) ? 0 : scene.streamReadCd;
-              scene.streamReadCd -= dt;
-              if (scene.streamReadCd <= 0) {
-                var reader = spiderFor(scene.activeRole || 'planner') || randomSpider();
-                if (reader) {
-                  var tail = buf.length > 130 ? '…' + buf.slice(-130) : buf;
-                  setSpeech(reader, '💬 ' + tail, 2.2, reader.icon + ' ' + reader.name + ' — reading the stream');
-                  recordEvent({ type: 'stream', text: tail, role: reader.role });
+            if (streaming && buf.length > 24 && newStream) {
+              var narrRole = roleForStreamingPhase(vm.streamingPhase);
+              if (!narrRole) {
+                var _byStep = spiderForStepType(scene._lastStepType);
+                narrRole = _byStep ? _byStep.role : (scene.activeRole || 'planner');
+              }
+              var narrSpider = spiderFor(narrRole) || randomSpider();
+              if (narrSpider) {
+                var tail = buf.length > 130 ? '…' + buf.slice(-130) : buf;
+                if (scene.streamNarrator !== narrSpider) {
+                  scene.streamNarrator = narrSpider;
+                  scene.streamNarratorText = '';
+                  scene.narrCd = 0;
                 }
-                scene.streamReadCd = 1.1; 
+                scene.narrCd = (scene.narrCd === undefined || scene.narrCd === null) ? 0 : scene.narrCd;
+                scene.narrCd -= dt;
+                if (scene.streamNarratorText !== tail && scene.narrCd <= 0) {
+                  scene.streamNarratorText = tail;
+                  setSpeech(narrSpider, '💬 ' + tail, 2.6, narrSpider.icon + ' ' + narrSpider.name + ' — talking out loud');
+                  recordEvent({ type: 'stream', text: tail, role: narrSpider.role });
+                  scene.narrCd = 0.4;
+                }
+                // Keep the bubble alive while the stream keeps flowing.
+                narrSpider.speechTtl = Math.max(narrSpider.speechTtl || 0, 1.4);
               }
               scene.lastStreamLen = buf.length;
+            } else if (scene.streamNarrator) {
+              scene.streamNarrator = null;
+              scene.streamNarratorText = null;
             }
+          }
+          if (!_replay && !scene.writer && !scene.watching && scene.reactLockT <= 0) {
             scene.banterCd = (scene.banterCd === undefined || scene.banterCd === null) ? 2 : scene.banterCd;
             scene.banterCd -= dt;
             if (scene.banterCd <= 0 && !scene.gossip) {
@@ -5437,6 +5623,10 @@ angular.module('kanbanApp')
               advanceGlare(dt);
             }
           }
+          if (scene.ctxFight) {
+            if (scene.writer || scene.queue.length) endContextFightNow();
+            else advanceContextFight(dt);
+          }
           if (_replay) {
           } else if (scene.gossip) {
             if (scene.writer || scene.queue.length || vm.streamingActive) {
@@ -5510,6 +5700,17 @@ angular.module('kanbanApp')
           rr(mx + 3, my + 3, mw - 6, mh - 6, 4); ctx.fill();
           ctx.fillStyle = '#b9985f';
           rr(mx + 6, my + 6, mw - 12, mh - 12, 3); ctx.fill();
+          // pushpins in the corners
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          ctx.beginPath(); ctx.arc(mx + 4, my + 4, 2, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(mx + mw - 4, my + 4, 2, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(mx + 4, my + mh - 4, 2, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(mx + mw - 4, my + mh - 4, 2, 0, 6.283); ctx.fill();
+          ctx.fillStyle = '#e06c75';
+          ctx.beginPath(); ctx.arc(mx + 4, my + 3, 2, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(mx + mw - 4, my + 3, 2, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(mx + 4, my + mh - 5, 2, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(mx + mw - 4, my + mh - 5, 2, 0, 6.283); ctx.fill();
           var hot = [];
           GRUMP_ROLES.forEach(function (rk) {
             var hs = spiderFor(rk);
@@ -5576,7 +5777,9 @@ angular.module('kanbanApp')
           }
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
           var W = cw, H = ch;
-          drawRoom(W, H);
+          if (!_bgCache || _bgCacheW !== cw || _bgCacheH !== ch || _bgCacheDpr !== dpr) rebuildBgCache(dpr, cw, ch);
+          ctx.drawImage(_bgCache, 0, 0, cw, ch);
+          drawClockHands(W, H);
           drawDecorations(W, H);
           drawCooler(W, H);
           drawTable(W, H);
@@ -5584,9 +5787,11 @@ angular.module('kanbanApp')
           drawMoodBoard(W, H);
           drawDesks(W, H);
           drawSpiders(W, H);
+          drawDustMotes(W, H);
           drawSteam(W, H);
           drawSparkles(W, H);
           drawConfetti(W, H);
+          drawVignette(W, H);
         }
         function drawDecorations(W, H) {
           var season = currentSeason();
@@ -5786,37 +5991,407 @@ angular.module('kanbanApp')
           ctx.arcTo(x, y, x + w, y, r);
           ctx.closePath();
         }
-        function drawRoom(W, H) {
+        function drawDustMotes(W, H) {
+          var t = Date.now() / 1000;
+          ctx.fillStyle = '#cfe3ff';
+          for (var i = 0; i < 13; i++) {
+            var px = (i * 0.618 + Math.sin(t * 0.21 + i * 1.7) * 0.04 + 0.5) % 1;
+            var py = 0.04 + ((i * 0.372 + Math.cos(t * 0.17 + i * 2.3) * 0.035 + 0.5) % 1) * 0.5;
+            var tw = 0.5 + 0.5 * Math.sin(t * 0.9 + i * 2.7);
+            ctx.globalAlpha = 0.03 + tw * 0.09;
+            ctx.beginPath();
+            ctx.arc(px * W, py * H, 0.8 + tw * 0.8, 0, 6.283);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+        function drawVignette(W, H) {
+          var g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.42, W / 2, H / 2, Math.max(W, H) * 0.72);
+          g.addColorStop(0, 'rgba(0,0,0,0)');
+          g.addColorStop(1, 'rgba(0,0,0,0.30)');
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, W, H);
+        }
+        var CLOCK_CTR = { x: 0.46, y: 0.135 };
+        var CLOCK_R = 0.052;
+        function rebuildBgCache(dpr, cw, ch) {
+          if (!_bgCache) _bgCache = document.createElement('canvas');
+          _bgCache.width = Math.max(1, Math.round(cw * dpr));
+          _bgCache.height = Math.max(1, Math.round(ch * dpr));
+          _bgCacheW = cw; _bgCacheH = ch; _bgCacheDpr = dpr;
+          var cc = _bgCache.getContext('2d');
+          var prev = ctx;
+          ctx = cc;
+          try {
+            cc.setTransform(dpr, 0, 0, dpr, 0, 0);
+            drawRoomStatic(cw, ch);
+          } finally {
+            ctx = prev;
+          }
+        }
+        function drawRoomStatic(W, H) {
           var wallH = H * 0.52;
+          // Wall base
           var grad = ctx.createLinearGradient(0, 0, 0, wallH);
-          grad.addColorStop(0, '#101a30');
-          grad.addColorStop(1, '#16223c');
+          grad.addColorStop(0, '#0c1322');
+          grad.addColorStop(0.5, '#131f36');
+          grad.addColorStop(1, '#1a2a48');
           ctx.fillStyle = grad;
           ctx.fillRect(0, 0, W, wallH);
-          ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+          // Crown molding
+          ctx.fillStyle = '#0a101c';
+          ctx.fillRect(0, 0, W, Math.max(3, H * 0.012));
+          ctx.fillStyle = 'rgba(255,255,255,0.09)';
+          ctx.fillRect(0, Math.max(3, H * 0.012), W, 1);
+          // Subtle vertical wall seams
+          ctx.strokeStyle = 'rgba(255,255,255,0.03)';
           ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(0, wallH); ctx.lineTo(W, wallH); ctx.stroke();
+          for (var pi = 1; pi < 6; pi++) {
+            var pxx = W * (pi / 6);
+            ctx.beginPath(); ctx.moveTo(pxx, 0); ctx.lineTo(pxx, wallH); ctx.stroke();
+          }
+          // Wainscot band (lower wall)
+          var wsY = wallH - H * 0.11;
+          var wsG = ctx.createLinearGradient(0, wsY, 0, wallH);
+          wsG.addColorStop(0, '#16233c');
+          wsG.addColorStop(1, '#1d2e4e');
+          ctx.fillStyle = wsG;
+          ctx.fillRect(0, wsY, W, wallH - wsY);
+          ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+          for (var si = 1; si < 10; si++) {
+            var sx = W * (si / 10);
+            ctx.beginPath(); ctx.moveTo(sx, wsY); ctx.lineTo(sx, wallH); ctx.stroke();
+          }
+          ctx.fillStyle = 'rgba(255,255,255,0.10)';
+          ctx.fillRect(0, wsY, W, 1.5);
+          ctx.fillStyle = 'rgba(0,0,0,0.25)';
+          ctx.fillRect(0, wsY + 1.5, W, 2);
+          // Ceiling pendant lamp: cord, dome, warm glow
+          var lampCx = W * 0.5;
+          var lampGlow = ctx.createRadialGradient(lampCx, H * 0.015, 1, lampCx, H * 0.015, H * 0.09);
+          lampGlow.addColorStop(0, 'rgba(255,214,130,0.30)');
+          lampGlow.addColorStop(1, 'rgba(255,214,130,0)');
+          ctx.fillStyle = lampGlow;
+          ctx.fillRect(lampCx - H * 0.09, 0, H * 0.18, H * 0.12);
+          ctx.fillStyle = '#1b1f27';
+          ctx.fillRect(lampCx - 1.5, 0, 3, H * 0.02);
+          ctx.fillStyle = '#c9a05a';
+          ctx.beginPath();
+          ctx.moveTo(lampCx - H * 0.035, H * 0.018);
+          ctx.lineTo(lampCx + H * 0.035, H * 0.018);
+          ctx.lineTo(lampCx + H * 0.02, H * 0.05);
+          ctx.lineTo(lampCx - H * 0.02, H * 0.05);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = '#ffe9b0';
+          ctx.beginPath();
+          ctx.ellipse(lampCx, H * 0.055, H * 0.016, H * 0.006, 0, 0, 6.283);
+          ctx.fill();
+          // Window with a night view
+          var wx = W * 0.035, wy = H * 0.09, ww = W * 0.16, wh = H * 0.25;
+          var sky = ctx.createLinearGradient(wx, wy, wx, wy + wh);
+          sky.addColorStop(0, '#0a1e3c');
+          sky.addColorStop(1, '#122c50');
+          ctx.fillStyle = sky;
+          rr(wx, wy, ww, wh, 4); ctx.fill();
+          // Stars
+          ctx.fillStyle = 'rgba(255,255,255,0.8)';
+          for (var st = 0; st < 22; st++) {
+            var sxx = wx + ((st * 37) % 97) / 100 * ww;
+            var syy = wy + ((st * 53) % 83) / 100 * wh;
+            ctx.globalAlpha = 0.35 + ((st * 13) % 5) * 0.12;
+            ctx.beginPath(); ctx.arc(sxx, syy, (st % 3 === 0) ? 1.2 : 0.7, 0, 6.283); ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+          // Crescent moon
+          var mx = wx + ww * 0.24, my = wy + wh * 0.26, mr = Math.max(4, H * 0.02);
+          ctx.fillStyle = '#f4e9c1';
+          ctx.beginPath(); ctx.arc(mx, my, mr, 0, 6.283); ctx.fill();
+          ctx.fillStyle = sky;
+          ctx.beginPath(); ctx.arc(mx + mr * 0.42, my - mr * 0.22, mr * 0.82, 0, 6.283); ctx.fill();
+          // City skyline silhouette with tiny lit windows
+          var skyY = wy + wh * 0.62;
+          ctx.fillStyle = '#0a1626';
+          var blds = [0.05, 0.16, 0.24, 0.36, 0.44, 0.55, 0.63, 0.74, 0.82, 0.92];
+          for (var bi = 0; bi < blds.length; bi++) {
+            var bx = wx + ww * blds[bi];
+            var bwd = ww * (0.05 + (bi % 3) * 0.012);
+            var bht = wh * (0.14 + ((bi * 29) % 5) * 0.045);
+            ctx.fillRect(bx, skyY - bht, bwd, bht);
+            ctx.fillStyle = 'rgba(255,214,130,0.55)';
+            for (var wj = 0; wj < 3; wj++) {
+              for (var hk = 0; hk < 4; hk++) {
+                if ((bi + wj + hk) % 3 === 0) {
+                  ctx.fillRect(bx + 1 + wj * (bwd / 3.2), skyY - bht + 2 + hk * (bht / 4.6), 1, 1.6);
+                }
+              }
+            }
+            ctx.fillStyle = '#0a1626';
+          }
+          // Glass tint + diagonal reflections
+          ctx.fillStyle = 'rgba(140,190,255,0.10)';
+          rr(wx, wy, ww, wh, 4); ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(wx + ww * 0.08, wy + wh * 0.2); ctx.lineTo(wx + ww * 0.3, wy);
+          ctx.moveTo(wx + ww * 0.2, wy + wh * 0.62); ctx.lineTo(wx + ww * 0.5, wy + wh * 0.3);
+          ctx.moveTo(wx + ww * 0.45, wy + wh * 0.88); ctx.lineTo(wx + ww * 0.68, wy + wh * 0.6);
+          ctx.stroke();
+          // Frame + mullions
+          ctx.fillStyle = '#31415e';
+          rr(wx - 3, wy - 3, ww + 6, wh + 6, 6); ctx.fill();
+          ctx.fillStyle = '#3f5173';
+          rr(wx - 1.5, wy - 1.5, ww + 3, wh + 3, 5); ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
+          rr(wx - 3, wy - 3, ww + 6, wh + 6, 6); ctx.stroke();
+          ctx.strokeStyle = '#31415e';
+          ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(wx + ww / 2, wy - 3); ctx.lineTo(wx + ww / 2, wy + wh + 3); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(wx - 3, wy + wh / 2); ctx.lineTo(wx + ww + 3, wy + wh / 2); ctx.stroke();
+          // Window sill + tiny plant
+          ctx.fillStyle = '#24334f';
+          ctx.fillRect(wx - 8, wy + wh + 1, ww + 16, 5);
+          ctx.fillStyle = 'rgba(255,255,255,0.12)';
+          ctx.fillRect(wx - 8, wy + wh + 1, ww + 16, 1);
+          var potX = wx + ww * 0.72, potY = wy + wh + 1;
+          ctx.fillStyle = '#8a4a2e';
+          rr(potX - 4, potY - 7, 8, 8, 2); ctx.fill();
+          ctx.fillStyle = '#2e8b57';
+          for (var lf = 0; lf < 5; lf++) {
+            var lxx = potX + Math.cos(lf * 2.4) * 4;
+            var lyy = potY - 7 - Math.abs(Math.sin(lf * 2.4)) * 5 - 2;
+            ctx.beginPath();
+            ctx.ellipse(lxx, lyy, 3, 1.6, lf * 0.8, 0, 6.283);
+            ctx.fill();
+          }
+          // Curtain panel beside the window
+          var curX = wx - 4, curW = ww * 0.16;
+          var curG = ctx.createLinearGradient(curX - curW, wy, curX, wy + wh);
+          curG.addColorStop(0, '#274a63');
+          curG.addColorStop(0.5, '#1d3a52');
+          curG.addColorStop(1, '#152b3e');
+          ctx.fillStyle = curG;
+          rr(curX - curW, wy - 2, curW + 4, wh + 6, 3); ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (var fd = 0; fd < 3; fd++) {
+            ctx.moveTo(curX - curW + 2 + fd * 5, wy);
+            ctx.lineTo(curX - curW + 2 + fd * 5, wy + wh);
+          }
+          ctx.stroke();
+          // Wall clock face (hands drawn per-frame)
+          var cx = CLOCK_CTR.x * W, cy = CLOCK_CTR.y * H, cr = CLOCK_R * Math.min(W, H);
+          ctx.fillStyle = 'rgba(0,0,0,0.35)';
+          ctx.beginPath(); ctx.arc(cx + 2, cy + 3, cr, 0, 6.283); ctx.fill();
+          ctx.fillStyle = '#23304a';
+          ctx.beginPath(); ctx.arc(cx, cy, cr, 0, 6.283); ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.fillStyle = '#e8eef6';
+          ctx.beginPath(); ctx.arc(cx, cy, cr * 0.92, 0, 6.283); ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 1; ctx.stroke();
+          for (var tk = 0; tk < 12; tk++) {
+            var ta = tk / 12 * 6.283;
+            var outer = cr * 0.86, inner = (tk % 3 === 0) ? cr * 0.7 : cr * 0.78;
+            ctx.strokeStyle = tk % 3 === 0 ? '#2b3a55' : 'rgba(43,58,85,0.6)';
+            ctx.lineWidth = tk % 3 === 0 ? 2 : 1;
+            ctx.beginPath();
+            ctx.moveTo(cx + Math.cos(ta) * inner, cy + Math.sin(ta) * inner);
+            ctx.lineTo(cx + Math.cos(ta) * outer, cy + Math.sin(ta) * outer);
+            ctx.stroke();
+          }
+          ctx.fillStyle = '#2b3a55';
+          ctx.font = 'bold ' + Math.max(4, cr * 0.24) + 'px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          var NUMS = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+          for (var nk = 0; nk < 12; nk++) {
+            var na = (nk / 12) * 6.283 - 1.5708;
+            ctx.fillText(String(NUMS[nk]), cx + Math.cos(na) * cr * 0.74, cy + Math.sin(na) * cr * 0.74 + 0.5);
+          }
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'alphabetic';
+          // 'STAND UP' poster
+          var px2 = W * 0.245, py2 = H * 0.115, pw2 = W * 0.115, ph2 = H * 0.185;
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          rr(px2 + 2, py2 + 3, pw2, ph2, 4); ctx.fill();
+          ctx.fillStyle = '#1c2636';
+          rr(px2, py2, pw2, ph2, 4); ctx.fill();
+          ctx.fillStyle = '#f2ead6';
+          rr(px2 + 3, py2 + 3, pw2 - 6, ph2 - 6, 2); ctx.fill();
+          ctx.fillStyle = '#3a5a8c';
+          ctx.font = 'bold ' + Math.max(7, pw2 * 0.34) + 'px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('STAND', px2 + pw2 / 2, py2 + ph2 * 0.3);
+          ctx.fillText('UP', px2 + pw2 / 2, py2 + ph2 * 0.46);
+          var ax = px2 + pw2 / 2, ay = py2 + ph2 * 0.66;
+          ctx.strokeStyle = '#c25c4a';
+          ctx.lineWidth = Math.max(1.5, pw2 * 0.06);
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(ax, ay + ph2 * 0.14);
+          ctx.lineTo(ax, ay - ph2 * 0.06);
+          ctx.stroke();
+          ctx.fillStyle = '#c25c4a';
+          ctx.beginPath();
+          ctx.moveTo(ax, ay - ph2 * 0.12);
+          ctx.lineTo(ax - pw2 * 0.08, ay - ph2 * 0.02);
+          ctx.lineTo(ax + pw2 * 0.08, ay - ph2 * 0.02);
+          ctx.closePath(); ctx.fill();
+          ctx.fillStyle = 'rgba(120,140,170,0.8)';
+          ctx.font = Math.max(5, pw2 * 0.18) + 'px sans-serif';
+          ctx.fillText('EVERY · DAY', px2 + pw2 / 2, py2 + ph2 * 0.85);
+          ctx.textAlign = 'left';
+          // Framed web print
+          var nx = W * 0.525, ny = H * 0.10, nw = W * 0.065, nh = H * 0.155;
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          rr(nx + 2, ny + 3, nw, nh, 3); ctx.fill();
+          ctx.fillStyle = '#241f14';
+          rr(nx, ny, nw, nh, 3); ctx.fill();
+          ctx.fillStyle = '#efe6cf';
+          rr(nx + 2, ny + 2, nw - 4, nh - 4, 2); ctx.fill();
+          var wcx = nx + nw / 2, wcy = ny + nh * 0.5, wr = Math.min(nw, nh) * 0.36;
+          ctx.strokeStyle = 'rgba(90,70,40,0.7)';
+          ctx.lineWidth = 0.8;
+          for (var ri = 0; ri < 8; ri++) {
+            var ra = ri / 8 * 6.283;
+            ctx.beginPath();
+            ctx.moveTo(wcx, wcy);
+            ctx.lineTo(wcx + Math.cos(ra) * wr, wcy + Math.sin(ra) * wr);
+            ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(120,90,50,0.5)';
+          ctx.lineWidth = 0.7;
+          for (var rg2 = 1; rg2 <= 3; rg2++) {
+            ctx.beginPath();
+            ctx.arc(wcx, wcy, wr * rg2 / 3.4, 0, 6.283);
+            ctx.stroke();
+          }
+          // Cobweb in the top-right corner with a hanging spider
+          var cwX = W * 0.985, cwY = H * 0.03, cwR = H * 0.06;
+          ctx.strokeStyle = 'rgba(220,235,255,0.25)';
+          ctx.lineWidth = 1;
+          for (var cwi = 0; cwi < 5; cwi++) {
+            var ca = 3.1416 + (cwi / 4) * 1.35;
+            ctx.beginPath();
+            ctx.moveTo(cwX, cwY);
+            ctx.lineTo(cwX + Math.cos(ca) * cwR, cwY + Math.sin(ca) * cwR);
+            ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(220,235,255,0.18)';
+          for (var cwr = 1; cwr <= 3; cwr++) {
+            ctx.beginPath();
+            ctx.arc(cwX, cwY, cwR * cwr / 3.4, 3.1416, 3.1416 + 1.35, false);
+            ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(220,235,255,0.3)';
+          ctx.lineWidth = 0.7;
+          ctx.beginPath();
+          ctx.moveTo(cwX, cwY);
+          ctx.lineTo(cwX - cwR * 0.5, cwY + cwR * 1.15);
+          ctx.stroke();
+          var hsX = cwX - cwR * 0.5, hsY = cwY + cwR * 1.15, hsR = Math.max(1.5, H * 0.004);
+          ctx.fillStyle = '#0f1520';
+          ctx.beginPath(); ctx.arc(hsX, hsY, hsR, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(hsX, hsY + hsR * 1.3, hsR * 0.8, 0, 6.283); ctx.fill();
+          // Floor
           var fg = ctx.createLinearGradient(0, wallH, 0, H);
-          fg.addColorStop(0, '#22304e');
-          fg.addColorStop(1, '#0d1424');
+          fg.addColorStop(0, '#1c2940');
+          fg.addColorStop(0.35, '#152034');
+          fg.addColorStop(1, '#0a111f');
           ctx.fillStyle = fg;
           ctx.fillRect(0, wallH, W, H - wallH);
-          ctx.strokeStyle = 'rgba(255,255,255,0.035)';
+          // Baseboard
+          ctx.fillStyle = '#10182a';
+          ctx.fillRect(0, wallH, W, 5);
+          ctx.fillStyle = 'rgba(255,255,255,0.10)';
+          ctx.fillRect(0, wallH, W, 1.2);
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          ctx.fillRect(0, wallH + 4.2, W, 1);
+          // Wood floor planks with joints
+          ctx.strokeStyle = 'rgba(255,255,255,0.03)';
           ctx.lineWidth = 1;
-          for (var i = 1; i < 6; i++) {
-            var yy = wallH + (H - wallH) * (i / 6);
-            ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(W, yy); ctx.stroke();
+          for (var pl = 1; pl < 7; pl++) {
+            var ply = wallH + (H - wallH) * (pl / 7);
+            ctx.beginPath(); ctx.moveTo(0, ply); ctx.lineTo(W, ply); ctx.stroke();
           }
-          var wx = W * 0.04, wy = H * 0.10, ww = W * 0.16, wh = H * 0.26;
-          rr(wx, wy, ww, wh, 6); ctx.fillStyle = 'rgba(110,180,255,0.12)'; ctx.fill();
-          ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 3; ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(wx + ww / 2, wy); ctx.lineTo(wx + ww / 2, wy + wh); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(wx, wy + wh / 2); ctx.lineTo(wx + ww, wy + wh / 2); ctx.stroke();
-          var cx = W * 0.46, cy = H * 0.14, cr = H * 0.05;
-          ctx.beginPath(); ctx.arc(cx, cy, cr, 0, 6.283); ctx.fillStyle = '#e8e8e8'; ctx.fill();
-          ctx.strokeStyle = '#888'; ctx.lineWidth = 2; ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - cr * 0.6); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + cr * 0.5, cy); ctx.stroke();
+          ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+          for (var pj = 0; pj < 9; pj++) {
+            var jx = W * (0.08 + pj * 0.105 + ((pj * 53) % 7) * 0.004);
+            var jy0 = wallH + ((pj * 31) % 6) * ((H - wallH) / 7);
+            ctx.beginPath(); ctx.moveTo(jx, jy0); ctx.lineTo(jx, jy0 + (H - wallH) / 7); ctx.stroke();
+          }
+          // Rug under the table
+          var rgx = W * 0.21, rgy = H * 0.545, rgw = W * 0.58, rgh = H * 0.26;
+          ctx.fillStyle = 'rgba(0,0,0,0.28)';
+          rr(rgx + 3, rgy + 4, rgw, rgh, 14); ctx.fill();
+          var rgG = ctx.createLinearGradient(0, rgy, 0, rgy + rgh);
+          rgG.addColorStop(0, '#5d3f2b');
+          rgG.addColorStop(1, '#4a3020');
+          ctx.fillStyle = rgG;
+          rr(rgx, rgy, rgw, rgh, 14); ctx.fill();
+          ctx.strokeStyle = 'rgba(240,210,170,0.25)';
+          ctx.lineWidth = 2;
+          rr(rgx + 8, rgy + 8, rgw - 16, rgh - 16, 10); ctx.stroke();
+          ctx.strokeStyle = 'rgba(240,210,170,0.12)';
+          ctx.lineWidth = 1;
+          rr(rgx + 14, rgy + 14, rgw - 28, rgh - 28, 8); ctx.stroke();
+          ctx.fillStyle = 'rgba(240,210,170,0.08)';
+          for (var dt = 0; dt < 24; dt++) {
+            var dxx = rgx + 14 + ((dt * 47) % 97) / 100 * (rgw - 28);
+            var dyy = rgy + 14 + ((dt * 71) % 89) / 100 * (rgh - 28);
+            ctx.beginPath(); ctx.arc(dxx, dyy, 1.1, 0, 6.283); ctx.fill();
+          }
+          // Warm light pool from the ceiling lamp
+          var poolCx = W * 0.5, poolCy = H * 0.86, poolR = H * 0.16;
+          var pool = ctx.createRadialGradient(poolCx, poolCy, 1, poolCx, poolCy, poolR);
+          pool.addColorStop(0, 'rgba(255,214,130,0.10)');
+          pool.addColorStop(1, 'rgba(255,214,130,0)');
+          ctx.fillStyle = pool;
+          ctx.fillRect(poolCx - poolR, poolCy - poolR, poolR * 2, poolR * 2);
+          // Soft light spill from the window onto the floor
+          var sp = ctx.createLinearGradient(wx, wallH, wx + ww * 1.5, wallH + (H - wallH) * 0.55);
+          sp.addColorStop(0, 'rgba(140,190,255,0.08)');
+          sp.addColorStop(1, 'rgba(140,190,255,0)');
+          ctx.fillStyle = sp;
+          ctx.beginPath();
+          ctx.moveTo(wx, wallH);
+          ctx.lineTo(wx + ww, wallH);
+          ctx.lineTo(wx + ww * 1.35, H * 0.85);
+          ctx.lineTo(wx - ww * 0.4, H * 0.85);
+          ctx.closePath();
+          ctx.fill();
+        }
+        function drawClockHands(W, H) {
+          var cx = CLOCK_CTR.x * W, cy = CLOCK_CTR.y * H, cr = CLOCK_R * Math.min(W, H);
+          var now = new Date();
+          var sec = now.getSeconds() + now.getMilliseconds() / 1000;
+          var min = now.getMinutes() + sec / 60;
+          var hr = (now.getHours() % 12) + min / 60;
+          var hA = hr / 12 * 6.283 - 1.5708;
+          var mA = min / 60 * 6.283 - 1.5708;
+          var sA = sec / 60 * 6.283 - 1.5708;
+          ctx.strokeStyle = '#1c2636';
+          ctx.lineCap = 'round';
+          ctx.lineWidth = Math.max(1.6, cr * 0.09);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(hA) * cr * 0.48, cy + Math.sin(hA) * cr * 0.48);
+          ctx.stroke();
+          ctx.lineWidth = Math.max(1.2, cr * 0.07);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(mA) * cr * 0.68, cy + Math.sin(mA) * cr * 0.68);
+          ctx.stroke();
+          ctx.strokeStyle = '#c25c4a';
+          ctx.lineWidth = Math.max(0.8, cr * 0.045);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(sA) * cr * 0.78, cy + Math.sin(sA) * cr * 0.78);
+          ctx.stroke();
+          ctx.fillStyle = '#1c2636';
+          ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.5, cr * 0.07), 0, 6.283); ctx.fill();
         }
         function drawTable(W, H) {
           var t = TABLE_RECT;
@@ -5824,30 +6399,137 @@ angular.module('kanbanApp')
           ctx.fillStyle = 'rgba(0,0,0,0.35)';
           rr(tx - 4, ty + 4, tw + 8, th + 6, 10); ctx.fill();
           var g = ctx.createLinearGradient(tx, ty, tx, ty + th);
-          g.addColorStop(0, '#4a3a2a'); g.addColorStop(1, '#382c20');
+          g.addColorStop(0, '#55432f'); g.addColorStop(0.5, '#46372a'); g.addColorStop(1, '#33281d');
           ctx.fillStyle = g;
           rr(tx, ty, tw, th, 10); ctx.fill();
-          ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1.5; ctx.stroke();
-          ctx.fillStyle = '#2a2118';
-          ctx.fillRect(tx + 8, ty + th - 2, 8, H * 0.05);
-          ctx.fillRect(tx + tw - 16, ty + th - 2, 8, H * 0.05);
-          ctx.fillStyle = 'rgba(255,255,255,0.14)';
-          rr(tx + tw * 0.15, ty + th * 0.22, tw * 0.18, th * 0.45, 3); ctx.fill();
-          rr(tx + tw * 0.55, ty + th * 0.22, tw * 0.18, th * 0.45, 3); ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.fillStyle = 'rgba(255,255,255,0.10)';
+          rr(tx + 3, ty + 2, tw - 6, 2, 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.10)';
+          ctx.lineWidth = 1;
+          for (var gr = 1; gr < 5; gr++) {
+            ctx.beginPath();
+            ctx.moveTo(tx + 6, ty + th * (gr / 5.5));
+            ctx.lineTo(tx + tw - 6, ty + th * (gr / 5.5) - 1);
+            ctx.stroke();
+          }
+          ctx.fillStyle = '#241c12';
+          ctx.fillRect(tx + 8, ty + th - 2, 7, H * 0.055);
+          ctx.fillRect(tx + tw - 15, ty + th - 2, 7, H * 0.055);
+          // notebook (left)
+          ctx.fillStyle = '#d9c9a3';
+          rr(tx + tw * 0.05, ty + th * 0.14, tw * 0.1, th * 0.6, 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+          ctx.strokeStyle = 'rgba(90,70,40,0.5)';
+          ctx.beginPath();
+          ctx.moveTo(tx + tw * 0.07, ty + th * 0.3); ctx.lineTo(tx + tw * 0.13, ty + th * 0.3);
+          ctx.moveTo(tx + tw * 0.07, ty + th * 0.42); ctx.lineTo(tx + tw * 0.13, ty + th * 0.42);
+          ctx.moveTo(tx + tw * 0.07, ty + th * 0.54); ctx.lineTo(tx + tw * 0.12, ty + th * 0.54);
+          ctx.stroke();
+          // paper stack
+          ctx.fillStyle = '#f2efe6';
+          rr(tx + tw * 0.17, ty + th * 0.12, tw * 0.14, th * 0.62, 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 1; ctx.stroke();
+          ctx.fillStyle = 'rgba(0,0,0,0.12)';
+          ctx.fillRect(tx + tw * 0.17, ty + th * 0.3, tw * 0.14, 1.5);
+          ctx.fillRect(tx + tw * 0.17, ty + th * 0.44, tw * 0.11, 1.5);
+          // laptop (open)
+          var lx = tx + tw * 0.42, ly = ty + th * 0.2;
+          ctx.fillStyle = '#232a33';
+          ctx.fillRect(lx - tw * 0.02, ly + th * 0.5, tw * 0.24, th * 0.16);
+          ctx.fillStyle = '#2f3844';
+          ctx.fillRect(lx - tw * 0.02, ly + th * 0.5, tw * 0.24, th * 0.06);
+          ctx.fillStyle = '#0e1520';
+          rr(lx, ly, tw * 0.2, th * 0.52, 2); ctx.fill();
+          ctx.strokeStyle = '#2f3844'; ctx.lineWidth = 1.5; ctx.stroke();
+          var sg = ctx.createLinearGradient(lx, ly, lx, ly + th * 0.5);
+          sg.addColorStop(0, '#27445e');
+          sg.addColorStop(1, '#16283a');
+          ctx.fillStyle = sg;
+          rr(lx + 2, ly + 2, tw * 0.2 - 4, th * 0.52 - 4, 1); ctx.fill();
+          ctx.fillStyle = 'rgba(140,190,255,0.5)';
+          ctx.fillRect(lx + 4, ly + th * 0.12, tw * 0.14, th * 0.07);
+          ctx.fillRect(lx + 4, ly + th * 0.24, tw * 0.1, th * 0.06);
+          // plant (center)
+          var plx = tx + tw * 0.72, ply = ty + th * 0.42;
+          ctx.fillStyle = '#8a4a2e';
+          rr(plx - 5, ply, 10, th * 0.42, 2); ctx.fill();
+          ctx.fillStyle = '#2e8b57';
+          for (var lf = 0; lf < 6; lf++) {
+            var lxx = plx + Math.cos(lf * 1.047) * 6;
+            var lyy = ply - Math.abs(Math.sin(lf * 1.047)) * 9;
+            ctx.beginPath();
+            ctx.ellipse(lxx, lyy, 3.4, 1.8, lf * 0.7, 0, 6.283);
+            ctx.fill();
+          }
+          // coffee mug with handle + steam
+          var mgx = tx + tw * 0.9, mgy = ty + th * 0.16;
+          ctx.fillStyle = '#c25c4a';
+          rr(mgx, mgy, 7, 8, 1.5); ctx.fill();
+          ctx.strokeStyle = '#c25c4a';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc(mgx + 8, mgy + 3.5, 2.4, -1.2, 1.2);
+          ctx.stroke();
+          ctx.fillStyle = '#5a2b24';
+          ctx.fillRect(mgx + 1, mgy + 1, 5, 2);
+          var now = Date.now() / 1000;
+          ctx.strokeStyle = 'rgba(235,240,250,0.4)';
+          ctx.lineWidth = 1;
+          ctx.lineCap = 'round';
+          for (var sm = 0; sm < 2; sm++) {
+            var ph = (now * 0.9 + sm * 0.5) % 1;
+            var sy0 = mgy - 2 - ph * 6;
+            ctx.globalAlpha = 0.35 * (1 - ph);
+            ctx.beginPath();
+            ctx.moveTo(mgx + 3.5 + Math.sin(ph * 9 + sm * 2) * 1.5, sy0);
+            ctx.quadraticCurveTo(mgx + 3.5 + Math.sin(ph * 9 + sm * 2) * 2.4, sy0 - 3, mgx + 3.5 + Math.cos(ph * 9 + sm * 2) * 3, sy0 - 6);
+            ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
         }
         function drawCooler(W, H) {
           var cx = COOLER.x * W, cy = COOLER.y * H;
           var s = Math.min(W, H) / 520;
-          ctx.fillStyle = 'rgba(120,190,255,0.85)';
-          rr(cx - 7 * s, cy - 20 * s, 14 * s, 16 * s, 3 * s); ctx.fill();
+          // floor mat under the cooler
+          ctx.fillStyle = 'rgba(0,0,0,0.28)';
+          rr(cx - 14 * s, cy - 6 * s, 28 * s, 22 * s, 6 * s); ctx.fill();
+          ctx.fillStyle = '#4a3020';
+          rr(cx - 13 * s, cy - 8 * s, 26 * s, 20 * s, 6 * s); ctx.fill();
+          ctx.strokeStyle = 'rgba(240,210,170,0.2)'; ctx.lineWidth = 1; ctx.stroke();
+          // water jug with bubbles
+          ctx.fillStyle = 'rgba(120,190,255,0.55)';
+          rr(cx - 7 * s, cy - 30 * s, 14 * s, 18 * s, 3 * s); ctx.fill();
           ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1; ctx.stroke();
-          ctx.fillStyle = 'rgba(150,215,255,0.9)';
-          rr(cx - 5 * s, cy - 12 * s, 10 * s, 7 * s, 2 * s); ctx.fill();
+          ctx.fillStyle = 'rgba(110,180,255,0.75)';
+          rr(cx - 5 * s, cy - 24 * s, 10 * s, 11 * s, 2 * s); ctx.fill();
+          ctx.fillStyle = 'rgba(210,235,255,0.9)';
+          ctx.beginPath(); ctx.arc(cx - 2 * s, cy - 20 * s, 1.2 * s, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(cx + 3 * s, cy - 17 * s, 0.9 * s, 0, 6.283); ctx.fill();
+          // cap
+          ctx.fillStyle = '#3b82c4';
+          rr(cx - 3 * s, cy - 32 * s, 6 * s, 3 * s, 1 * s); ctx.fill();
+          // cup stack on top
           ctx.fillStyle = '#d9e2ef';
-          rr(cx - 9 * s, cy - 4 * s, 18 * s, 12 * s, 3 * s); ctx.fill();
+          rr(cx - 4 * s, cy - 38 * s, 8 * s, 5 * s, 1.5 * s); ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.stroke();
+          ctx.fillStyle = '#eef3f9';
+          rr(cx - 3.5 * s, cy - 42 * s, 7 * s, 5 * s, 1.5 * s); ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.stroke();
+          // body / door
+          ctx.fillStyle = '#d9e2ef';
+          rr(cx - 9 * s, cy - 8 * s, 18 * s, 16 * s, 3 * s); ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.stroke();
+          // tap + drip tray + puddle
           ctx.fillStyle = '#3b82c4';
           rr(cx + 6 * s, cy - 1 * s, 4 * s, 5 * s, 1 * s); ctx.fill();
+          ctx.fillStyle = '#cfe6ff';
+          rr(cx + 5 * s, cy + 4 * s, 6 * s, 2 * s, 1 * s); ctx.fill();
+          ctx.fillStyle = 'rgba(140,190,255,0.4)';
+          ctx.beginPath();
+          ctx.ellipse(cx + 8 * s, cy + 8 * s, 3 * s, 1.2 * s, 0, 0, 6.283);
+          ctx.fill();
+          // cup on the tray
           ctx.fillStyle = '#ffffff';
           rr(cx + 3 * s, cy + 9 * s, 5 * s, 6 * s, 1 * s); ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.stroke();
@@ -5882,6 +6564,17 @@ angular.module('kanbanApp')
           ctx.strokeStyle = '#5c6a5e'; ctx.lineWidth = 3; ctx.stroke();
           ctx.fillStyle = 'rgba(0,0,0,0.25)';
           rr(bx + bw * 0.1, by + bh - 12, bw * 0.35, 7, 3); ctx.fill();
+          // markers resting on the tray
+          var markColors = ['#e06c75', '#e5c07b', '#61afef', '#98c379'];
+          for (var mk = 0; mk < markColors.length; mk++) {
+            ctx.fillStyle = markColors[mk];
+            ctx.fillRect(bx + bw * 0.12 + mk * 12, by + bh - 15, 2.4, 3);
+            ctx.fillRect(bx + bw * 0.12 + mk * 12, by + bh - 12, 8, 5);
+          }
+          // eraser block
+          ctx.fillStyle = '#8a93a3';
+          rr(bx + bw * 0.12 + 4 * 12 + 8, by + bh - 13, 14, 6, 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 1; ctx.stroke();
           var padX = 10, padY = 12;
           var chartW = 52, chartH = 34;
           var chartShown = !!(scene && scene.postMortem && scene.postMortem.shown);
@@ -5967,16 +6660,50 @@ angular.module('kanbanApp')
             var dx = s.home.x * W, dy = s.home.y * H;
             ctx.fillStyle = 'rgba(0,0,0,0.3)';
             rr(dx - 24, dy - 6, 48, 18, 4); ctx.fill();
-            ctx.fillStyle = '#2b2117';
+            var dg = ctx.createLinearGradient(dx - 26, dy - 8, dx - 26, dy + 10);
+            dg.addColorStop(0, '#3a2d1e'); dg.addColorStop(1, '#241c12');
+            ctx.fillStyle = dg;
             rr(dx - 26, dy - 8, 52, 18, 4); ctx.fill();
-            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.fillStyle = 'rgba(255,255,255,0.08)';
+            rr(dx - 24, dy - 7, 48, 2, 1); ctx.fill();
+            // monitor stand + base
             ctx.fillStyle = '#0d1424';
-            rr(dx - mf(10), dy - mf(24), mf(20), mf(14), 2); ctx.fill();
+            ctx.fillRect(dx - 1.5, dy - mf(9), 3, mf(9));
+            ctx.fillRect(dx - mf(4), dy - mf(9), mf(8), 2.5);
+            // monitor
+            ctx.fillStyle = '#0d1424';
+            rr(dx - mf(13), dy - mf(24), mf(26), mf(16), 2); ctx.fill();
             ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.stroke();
-            ctx.fillStyle = s.color;
-            ctx.globalAlpha = 0.5;
-            ctx.fillRect(dx - mf(7), dy - mf(21), mf(14), 2);
+            var scG = ctx.createLinearGradient(dx - mf(11), dy - mf(22), dx - mf(11), dy - mf(10));
+            scG.addColorStop(0, s.color);
+            scG.addColorStop(1, blendHex(s.color, '#0d1424', 0.55));
+            ctx.fillStyle = scG;
+            rr(dx - mf(11), dy - mf(22), mf(22), mf(12), 1.5); ctx.fill();
+            ctx.fillStyle = 'rgba(255,255,255,0.8)';
+            ctx.fillRect(dx - mf(11) + 2, dy - mf(20), mf(7), mf(2));
+            ctx.fillRect(dx - mf(11) + 2, dy - mf(16.5), mf(5), mf(2));
+            // sweeping screen scanline (subtle live activity)
+            var scrT = (Date.now() / 4000 + s.role.length * 0.37) % 1;
+            ctx.globalAlpha = 0.25;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(dx - mf(11), dy - mf(22) + scrT * mf(12), mf(22), 1);
             ctx.globalAlpha = 1;
+            // power LED
+            ctx.fillStyle = '#4ade80';
+            ctx.beginPath(); ctx.arc(dx + mf(10.5), dy - mf(9.5), 1, 0, 6.283); ctx.fill();
+            // keyboard
+            ctx.fillStyle = '#1a2230';
+            rr(dx - mf(10), dy + mf(1), mf(20), mf(3), 1); ctx.fill();
+            // notepad (left corner)
+            ctx.fillStyle = '#e8e0cc';
+            rr(dx - mf(21), dy - mf(12), mf(7), mf(6), 1); ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.8; ctx.stroke();
+            // mug (right corner)
+            ctx.fillStyle = '#c25c4a';
+            rr(dx + mf(13), dy - mf(13), mf(5), mf(6), 1); ctx.fill();
+            ctx.strokeStyle = '#c25c4a';
+            ctx.beginPath(); ctx.arc(dx + mf(18.6), dy - mf(10.4), mf(1.4), -1.2, 1.2); ctx.stroke();
             var nLabel = s.name.toUpperCase();
             ctx.font = 'bold ' + mf(8) + 'px sans-serif';
             var nW = Math.ceil(ctx.measureText(nLabel).width) + mf(20);
@@ -6183,7 +6910,11 @@ angular.module('kanbanApp')
             ctx.fill();
             ctx.globalAlpha = 1;
           }
-          ctx.fillStyle = bodyColor;
+          var bodyG = ctx.createRadialGradient(px - bodyW * 0.18, cy - bodyH * 0.35, bodyW * 0.12, px, cy, bodyW * 0.85);
+          bodyG.addColorStop(0, blendHex(bodyColor, '#ffffff', 0.4));
+          bodyG.addColorStop(0.5, bodyColor);
+          bodyG.addColorStop(1, blendHex(bodyColor, '#000000', 0.38));
+          ctx.fillStyle = bodyG;
           rr(px - bodyW / 2, cy - bodyH / 2, bodyW, bodyH, 6 * scale);
           ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.35)';
@@ -6411,6 +7142,15 @@ angular.module('kanbanApp')
           var sp = spiderFor('complexity');
           if (!sp) return;
           if (scene.writer === sp || scene.gossip || scene.watching) return;
+          // Context fight: when the live token count approaches the configured max
+          // context budget, the Complexity spider picks a fight with the Explorer
+          // over the context bloat. Fires once per run, only while actually streaming.
+          if (!scene.ctxFightFired && vm.streamingActive) {
+            var _maxChars = (typeof vm.maxContextChars === 'number' && vm.maxContextChars > 0) ? vm.maxContextChars : 22000;
+            var _maxTokens = Math.max(1000, Math.round(_maxChars / 4));
+            if (size >= _maxTokens * 0.8) startContextFight();
+          }
+          if (scene.ctxFight) return;
           var bucket = Math.floor(size / 10000);
           if (bucket <= _ctxGripedAt || bucket < 2) return;
           _ctxGripedAt = bucket;

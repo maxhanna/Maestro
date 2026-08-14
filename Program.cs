@@ -207,8 +207,18 @@ app.MapGet("/{**path}", async context =>
     };
     await stream.CopyToAsync(context.Response.Body);
 });
-app.MapControllers();
-app.MapHub<CoEditHub>("/hubs/coEdit");
+try
+{
+    app.MapControllers();
+    app.MapHub<CoEditHub>("/hubs/coEdit");
+}
+catch (System.Reflection.ReflectionTypeLoadException ex)
+{
+    Log("Controller type-load failure — loader exceptions:");
+    foreach (var le in ex.LoaderExceptions ?? Array.Empty<Exception>())
+        Log("   " + le);
+    throw;
+}
 
 // If another Weaver instance is already listening on the default port, fall back
 // to the next free port instead of crashing — so a double-clicked exe always

@@ -98,7 +98,20 @@
     <Exec Command="dotnet-script lint.csx" ContinueOnError="false" />
   </Target>
 
-  <!-- Tests live in this project, so the test platform (testhost, code-coverage
+  <!-- Tests live in this project (so `dotnet test` works from the repo root), but
+       the xunit packages are PrivateAssets=all and therefore are NOT bundled into
+       the single-file EXE. A published Weaver.dll that still references xunit types
+       crashes at startup: MVC's controller scan calls GetDefinedTypes() over the
+       whole module and throws ReflectionTypeLoadException when the test classes
+       can't resolve xunit.core (FileNotFoundException). The dotnet CLI passes
+       _IsPublishing=true (global property) only for `dotnet publish`, so the test
+       sources are compiled out of the shipped EXE while `dotnet build`/`dotnet
+       test` still compile them. -->
+  <ItemGroup Condition="'$(_IsPublishing)' == 'true'">
+    <Compile Remove="tests\UnitTests\**" />
+  </ItemGroup>
+
+<!-- Tests live in this project, so the test platform (testhost, code-coverage
        profilers, Mono.Cecil, satellite resources) would otherwise leak into the
        published single-file EXE. The Microsoft.CodeCoverage / TestHost packages
        force-copy their folders into $(PublishDir) via raw Copy tasks that bypass
