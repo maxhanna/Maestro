@@ -2245,6 +2245,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private static string? ClassifyTaskKind(string? prompt, string projectRoot)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return null;
+        if (TestIntentClassifier.Classify(prompt).Intent != TestIntentClassifier.Kind.None) return "test";
         if (IsDumpTask(prompt, projectRoot)) return "dump";
         if (TaskExplicitlyRequestsScript(prompt)) return "build";
         return null;

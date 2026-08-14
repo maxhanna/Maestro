@@ -789,6 +789,7 @@ partial class AgentController
         ["_web_search"] = "\"_web_search\"         — Search the web; put the query in \"change\"",
         ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
         ["_scraper"] = "\"_scraper\"           — FALLBACK fetch when _web_fetch keeps failing: put the URL in \"change\"; the system probes your OS/interpreter/installed packages and builds+runs a working scraper, writing the demanded file. Never write scraper code yourself.",
+        ["_browser_test"] = "\"_browser_test\"      — LIVE web-app test: the system spins up the project's own server (any type: C#/node/python/static) and verifies the named feature in a real browser — no code needed. Put what to test in \"change\" (e.g. \"the kanban board loads\" or \"/api/agent/llm-reachable returns 200\"). Use for TEST/VERIFY-only intents, never for edits.",
         ["_git"] = "\"_git\"                — Git operation (commit/pull/push/branch/revert)",
         ["_rename_file"] = "\"_rename_file\"        — Rename: put \"oldpath → newpath\" in \"change\"",
         ["_delete_file"] = "\"_delete_file\"        — Delete a file path in \"change\"",

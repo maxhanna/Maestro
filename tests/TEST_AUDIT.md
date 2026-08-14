@@ -4,12 +4,15 @@ A full inventory of every test in the repository: what each suite covers, how to
 them, what can be improved, and what is missing. Generated from a sweep of all test
 sources in `tests/` — every file and test method is accounted for below.
 
-**Last audited:** August 12, 2026 · **Suite size:** 96 C# test classes
-(1,614 runtime test cases per `dotnet test` on Windows) + 14 standalone JS suites
-(180 tests), run together via `node tests/js/run-all.js`. The CI workflow builds
+**Last audited:** August 13, 2026 · **Suite size:** 117 C# test classes
+(1,967 runtime test cases per `dotnet test` on Windows) + 21 standalone JS suites
+(225 tests), run together via `node tests/js/run-all.js`. The CI workflow builds
 framework-dependent with `-p:RuntimeIdentifier=linux-x64 -p:SelfContained=false`
 and runs the suite on the Linux runner, so OS-branched tests (`OperatingSystem.IsWindows()`)
-must stay green on BOTH hosts.
+must stay green on BOTH hosts. The live-browser E2E tests (`ServerLaunchE2ETests`)
+launch a real headless Edge/Chrome via CDP when one exists and silently skip when
+none does (Linux CI), and the server-launch E2E test falls back to `dotnet run`
+when no built apphost exists next to the test assembly.
 
 ---
 
@@ -235,9 +238,24 @@ byte-identical; bad input fails closed.**
 |---|---|---|
 | `FuzzHarness` | — | Shared discipline for seeded-random corpus tests: deterministic per-doc RNG, `AssertAllDocsChecked` (no silently-degraded corpus), `AssertExercised` (no vacuous pass), byte-identical no-op asserts. |
 
+### 2.14 Live web-server testing (deterministic browser pipeline)
+
+The **live web-test** capability: strictly-test prompts ("test that …", "is … working?")
+short-circuit the normal edit pipeline and drive a real browser or HTTP probe against
+the project's OWN server, launched deterministically — zero LLM involvement.
+
+| File | Tests | What it covers |
+|---|---|---|
+| `TestIntentClassifierTests` | 18 | The strictly-test intent gate: UI forms ("is the agent panel working" → section `agent panel`, "test the feature where cards can be dragged" → `where cards can be dragged", "is the settings page loading", "are the notes loading", "is there a kanban board", "are the buttons clickable"), API forms ("test the get-cards endpoint returns data" → `/get-cards`, "does /api/status respond 200"), the kind split (`Ui` vs `Api`), and the precision lock — edit verbs ("change the color", "add a column"), unit-test phrasing ("write unit tests for the service"), "test the plan", and `WebNeedClassifier.IsWebNeed` vetoes are NEVER misread as live tests. |
+| `ServerLaunchPlanTests` | 28 | `DetectLaunchPlan` for every project type: `dotnet` csproj/sln (with/without `--no-launch-profile`), `node` (package.json scripts: start/dev/serve/preview/server/run; entry-point fallback), `python` (requirements.txt/uvicorn/flask/streamlit/module entry), `go`, `cargo`, `java` (maven/gradle/spring boot jar), `php` (built-in server), `ruby` (rackup/bundle exec), `static` (index.html); malformed manifests, empty args, no-project detection, and the static-server fallback with no port. |
+| `WebPageProbeServiceTests` | 14 | The HTTP/AngleSharp fallback probe: `BodyText` extraction (the `TextContent` concatenation bug — "404 Not FoundPage not found" — fixed by a DOM walker that spaces text nodes and skips script/style/noscript/template), keyword scoring (2.5 weight, threshold 2.5, ignore-case), `FindTargetSection` picking the right anchor + URL among competing sections, `PageMentions` (case-insensitive needle), and `Verify` on a served fixture. |
+| `BrowserAutomationServiceTests` | 10 | The fallback browser service: full verify flows against a served fixture (pass/fail verdicts + findings), no-plan → Mode=failed, RFC-3986 `ResolveUrl` (absolute-path targets root at the host, relative resolve against the current page, malformed URLs fail closed), and the top-level `RunAsync` wiring. |
+| `TestIntentPipelineTests` | 10 | The pipeline wiring: a strict test prompt produces the `_browser_test` step (scripted client asserted to see the right plan/summary, complete = checks passed), the API flavor routes to the HTTP fallback, the non-test prompt stays on the normal plan path (no live-test steps, no "Live web test" summary), and the classic planner route. |
+| `ServerLaunchE2ETests` | 4 | Real end-to-end against real processes: launches the STATIC test fixture (build→detect→launch→fetch→stop), a node fixture (needs package.json for detection), **launches Weaver's own server** (the `bin/…/win-x64/Weaver.exe` apphost when present — with `--urls --no-open-browser` as direct Command+Arguments, NEVER `dotnet <exe>` which throws `BadImageFormatException` — else `dotnet run` fallback; asserts index + ide.html content and that the launcher owns a free port), and the live **CDP** test: real headless Edge/Chrome → `Page.navigate` → snapshot → programmatic click → page-changed assertion. The CDP connection attaches with `flatten:true` and every domain call must carry the sessionId — a missing one (the `Page.navigate` regression) hits the browser-level endpoint and dies with `'Page.navigate' wasn't found`. Skips gracefully on machines with no browser.
+
 ---
 
-## 3. Inventory — JS client-logic suites (14 files, 180 tests)
+## 3. Inventory — JS client-logic suites (21 files, 225 tests)
 
 Each file is a self-contained node script with its own mini-runner
 (`test(name, fn)` + exit-code). They test extracted client logic modules
@@ -249,11 +267,17 @@ new CI workflow runs on every push:
 | File | Tests | What it covers |
 |---|---|---|
 | `auto-pr-toggle.test.js` | 6 | Toggling the card **BRANCH** checkbox: unchecking with a stale branch / created PR clears `prStatus`; checking preserves it; no-ops on clean cards. |
+| `agent-done-verdict.test.js` | 5 | The `done` verdict rendering: "done" confirmation paths, failed/unverified verdicts, and the verdict banner logic. |
+| `calendar-cron-chips.test.js` | 8 | The cron **chip** UI state: chip visibility/labels per cron expression, upcoming-fire labels, invalid expressions. |
+| `calendar-cron-queue.test.js` | 4 | The scheduled-card queue: cron cards queued for their next fire, ordering, and drain. |
+| `calendar-scheduled-popup.test.js` | 6 | The scheduled-card popup: shows the schedule + next fire, edit/save round-trip, cancel. |
 | `board-heal.test.js` | 13 | Card upsert rules (fresh → todo, re-delivery updates in place, done stays done, metadata-only preserves text) and the **heal** dedupe (within-column duplicates collapse, doing/done/archived rank above todo twins, invariant: no id survives in two columns). |
 | `calendar-cron-days.test.js` | 8 | The **day-level cron matcher** that places scheduled (cron) cards on the month grid: `cronDayMatches` matches only the day-of-month/month/day-of-week fields (the fire TIME renders separately), so a daily cron (`0 9 * * *`) appears on EVERY day of the viewed month, `*/N` day-of-month marks every Nth day, weekday crons mark every matching weekday, and malformed expressions never match. This is what fixed "a daily cron only shows on the day it was created for". |
 | `calendar-idempotency.test.js` | 11 | Cron/scheduled cards: a live instance in todo/doing suppresses the fire, but a done instance doesn't; different task/schedule never false-suppresses; one-off and non-cron cards unaffected. |
 | `error-core.test.js` | 23 | Stack parsing per browser (Chrome/Firefox/Safari legacy forms), `shouldFilter` (AbortError, cross-origin), error-key dedupe with burst windows, key caps, reset. |
 | `files-edited-dedupe.test.js` | 6 | Duplicate file paths collapse, order preserved, case/slash-insensitive, junk entries dropped. |
+| `kanban-cron-doing.test.js` | 10 | Cron cards moving to **doing** at fire time: column move, doing-state flags, no premature fires. |
+| `kanban-load-drain.test.js` | 7 | The kanban **load** + **drain** sequence: cards load in order, the drain consumes queued work, guards against double-drain. |
 | `meeting-ticker.test.js` | 16 | The step ticker labels: LLM batch markers (`(deterministic batch: N edits...)`) parsed into "N/M edits" labels, path basename extraction, 40-char truncation, partial-batch detection, marker format locked to the C# generator emission. |
 | `pr-finish-guard.test.js` | 10 | The PR-finish completion guard: a finish response landing after BRANCH was toggled off clears `prStatus` and skips the outcome; success/failure/HTTP-error paths on normal runs. |
 | `suggestion-cancel.test.js` | 29 | `cancelCardSuggestions`: start-eligibility (cap, already-has, already-requested, topup), abort of in-flight generation (flags reset, deferred resolved safely), clearing suggestions/display flags, text-edit invalidation, and the idle **guard** (executing card / benchmark / self-improving cycle blocks suggestions). |
@@ -262,6 +286,7 @@ new CI workflow runs on every push:
 | `feedback.test.js` | 21 | `vm.sendFeedback` (audit §5.1): null-card/empty-message/already-sending guards, the not-connected error path, the full POST payload (`clientId/cardId/cardText/message/planSummary/filesEdited/steps` — object-with-`path` entries flattened, empties dropped, `agentAnalysis` missing degrades safely, message trimmed, **step changes picked via description→path→command→url fallback with status, junk steps dropped**), the success path (`_feedbackSent` **appended as an array entry** on the re-found card + `saveCards` + popup cleared + log, second submission appends, legacy single-object shape normalized), both failure paths (server `data.error` surfaced; HTTP-status fallback), the ✓ chip helpers (`feedbackSentCount`/`feedbackSentLast`/`feedbackSentLabel` — `✓ Sent` for one, `✓ N sent` for several, legacy object counts as one), and `openFeedback`/`closeFeedback` (`feedbackPrevious` preview populated from the card's `_feedbackSent` array, legacy object normalized, empty when none, reset on close, plus a kanban.html wiring assertion that the popup renders `vm.feedbackPrevious`). |
 | `suggestion-ready.test.js` | 14 | The ready/queue/drain logic: idle board → start now; card running → readied + `_autoQueued`; drain rules (endpoint-parked, suggestion-auto, self-improving always drain; plain ready card needs autoQueue; **only one suggestion card starts per drain**). |
 | `suggestion-signals.test.js` | 6 | `collectRunSignals` — the log→problem-signal extraction feeding the prompt's RUN OUTCOME block: warn/error/rejected captured, info-with-marker captured, quiet runs → empty, numeric-variant dedupe, 220-char cap, 30-signal cap. |
+| `taskkind-sse.test.js` | 5 | The SSE `taskKind` event: kind delivered to the card, unknown kinds ignored, no-card no-op. |
 
 ---
 
@@ -467,7 +492,8 @@ Ordered by how much they matter.
 | Text / JSON / formatting utils | 6 classes | ~25 | Good |
 | Complexity scoring & benchmarks | 3 classes | ~36 | Good |
 | File tree | 1 class | 2 | **Fixed** — embedded-manifest helper lookup; green from any output dir |
-| JS client logic | 14 files | 180 | Good per-module; `run-all.js` aggregator + CI workflow (§4.2) |
+| Live web-server testing | 6 classes | 84 | **New** — classifier, launch plans, HTTP probe, browser service, pipeline wiring, and real-process E2E (incl. Weaver itself + live CDP) |
+| JS client logic | 21 files | 225 | Good per-module; `run-all.js` aggregator + CI workflow (§4.2) |
 | Feedback / context-SSE / SSE shape / guard interactions | 3 classes + 2 JS | ~35 | Covered (§5.1–5.2, §5.4); abort-branch + diff system still open (§5.1) |
 
 Bottom line: the edit-application layer is the most thoroughly tested part of the
@@ -475,7 +501,9 @@ codebase — likely because every prior bug surfaced there. Since this audit was
 written the highest-leverage gaps have closed: a JS aggregator + CI runner (§4.2), the
 bughosted feedback proxy + `sendFeedback` (JS + C#, §5.1), the live context-SSE handler
 (§5.1), guard interactions incl. veto order and the fetch-command auto-inject loop-guard
-(§5.2), the SSE frame shape (§5.4), and the `[(ngModel)]`/`[class]` binding shapes
-(§4.7). The remaining open items are the abort-branch flow and the interactive diff
-system (both §5.1), a full SSE event *sequence* test and the verification-layer fuzz
-(§4.5), and the concurrency paths (§5.5).
+(§5.2), the SSE frame shape (§5.4), the `[(ngModel)]`/`[class]` binding shapes
+(§4.7), and the deterministic **live web-test pipeline** (§2.14) — intent gate, launch
+plans for every project type, HTTP/AngleSharp probe, CDP browser service, pipeline
+wiring, and real-process E2E tests that launch Weaver itself. The remaining open items
+are the abort-branch flow and the interactive diff system (both §5.1), a full SSE event
+*sequence* test and the verification-layer fuzz (§4.5), and the concurrency paths (§5.5).

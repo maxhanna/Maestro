@@ -450,7 +450,7 @@
                   class="tag-label"> build</span></span>
               <span class="card-tag tag-ready" ng-if="vm.isCardActive(card.id)" style="margin-left:auto;">▶<span
                   class="tag-label"> ACTIVE</span></span>
-              <span class="card-tag tag-interrupted" ng-if="!vm.isCardActive(card.id) && vm.cardRunInterrupted(card)"
+              <span class="card-tag tag-interrupted" ng-if="!vm.isCardActive(card.id) && vm.cardRunInterrupted(card) && !card._verification.complete"
                 style="margin-left:auto;"
                 title="This card's run is no longer live — the stream ended without a done event (page reload or connection drop).">⚠<span
                   class="tag-label"> INTERRUPTED</span></span>

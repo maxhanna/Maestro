@@ -1500,6 +1500,20 @@ partial class AgentController
             }
         }
 
+        // STRICT TEST-INTENT SHORT-CIRCUIT: a prompt whose intent is strictly to test a
+        // feature/functionality of the project's web server ("test the kanban board",
+        // "verify the calendar page loads", "does the settings form save?") is handled
+        // DETERMINISTICALLY — the system spins up the project's own server (any project
+        // type: C#, node, python, static HTML, …), opens it in a headless browser (or the
+        // HTTP probe), finds the section the prompt names, and verifies it live. No LLM
+        // planning, no token spend, identical results for every model — the classifier is
+        // deliberately conservative, so edit/web/script prompts never land here.
+        var testIntent = TestIntentClassifier.Classify(prompt);
+        if (testIntent.Intent != TestIntentClassifier.Kind.None)
+        {
+            return await RunLiveWebTestPipeline(prompt, projectRoot, emitSse, testIntent, ct);
+        }
+
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
             if (!await connectivityTask)

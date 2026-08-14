@@ -690,6 +690,14 @@ partial class AgentController
                 await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
+            if (planFile.Equals("_browser_test", StringComparison.OrdinalIgnoreCase))
+            {
+                // LIVE WEB TEST step tool: spin up the project's own server and verify the
+                // named feature in a real browser (deterministic — no LLM in the loop).
+                stepIndex = await ExecuteBrowserTestStep(changeDesc, prompt, projectRoot, emitSse, ct, allResults, stepIndex);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
+                continue;
+            }
             if (planFile.Equals("_move_file", StringComparison.OrdinalIgnoreCase))
             {
                 var dst = AgentDiscovery.ExtractTargetPath(changeDesc, planFile, projectRoot);

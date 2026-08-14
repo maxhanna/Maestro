@@ -125,6 +125,14 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 
 ---
 
+### 🌐 Live Web Testing
+- Strictly-test prompts ("test that the kanban board loads", "is the agent panel working?") run a dedicated deterministic test pipeline with **zero LLM involvement**  
+- Detects and launches the project's own server (dotnet, node, python, go, cargo, java, php, ruby, or static)  
+- Verifies the named page/section in a real browser (headless Edge/Chrome via the Chrome DevTools Protocol, when available) or via direct HTTP probing  
+- Reports check-by-check results on the card with a PASSED/FAILED verdict
+
+---
+
 ## 🧬 Supported Languages
 
 Weaver supports syntax highlighting and editing for:
@@ -185,6 +193,11 @@ Single-file, self-contained, native-library bundling, and appsettings embedding 
 **The published `Weaver.exe` is fully standalone**: it bundles the runtime, the SQLite native library (`e_sqlite3`), the tree-sitter parsers, the web UI, and `appsettings.json`. You can copy just `Weaver.exe` into a fresh folder (even an empty one) and it will run — the bundled files are extracted to `%TEMP%/.net/Weaver/` on first launch. The app creates its `data/weaver.db` next to the exe on first run, so the folder must be writable. Expect the exe to be ~200 MB — everything is inside it; don't enable `PublishTrimmed` to shrink it (TreeSitter/AngleSharp/MailKit are reflection-heavy and trimming would break them).
 
 Testing command : dotnet test   (tests live in tests/UnitTests and compile into the main project)
+
+Note: `dotnet test` runs everything including the live E2E suites — they launch the
+project's real server (the built `Weaver.exe`, or `dotnet run` as fallback) and a real
+headless browser via CDP when one is installed, so they exercise actual processes on
+your machine. On machines without a browser (e.g. CI) those tests skip gracefully.
 
 ![Agentic loop](https://venturebeat.com/_next/image?url=https%3A%2F%2Fimages.ctfassets.net%2Fjdtwqhzvc2n1%2F5gWXRttHvteZMEGgygXVuz%2F3fa3112800b8d8f6e153fa0957a78f22%2Fautonomous_optimization.png%3Fw%3D1000%26q%3D100&w=3840&q=75)
 

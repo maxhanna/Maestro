@@ -107,6 +107,7 @@ public static class AgentProjectUtilities
         file.Equals("_command", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_browser_test", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_explore", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_discover", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_scraper", StringComparison.OrdinalIgnoreCase));
@@ -128,7 +129,7 @@ public static class AgentProjectUtilities
             "_git", "_ping", "_show", "_display", "_create_file", "_create_directory",
             "_package_install", "_command", "_web_search", "_web_fetch", "_explore", "_discover",
             "_rename", "_rename_file", "_move_file", "_delete_file", "_continue",
-            "_scraper"
+            "_scraper", "_browser_test"
         };
         return !specialMarkers.Contains(path);
     }
