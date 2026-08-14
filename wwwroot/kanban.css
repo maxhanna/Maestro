@@ -319,6 +319,10 @@ body.dragging-active .card:hover {
     justify-content: flex-end;
 }
 
+.card-tag-container .card-tag {
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
 .card .card-tag.tag-context {
     background: rgba(97, 175, 239, 0.14);
     color: #61afef;

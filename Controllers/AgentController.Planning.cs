@@ -1023,12 +1023,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var psi = new ProcessStartInfo
             {
                 FileName = node,
-                Arguments = $"--check \"{tempPath}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            if (ext is ".ts" or ".tsx" or ".mts" or ".cts")
+            {
+                psi.ArgumentList.Add("--experimental-strip-types");
+            }
+            psi.ArgumentList.Add("--check");
+            psi.ArgumentList.Add(tempPath);
             using var process = Process.Start(psi);
             if (process == null) return null;
             var stderr = process.StandardError.ReadToEnd();
