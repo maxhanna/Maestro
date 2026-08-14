@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using System.Text;
+using System.Text.RegularExpressions;
 using Weaver.Services;
 using Weaver;
 
@@ -30,6 +31,12 @@ partial class AgentController
         BrowserFactory = CdpBrowserDriver.TryCreateAsync
     };
 
+    // Lazy-created orchestrator (needs the injected _db, so it can't be a field initializer).
+    // Tests swap this via reflection with a fake-hosted orchestrator.
+    private BenchmarkCardOrchestrator? _benchmarkOrchestrator;
+    private BenchmarkCardOrchestrator BenchmarkOrchestrator =>
+        _benchmarkOrchestrator ??= new BenchmarkCardOrchestrator(_db);
+
     /// <summary>
     /// The strict-test-intent short-circuit: spin up the project's server and verify
     /// the named feature, then return the steps + verdict. Zero LLM calls.
@@ -51,6 +58,7 @@ partial class AgentController
             }, ct);
 
         BrowserTestReport report;
+        _browserTestService.OnProgress = MakeWebtestProgressSink(emitSse);
         try
         {
             report = testIntent.Intent == TestIntentClassifier.Kind.Api
@@ -67,6 +75,10 @@ partial class AgentController
                 LaunchError = ex.Message,
                 Findings = { new TestFinding("fail", $"Live web test crashed: {ex.Message}") }
             };
+        }
+        finally
+        {
+            _browserTestService.OnProgress = null;
         }
 
         var stepIndex = 0;
@@ -164,6 +176,7 @@ partial class AgentController
         var target = changeDesc.Trim();
         var testIntent = new TestClassifierTarget(target);
         BrowserTestReport report;
+        _browserTestService.OnProgress = MakeWebtestProgressSink(emitSse);
         try
         {
             report = testIntent.IsApi
@@ -178,6 +191,10 @@ partial class AgentController
                 Target = target, Mode = "failed", LaunchError = ex.Message,
                 Findings = { new TestFinding("fail", $"Live web test crashed: {ex.Message}") }
             };
+        }
+        finally
+        {
+            _browserTestService.OnProgress = null;
         }
 
         allResults.Add(new Dictionary<string, object?>
@@ -208,6 +225,185 @@ partial class AgentController
         await EmitLog(emitSse, report.Passed ? "success" : "error", report.ToString(), ct: ct);
         return stepIndex + 1;
     }
+
+    /// <summary>Executes a "_benchmark_verify" plan step: runs the named benchmark's
+    /// acceptance checks (filesystem + live web test) end-to-end — the deterministic way a
+    /// self-improving card proves a benchmark change actually works, by reading the screen
+    /// AND checking the filesystem.</summary>
+    private async Task<int> ExecuteBenchmarkVerifyStep(
+        string changeDesc, string projectRoot, bool emitSse,
+        CancellationToken ct, List<object> allResults, int stepIndex)
+    {
+        var level = ExtractBenchmarkLevel(changeDesc);
+        if (level == null)
+        {
+            await EmitLog(emitSse, "error", $"_benchmark_verify: could not parse a benchmark level from \"{changeDesc}\"", ct: ct);
+            return stepIndex;
+        }
+
+        var benchmark = new BenchmarkService(_db);
+        var custom = benchmark.LoadCustomSystemInfo();
+        var benchRoot = BenchmarkService.ResolveBenchmarkRoot(custom?.BenchmarkProjectRoot);
+        benchmark.BrowserTest.OnProgress = MakeWebtestProgressSink(emitSse);
+
+        List<BenchmarkCheckResult> results;
+        try
+        {
+            results = await benchmark.EvaluateChecksAsync(level.Value, benchRoot, ct);
+        }
+        catch (Exception ex)
+        {
+            results = new List<BenchmarkCheckResult>
+            {
+                new BenchmarkCheckResult { Name = "verify", Passed = false, Message = ex.Message }
+            };
+        }
+        finally
+        {
+            benchmark.BrowserTest.OnProgress = null;
+        }
+
+        var passed = results.Count(r => r.Passed);
+        var failed = results.Where(r => !r.Passed).ToList();
+        var allPassed = results.Count > 0 && failed.Count == 0;
+        var summary = allPassed
+            ? $"Benchmark {level} verified — {passed}/{results.Count} checks passed"
+            : $"Benchmark {level} NOT verified — {failed.Count} of {results.Count} check(s) failed";
+
+        var checksPayload = results.Select(r => new { r.Name, r.Passed, r.Message }).ToList();
+        allResults.Add(new Dictionary<string, object?>
+        {
+            ["index"] = stepIndex,
+            ["type"] = "benchmark_verify",
+            ["status"] = allPassed ? "done" : "error",
+            ["path"] = "benchmark_verify",
+            ["level"] = level,
+            ["description"] = summary,
+            ["checks"] = checksPayload
+        });
+        if (emitSse)
+            await SendSse(Response, "step", new
+            {
+                index = stepIndex,
+                type = "benchmark_verify",
+                status = allPassed ? "done" : "error",
+                path = "benchmark_verify",
+                level = level,
+                description = summary,
+                checks = checksPayload
+            }, ct);
+        await EmitLog(emitSse, allPassed ? "success" : "error", summary, new { level = level, checks = results }, ct: ct);
+        return stepIndex + 1;
+    }
+
+    /// <summary>Executes a "_benchmark_orchestrate" plan step: spins up a FRESH Weaver instance,
+    /// injects the benchmark card, runs it, and verifies the result end-to-end. This is the
+    /// self-improving column's full loop — the deterministic core (launch/inject/run/verify)
+    /// with zero extra planning, so a basic model gets the same result as a strong one.</summary>
+    private async Task<int> ExecuteBenchmarkOrchestrateStep(
+        string changeDesc, string projectRoot, bool emitSse,
+        CancellationToken ct, List<object> allResults, int stepIndex)
+    {
+        var level = ExtractBenchmarkLevel(changeDesc);
+        if (level == null)
+        {
+            await EmitLog(emitSse, "error", $"_benchmark_orchestrate: could not parse a benchmark level from \"{changeDesc}\"", ct: ct);
+            return stepIndex;
+        }
+
+        var plan = BenchmarkService.GetBenchmarkPlans().FirstOrDefault(p => p.Level == level.Value);
+        if (plan == null)
+        {
+            await EmitLog(emitSse, "error", $"_benchmark_orchestrate: unknown benchmark level {level.Value}", ct: ct);
+            return stepIndex;
+        }
+
+        await EmitLog(emitSse, "info", $"_benchmark_orchestrate: spinning up a fresh instance to run benchmark {level.Value} end-to-end…", ct: ct);
+
+        var orchestrator = BenchmarkOrchestrator;
+        Func<BenchmarkOrchestrationEvent, CancellationToken, Task> onProgress = async (e, ct2) =>
+        {
+            await EmitLog(emitSse, "info", $"🧪 {e.Stage}: {e.Message}", ct: ct2);
+            if (emitSse)
+                await SendSse(Response, "webtest", new { phase = e.Stage, url = e.Url, message = e.Message }, ct2);
+        };
+
+        var result = await orchestrator.OrchestrateAsync(
+            new BenchmarkOrchestrationRequest(plan.Description, level.Value, "selfImproving", EndpointId: null),
+            onProgress, ct);
+
+        var summary = result.Succeeded
+            ? $"Benchmark {level} orchestrated end-to-end — fresh instance ran the card and {result.Checks.Count(c => c.Passed)}/{result.Checks.Count} checks passed"
+            : result.Verified
+                ? $"Benchmark {level} verified but the run flagged a problem: {result.Error}"
+                : $"Benchmark {level} orchestration did not verify — {result.Checks.Count(c => !c.Passed)} of {result.Checks.Count} check(s) failed{(string.IsNullOrWhiteSpace(result.Error) ? "" : $" ({result.Error})")}";
+
+        var checksPayload = result.Checks.Select(r => new { r.Name, r.Passed, r.Message }).ToList();
+        allResults.Add(new Dictionary<string, object?>
+        {
+            ["index"] = stepIndex,
+            ["type"] = "benchmark_orchestrate",
+            ["status"] = result.Succeeded ? "done" : "error",
+            ["path"] = "benchmark_orchestrate",
+            ["level"] = level,
+            ["instanceUrl"] = result.InstanceUrl,
+            ["cardId"] = result.CardId,
+            ["workspace"] = result.WorkspaceRoot,
+            ["description"] = summary,
+            ["checks"] = checksPayload
+        });
+        if (emitSse)
+            await SendSse(Response, "step", new
+            {
+                index = stepIndex,
+                type = "benchmark_orchestrate",
+                status = result.Succeeded ? "done" : "error",
+                path = "benchmark_orchestrate",
+                level = level,
+                instanceUrl = result.InstanceUrl,
+                cardId = result.CardId,
+                workspace = result.WorkspaceRoot,
+                description = summary,
+                checks = checksPayload
+            }, ct);
+        await EmitLog(emitSse, result.Succeeded ? "success" : "error", summary,
+            new { level = level, instanceUrl = result.InstanceUrl, checks = result.Checks }, ct: ct);
+        return stepIndex + 1;
+    }
+
+    /// <summary>Extracts the benchmark level from a "_benchmark_verify" step's change text
+    /// (e.g. "benchmark 22", "benchmark_test_22", "verify level 4").</summary>
+    private static int? ExtractBenchmarkLevel(string changeDesc)
+    {
+        if (string.IsNullOrWhiteSpace(changeDesc)) return null;
+        var m = Regex.Match(changeDesc, @"\d{1,3}");
+        return m.Success && int.TryParse(m.Value, out var level) ? level : null;
+    }
+
+    /// <summary>Builds the per-run progress sink that streams live browser navigation
+    /// ("where is it going, what is it checking") to the UI as a "webtest" SSE event.</summary>
+    private Func<BrowserTestEvent, CancellationToken, Task> MakeWebtestProgressSink(bool emitSse) =>
+        async (e, ct2) =>
+        {
+            if (!emitSse) return;
+            // Snapshot-phase events carry the rendered page — stream a compact excerpt
+            // (title + a few headings + visible text) so the Test Browser panel can show
+            // what actually painted, without shipping the full 30k-char body over SSE.
+            object? snap = null;
+            if (e.Snapshot != null)
+            {
+                var body = e.Snapshot.BodyText ?? "";
+                if (body.Length > 400) body = body[..400] + "…";
+                snap = new
+                {
+                    title = e.Snapshot.Title,
+                    headings = e.Snapshot.Headings.Take(6).ToList(),
+                    body,
+                    imageDataUrl = e.Snapshot.ScreenshotDataUrl
+                };
+            }
+            await SendSse(Response, "webtest", new { phase = e.Phase, url = e.Url, message = e.Message, snapshot = snap }, ct2);
+        };
 
     /// <summary>Whether a "_browser_test" step targets an API endpoint vs the UI.
     /// Mirrors the classifier's API rule for plan steps whose change names a route.</summary>

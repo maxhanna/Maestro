@@ -334,7 +334,19 @@
             </div>
           </div>
 
-          <div class="agent-current" ng-if="vm.streamingActive && vm.getActiveStep()">
+          <div class="agent-panel-tabs span-full" ng-if="vm.hasWebtestBrowser()">
+            <button type="button" class="agent-panel-tab"
+              ng-class="{active: vm.agentPanelTabIs('activity')}"
+              ng-click="vm.setAgentPanelTab('activity')">Activity</button>
+            <button type="button" class="agent-panel-tab"
+              ng-class="{active: vm.agentPanelTabIs('browser')}"
+              ng-click="vm.setAgentPanelTab('browser')">
+              Browser
+              <span class="agent-panel-tab-count">{{vm.webtestEvents.length}}</span>
+            </button>
+          </div>
+
+          <div class="agent-current" ng-if="vm.agentPanelTabIs('activity') && vm.streamingActive && vm.getActiveStep()">
             <div class="agent-current-label">Now</div>
             <div class="agent-current-step" ng-class="vm.getActiveStep().status">
               <span class="step-icon">⏳</span>
@@ -344,8 +356,42 @@
             </div>
           </div>
 
+          <!-- Live web-test browser: watch where the agent navigates and what it verifies -->
+          <div class="webtest-panel" ng-if="vm.agentPanelTabIs('browser') && vm.hasWebtestBrowser()">
+              <div class="webtest-panel-head">
+                <span>Test Browser</span>
+                <span class="webtest-count" ng-if="vm.webtestEvents.length">{{vm.webtestEvents.length}} events</span>
+                <span class="webtest-phase" ng-if="vm.webtestCurrent" ng-class="'webtest-phase-' + vm.webtestCurrent.phase">
+                  {{vm.webtestCurrent.phase}}
+                </span>
+              </div>
+              <div class="webtest-chrome">
+                <span class="webtest-dots"><i></i><i></i><i></i></span>
+                <span class="webtest-url"
+                  title="{{vm.webtestCurrent && vm.webtestCurrent.url}}">{{vm.webtestCurrent && vm.webtestCurrent.url ? vm.webtestCurrent.url : 'about:blank'}}</span>
+              </div>
+              <div class="webtest-snapshot" ng-if="vm.webtestCurrent && vm.webtestCurrent.snapshot">
+                <img class="webtest-screenshot" ng-if="vm.webtestCurrent.snapshot.imageDataUrl"
+                  ng-src="{{vm.webtestCurrent.snapshot.imageDataUrl}}" alt="Live browser screenshot" />
+                <div class="webtest-snapshot-title" ng-if="vm.webtestCurrent.snapshot.title"
+                  title="Rendered <title>">{{vm.webtestCurrent.snapshot.title}}</div>
+                <div class="webtest-snapshot-headings" ng-if="vm.webtestCurrent.snapshot.headings && vm.webtestCurrent.snapshot.headings.length">
+                  <span class="webtest-snapshot-h" ng-repeat="h in vm.webtestCurrent.snapshot.headings track by $index">{{h}}</span>
+                </div>
+                <div class="webtest-snapshot-body" title="Visible page text (excerpt)">{{vm.webtestCurrent.snapshot.body}}</div>
+              </div>
+              <div class="webtest-status" ng-if="vm.webtestCurrent">{{vm.webtestCurrent.message}}</div>
+              <div class="webtest-log">
+                <div class="webtest-entry" ng-repeat="e in vm.webtestEvents track by $index">
+                  <span class="webtest-entry-phase" ng-class="'webtest-phase-' + e.phase">{{e.phase}}</span>
+                  <span class="webtest-entry-msg">{{e.message}}</span>
+                  <span class="webtest-entry-url" ng-if="e.url">{{e.url}}</span>
+                </div>
+              </div>
+          </div>
+
           <!-- Latest log entry (prettified) -->
-          <div class="agent-latest-log" ng-if="vm.agentActivityLog.length">
+          <div class="agent-latest-log" ng-if="vm.agentPanelTabIs('activity') && vm.agentActivityLog.length">
             <div class="latest-log-header">
               <span class="latest-log-badge"
                 ng-class="vm.agentActivityLog[vm.agentActivityLog.length-1].level">{{vm.agentActivityLog[vm.agentActivityLog.length-1].level}}</span>
@@ -363,7 +409,7 @@
           <!-- Steering input (always visible): at run start its value is sent as
                steeringContext; while a run is ACTIVE the Steer now button POSTs it to
                api/agent/steer so the user can steer the agent mid-flight. -->
-          <div class="steering-section" ng-if="vm.agentActivityLogLength > 0">
+          <div class="steering-section" ng-if="vm.agentPanelTabIs('activity') && vm.agentActivityLogLength > 0">
             <input type="text" class="steering-input" ng-model="vm.steeringContext"
               placeholder="Steer the agent (optional)..."
               ng-keydown="$event.key === 'Enter' ? vm.steerNow() : null" />
@@ -375,7 +421,7 @@
             </button>
           </div>
 
-          <div class="agent-latest-log agent-activity-log" ng-if="vm.agentActivityLog.length">
+          <div class="agent-latest-log agent-activity-log" ng-if="vm.agentPanelTabIs('activity') && vm.agentActivityLog.length">
             <details>
               <summary>
                 <span>📋 Log ({{vm.agentActivityLogLength}})</span>
@@ -421,7 +467,7 @@
             </details>
           </div>
 
-          <div class="agent-streaming-tokens" ng-if="vm.streamingTokenBuffer">
+          <div class="agent-streaming-tokens" ng-if="vm.agentPanelTabIs('activity') && vm.streamingTokenBuffer">
             <details open>
               <summary>
                 <span>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : ''
@@ -439,7 +485,7 @@
             </details>
           </div>
 
-          <div class="agent-resolve-streams" ng-if="vm.resolveStreams && vm.resolveStreams.length">
+          <div class="agent-resolve-streams" ng-if="vm.agentPanelTabIs('activity') && vm.resolveStreams && vm.resolveStreams.length">
             <div ng-repeat="rs in vm.resolveStreams track by $index" class="resolve-stream-section">
               <details>
                 <summary>💬 Resolve {{$index + 1}}</summary>
@@ -451,7 +497,7 @@
 
           <!-- META-PLAN BLOCK -->
           <div class="card-meta-plan"
-            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            ng-if="vm.agentPanelTabIs('activity') && card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
             style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
             <div class="meta-plan-header"
               style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
@@ -487,7 +533,7 @@
           </div>
 
           <div class="agent-streaming-thinking"
-            ng-if="vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length">
+            ng-if="vm.agentPanelTabIs('activity') && (vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length)">
             <details ng-attr-open="{{(vm.streamingSteps.length || vm.planItems.length) ? 'open' : undefined}}">
               <summary>
                 <span>🧠 Plan</span>
@@ -609,7 +655,7 @@
             </details>
           </div>
 
-          <div class="agent-streaming-thinking" ng-if="vm.cohesionIssues && vm.cohesionIssues.length">
+          <div class="agent-streaming-thinking" ng-if="vm.agentPanelTabIs('activity') && vm.cohesionIssues && vm.cohesionIssues.length">
             <details>
               <summary>
                 <span>🔍 Cohesion Issues{{vm.cohesionFile ? ' (' + vm.cohesionFile + ')' : ''}}</span>
@@ -623,16 +669,16 @@
             </details>
           </div>
 
-          <div class="agent-summary-live" ng-if="vm.streamingSummary">
+          <div class="agent-summary-live" ng-if="vm.agentPanelTabIs('activity') && vm.streamingSummary">
             <strong>Batch:</strong> {{vm.streamingSummary}}
           </div>
 
-          <div class="files-edited-panel" ng-if="vm.streamingFilesEdited.length">
+          <div class="files-edited-panel" ng-if="vm.agentPanelTabIs('activity') && vm.streamingFilesEdited.length">
             <strong>Files changed</strong>
             <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited track by f.path">{{f.path}}</div>
           </div>
 
-          <div>
+          <div ng-if="vm.agentPanelTabIs('activity')">
             <details ng-attr-open="{{vm.streamingActive ? 'open' : undefined}}">
               <summary>💻 Commands ({{vm.streamingSteps.length}})</summary>
               <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length"

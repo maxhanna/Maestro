@@ -17,6 +17,7 @@ public sealed class PageSnapshot
     public List<string> Buttons { get; init; } = new();
     public List<string> Inputs { get; init; } = new();
     public string BodyText { get; init; } = "";
+    public string? ScreenshotDataUrl { get; set; }
 }
 
 /// <summary>A navigation link with its visible text and target URL.</summary>

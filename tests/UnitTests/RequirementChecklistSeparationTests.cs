@@ -39,7 +39,8 @@ public class RequirementChecklistSeparationTests
             new List<string>(),              /* rejectionFeedback */
             null,                            /* extendedReasoning */
             null,                            /* atomicStepEstimate */
-            requirementChecklist
+            requirementChecklist,
+            null                             /* projectRoot */
         })!;
 
     private static string BuildReplan(string? requirementChecklist)

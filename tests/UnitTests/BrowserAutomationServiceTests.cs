@@ -178,6 +178,28 @@ public class BrowserAutomationServiceTests : IDisposable
         await Assert.ThrowsAnyAsync<Exception>(async () => await http.GetAsync(report.ServerUrl + "/"));
     }
 
+    [Fact]
+    public async Task RunUiTestAsync_StreamsSnapshotEvents_WithRenderedPage()
+    {
+        // The OnProgress stream must surface WHAT RENDERED (title + headings), not just
+        // the URL — this is what the Test Browser panel reads to show the live page.
+        var root = NewProject(SiteHtml);
+        var service = ServiceFor(root);
+        var events = new List<BrowserTestEvent>();
+        service.OnProgress = (e, ct) => { events.Add(e); return Task.CompletedTask; };
+
+        var report = await service.RunUiTestAsync(root, "fixture home", null);
+
+        Assert.True(report.Passed, report.ToString());
+        var snap = events.FirstOrDefault(e => e.Phase == "snapshot");
+        Assert.NotNull(snap);
+        Assert.NotNull(snap!.Snapshot);
+        Assert.Equal("Fixture", snap.Snapshot!.Title);
+        Assert.Contains("Fixture Home", snap.Snapshot.Headings);
+        // The stream ends with a done verdict.
+        Assert.Contains(events, e => e.Phase == "done");
+    }
+
     // ── ResolveUrl / helpers ─────────────────────────────────────────────────
 
     [Theory]

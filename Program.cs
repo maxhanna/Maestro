@@ -223,14 +223,23 @@ catch (System.Reflection.ReflectionTypeLoadException ex)
 // If another Weaver instance is already listening on the default port, fall back
 // to the next free port instead of crashing — so a double-clicked exe always
 // starts (e.g. when a second copy runs while the first is still open).
-var listenUrl = app.Urls.FirstOrDefault() ?? "http://127.0.0.1:5000";
+//
+// Honor an explicit listen URL (`--urls` / `urls` config) FIRST: the WebHost's
+// app.Urls does not reliably reflect a command-line `--urls` value, so read the
+// resolved configuration directly — otherwise a launcher pointing Weaver at a
+// specific free port (e.g. `--urls http://127.0.0.1:{port}`) is silently overridden
+// back to the 5000 default and the launcher's port is never bound. The resolved
+// URL is then bound explicitly so Kestrel listens exactly where we decided.
+var listenUrl = (builder.Configuration["urls"] ?? app.Urls.FirstOrDefault() ?? "http://127.0.0.1:5000")
+    .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    .FirstOrDefault() ?? "http://127.0.0.1:5000";
 var freeUrl = EnsureFreePort(listenUrl, out var originalPort);
 if (freeUrl != listenUrl)
 {
-    app.Urls.Clear();
-    app.Urls.Add(freeUrl);
     Log($"Port {originalPort} is already in use — starting on {freeUrl} instead.");
 }
+app.Urls.Clear();
+app.Urls.Add(freeUrl);
 
 try
 {

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http.Features;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -663,11 +664,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private async Task<IncrementalStepProposal?> ProposeNextIncrementalStepAsync(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string? steeringContext, List<string> rejectionFeedback, bool emitSse, CancellationToken ct,
-        string stepMode = "all", string? extendedReasoning = null, int? atomicStepEstimate = null)
+        string stepMode = "all", string? extendedReasoning = null, int? atomicStepEstimate = null,
+        string? projectRoot = null)
     {
         var cfg = await LoadConfigAsync();
         var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct), atomicStepEstimate);
-        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning, atomicStepEstimate, _requirementChecklist);
+        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning, atomicStepEstimate, _requirementChecklist, projectRoot);
         // Labeled so the agent panel shows the token spend of this planning round (prompt +
         // response) right in the run's log, and the step result aggregates it as llmTokens.
         var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout,
@@ -1003,6 +1005,75 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return violations;
     }
 
+    private static string? ValidateJavaScriptLikeCreateFile(string? filePath, string? content)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || string.IsNullOrWhiteSpace(content)) return null;
+        var ext = Path.GetExtension(filePath).ToLowerInvariant();
+        if (ext is not ".js" and not ".jsx" and not ".mjs" and not ".cjs" and not ".ts" and not ".tsx")
+            return null;
+
+        var node = FindExecutableOnPath("node");
+        if (node == null)
+            return null;
+
+        var tempPath = Path.Combine(Path.GetTempPath(), $"weaver-syntax-{Guid.NewGuid():N}{ext}");
+        try
+        {
+            System.IO.File.WriteAllText(tempPath, content);
+            var psi = new ProcessStartInfo
+            {
+                FileName = node,
+                Arguments = $"--check \"{tempPath}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var process = Process.Start(psi);
+            if (process == null) return null;
+            var stderr = process.StandardError.ReadToEnd();
+            var stdout = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(15000);
+            if (process.ExitCode != 0)
+            {
+                var tail = (stderr + "\n" + stdout).Trim();
+                return $"JavaScript/TypeScript syntax check failed for '{filePath}' — reject this _create_file until the script parses cleanly. {tail}";
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            try { if (System.IO.File.Exists(tempPath)) System.IO.File.Delete(tempPath); } catch { }
+        }
+    }
+
+    private static string? FindExecutableOnPath(string name)
+    {
+        var candidates = new[]
+        {
+            name,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), name),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.SystemX86), name)
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (!string.IsNullOrWhiteSpace(candidate) && System.IO.File.Exists(candidate)) return candidate;
+        }
+
+        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var full = Path.Combine(dir, name + (OperatingSystem.IsWindows() ? ".exe" : ""));
+            if (System.IO.File.Exists(full)) return full;
+        }
+        return null;
+    }
+
     private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
         PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string projectRoot, bool emitSse, CancellationToken ct,
@@ -1079,6 +1150,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase) &&
                                    string.Equals(s.Change, step.Change, StringComparison.OrdinalIgnoreCase)))
                 return (false, $"File '{step.Change}' was already created by a prior _create_file step — target the existing file instead.");
+
+            var jsSyntaxReason = ValidateJavaScriptLikeCreateFile(step.Change, step.NewString);
+            if (jsSyntaxReason != null)
+                return (false, jsSyntaxReason);
+
             // '.' is in the path class so dotted prefixes (maxhanna.client/src/…) are captured
             // whole — the old [\w\-/\\]+ stopped at the first dot and matched only
             // "maxhanna.client", blindfolding both the same-dir conflict check and this guard.
@@ -1121,6 +1197,48 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return (false, $"_command step is not an executable shell command. You are on {(OperatingSystem.IsWindows() ? "Windows" : Environment.OSVersion)} and the Desktop is at {osDesktopPath}. A _command step's change must BE the real command with an absolute path, e.g. {mkDirExample}. Never put planning notes in a _command step.");
             }
             return (false, "_command step is not an executable shell command. Use _command only for real terminal commands such as `dotnet test`, `npm install`, or `cd app; npx ng g c name`. Put planning notes in the thinking field, not in a command step.");
+        }
+        // WRONG-ROOT GUARD: a _command step that creates a folder/file using an absolute path
+        // that falls OUTSIDE the project root is almost always the model confusing the Desktop
+        // (parent of benchmark_sandbox) with the sandbox itself. Reject and steer it to use
+        // relative paths (handled by _create_file/_create_directory) or the correct absolute
+        // project root so benchmark folders land inside the sandbox, not alongside it.
+        if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(step.Change) &&
+            !string.IsNullOrWhiteSpace(projectRoot))
+        {
+            // Extract any absolute path embedded in the command (mkdir/New-Item/Set-Content/etc.)
+            var absPathMatch = Regex.Match(step.Change,
+                OperatingSystem.IsWindows()
+                    ? @"[A-Za-z]:[\\/][^\s""'|>&]+"
+                    : @"/[^\s""'|>&]+",
+                RegexOptions.IgnoreCase);
+            if (absPathMatch.Success)
+            {
+                var absPath = absPathMatch.Value.TrimEnd('\\', '/');
+                var fullAbs = Path.GetFullPath(absPath);
+                var fullRoot = Path.GetFullPath(projectRoot);
+                // Only fire when the absolute path is NOT under the project root.
+                if (!fullAbs.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase) &&
+                    !fullAbs.Equals(fullRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Check it looks like a directory creation / file-write command — not
+                    // a legitimate tool invocation like `git clone` or `dotnet publish -o`.
+                    var isMkDir = Regex.IsMatch(step.Change,
+                        @"\b(mkdir|md|New-Item|ni)\b", RegexOptions.IgnoreCase);
+                    var isWrite = Regex.IsMatch(step.Change,
+                        @"\b(Set-Content|Out-File|Add-Content|echo\s|Write-Output)\b",
+                        RegexOptions.IgnoreCase);
+                    if (isMkDir || isWrite)
+                    {
+                        return (false,
+                            $"_command creates a path OUTSIDE the project root. " +
+                            $"The project root is \"{fullRoot}\". " +
+                            $"To create a subfolder use a _create_directory step with a relative path (e.g. \"benchmark_test_22\"), " +
+                            $"or use an absolute path under the project root: \"{Path.Combine(fullRoot, Path.GetFileName(fullAbs))}\".");
+                    }
+                }
+            }
         }
         // FETCH-IN-COMMAND GUARD: a _command step that pulls CONTENT from an http(s)
         // URL with a download tool is the planner doing a web search by writing a
@@ -1495,7 +1613,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await SendSse(Response, "phase", new { message = $"Planning — step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
             var proposal = await ProposeNextIncrementalStepAsync(
                 prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct,
-                atomicStepEstimate: atomicStepEstimate);
+                atomicStepEstimate: atomicStepEstimate, projectRoot: projectRoot);
             if (proposal == null)
             {
                 var jsonFb = "Your previous response could not be parsed as valid JSON. " +
@@ -3096,7 +3214,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     "_planning", proposingText,
                     $"Proposing step {planSoFar.Count + 1}…", null, ct);
             }
-            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning, atomicStepEstimate: atomicStepEstimate);
+            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning, atomicStepEstimate: atomicStepEstimate, projectRoot: projectRoot);
             if (proposal == null)
             {
                 var jsonFb = "Your previous response could not be parsed as valid JSON. " +

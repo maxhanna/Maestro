@@ -152,6 +152,7 @@ public class ServerLaunchE2ETests : IDisposable
                 Assert.Contains(new PageLink("Pricing", "/pricing.html"), snap.Links);
                 Assert.Contains("Save changes", snap.Buttons);
                 Assert.Contains("Rendered by the real browser", snap.BodyText);
+                Assert.StartsWith("data:image/jpeg;base64,", snap.ScreenshotDataUrl);
 
                 // Click the nav link → the page navigates → re-snapshot sees Pricing.
                 var clicked = await driver.ClickByTextAsync("pricing");

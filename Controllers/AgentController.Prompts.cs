@@ -613,7 +613,8 @@ partial class AgentController
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string? steeringContext, List<string> rejectionFeedback, string? extendedReasoning = null,
-        int? atomicStepEstimate = null, string? requirementChecklist = null)
+        int? atomicStepEstimate = null, string? requirementChecklist = null,
+        string? projectRoot = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("### TASK ###");
@@ -647,6 +648,12 @@ partial class AgentController
             sb.AppendLine();
             sb.AppendLine("### EXTENDED REASONING (from the deep-reasoning engine — read it fully; it decided this step's file, anchors and content. Follow it unless you find a concrete contradiction with the discovery context.) ###");
             sb.AppendLine(extendedReasoning);
+        }
+        if (!string.IsNullOrWhiteSpace(projectRoot))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### PROJECT ROOT ###");
+            sb.AppendLine(projectRoot);
         }
         sb.AppendLine();
         sb.AppendLine("### DISCOVERY CONTEXT (only reference paths/content shown here) ###");
@@ -790,6 +797,8 @@ partial class AgentController
         ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
         ["_scraper"] = "\"_scraper\"           — FALLBACK fetch when _web_fetch keeps failing: put the URL in \"change\"; the system probes your OS/interpreter/installed packages and builds+runs a working scraper, writing the demanded file. Never write scraper code yourself.",
         ["_browser_test"] = "\"_browser_test\"      — LIVE web-app test: the system spins up the project's own server (any type: C#/node/python/static) and verifies the named feature in a real browser — no code needed. Put what to test in \"change\" (e.g. \"the kanban board loads\" or \"/api/agent/llm-reachable returns 200\"). Use for TEST/VERIFY-only intents, never for edits.",
+        ["_benchmark_verify"] = "\"_benchmark_verify\" — Run a benchmark's acceptance checks END-TO-END (filesystem + live web test): put the benchmark level in \"change\" (e.g. \"benchmark 22\" or \"benchmark_test_22\"). Use after adding/changing a benchmark in the benchmark service to prove the agent can actually pass it.",
+        ["_benchmark_orchestrate"] = "\"_benchmark_orchestrate\" — Spin up a FRESH Weaver instance, inject the benchmark card, run it, and verify it end-to-end (filesystem + live web test): put the benchmark level in \"change\" (e.g. \"benchmark 22\"). Use when a self-improving card changes or adds a benchmark — the system proves the change works by running it on a fresh instance.",
         ["_git"] = "\"_git\"                — Git operation (commit/pull/push/branch/revert)",
         ["_rename_file"] = "\"_rename_file\"        — Rename: put \"oldpath → newpath\" in \"change\"",
         ["_delete_file"] = "\"_delete_file\"        — Delete a file path in \"change\"",

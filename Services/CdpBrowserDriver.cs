@@ -46,7 +46,9 @@ public sealed class CdpBrowserDriver : IAsyncDisposable
     {
         var raw = await EvaluateAsync(SnapshotJs, ct);
         var text = raw.ValueKind == JsonValueKind.String ? raw.GetString() ?? "" : raw.ToString();
-        return ParseSnapshotJson(text, _url);
+        var snapshot = ParseSnapshotJson(text, _url);
+        snapshot.ScreenshotDataUrl = await TryCaptureScreenshotDataUrlAsync(ct);
+        return snapshot;
     }
 
     /// <summary>Navigates to a URL and waits for the page's readyState to reach
@@ -93,6 +95,26 @@ public sealed class CdpBrowserDriver : IAsyncDisposable
             throw new InvalidOperationException("Page script failed to evaluate.");
         }
         return result.GetProperty("value");
+    }
+
+    private async Task<string?> TryCaptureScreenshotDataUrlAsync(CancellationToken ct)
+    {
+        try
+        {
+            var resp = await SendAsync("Page.captureScreenshot", new JsonObject
+            {
+                ["format"] = "jpeg",
+                ["quality"] = 60,
+                ["fromSurface"] = true
+            }, ct, _sessionId);
+            return resp.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == JsonValueKind.String
+                ? "data:image/jpeg;base64," + dataEl.GetString()
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>

@@ -125,6 +125,26 @@ public class CreateFileDirectoryGuardTests : IDisposable
         Assert.True(valid, $"a root-level _create_file must pass — reason: {reason}");
     }
 
+    [Fact]
+    public void CreateJsFileWithSyntaxError_IsRejected()
+    {
+        var brokenJs = "const PORT = process.env.PORT ||8765;\n" +
+                       "const server = http.createServer((req, res) => {\n" +
+                       "  res.setHeader(\"Access-Control-Allow-Headers\", \"*\">);\n" +
+                       "  res.end(JSON.stringify({'status':'ok'}));\n" +
+                       "});\n";
+
+        var (valid, reason) = Validate(new PlanStep
+        {
+            File = "_create_file",
+            Change = "benchmark_test_22/server.js",
+            NewString = brokenJs
+        });
+
+        Assert.False(valid);
+        Assert.Contains("syntax", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
     // ── Helper-level: FindClosestRealDirectory ─────────────────────────────────────────
 
     [Fact]

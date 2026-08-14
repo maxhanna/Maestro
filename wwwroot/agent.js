@@ -8,6 +8,8 @@ angular.module('kanbanApp')
         // extracts these helpers from the live source).
         function shouldStartSuggestions(card, maxSuggestions, topup) {
             if (!card || maxSuggestions <= 0) return false;
+            // Benchmark cards are sandbox noise — never generate suggestions for them.
+            if (card._benchmark) return false;
             if (topup) {
                 return Array.isArray(card._suggestions) && card._suggestions.length < maxSuggestions && !card._suggestionsGenerating;
             }
@@ -226,12 +228,20 @@ angular.module('kanbanApp')
             else { var running = vm.streamingSteps.find(function (s) { return s.status === 'running'; }); vm.activeStepIndex = running ? running.index : null; }
             refreshFilesEditedFromSteps(vm);
         }
+        // Pure tab guard for the Agent panel: the Browser tab only exists once a live
+        // web-test stream has something to show, so reloads or run resets cannot leave
+        // the UI parked on an empty pane.
+        function normalizeAgentPanelTab(tab, webtestEvents) {
+            var hasBrowser = Array.isArray(webtestEvents) && webtestEvents.length > 0;
+            return tab === 'browser' && hasBrowser ? 'browser' : 'activity';
+        }
         return {
             init: function (vm, $scope) {
                 vm.aiPrompt = ''; vm.aiResponse = ''; vm.activeCardText = ''; vm.activeCardId = null;
                 vm.activeCardIds = new Set(); vm.aiChatMessages = []; vm.aiChatInput = ''; vm.aiChatLoading = false; vm.chatMode = 'ask';
                 vm.streamingActive = false; vm.streamingThinking = ''; vm.streamingSummary = ''; vm._agentStopped = false; vm.streamingPhase = '';
                 vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.llmSpend = null; vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.streamingTokenBuffer = '';
+                vm.webtestEvents = []; vm.webtestCurrent = null; vm.agentPanelTab = 'activity';
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.agentRuns = []; vm.currentRun = null;
@@ -246,6 +256,16 @@ angular.module('kanbanApp')
                     if (card && card.prStatus && card.prStatus.worktreePath) return card.prStatus.worktreePath;
                     return base;
                 }
+                vm.hasWebtestBrowser = function () {
+                    return !!(vm.webtestEvents && vm.webtestEvents.length);
+                };
+                vm.setAgentPanelTab = function (tab) {
+                    vm.agentPanelTab = normalizeAgentPanelTab(tab, vm.webtestEvents);
+                };
+                vm.agentPanelTabIs = function (tab) {
+                    vm.agentPanelTab = normalizeAgentPanelTab(vm.agentPanelTab, vm.webtestEvents);
+                    return vm.agentPanelTab === tab;
+                };
                 // Rewrites a card's stored absolute diff paths from the isolated worktree
                 // prefix to the shared repo prefix after finish (the backend copies the
                 // worktree's data/undo into the shared repo before removing it), so the
@@ -646,6 +666,9 @@ angular.module('kanbanApp')
                                 vm.streamingFilesEdited = [];
                                 vm.planItems = [];
                                 vm.agentActivityLog = [];
+                                vm.webtestEvents = [];
+                                vm.webtestCurrent = null;
+                                vm.agentPanelTab = 'activity';
                             }
                             pushAgentLog(vm, 'info', isAutoRestart ? 'Agent restarting (' + (card._agentIteration || 0) + '/5)' : 'Agent started', { project: runProj, task: card.text });
                             vm.activeCardText = card.text; vm._agentStartTime = Date.now();
@@ -863,6 +886,18 @@ angular.module('kanbanApp')
                                                                 break;
                                                             case 'refresh':
                                                                 if (parsed && parsed.target === 'boarddata' && vm.refreshBoardData) vm.refreshBoardData(parsed);
+                                                                break;
+                                                            case 'webtest':
+                                                                // Live web-test progress — the "Test Browser" panel watches the agent
+                                                                // navigate and verify the running app in real time. Snapshot-phase
+                                                                // events carry the rendered page (title/headings/visible text).
+                                                                if (parsed) {
+                                                                    if (!vm.webtestEvents) vm.webtestEvents = [];
+                                                                    vm.webtestEvents.push({ phase: parsed.phase, url: parsed.url || null, message: parsed.message || '', snapshot: parsed.snapshot || null, ts: Date.now() });
+                                                                    if (vm.webtestEvents.length > 250) vm.webtestEvents.shift();
+                                                                    vm.webtestCurrent = { phase: parsed.phase, url: parsed.url || null, message: parsed.message || '', snapshot: parsed.snapshot || null };
+                                                                    vm.agentPanelTab = 'browser';
+                                                                }
                                                                 break;
                                                              case 'step':
                                                                  if (parsed) {

@@ -805,6 +805,10 @@ public partial class AgentController : ControllerBase
         if (string.IsNullOrWhiteSpace(cardId) || string.IsNullOrWhiteSpace(project))
             return BadRequest(new { error = "cardId and project are required" });
 
+        // Benchmark cards are sandbox noise — never generate suggestions for them.
+        if (await IsCardBenchmarkAsync(cardId))
+            return Ok(new { suggestions = new List<object>() });
+
         // Idle-only guard: Done-card suggestions may ONLY run while the system is completely
         // idle. A card executing right now means the board is NOT idle — refuse without
         // touching the LLM. The completion-triggered request for the card that JUST finished
@@ -1422,6 +1426,32 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
             return lines.Count > 0 ? string.Join("\n", lines) : "";
         }
         catch { return ""; }
+    }
+
+    private async Task<bool> IsCardBenchmarkAsync(string cardId)
+    {
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return false;
+            var columns = new[] { "todo", "doing", "done", "archived", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    return cardObj["_benchmark"] is JsonValue bv && bv.TryGetValue<bool>(out var isBench) && isBench;
+                }
+            }
+        }
+        catch { }
+        return false;
     }
 
     private async Task<List<object>?> ReadCardSuggestionsAsync(string cardId)

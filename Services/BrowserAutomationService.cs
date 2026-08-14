@@ -37,6 +37,12 @@ public sealed class BrowserTestReport
     }
 }
 
+/// <summary>One live progress event from a running web test — streamed to the UI so a
+/// human can watch where the browser is navigating and what it is verifying in real time.
+/// A <c>snapshot</c>-phase event carries the rendered page (title/headings/visible text)
+/// so the UI can show what actually painted on screen, not just the URL.</summary>
+public sealed record BrowserTestEvent(string Phase, string? Url, string Message, PageSnapshot? Snapshot = null);
+
 /// <summary>
 /// The deterministic LIVE WEB TEST runner. Given a project root and the feature the
 /// prompt asked to test, it: (1) detects how the project's server starts,
@@ -61,14 +67,41 @@ public class BrowserAutomationService
     public TimeSpan ServerTimeout { get; set; } = TimeSpan.FromSeconds(120);
     public TimeSpan BrowserSettleTime { get; set; } = TimeSpan.FromSeconds(2);
 
+    /// <summary>Optional progress sink — streamed live to the UI so a human can watch
+    /// where the browser is navigating and what it is verifying. Null (default) = silent.</summary>
+    public Func<BrowserTestEvent, CancellationToken, Task>? OnProgress { get; set; }
+
+    private async Task Progress(string phase, string? url, string message, CancellationToken ct)
+    {
+        if (OnProgress == null) return;
+        try { await OnProgress(new BrowserTestEvent(phase, url, message), ct); } catch { }
+    }
+
+    /// <summary>Emits the just-captured page snapshot so the UI can show what actually
+    /// rendered (title, headings, visible text) after each navigation.</summary>
+    private async Task EmitSnapshot(PageSnapshot snapshot, string? url, CancellationToken ct)
+    {
+        if (OnProgress == null) return;
+        try
+        {
+            await OnProgress(new BrowserTestEvent("snapshot", url,
+                $"Rendered: \"{snapshot.Title}\"", snapshot), ct);
+        }
+        catch { }
+    }
+
     /// <summary>Runs a UI test: launch the project's server and inspect the section the
     /// prompt names in a real browser (or HTTP probe fallback).</summary>
-    public async Task<BrowserTestReport> RunUiTestAsync(
+    public virtual async Task<BrowserTestReport> RunUiTestAsync(
         string projectRoot, string target, string? prompt, CancellationToken ct = default)
     {
         var report = new BrowserTestReport { Target = target };
         var server = await LaunchServerAsync(projectRoot, report, ct);
-        if (server == null) return report;
+        if (server == null)
+        {
+            await Progress("done", null, "Live web test could not start (" + (report.LaunchError ?? "no server") + ")", ct);
+            return report;
+        }
         try
         {
             await InspectUiAsync(server, target, prompt, report, ct);
@@ -82,23 +115,31 @@ public class BrowserAutomationService
             server.Stop();
         }
         report.Passed = !report.HasFailures;
+        await Progress("done", report.ServerUrl, report.Passed
+            ? $"Live web test PASSED — {report.Findings.Count(f => f.Kind == "pass")} checks"
+            : "Live web test FAILED", ct);
         return report;
     }
 
     /// <summary>Runs an API test: launch the project's server and call the named
     /// endpoint over HTTP, verifying status and (optionally) content.</summary>
-    public async Task<BrowserTestReport> RunApiTestAsync(
+    public virtual async Task<BrowserTestReport> RunApiTestAsync(
         string projectRoot, string target, CancellationToken ct = default)
     {
         var report = new BrowserTestReport { Target = target, Mode = "http" };
         var server = await LaunchServerAsync(projectRoot, report, ct);
-        if (server == null) return report;
+        if (server == null)
+        {
+            await Progress("done", null, "Live web test could not start (" + (report.LaunchError ?? "no server") + ")", ct);
+            return report;
+        }
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
             var url = ResolveUrl(server.Url, target);
             report.SectionUrl = url;
             report.Navigations = 1;
+            await Progress("navigating", url, $"GET {url}", ct);
             using var resp = await http.GetAsync(url, ct);
             var body = await resp.Content.ReadAsStringAsync(ct);
             report.Findings.Add((int)resp.StatusCode >= 200 && (int)resp.StatusCode < 400
@@ -118,6 +159,7 @@ public class BrowserAutomationService
             server.Stop();
         }
         report.Passed = !report.HasFailures;
+        await Progress("done", report.ServerUrl, report.Passed ? "API test PASSED" : "API test FAILED", ct);
         return report;
     }
 
@@ -139,6 +181,7 @@ public class BrowserAutomationService
             var server = await Launcher.LaunchAsync(plan, ServerTimeout, ct);
             report.ServerUrl = server.Url;
             report.Findings.Add(new TestFinding("pass", $"Server started: {plan.Description} → {server.Url}"));
+            await Progress("server", server.Url, $"Server started: {plan.Kind} → {server.Url}", ct);
             return server;
         }
         catch (Exception ex)
@@ -167,6 +210,8 @@ public class BrowserAutomationService
         // HTTP fallback: fetch + AngleSharp parse.
         report.Mode = "http";
         snapshot = await WebPageProbeService.FetchSnapshotAsync(server.Url, ct);
+        await Progress("navigating", server.Url, $"Opened {server.Url} (HTTP probe)", ct);
+        await EmitSnapshot(snapshot, server.Url, ct);
         report.Findings.Add(new TestFinding("info", "No browser available — inspected the page over HTTP (server-rendered/static content only; JavaScript-rendered apps need a browser)."));
         section = WebPageProbeService.FindTargetSection(snapshot, target, prompt);
         if (section != null)
@@ -175,10 +220,14 @@ public class BrowserAutomationService
             report.SectionUrl = section.Url;
             report.Findings.Add(new TestFinding("pass",
                 $"Found section \"{section.Label}\" ({(section.Url != null ? "link → " + section.Url : section.Kind)})"));
+            await Progress("section", section.Url, $"Found section \"{section.Label}\"", ct);
         }
         if (section?.Url != null && !string.IsNullOrWhiteSpace(section.Url) && IsNavigableHref(section.Url))
         {
-            snapshot = await WebPageProbeService.FetchSnapshotAsync(ResolveUrl(server.Url, section.Url), ct);
+            var sectionUrl = ResolveUrl(server.Url, section.Url);
+            await Progress("navigating", sectionUrl, $"Navigating to \"{section.Label}\" → {sectionUrl}", ct);
+            snapshot = await WebPageProbeService.FetchSnapshotAsync(sectionUrl, ct);
+            await EmitSnapshot(snapshot, sectionUrl, ct);
             report.Navigations++;
         }
         else if (section == null && !string.IsNullOrWhiteSpace(target))
@@ -195,8 +244,10 @@ public class BrowserAutomationService
     {
         report.Mode = "browser";
         await driver.NavigateAsync(baseUrl, ct);
+        await Progress("navigating", baseUrl, $"Browser navigated to {baseUrl}", ct);
         await driver.SettleAsync(BrowserSettleTime, ct);
         var snapshot = await driver.GetSnapshotAsync(ct);
+        await EmitSnapshot(snapshot, baseUrl, ct);
         var section = WebPageProbeService.FindTargetSection(snapshot, target, prompt);
         if (section != null)
         {
@@ -204,14 +255,18 @@ public class BrowserAutomationService
             report.SectionUrl = section.Url;
             report.Findings.Add(new TestFinding("pass",
                 $"Found section \"{section.Label}\" ({(section.Url != null ? "link → " + section.Url : section.Kind)})"));
+            await Progress("section", section.Url, $"Found section \"{section.Label}\"", ct);
         }
         if (section != null && section.Url != null && IsNavigableHref(section.Url))
         {
             // Navigate to the section the prompt named.
-            await driver.NavigateAsync(ResolveUrl(baseUrl, section.Url), ct);
+            var sectionUrl = ResolveUrl(baseUrl, section.Url);
+            await Progress("navigating", sectionUrl, $"Navigating to \"{section.Label}\" → {sectionUrl}", ct);
+            await driver.NavigateAsync(sectionUrl, ct);
             await driver.SettleAsync(BrowserSettleTime, ct);
             report.Navigations++;
             snapshot = await driver.GetSnapshotAsync(ct);
+            await EmitSnapshot(snapshot, sectionUrl, ct);
         }
         else if (section != null && section.Kind == "button")
         {
@@ -222,6 +277,7 @@ public class BrowserAutomationService
                 await driver.SettleAsync(BrowserSettleTime, ct);
                 report.Navigations++;
                 snapshot = await driver.GetSnapshotAsync(ct);
+                await EmitSnapshot(snapshot, baseUrl, ct);
                 report.Findings.Add(new TestFinding("pass", $"Clicked button \"{section.Label}\" — re-snapshotted the page."));
             }
         }

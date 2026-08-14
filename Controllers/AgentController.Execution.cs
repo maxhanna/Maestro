@@ -698,6 +698,24 @@ partial class AgentController
                 await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
                 continue;
             }
+            if (planFile.Equals("_benchmark_verify", StringComparison.OrdinalIgnoreCase))
+            {
+                // BENCHMARK VERIFY step tool: run a benchmark's acceptance checks (filesystem
+                // + live web test) end-to-end — the self-improving column's "did my change
+                // actually work?" button, with zero LLM involvement.
+                stepIndex = await ExecuteBenchmarkVerifyStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
+                continue;
+            }
+            if (planFile.Equals("_benchmark_orchestrate", StringComparison.OrdinalIgnoreCase))
+            {
+                // BENCHMARK ORCHESTRATE step tool: spin up a FRESH Weaver instance, inject the
+                // benchmark card, run it, and verify end-to-end — the self-improving column's
+                // full loop (launch → inject → run → verify), with zero extra planning.
+                stepIndex = await ExecuteBenchmarkOrchestrateStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
+                continue;
+            }
             if (planFile.Equals("_move_file", StringComparison.OrdinalIgnoreCase))
             {
                 var dst = AgentDiscovery.ExtractTargetPath(changeDesc, planFile, projectRoot);

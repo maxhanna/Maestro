@@ -15,6 +15,17 @@ public class BenchmarkService
     }
 
     /// <summary>
+    /// The live web-app test runner used by <see cref="BenchmarkCheckType.LiveUiTest"/> and
+    /// <see cref="BenchmarkCheckType.LiveApiTest"/> checks: it launches the benchmark folder's
+    /// own server and inspects it in a real browser (or the HTTP/AngleSharp fallback). Real
+    /// by default; tests substitute a fake to avoid spawning a browser/server.
+    /// </summary>
+    public BrowserAutomationService BrowserTest { get; set; } = new()
+    {
+        BrowserFactory = CdpBrowserDriver.TryCreateAsync
+    };
+
+    /// <summary>
     /// Resolves the benchmark project root exactly the way ExecuteStreamCore does: the
     /// user-configured custom root when set (from the benchmark system-info panel), else
     /// the desktop benchmark_sandbox. The kanban project created for benchmark cards must
@@ -552,8 +563,39 @@ public class BenchmarkService
                     Check.Contains("Edited cell fairy present", "benchmark_test_21/pokemon_data.csv", "fairy"),
                     Check.NotContains("Mass edit replaced the placeholder", "benchmark_test_21/pokemon_data.csv", "unknown")
                 ]
+            },
+            new()
+            {
+                Level = 22, Name = "Live Web Test 1: HTTP server + browser verification", Description = "Create a folder called 'benchmark_test_22' at the project root. Inside it, build a simple HTTP server and then TEST it with the live web-test suite.\n\nSTEP 1 — SERVER: Serve 'index.html' at / with a heading that says exactly 'Benchmark 22', a short paragraph, and a button. Add a /api/health endpoint that returns JSON {\"status\": \"ok\"}. The server must read its port from the PORT environment variable, defaulting to 8765, so it can be started on a different free port when 8765 is already in use. Choose whatever language, runtime, or library you prefer — the implementation is up to you.\n\nSTEP 2 — TEST: Spin up your server and verify it works: confirm the 'Benchmark 22' heading is actually present on the rendered page (visually, in a browser) and that GET /api/health returns the expected JSON. If the preconfigured port is busy, start the server on a different free port and test there instead.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_22"),
+                    Check.File("Index page exists", "benchmark_test_22/index.html"),
+                    Check.AnyFileContains("Default port configured", "benchmark_test_22", "8765"),
+                    Check.AnyFileContains("Reads port from environment", "benchmark_test_22", "PORT"),
+                    Check.AnyFileContains("Health endpoint exists", "benchmark_test_22", "/api/health"),
+                    Check.LiveUiTest("Heading renders on screen", "benchmark_test_22", "Benchmark 22"),
+                    Check.LiveApiTest("Health endpoint answers", "benchmark_test_22", "/api/health")
+                ]
             }
         };
+    }
+
+    /// <summary>
+    /// Runs a benchmark's acceptance checks against a project root WITHOUT saving a score.
+    /// This is the reusable "verify a benchmark end-to-end" entry point used by the
+    /// <c>_benchmark_verify</c> step tool (self-improving cards run their touched benchmark
+    /// here — including the live web-test checks that spin up the server and read the screen).
+    /// </summary>
+    public async Task<List<BenchmarkCheckResult>> EvaluateChecksAsync(int level, string projectRoot, CancellationToken ct = default)
+    {
+        var plan = GetBenchmarkPlans().FirstOrDefault(p => p.Level == level)
+            ?? throw new ArgumentOutOfRangeException(nameof(level), $"Unknown benchmark level {level}.");
+
+        var results = new List<BenchmarkCheckResult>();
+        foreach (var check in plan.AcceptanceChecks)
+            results.Add(await EvaluateCheckAsync(check, projectRoot, ct));
+        return results;
     }
 
     public async Task<BenchmarkScore> EvaluateAsync(
@@ -565,9 +607,7 @@ public class BenchmarkService
         var plan = GetBenchmarkPlans().FirstOrDefault(p => p.Level == level)
             ?? throw new ArgumentOutOfRangeException(nameof(level), $"Unknown benchmark level {level}.");
 
-        var results = new List<BenchmarkCheckResult>();
-        foreach (var check in plan.AcceptanceChecks)
-            results.Add(await EvaluateCheckAsync(check, projectRoot, ct));
+        var results = await EvaluateChecksAsync(level, projectRoot, ct);
 
         var totalWeight = results.Sum(r => r.Weight);
         var earnedWeight = results.Where(r => r.Passed).Sum(r => r.Weight);
@@ -707,6 +747,28 @@ public class BenchmarkService
                         ? $"Found '{needle}' in a file under {check.Path}."
                         : $"'{needle}' not found in any of the {scanned} file(s) under {check.Path}.";
                     break;
+                case BenchmarkCheckType.LiveUiTest:
+                case BenchmarkCheckType.LiveApiTest:
+                {
+                    // The LIVE WEB TEST check: spin up the benchmark folder's own server and
+                    // verify the named target is actually present on screen (or the endpoint
+                    // answers over HTTP). This is the deterministic "testing suite" — the same
+                    // BrowserAutomationService the agent uses for "test the …" prompts.
+                    var target = check.Value ?? "";
+                    if (target.Length == 0) { result.Message = "Empty live-test target."; break; }
+                    if (!Directory.Exists(path)) { result.Message = $"Missing directory: {check.Path}"; break; }
+                    BrowserTestReport report;
+                    if (check.Type == BenchmarkCheckType.LiveApiTest)
+                        report = await BrowserTest.RunApiTestAsync(path, target, ct);
+                    else
+                        report = await BrowserTest.RunUiTestAsync(path, target, null, ct);
+                    result.Passed = report.Passed;
+                    var failures = report.Findings.Where(f => f.Kind == "fail").Select(f => f.Message).ToList();
+                    result.Message = result.Passed
+                        ? $"Live web test passed: \"{target}\" ({report.Mode}, {report.Findings.Count(f => f.Kind == "pass")} checks)."
+                        : $"Live web test failed: \"{target}\" ({report.Mode}). {string.Join(" ", failures)}";
+                    break;
+                }
                 default:
                     result.Message = $"Unsupported check type: {check.Type}.";
                     break;
@@ -804,7 +866,7 @@ public class BenchmarkPlanDefinition
     public List<BenchmarkAcceptanceCheck> AcceptanceChecks { get; set; } = new();
 }
 
-public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals, FileFreshTimestamp, DirectoryContains }
+public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals, FileFreshTimestamp, DirectoryContains, LiveUiTest, LiveApiTest }
 
 public static class Check
 {
@@ -841,6 +903,21 @@ public static class Check
     /// </summary>
     public static BenchmarkAcceptanceCheck AnyFileContains(string name, string dir, string value, double weight = 1) =>
         new() { Name = name, Type = BenchmarkCheckType.DirectoryContains, Path = dir, Value = value, Weight = weight };
+
+    /// <summary>
+    /// LIVE WEB TEST check: launches the benchmark folder's own server and verifies the
+    /// named section/target is actually present on screen (in a real browser, or the HTTP
+    /// fallback when none is installed). This is what makes a benchmark "use the testing
+    /// suite": the agent's output is verified by actually running it, not just by reading
+    /// its source files.
+    /// </summary>
+    public static BenchmarkAcceptanceCheck LiveUiTest(string name, string dir, string target, double weight = 2) =>
+        new() { Name = name, Type = BenchmarkCheckType.LiveUiTest, Path = dir, Value = target, Weight = weight };
+
+    /// <summary>LIVE API TEST check: launches the folder's server and GETs the named endpoint,
+    /// verifying it answers 2xx. The target is a route (e.g. "/api/health").</summary>
+    public static BenchmarkAcceptanceCheck LiveApiTest(string name, string dir, string target, double weight = 2) =>
+        new() { Name = name, Type = BenchmarkCheckType.LiveApiTest, Path = dir, Value = target, Weight = weight };
 }
 
 public class BenchmarkAcceptanceCheck

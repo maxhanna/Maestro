@@ -73,6 +73,18 @@ test('negative cap → does not start', function () {
   assert.strictEqual(shouldStartSuggestions({}, -1, false), false);
 });
 
+test('benchmark card → does not start (fresh run)', function () {
+  assert.strictEqual(shouldStartSuggestions({ _benchmark: true }, 3, false), false);
+});
+
+test('benchmark card → does not start (topup)', function () {
+  assert.strictEqual(shouldStartSuggestions({ _benchmark: true, _suggestions: [{ text: 'a' }] }, 3, true), false);
+});
+
+test('non-benchmark card (_benchmark: false) → starts normally', function () {
+  assert.strictEqual(shouldStartSuggestions({ _benchmark: false }, 3, false), true);
+});
+
 // ── shouldStartSuggestions: topup (More like this) guard ───────────────────
 test('topup with existing suggestions below cap → starts', function () {
   assert.strictEqual(shouldStartSuggestions({ _suggestions: [{ text: 'a' }, { text: 'b' }] }, 3, true), true);
