@@ -83,8 +83,53 @@ partial class AgentController
                 if (rel.Length > 0 && !rel.Contains('/') && !Path.HasExtension(rel) && IsRealDir(projectRoot, rel))
                     lastExecutedDir = rel;
             }
+            // A successful mkdir-style _command ALSO establishes the implied directory: the
+            // interleaved route executes each step as its own single-step plan, so the plan scan
+            // above never sees the mkdir (the classic route converts it to _create_directory in
+            // ValidatePlanAsync, but the interleaved route skips that conversion). Without this,
+            // a planner that mkdir's "benchmark_test_22" then plans a PATHLESS _create_file
+            // ("Create server.js backend implementation…") lands the file at the PROJECT ROOT
+            // instead of inside the folder it just created.
+            else if (r.GetValueOrDefault("type")?.ToString() == "command" &&
+                     r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" &&
+                     r.GetValueOrDefault("command") is string cmdText)
+            {
+                var createdDir = TryExtractCreatedDirectory(cmdText, projectRoot);
+                if (createdDir != null && IsRealDir(projectRoot, createdDir))
+                    lastExecutedDir = createdDir;
+            }
         }
         return lastExecutedDir;
+    }
+
+    /// <summary>
+    /// Extracts the directory a successful mkdir-style _command created, as a project-relative
+    /// path, or null when the command isn't a single directory creation. Only the segment after
+    /// the mkdir keyword is read (a "Set-Location …; mkdir …" chain is stripped at the first
+    /// ';'), quoted paths win, extensioned targets (a mkdir-of-a-file attempt) are rejected, and
+    /// directories OUTSIDE the repo (an OS-filesystem task) are not scoping context.
+    /// </summary>
+    private static string? TryExtractCreatedDirectory(string? command, string projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return null;
+        var keyword = Regex.Match(command, @"\b(mkdir|md|New-Item)\b", RegexOptions.IgnoreCase);
+        if (!keyword.Success) return null;
+        if (Regex.IsMatch(command, @"\bNew-Item\b[^\r\n;]*?\b-ItemType\s+File\b", RegexOptions.IgnoreCase)) return null;
+        var tail = command[keyword.Index..];
+        var stop = tail.IndexOfAny(new[] { ';', '\r', '\n' });
+        if (stop >= 0) tail = tail[..stop];
+        var q = Regex.Match(tail, @"\""([^\""]+)\""");
+        if (!q.Success) q = Regex.Match(tail, @"'([^']+)'");
+        var path = q.Success
+            ? q.Groups[1].Value.Trim()
+            : Regex.Match(tail, @"\b(?:mkdir|md|New-Item)\b\s+(?:-p\s+|-Path\s+)?([^\s;|&]+)", RegexOptions.IgnoreCase).Groups[1].Value.Trim('\'', '\"');
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        if (Path.HasExtension(path.TrimEnd('/', '\\'))) return null;
+        var rootFull = Path.GetFullPath(projectRoot).TrimEnd('\\', '/');
+        var full = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
+        if (full.Equals(Path.GetFullPath(projectRoot), StringComparison.OrdinalIgnoreCase)) return null; // the root itself
+        if (!full.StartsWith(rootFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return null; // outside the repo
+        return full[(rootFull.Length + 1)..].Replace('\\', '/');
     }
 
     private async Task ExecutePlan(

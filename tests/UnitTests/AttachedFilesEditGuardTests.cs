@@ -68,7 +68,14 @@ public class AttachedFilesEditGuardTests
         return root;
     }
 
-    private static PlanStep CreateFile(string change) => new() { File = "_create_file", Change = change, NewString = "some content that is long enough" };
+    // Valid, parseable TS so the JavaScript-syntax check (which runs BEFORE the attached-files
+    // guard) doesn't mask the guard under test — the fixture must be a file the validator would
+    // otherwise accept, so the attached-files guard is the only thing deciding.
+    private static PlanStep CreateFile(string change) => new()
+    {
+        File = "_create_file", Change = change,
+        NewString = "export function groupBenchmarksByName() { return []; }"
+    };
 
     // ── reject: edit-scoped task with attached files proposes a new file ─────
 

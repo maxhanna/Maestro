@@ -115,6 +115,18 @@ partial class AgentController
         {
             if (lower.Contains(art)) return true;
         }
+        // A write verb paired with an OS location ("save it to my desktop", "download to
+        // my downloads folder", "export to my documents") implies a filesystem artifact even
+        // when no noun is named — the prompt is still an OS-filesystem task, so the
+        // wrong-root guard must stand down and let the _command write land there.
+        var fsVerbs = new[]
+        {
+            "save", "write", "store", "export", "dump", "download", "copy", "move"
+        };
+        foreach (var verb in fsVerbs)
+        {
+            if (lower.Contains(verb)) return true;
+        }
         return false;
     }
     private async Task<string?> ValidatePlanAsync(string userPrompt, AgentPlan plan, CancellationToken ct)
@@ -1514,6 +1526,31 @@ partial class AgentController
             return await RunLiveWebTestPipeline(prompt, projectRoot, emitSse, testIntent, ct);
         }
 
+        // VISUAL-INSPECTION DETECTION: prompts like "check my game for visual bugs" or
+        // "verify visually" don't contain a strict test verb, so the deterministic
+        // classifier above returned None. When a visual signal is present, ask the LLM
+        // whether the request needs to SEE a rendered page — and if so, route to the same
+        // live web-test pipeline, which spins up the server and streams page snapshots to
+        // the Test Browser tab. Fails closed (normal planning) on any LLM hiccup.
+        // BUILD/EDIT tasks are EXEMPT: "build a game and check it for visual bugs" must
+        // plan the build FIRST and test SECOND — short-circuiting here would try to run a
+        // server that doesn't exist yet.
+        if (TestIntentClassifier.HasVisualInspectionHint(prompt) &&
+            !TestIntentClassifier.HasEditIntent(prompt))
+        {
+            if (!await connectivityTask)
+                throw new InvalidOperationException("LLM connectivity check failed.");
+            var (needsVisual, target) = await ClassifyVisualInspectionPromptAsync(prompt, ct);
+            if (needsVisual)
+            {
+                var inspectTarget = string.IsNullOrWhiteSpace(target) ? "the page" : target;
+                await EmitLog(emitSse, "info",
+                    $"👁 Visual inspection detected — routing to the live browser test (target: \"{inspectTarget}\")", ct: ct);
+                return await RunLiveWebTestPipeline(prompt, projectRoot, emitSse,
+                    new TestIntentClassifier.TestIntent(TestIntentClassifier.Kind.Ui, inspectTarget), ct);
+            }
+        }
+
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
             if (!await connectivityTask)
@@ -1584,10 +1621,18 @@ partial class AgentController
         // + no verified_complete), not by this blunt error-count rule. The pre-fix behavior
         // marked a run INCOMPLETE even when it recovered (retried fetch succeeded, file auto-
         // dumped, verified_complete recorded) just because an error result sat in the steps.
+        // A failed _command step is the same class now: since the benchmark-22 fix, a command
+        // whose output shows a hard failure (e.g. `node server.js` crashing with a SyntaxError)
+        // is reported status=error instead of a lie "done", and the interleaved loop feeds the
+        // error back to the planner for a recovery EDIT. A run that recovered (the edit landed,
+        // PostExecuteVerify said complete, verified_complete recorded) must NOT be marked
+        // incomplete just because the failed attempt sat in the steps; a genuinely unrecovered
+        // command failure is caught by PostExecuteVerify (the verifier sees the failing file /
+        // missing output and reports a CONFIRMED issue that drives the repair loop).
         var hasFatalStepErrors = allSteps.OfType<Dictionary<string, object?>>()
             .Any(s => s.TryGetValue("status", out var status) && s.TryGetValue("type", out var type)
                 && status?.ToString() == "error"
-                && type?.ToString() is not ("list" or "_web_search" or "_web_fetch" or "web_search" or "web_fetch" or "scraper"));
+                && type?.ToString() is not ("list" or "_web_search" or "_web_fetch" or "web_search" or "web_fetch" or "scraper" or "command"));
         if (hasFatalStepErrors)
         {
             complete = false;

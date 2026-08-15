@@ -251,10 +251,119 @@ public partial class AgentController : ControllerBase
         await EmitLog(true, "rejected", message, feedback, ct);
     }
     private static readonly SemaphoreSlim SseWriteLock = new(1, 1);
+
+    // ── Run-unique step indices ──────────────────────────────────────────────────────────
+    // Every pipeline phase used its own 0-based counter (discovery=0, plan=0, command=0, …),
+    // so a step's `index` was only meaningful within its phase. That made the frontend guess
+    // (type + index + descriptor matching) to tell an update apart from a new step. This
+    // AsyncLocal holds ONE monotonic counter per run; SendSse remaps every 'step' event onto
+    // it, so the frontend can dedupe on `index` alone.
+    private static readonly AsyncLocal<StepIndexContext?> StepIndexCtx = new();
+    internal sealed class StepIndexContext
+    {
+        public int Next;
+        public readonly Dictionary<string, int> Keys = new(StringComparer.Ordinal);
+        // Keys whose latest event was transient (running) — a lifecycle update (running→done)
+        // reuses their index; anything arriving after they close gets a FRESH index, so a
+        // re-run of the same command later in the run is never merged into the first one.
+        public readonly HashSet<string> Open = new(StringComparer.Ordinal);
+        // Last status seen per key. A CLOSED re-arrival of the same key — the interleaved
+        // loop re-sends each completed step's result to attach its global planItemIndex right
+        // after ExecutePlan already streamed it — is the SAME step, so it reuses the index
+        // instead of spawning a duplicate entry. A fresh running/exploring/proposing after
+        // close is the re-run signal and still gets a new index.
+        public readonly Dictionary<string, string> LastStatus = new(StringComparer.Ordinal);
+    }
+    internal static string FirstNonEmptyStepDescriptor(JsonObject obj)
+    {
+        foreach (var name in new[] { "description", "path", "command", "url", "query" })
+        {
+            if (obj.TryGetPropertyValue(name, out var v) && v is JsonValue jv
+                && jv.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s))
+                return s!;
+        }
+        return "";
+    }
+    internal static string StepKey(JsonObject obj)
+    {
+        var type = obj.TryGetPropertyValue("type", out var tn) && tn is JsonValue tv
+            ? tv.GetValue<string>() ?? ""
+            : "";
+        var origIndex = obj.TryGetPropertyValue("index", out var inode) && inode is JsonValue iv && iv.TryGetValue<long>(out var il)
+            ? il
+            : -1;
+        // A step's running and done events share type + original index + primary descriptor
+        // (ExecuteSteps reuses the same result dict and only appends command/output), so a
+        // lifecycle update resolves to the SAME remapped index.
+        return type + "|" + origIndex + "|" + FirstNonEmptyStepDescriptor(obj);
+    }
+    internal static JsonObject RemapStepIndex(object data, StepIndexContext ctx)
+    {
+        var obj = data is JsonNode jn ? jn.DeepClone() : JsonSerializer.SerializeToNode(data);
+        if (obj is not JsonObject jo) return obj?.AsObject() ?? new JsonObject();
+        lock (ctx)
+        {
+            var key = StepKey(jo);
+            var status = jo.TryGetPropertyValue("status", out var sn) && sn is JsonValue sv
+                ? sv.GetValue<string>() ?? ""
+                : "";
+            var isOpening = status is "running" or "exploring" or "proposing";
+            // The interleaved loop re-sends each just-completed step's result (tagged with its
+            // global planItemIndex) after ExecutePlan already streamed the same running→done
+            // pair. That re-arrival is the SAME logical step, so a closed event landing on a
+            // key whose last event was also closed reuses the index; only a fresh
+            // opening event after close (a genuine re-run) is treated as a new step.
+            var lastWasClosed = ctx.LastStatus.TryGetValue(key, out var lastSt) &&
+                lastSt is not ("running" or "exploring" or "proposing");
+            var closedReEmission = !isOpening && !ctx.Open.Contains(key) && lastWasClosed;
+            if (ctx.Keys.TryGetValue(key, out var idx) && (ctx.Open.Contains(key) || closedReEmission))
+            {
+                // Same logical step's lifecycle update (running→done) or the interleaved
+                // loop's planItemIndex re-send — reuse its index.
+            }
+            else
+            {
+                idx = ctx.Next++;
+                ctx.Keys[key] = idx;
+            }
+            ctx.LastStatus[key] = status;
+            if (isOpening) ctx.Open.Add(key);
+            else ctx.Open.Remove(key);
+            jo["index"] = idx;
+        }
+        return jo;
+    }
+    internal static List<object> RemapDoneSteps(List<object> allSteps, StepIndexContext ctx)
+    {
+        // The 'done' payload's steps[] must match what the panel already showed live, so
+        // reuse the SAME mapping (by key) rather than re-assigning fresh indices.
+        var remapped = new List<object>(allSteps.Count);
+        foreach (var s in allSteps)
+        {
+            if (s is Dictionary<string, object?> d && d.ContainsKey("index") && d.ContainsKey("type"))
+            {
+                var node = JsonSerializer.SerializeToNode(d);
+                if (node is JsonObject obj)
+                {
+                    lock (ctx)
+                    {
+                        var key = StepKey(obj);
+                        if (ctx.Keys.TryGetValue(key, out var idx)) obj["index"] = idx;
+                    }
+                    remapped.Add(obj);
+                    continue;
+                }
+            }
+            remapped.Add(s);
+        }
+        return remapped;
+    }
     private static async Task SendSse(HttpResponse response, string eventName, object data, CancellationToken ct = default)
     {
         try
         {
+            if (eventName == "step" && data != null && StepIndexCtx.Value is { } ctx)
+                data = RemapStepIndex(data, ctx);
             var json = JsonSerializer.Serialize(data);
             // Serialize writes so the concurrent /slots progress poller can't
             // interleave partial frames with in-flight token/log events.
@@ -500,6 +609,9 @@ public partial class AgentController : ControllerBase
 
     private async Task ExecuteStreamCore(AgentRequest req)
     {
+        // One fresh, per-run step-index scope: every 'step' SSE event in this run draws its
+        // unique index from this single monotonic counter (see SendSse / RemapStepIndex).
+        StepIndexCtx.Value = new StepIndexContext();
         if (string.IsNullOrWhiteSpace(req.Prompt))
         {
             await SendSse(Response, "error", new { message = "Prompt is required" });
@@ -566,18 +678,24 @@ public partial class AgentController : ControllerBase
                 complete = anyStepsAttempted || planAlreadyDone;
                 editsApplied = true;
             }
+            // A deterministic live web test that FAILED is terminal: its verdict is final
+            // (re-running the same deterministic test just fails again), so the card must
+            // not auto-restart on it — the frontend uses this to stop the retry loop.
+            var ranLiveWebTest = allSteps.OfType<Dictionary<string, object?>>()
+                .Any(s => s.TryGetValue("type", out var t) && t?.ToString() is "browse" or "verify");
             await SendSse(Response, "done", new
             {
                 summary = plan?.Summary ?? "",
                 thinking = plan?.Thinking ?? "",
                 complete,
                 editsApplied,
+                noAutoRestart = ranLiveWebTest && !complete,
                 incomplete = AgentPlanParsing.TaskExpectsFileChanges(req.Prompt) && !complete,
                 warning = !complete && AgentPlanParsing.TaskExpectsFileChanges(req.Prompt)
                     ? (editsApplied ? "Task may be incomplete. Please review."
                                     : "No files were modified.")
                     : (string?)null,
-                steps = allSteps,
+                steps = StepIndexCtx.Value is { } sctx ? RemapDoneSteps(allSteps, sctx) : allSteps,
                 filesEdited
             });
             if (req.SelfImproving)

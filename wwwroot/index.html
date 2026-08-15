@@ -683,9 +683,18 @@
               <summary>💻 Commands ({{vm.streamingSteps.length}})</summary>
               <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length"
                 ng-style="{'font-size': vm.planFontSize + 'px'}">
-                <details class="agent-step-panel" ng-repeat="s in vm.streamingSteps track by s.index"
-                  ng-class="s.status || 'pending'"
-                  ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+                <div class="command-step-wrap" ng-repeat="s in vm.commandStepList() track by s.index">
+                  <div class="command-phase-header" ng-if="s._phaseFirst"
+                    ng-click="vm.toggleCommandPhase(s._phase)"
+                    ng-class="{'collapsed': vm.commandPhaseCollapsed(s._phase)}"
+                    title="{{vm.commandPhaseCollapsed(s._phase) ? 'Expand' : 'Collapse'}} {{vm.commandPhaseLabel(s._phase)}} steps">
+                    <span class="command-phase-caret">{{vm.commandPhaseCollapsed(s._phase) ? '▸' : '▾'}}</span>
+                    <span class="command-phase-label">{{vm.commandPhaseLabel(s._phase)}}</span>
+                    <span class="command-phase-count">{{s._phaseCount}}</span>
+                  </div>
+                  <details class="agent-step-panel" ng-if="!vm.commandPhaseCollapsed(s._phase)"
+                    ng-class="s.status || 'pending'"
+                    ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
                   <summary class="step-summary-row">
                     <span
                       class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
@@ -815,6 +824,7 @@
                     </div>
                   </div>
                 </details>
+                </div>
               </div>
             </details>
           </div>

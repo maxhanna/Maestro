@@ -3108,7 +3108,7 @@ h3 .small.ghost:hover {
 	position: absolute;
 	bottom: 150%;
 	left: 0;
-	z-index: 300;
+	z-index: 300000;
 	display: flex;
 	flex-direction: column;
 	gap: 3px;
@@ -3873,6 +3873,106 @@ h3 .small.ghost:hover {
 
 .agent-steps-list .snippet-hint {
 	font-size: 0.71em;
+}
+
+.command-step-wrap {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.command-phase-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 8px;
+	margin-top: 4px;
+	border-radius: 4px;
+	background: var(--bg2, #1e242e);
+	border: 1px solid var(--border, #333);
+	cursor: pointer;
+	user-select: none;
+	font-size: 0.78em;
+	font-weight: 600;
+}
+
+.command-phase-header:hover {
+	filter: brightness(1.15);
+}
+
+.command-phase-header.collapsed {
+	opacity: 0.75;
+}
+
+.command-phase-caret {
+	width: 12px;
+	font-size: 0.8em;
+	color: #61afef;
+}
+
+.command-phase-label {
+	flex: 1;
+}
+
+.command-phase-count {
+	font-size: 0.82em;
+	color: #98c379;
+	background: rgba(152, 197, 121, 0.12);
+	border-radius: 8px;
+	padding: 1px 7px;
+}
+
+.command-history {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.command-history-section summary {
+	cursor: pointer;
+}
+
+.command-history-step details {
+	border: 1px solid var(--border, #333);
+	border-radius: 4px;
+	padding: 4px 6px;
+	background: var(--bg2, #1e242e);
+}
+
+.command-history-summary {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.78em;
+	cursor: pointer;
+}
+
+.command-history-summary .step-status {
+	width: 16px;
+	text-align: center;
+}
+
+.command-history-summary .step-title {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.command-history-size {
+	font-size: 0.72em;
+	opacity: 0.55;
+	margin-left: auto;
+	white-space: nowrap;
+}
+
+.command-history-step .command-history-output {
+	max-height: none;
+	white-space: pre-wrap;
+	word-break: break-word;
+	opacity: 0.85;
+	margin: 4px 0 6px;
 }
 
 .agent-steps-list .path-suggestions {
@@ -7092,7 +7192,8 @@ h3 .small.ghost:hover {
 .meeting-gossip-log {
 	display: flex;
 	flex-direction: column;
-	max-height: 96px;
+	position: relative;
+	max-height: max(96px, calc(var(--meeting-font, 12px) * 8));
 	border-top: 1px solid rgba(255, 255, 255, 0.07);
 	background: rgba(0, 0, 0, 0.28);
 	overflow: hidden;
@@ -7100,7 +7201,7 @@ h3 .small.ghost:hover {
 }
 
 .meeting-gossip-log.meeting-gossip-expanded {
-	max-height: min(52%, 320px);
+	max-height: min(52%, 340px);
 }
 
 .meeting-gossip-log-head {
@@ -7277,6 +7378,42 @@ h3 .small.ghost:hover {
 .meeting-gossip-log-feed::-webkit-scrollbar-thumb {
 	background: rgba(255, 255, 255, 0.15);
 	border-radius: 3px;
+}
+
+.meeting-gossip-fab {
+	position: absolute;
+	right: 12px;
+	bottom: 8px;
+	z-index: 3;
+	pointer-events: none;
+}
+
+.meeting-gossip-fab-btn {
+	pointer-events: auto;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	border: 1px solid rgba(255, 255, 255, 0.22);
+	background: rgba(30, 38, 55, 0.92);
+	color: #e6eef6;
+	font-size: calc(var(--meeting-font, 12px) - 1px);
+	line-height: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	padding: 0;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+	transition: all 0.15s ease;
+}
+
+.meeting-gossip-fab-btn:hover {
+	background: rgba(60, 74, 105, 0.95);
+	border-color: rgba(255, 255, 255, 0.4);
+}
+
+.meeting-gossip-fab-btn:active {
+	transform: scale(0.92);
 }
 
 .meeting-status-bar {

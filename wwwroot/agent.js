@@ -165,6 +165,60 @@ angular.module('kanbanApp')
             return status || 'pending';
         }
         function normalizeStep(step) { if (!step) return step; step.status = normalizeStepStatus(step.status); return step; }
+        // Phase grouping for the "💻 Commands" list: each step is bucketed into the pipeline
+        // phase it belongs to (discover/plan/execute/verify) so a long run can be collapsed
+        // into scannable sections. Pure functions — extracted by tests/js/agent-step-phase.test.js.
+        var COMMAND_PHASE_LABELS = {
+            discover: '🔎 Discover',
+            plan: '💭 Plan',
+            execute: '⚡ Execute',
+            verify: '🔍 Verify',
+            other: '📋 Other'
+        };
+        function stepPhaseOf(s) {
+            var t = ((s && s.type) || '').toLowerCase();
+            var st = (s && s.status) || '';
+            if (t === 'plan' || (t === 'plan_step' && st !== 'done')) return 'plan';
+            if (t === 'list' || t === 'read' || t === 'grep' || t === 'glob' || t === 'explore') return 'discover';
+            if (t === 'verify' || t === 'verified_complete' || t === 'checkpoint' || t === 'browse' || t === 'test' || t === 'assess' || t === 'completion_assessment') return 'verify';
+            return 'execute';
+        }
+        function annotateStepPhases(steps, opts) {
+            if (!Array.isArray(steps)) return [];
+            opts = opts || {};
+            // preferPersisted trusts the _phase stamped at run end (persistStepPhases) so a
+            // completed card's Command history keeps the buckets the user watched live even
+            // if the classifier rules evolve later. The live panel passes no opts and always
+            // recomputes, so status transitions (plan_step pending→done) re-bucket correctly.
+            function phaseOf(s) {
+                return (opts.preferPersisted && s._phase) ? s._phase : stepPhaseOf(s);
+            }
+            var counts = {};
+            for (var i = 0; i < steps.length; i++) {
+                var p = phaseOf(steps[i]);
+                counts[p] = (counts[p] || 0) + 1;
+            }
+            var prev = null;
+            for (var j = 0; j < steps.length; j++) {
+                var s = steps[j];
+                var ph = phaseOf(s);
+                s._phase = ph;
+                s._phaseFirst = ph !== prev;
+                s._phaseCount = counts[ph] || 0;
+                prev = ph;
+            }
+            return steps;
+        }
+        // Stamps each step of a finished run with its pipeline phase BEFORE the list is
+        // persisted onto the card (card._steps), so the completed card's Command history
+        // renders the same discover/plan/execute/verify buckets the user saw live. Only
+        // _phase is stamped — _phaseFirst/_phaseCount are render-derived and recomputed on
+        // display (annotateStepPhases), so they never go stale in the persisted data.
+        function persistStepPhases(steps) {
+            if (!Array.isArray(steps)) return steps;
+            steps.forEach(function (s) { if (s) s._phase = stepPhaseOf(s); });
+            return steps;
+        }
         function pushAgentLog(vm, level, message, detail) {
             if (!message || level === 'status') return;
             try {
@@ -221,10 +275,19 @@ angular.module('kanbanApp')
         }
         function upsertStreamingStep(vm, parsed, $scope, $timeout) {
             normalizeStep(parsed);
+            // The backend remaps every 'step' event onto ONE run-unique monotonic counter
+            // (AgentController.SendSse/RemapStepIndex), so `index` alone is the stable
+            // dedupe key: an update (running→done) carries the SAME index and extends in
+            // place, a new step carries a fresh one. Missing indices (legacy paths) are
+            // re-keyed defensively.
+            if (parsed.index == null) {
+                parsed.index = vm.streamingSteps.reduce(function (m, s) { return Math.max(m, s.index || 0); }, -1) + 1;
+            }
             var existing = vm.streamingSteps.find(function (s) { return s.index === parsed.index; });
-            if (existing) angular.extend(existing, parsed); else vm.streamingSteps.push(parsed);
+            if (existing) angular.extend(existing, parsed);
+            else vm.streamingSteps.push(parsed);
             vm.streamingSteps.sort(function (a, b) { return (a.index || 0) - (b.index || 0); });
-            if (parsed.status === 'running') vm.activeStepIndex = parsed.index;
+            if (parsed.status === 'running') vm.activeStepIndex = existing ? existing.index : parsed.index;
             else { var running = vm.streamingSteps.find(function (s) { return s.status === 'running'; }); vm.activeStepIndex = running ? running.index : null; }
             refreshFilesEditedFromSteps(vm);
         }
@@ -265,6 +328,48 @@ angular.module('kanbanApp')
                 vm.agentPanelTabIs = function (tab) {
                     vm.agentPanelTab = normalizeAgentPanelTab(vm.agentPanelTab, vm.webtestEvents);
                     return vm.agentPanelTab === tab;
+                };
+                // Rehydrate the agent panel's "💻 Commands" list from a completed card's
+                // persisted history (card._steps) so the full executed-command list survives
+                // a reload — vm.streamingSteps is otherwise transient and only exists while
+                // a run is streaming. Returns true when the panel was restored.
+                vm.restoreCardSteps = function (card) {
+                    if (!card || !Array.isArray(card._steps) || vm.streamingActive) return false;
+                    var steps = angular.copy(card._steps);
+                    for (var i = 0; i < steps.length; i++) {
+                        normalizeStep(steps[i]);
+                        steps[i].index = i; // server indices restart per phase — re-key for ngRepeat track-by
+                    }
+                    vm.streamingSteps = steps;
+                    vm.activeStepIndex = null;
+                    refreshFilesEditedFromSteps(vm);
+                    return true;
+                };
+                // Phase grouping for the "💻 Commands" list (see annotateStepPhases). Each step
+                // is tagged with its pipeline phase; the panel renders a collapsible header per
+                // phase so a long run is scannable. State is session-only (per page load).
+                vm.commandStepList = function () {
+                    return annotateStepPhases(vm.streamingSteps || []);
+                };
+                // The completed-card Command history renderer (command-history.html): annotates
+                // the persisted card._steps with the same collapsible discover/plan/execute/
+                // verify sections as the live panel, preferring the _phase bucket stamped at
+                // run end so the card never re-buckets differently from what was streamed.
+                // In-place and idempotent — _phaseFirst/_phaseCount recompute to identical
+                // values each render, so no per-digest copies of large step outputs.
+                vm.commandHistorySteps = function (card) {
+                    if (!card || !Array.isArray(card._steps) || !card._steps.length) return [];
+                    return annotateStepPhases(card._steps, { preferPersisted: true });
+                };
+                vm.commandPhaseLabel = function (key) {
+                    return COMMAND_PHASE_LABELS[key] || COMMAND_PHASE_LABELS.other;
+                };
+                vm.commandPhaseCollapsed = function (key) {
+                    return !!(vm._commandPhaseCollapsed && vm._commandPhaseCollapsed[key]);
+                };
+                vm.toggleCommandPhase = function (key) {
+                    if (!vm._commandPhaseCollapsed) vm._commandPhaseCollapsed = {};
+                    vm._commandPhaseCollapsed[key] = !vm._commandPhaseCollapsed[key];
                 };
                 // Rewrites a card's stored absolute diff paths from the isolated worktree
                 // prefix to the shared repo prefix after finish (the backend copies the
@@ -666,6 +771,7 @@ angular.module('kanbanApp')
                                 vm.streamingFilesEdited = [];
                                 vm.planItems = [];
                                 vm.agentActivityLog = [];
+                                vm._commandPhaseCollapsed = {}; // new run starts with every phase expanded
                                 vm.webtestEvents = [];
                                 vm.webtestCurrent = null;
                                 vm.agentPanelTab = 'activity';
@@ -1012,6 +1118,7 @@ angular.module('kanbanApp')
                                                                     if (mvIdx !== -1) {
                                                                         var mvCard = vm.state[mvCol].splice(mvIdx, 1)[0];
                                                                         mvCard.agentAnalysis = concAnalysis;
+                                                                        mvCard._steps = persistStepPhases(concAnalysis.steps);
                                                                         mvCard.agentLog = angular.copy(run.log);
                                                                         // Audit trail: scheduled (cron) cards are deleted when done, so record
                                                                         // the outcome + duration BEFORE the card disappears from the board.
@@ -1022,7 +1129,7 @@ angular.module('kanbanApp')
                                                                             vm.state.done.push(mvCard);
                                                                         }
                                                                         vm.saveCards();
-                                                                        if (vm.suggestImprovements && mvCol === 'doing' && !mvCard.selfImproving && !mvCard._fromCron) vm.suggestImprovements(mvCard, concAnalysis.summary, proj);
+                                                                        if (vm.suggestImprovements && mvCol === 'doing' && !mvCard.selfImproving && !mvCard._fromCron && !mvCard._benchmark) vm.suggestImprovements(mvCard, concAnalysis.summary, proj);
                                                                     } else if (vm.saveCards) { vm.saveCards(); }
                                                                     if (vm.reconcileBenchmarkRunning) vm.reconcileBenchmarkRunning();
                                                                     $scope.$applyAsync(); return;
@@ -1031,12 +1138,16 @@ angular.module('kanbanApp')
                                                                 var editsApplied = parsed && parsed.editsApplied;
                                                                 if (!editsApplied && !vm.activeCardId) vm.stopAgent();
                                                                 var incomplete = parsed && parsed.incomplete;
+                                                                // A deterministic live web test that FAILED is terminal — its verdict is
+                                                                // final (re-running the same test fails identically), so don't auto-restart.
+                                                                if (parsed && parsed.noAutoRestart) incomplete = false;
                                                                 if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
                                                                 pushAgentLog(vm, editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits', { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning, duration: elapsedStr || undefined });
                                                                 pushAgentLog(vm, 'info', '⏱ ' + (elapsedStr || elapsed + 'ms'));
                                                                 var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
                                                                 var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
                                                                 var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
+                                                                card._steps = persistStepPhases(finalSteps);
                                                                 if (parsed && parsed.filesEdited && parsed.filesEdited.length) vm.streamingFilesEdited = dedupeFilesEdited(parsed.filesEdited);
                                                                 else refreshFilesEditedFromSteps(vm);
                                                                 vm.agentResult = { summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited, steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
@@ -1106,7 +1217,7 @@ angular.module('kanbanApp')
                                                                         }
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
-                                                                        if (vm.suggestImprovements && !card.selfImproving) vm.suggestImprovements(card, finalSummary, proj);
+                                                                        if (vm.suggestImprovements && !card.selfImproving && !card._benchmark) vm.suggestImprovements(card, finalSummary, proj);
                                                                         $timeout(function () {
                                                                             if (!vm.autoQueue) return;
                                                                             vm.processQueuedCards();
@@ -1544,6 +1655,7 @@ angular.module('kanbanApp')
                     if (!vm.state || !Array.isArray(vm.state.done)) return need;
                     (vm.state.done).forEach(function (c) {
                         if (!c) return;
+                        if (c._benchmark) return;
                         if (c._suggestionsSaturated) return;
                         if (c._suggestionsGenerating) return;
                         var maxFor = vm.projectMaxSuggestions(c.filePath || vm.selectedProject);

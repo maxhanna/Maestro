@@ -83,6 +83,27 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         _clientFactory = new WebTaskScriptedClientFactory(PlannerMode.WebChain, _steerTarget);
     }
 
+    /// <summary>A canned live-browser runner so a scripted _browser_test plan step
+    /// passes deterministically without launching a real server (mirrors
+    /// BenchmarkLiveWebTestTests.FakeBrowserAutomationService).</summary>
+    private sealed class FakeBrowserAutomationService : BrowserAutomationService
+    {
+        public string? LastUiTarget { get; private set; }
+        public string? LastApiTarget { get; private set; }
+
+        public override Task<BrowserTestReport> RunUiTestAsync(string projectRoot, string target, string? prompt, CancellationToken ct = default)
+        {
+            LastUiTarget = target;
+            return Task.FromResult(new BrowserTestReport { Target = target, Mode = "http", Passed = true });
+        }
+
+        public override Task<BrowserTestReport> RunApiTestAsync(string projectRoot, string target, CancellationToken ct = default)
+        {
+            LastApiTarget = target;
+            return Task.FromResult(new BrowserTestReport { Target = target, Mode = "http", Passed = true });
+        }
+    }
+
     public void Dispose()
     {
         _clientFactory.Dispose();
@@ -174,6 +195,64 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // — no second assessment, and the fetched data never round-trips through the LLM (the
         // fix for the "planner re-emits the whole dataset inline" failure).
         Assert.Equal(1, _clientFactory.Calls.Count(c => c == "web-assess"));
+    }
+
+    [Fact]
+    public async Task VisualVerifyTask_BuildThenPlanComplete_IsRejectedAndSteeredToBrowserTest()
+    {
+        // Regression for benchmark 22: a build-then-VISUALLY-VERIFY task ("check it for
+        // visual bugs", "you must LOOK at the rendered page") used to declare the plan
+        // complete after the BUILD steps — no _browser_test step, no server spin-up, no
+        // Test Browser tab. The plan-complete visual gate must REJECT the premature
+        // completion, steer the planner to a _browser_test step, and only accept completion
+        // once that step actually ran.
+        _clientFactory.Mode = PlannerMode.VisualVerifyBuild;
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_22' at the project root. Inside it, build a small web game " +
+                     "and then CHECK IT FOR VISUAL BUGS — you must LOOK at the rendered page to visually confirm " +
+                     "the heading renders on screen. Use the live browser test suite.";
+        Assert.True(TestIntentClassifier.HasVisualInspectionHint(prompt),
+            "the test prompt must fire the visual-inspection hint");
+        Assert.True(TestIntentClassifier.HasEditIntent(prompt),
+            "the test prompt is a build task — must NOT short-circuit in discovery");
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        // The run completed AND actually executed a live browser test step — the visual
+        // verification is no longer skipped.
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}");
+        Assert.True(plan!.Plan.Any(s => string.Equals(s.File, "_browser_test", StringComparison.OrdinalIgnoreCase)),
+            "the final plan must include a _browser_test step");
+        Assert.True(allSteps.OfType<Dictionary<string, object?>>()
+                .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"),
+            "the run must have actually executed the browser test step");
+        // The planner was STEERED: the rejection feedback (with the _browser_test demand)
+        // reached a subsequent planner turn instead of being silently accepted.
+        Assert.True(_clientFactory.PlannerUserPrompts.Any(p => p.Contains("_browser_test")),
+            "a later planner turn must have seen the _browser_test steering feedback");
+        Assert.Contains(_clientFactory.Calls, c => c == "visual-classifier");
+    }
+
+    [Fact]
+    public async Task VisualVerifyTask_StylingEdit_DoesNotForceABrowserTest()
+    {
+        // Precision lock: a task that merely MENTIONS visual styling ("style the button's
+        // visual appearance") is a build/edit task, not a visual-INSPECTION demand — the
+        // plan-complete gate must NOT force a _browser_test on it. The scripted classifier
+        // answers needsVisual=false, and the run completes with just the build step.
+        _clientFactory.Mode = PlannerMode.VisualVerifyBuild;
+        var controller = BuildController();
+        var prompt = "Style the button on the page with better visual appearance and a nicer layout.";
+        Assert.True(TestIntentClassifier.HasVisualInspectionHint(prompt),
+            "'visual appearance' must fire the hint (the gate then defers to the classifier)");
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}");
+        Assert.True(!plan!.Plan.Any(s => string.Equals(s.File, "_browser_test", StringComparison.OrdinalIgnoreCase)),
+            "a pure styling edit must never get a forced browser test");
+        Assert.True(!allSteps.OfType<Dictionary<string, object?>>()
+            .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"));
     }
 
     [Fact]
@@ -573,6 +652,73 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.True(File.Exists(_csvPath), $"the demanded file should exist at {_csvPath}");
         Assert.Contains("### WEB RESULTS", File.ReadAllText(_csvPath, Encoding.UTF8));
         Assert.Equal(new[] { "_command", "_web_search", "_web_fetch" }, plan.Plan.Select(s => s.File).ToArray());
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_PathlessCreateFile_ScopedIntoMkdirCreatedFolder()
+    {
+        // The benchmark-22 shape that landed server.js at the SANDBOX ROOT: the planner mkdir's
+        // the folder with a _command step, then plans a PATHLESS _create_file ("Create server.js
+        // backend implementation…") whose change is a prose description, not the full path. The
+        // interleaved route skips the classic mkdir→_create_directory conversion (that happens in
+        // ValidatePlanAsync, whole-plan only), so the pathless scoping must recognize the mkdir
+        // _command result as the implied directory and land the file INSIDE benchmark_test_22/ —
+        // never at the project root.
+        _clientFactory.Mode = PlannerMode.MkdirThenPathlessCreateFile;
+        var controller = BuildController();
+        var targetFolder = Path.Combine(_projectRoot, "benchmark_test_22");
+        var prompt = "Create a folder called 'benchmark_test_22' at the project root. Inside it, create a server.js " +
+                     "that serves index.html at / and exposes a GET /api/health endpoint returning {\"status\": \"ok\"}.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.True(Directory.Exists(targetFolder), $"the mkdir step must create {targetFolder}");
+        // The pathless _create_file was scoped into the folder: it created benchmark_test_22/server.js…
+        var createResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "create" && r.GetValueOrDefault("status")?.ToString() is "done" or "created");
+        Assert.Equal("benchmark_test_22/server.js", createResult.GetValueOrDefault("path")?.ToString());
+        Assert.True(File.Exists(Path.Combine(targetFolder, "server.js")), "server.js must land inside benchmark_test_22/");
+        // …and NOT a root-level server.js (the pre-fix behavior).
+        Assert.False(File.Exists(Path.Combine(_projectRoot, "server.js")), "no root-level server.js may exist");
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
+    [Fact]
+    public async Task WebTask_FailedCommand_IsReportedAndRecoveredWithACorrectedCommand()
+    {
+        // The benchmark-22 deadlock: `node server.js` crashed with a SyntaxError but the step
+        // was reported "done" — no recovery edit was ever planned and the planner deadlocked
+        // re-proposing the same broken command until the slot-failure valve threw. The fix:
+        // (a) a _command whose output shows a hard failure is reported status=error (never
+        // done), and (b) the interleaved loop feeds the failure output back to the planner,
+        // which plans a recovery EDIT of the crashing file.
+        _clientFactory.Mode = PlannerMode.BrokenCommandRecovery;
+        var controller = BuildController();
+        // Edit intent ("fix") so discovery does NOT short-circuit into the test-intent web
+        // test — the run must go through the interleaved planner where the command runs.
+        var prompt = "Fix the server so `node server.js` starts without errors.";
+        Assert.True(TestIntentClassifier.HasEditIntent(prompt), "the test prompt must route through planning");
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        // The failing command is REPORTED as error — pre-fix it was "done".
+        var failedCmd = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "command" &&
+                 (r.GetValueOrDefault("command")?.ToString() ?? "").Contains("node benchmark_test_22/server.js") &&
+                 r.GetValueOrDefault("status")?.ToString() == "error");
+        Assert.Contains("boom", failedCmd.GetValueOrDefault("error")?.ToString() ?? "", StringComparison.Ordinal);
+        // The recovery EDIT landed — the crashing line was replaced.
+        var serverPath = Path.Combine(_projectRoot, "benchmark_test_22", "server.js");
+        Assert.True(File.Exists(serverPath), "server.js must exist after the create step");
+        Assert.Contains("server.listen(process.env.PORT || 8765);", File.ReadAllText(serverPath, Encoding.UTF8));
+        Assert.DoesNotContain("throw new Error(\"boom\");", File.ReadAllText(serverPath, Encoding.UTF8));
+        // The planner SAW the failure feedback (the error output + the recovery demand).
+        Assert.Contains(_clientFactory.PlannerUserPrompts, p => p.Contains("FAILED", StringComparison.OrdinalIgnoreCase));
+        // The run did NOT die with the "3 slots in a row" exception — it recovered.
+        Assert.Contains(_clientFactory.Calls, c => c == "planner-step");
         Assert.Empty(_clientFactory.Unmatched);
     }
 
@@ -1371,7 +1517,8 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
             /*existingPlan*/ existingPlan, /*completedStepIndices*/ completedStepIndices, /*cardId*/ cardId,
             /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ webResults
         })!;
-        return await task;
+        var result = await task;
+        return result;
     }
 
     private static (AgentPlan? plan, HashSet<int>? completed, bool benchmark, List<Dictionary<string, object?>>? webResults) LoadPlan(
@@ -1408,6 +1555,11 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         SetField(controller, "_scraperService", new ScraperEnvironmentService());
         // Hermetic runtime probe: nothing installed (no real process spawns in tests).
         SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
+        // Hermetic browser test: the fake service PASSES by default, so a scripted
+        // _browser_test step completes (status "done") instead of launching a real server
+        // against the empty temp project and failing with a launch error (which the
+        // interleaved loop would treat as a fatal step failure and REMOVE from the plan).
+        SetField(controller, "_browserTestService", new FakeBrowserAutomationService());
         // Skip the real TCP/HTTP connectivity probe (the run must not depend on the host
         // network): cache the "reachable" verdict directly.
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
@@ -1440,7 +1592,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds, FetchThenCsvEdits }
+    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds, FetchThenCsvEdits, VisualVerifyBuild, MkdirThenPathlessCreateFile, BrokenCommandRecovery }
 
     /// <summary>
     /// Fake system-built scraper: records the URLs it was asked to scrape and writes the
@@ -1653,6 +1805,19 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     // script it to echo the description back (the changeDesc IS the path).
                     return (user.Trim().Trim('"', '\'', '`'), "extract-path");
                 }
+                if (system.Contains("You classify a single user request", StringComparison.Ordinal))
+                {
+                    // The visual-inspection classifier — consulted by BOTH the discovery
+                    // short-circuit and the plan-complete visual gate. Scripted content-aware:
+                    // demands to LOOK at the rendered page / check for visual bugs need a live
+                    // browser test; a pure styling edit does not.
+                    var needsVisual = user.Contains("visual bug", StringComparison.OrdinalIgnoreCase) ||
+                                      user.Contains("look at the rendered", StringComparison.OrdinalIgnoreCase) ||
+                                      user.Contains("visually confirm", StringComparison.OrdinalIgnoreCase);
+                    return (needsVisual
+                        ? "{\"needsVisual\": true, \"target\": \"the game\"}"
+                        : "{\"needsVisual\": false, \"target\": \"\"}", "visual-classifier");
+                }
                 if (system.Contains("You extract a short checklist of literal, testable requirements", StringComparison.Ordinal))
                 {
                     // The checklist is APPENDED to the task prompt (Pipeline.cs), so in the
@@ -1730,6 +1895,25 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     // write and without any web step to auto-dump — the OS-output gate rejects
                     // each premature completion until the regen budget is exhausted.
                     return ("{\"planComplete\": true, \"completionReason\": \"nothing to do\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.VisualVerifyBuild)
+                {
+                    // The benchmark-22 shape (build-then-visually-verify): turn 1 builds the
+                    // game page, turn 2 declares the plan complete WITHOUT any _browser_test
+                    // step — the pre-fix failure the visual gate must reject — turn 3 heeds
+                    // the feedback and plans the live browser test, turn 4 completes (the
+                    // gate passes because a _browser_test step ran).
+                    if (n == 1)
+                        return (PlannerStepJson("_create_file", "benchmark_test_22/index.html"), "planner-step");
+                    if (n == 2)
+                        return ("{\"planComplete\": true, \"completionReason\": \"built the game\"}", "planner-step");
+                    if (n == 3)
+                        // The EXACT real-world phrasing that was deadlocked pre-fix: the change
+                        // starts with the research verb 'Inspect', which the research-verb gate
+                        // used to reject _browser_test steps with — the step must be ACCEPTED.
+                        return (PlannerStepJson("_browser_test",
+                            "Inspect the benchmark game for correct rendering of 'Benchmark 22' header and functional clickable element"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"built the game and ran the live browser test\"}", "planner-step");
                 }
                 if (_owner.Mode == PlannerMode.SearchOnly)
                 {
@@ -1850,6 +2034,46 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     if (n == 3)
                         return (PlannerStepJson("_web_fetch", "https://example.com/alphafold3"), "planner-step");
                     return ("{\"planComplete\": true, \"completionReason\": \"folder created, data fetched and written into the csv\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.BrokenCommandRecovery)
+                {
+                    // The benchmark-22 deadlock, faithfully: round 1 mkdir's the folder, round
+                    // 2 creates a server.js that is syntactically VALID (so the JS syntax
+                    // check admits it) but throws immediately, round 3 runs
+                    // `node benchmark_test_22/server.js`, which CRASHES with "Error: boom" —
+                    // pre-fix that step was reported "done", so the planner never saw a
+                    // failure and deadlocked re-proposing the same command. Now the failure
+                    // is REPORTED (status=error) and fed back, round 4 plans a recovery EDIT
+                    // of the crashing file, and round 5 completes.
+                    if (n == 1)
+                        return (PlannerStepJson("_command", "mkdir \"benchmark_test_22\""), "planner-step");
+                    if (n == 2)
+                        return (PlannerCreateFileStepJson("benchmark_test_22/server.js", "throw new Error(\"boom\");"), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_command", "node benchmark_test_22/server.js"), "planner-step");
+                    if (n == 4)
+                        // The recovery edit replaces the crashing line with a REAL server — not
+                        // a console.log stub (the deterministic placeholder-stub reject would
+                        // abandon it).
+                        return (PlannerEditStepJson("benchmark_test_22/server.js", "fix the crash in server.js",
+                            "throw new Error(\"boom\");",
+                            "const http = require('http');\nconst server = http.createServer((req, res) => res.end('ok'));\nserver.listen(process.env.PORT || 8765);"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"fixed the crashing server and re-verified\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.MkdirThenPathlessCreateFile)
+                {
+                    // Round 1 mkdir's the folder with a _command (the benchmark-22 shape —
+                    // interleaved route, so no mkdir→_create_directory conversion). Round 2
+                    // plans a PATHLESS _create_file whose change is a prose description, not
+                    // the full path — the deterministic scoping must land it inside the
+                    // folder the mkdir just created. Round 3 completes.
+                    if (n == 1)
+                        return (PlannerStepJson("_command", "mkdir \"benchmark_test_22\""), "planner-step");
+                    if (n == 2)
+                        return (PlannerCreateFileStepJson(
+                            "Create server.js backend implementation serving static html + api health check",
+                            "const http = require('http');\nconst PORT = process.env.PORT || 8765;\nhttp.createServer((req, res) => {\n  if (req.url === '/api/health') { res.writeHead(200, {'Content-Type': 'application/json'}); res.end(JSON.stringify({ status: 'ok' })); }\n  else { res.writeHead(200, {'Content-Type': 'text/html'}); res.end('<h1>Benchmark 22</h1>'); }\n}).listen(PORT);\n"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"folder created and server.js written inside it\"}", "planner-step");
                 }
                 if (_owner.Mode == PlannerMode.CreateFileAsDirectory)
                 {

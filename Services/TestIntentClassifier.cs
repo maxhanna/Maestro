@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace Weaver.Services;
@@ -126,6 +127,77 @@ public static class TestIntentClassifier
 
     /// <summary>True when the prompt is a strict live web-app test task (Ui or Api).</summary>
     public static bool IsTestIntent(string? text) => Classify(text).Intent != Kind.None;
+
+    // ── Visual-inspection detection ─────────────────────────────────────────
+    //
+    // Prompts like "check my game for visual bugs", "verify visually", "does the nav bar
+    // look right", or "screenshot the homepage" want the agent to SEE a rendered page —
+    // but they don't always contain one of the strict test verbs above, so the
+    // deterministic classifier returns None. This hint is the cheap gate for the LLM
+    // classifier: when it fires, the LLM decides whether the request genuinely needs
+    // visual inspection (and names the target). The hint is deliberately INCLUSIVE — a
+    // false-positive hint just costs one tiny LLM call that answers "no", while a
+    // false-negative hint would silently skip the visual pipeline entirely.
+    private static readonly Regex VisualHintRegex = new(
+        @"\b(visual|visually|screenshot|screenshots|pixel|pixels|appearance)\b|" +
+        @"\blooks?\s+(right|wrong|ok|okay|good|bad|broken|correct|proper|fine|like)\b|" +
+        @"\bwhat\s+does.{0,40}\blook\s+like\b|\bhow\s+does.{0,40}\blook\b",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// True when a prompt hints at needing to SEE a rendered page — visual bugs, layout,
+    /// styling, screenshots, "does it look right" — even though it may not match a strict
+    /// test verb. Used to gate the LLM-based visual-inspection classifier (so the LLM is
+    /// only consulted when there is a real visual signal, never on every prompt).
+    /// </summary>
+    public static bool HasVisualInspectionHint(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return VisualHintRegex.IsMatch(Normalize(text));
+    }
+
+    /// <summary>
+    /// True when the prompt asks to BUILD/EDIT/CHANGE something ("build a game", "create a
+    /// folder", "fix the button", "write a server") — the deterministic counterpart of the
+    /// visual-inspection gate. A build task must go through normal planning (build FIRST,
+    /// test SECOND), so the visual short-circuit must NOT fire on it: otherwise
+    /// "build a game and check it for visual bugs" would try to run the (not-yet-built)
+    /// server before anything exists.
+    /// </summary>
+    public static bool HasEditIntent(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var t = Normalize(text);
+        foreach (var veto in EditVetoVerbs)
+            if (t.Contains(" " + veto + " ", StringComparison.Ordinal) ||
+                t.StartsWith(veto + " ", StringComparison.Ordinal))
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Parses the LLM visual-inspection verdict JSON. Returns (needsVisual, target) with a
+    /// clean (false, "") on malformed input, empty responses, or missing properties — the
+    /// classifier must fail CLOSED (no visual inspection) when the model rambles or the
+    /// JSON is broken.
+    /// </summary>
+    public static (bool NeedsVisual, string Target) ParseVisualVerdict(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return (false, "");
+        try
+        {
+            var cleaned = AgentJsonUtilities.ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            var needs = doc.RootElement.TryGetProperty("needsVisual", out var v) &&
+                        v.ValueKind == JsonValueKind.True;
+            var target = "";
+            if (doc.RootElement.TryGetProperty("target", out var t) &&
+                t.ValueKind == JsonValueKind.String)
+                target = t.GetString() ?? "";
+            return (needs, target.Trim());
+        }
+        catch { return (false, ""); }
+    }
 
     /// <summary>Lowercases, collapses whitespace, and strips punctuation so phrase
     /// matching is stable across prompt formatting.</summary>

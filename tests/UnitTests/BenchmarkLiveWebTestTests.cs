@@ -86,6 +86,11 @@ public class BenchmarkLiveWebTestTests : IDisposable
         Assert.Contains("/api/health", desc);
         Assert.Contains("test", desc, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("server.py", desc, StringComparison.OrdinalIgnoreCase);
+        // Benchmark 22 must specifically demand VISUAL inspection of the rendered page
+        // ("check my game for visual bugs" shape), which is what triggers the live
+        // browser test and the Test Browser tab — not just a source-file grep.
+        Assert.Contains("visual bugs", desc, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("LOOK at the rendered page", desc, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -2154,6 +2154,24 @@ partial class AgentController
         }
         catch { return false; }
     }
+    /// <summary>
+    /// The LLM-based "does this need VISUAL inspection?" classifier. It runs only when
+    /// <see cref="TestIntentClassifier.HasVisualInspectionHint"/> already fired (a visual
+    /// signal is present) but the deterministic test classifier found no strict test verb —
+    /// so prompts like "check my game for visual bugs" or "verify visually" still reach the
+    /// live browser-test pipeline. Fails closed: any transport error or unparseable reply
+    /// means (false, "") and normal planning continues.
+    /// </summary>
+    private async Task<(bool NeedsVisual, string Target)> ClassifyVisualInspectionPromptAsync(string prompt, CancellationToken ct)
+    {
+        const string sys =
+            "You classify a single user request. Answer ONLY with JSON: {\"needsVisual\": true|false, \"target\": \"...\"}.\n" +
+            "needsVisual = true ONLY when the request needs VISUAL INSPECTION of a RENDERED web page/app — the user wants to SEE what something looks like on screen: visual bugs, layout, styling, a screenshot, 'does it look right', 'what does the page look like', broken rendering, pixel checks.\n" +
+            "needsVisual = false when the request is a code edit, a build/implementation task, a data fetch or search, a unit test, a filesystem operation, or anything that does not require looking at a rendered page.\n" +
+            "target is a SHORT label for what to inspect (e.g. 'the game', 'the homepage', 'the nav bar', 'the calendar page'); use an empty string when no specific section is named.";
+        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, _infiniteTimeout, maxTokens: 96);
+        return TestIntentClassifier.ParseVisualVerdict(raw);
+    }
     private async Task<AgentPlan?> RecoverPlanFromRamblingAsync(
         bool emitSse, CancellationToken ct, string ramblingRaw)
     {

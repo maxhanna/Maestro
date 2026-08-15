@@ -32,10 +32,11 @@ const startMatch = /function shouldStartSuggestions\(card, maxSuggestions, topup
 const abortMatch = /function abortSuggestionGeneration\(card\) \{[\s\S]*?\n        \}/.exec(src);
 const staleMatch = /function clearStaleSuggestions\(card\) \{[\s\S]*?\n        \}/.exec(src);
 const busyMatch = /function suggestionSystemBlocked\(state\) \{[\s\S]*?\n        \}/.exec(src);
-assert(startMatch, 'shouldStartSuggestions not found in wwwroot/agent.js — marker format may have drifted');
+const doneMatch = /vm\._doneCardsNeedingSuggestions = function \(\) \{[\s\S]*?\n                \};/.exec(src);assert(startMatch, 'shouldStartSuggestions not found in wwwroot/agent.js — marker format may have drifted');
 assert(abortMatch, 'abortSuggestionGeneration not found in wwwroot/agent.js — marker format may have drifted');
 assert(staleMatch, 'clearStaleSuggestions not found in wwwroot/agent.js — marker format may have drifted');
 assert(busyMatch, 'suggestionSystemBlocked not found in wwwroot/agent.js — marker format may have drifted');
+assert(doneMatch, '_doneCardsNeedingSuggestions not found in wwwroot/agent.js — marker format may have drifted');
 
 const shouldStartSuggestions = eval('(function shouldStartSuggestions(card, maxSuggestions, topup) {' +
   startMatch[0].replace(/^function shouldStartSuggestions\(card, maxSuggestions, topup\) \{/, '').replace(/\n        \}$/, '') + '})');
@@ -45,6 +46,8 @@ const clearStaleSuggestions = eval('(function clearStaleSuggestions(card) {' +
   staleMatch[0].replace(/^function clearStaleSuggestions\(card\) \{/, '').replace(/\n        \}$/, '') + '})');
 const suggestionSystemBlocked = eval('(function suggestionSystemBlocked(state) {' +
   busyMatch[0].replace(/^function suggestionSystemBlocked\(state\) \{/, '').replace(/\n        \}$/, '') + '})');
+const doneCardsNeedingSuggestions = eval('(function (vm) {' +
+  doneMatch[0].replace(/^vm\._doneCardsNeedingSuggestions = function \(\) \{/, '').replace(/\n                \};$/, '') + '})');
 
 console.log('suggestion start/cancel helper tests\n');
 
@@ -242,5 +245,39 @@ test('idle flags present but nothing executing → not blocked', function () {
   assert.strictEqual(suggestionSystemBlocked({ streamingActive: false, benchmarkRunning: false, _suggestionIdlePaused: true }), false);
 });
 
+// ── _doneCardsNeedingSuggestions: benchmark cards are never eligible ──────
+
+test('benchmark card in Done → never counted as needing suggestions', function () {
+  const vm = {
+    state: { done: [{ id: 'b1', _benchmark: true, text: 'benchmark card' }] },
+    projectMaxSuggestions: function () { return 3; }
+  };
+  assert.deepStrictEqual(doneCardsNeedingSuggestions(vm), []);
+});
+
+test('benchmark card mixed with regular Done cards → only the regular card is counted', function () {
+  const vm = {
+    state: { done: [
+      { id: 'b1', _benchmark: true, text: 'benchmark card' },
+      { id: 'c1', text: 'finished work', _suggestions: [] }
+    ] },
+    projectMaxSuggestions: function () { return 3; }
+  };
+  const need = doneCardsNeedingSuggestions(vm);
+  assert.strictEqual(need.length, 1);
+  assert.strictEqual(need[0].id, 'c1');
+});
+
+test('regular Done card without suggestions → counted', function () {
+  const vm = {
+    state: { done: [{ id: 'c1', text: 'finished work' }] },
+    projectMaxSuggestions: function () { return 3; }
+  };
+  const need = doneCardsNeedingSuggestions(vm);
+  assert.strictEqual(need.length, 1);
+  assert.strictEqual(need[0].id, 'c1');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);
+

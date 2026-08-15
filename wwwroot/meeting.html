@@ -32,8 +32,7 @@
       <button class="ide-panel-btn" ng-click="vm.closeMeeting()" title="Close Meeting View">✕</button>
     </div>
   </div>
-  <div class="meeting-body" ng-mouseenter="vm.setMeetingHovered(true)" ng-mouseleave="vm.setMeetingHovered(false)"
-    ng-style="{'--meeting-font': vm.meetingFontSize + 'px'}">
+  <div class="meeting-body" ng-mouseenter="vm.setMeetingHovered(true)" ng-mouseleave="vm.setMeetingHovered(false)">
     <canvas id="meetingCanvas" class="meeting-canvas"></canvas>
     <div class="meeting-sound-tip" ng-show="vm.meetingSoundTip">
       <span class="meeting-sound-tip-icon">🔊</span>
@@ -142,6 +141,12 @@
           <span class="meeting-gossip-who">{{g.who}}:</span>
           <span class="meeting-gossip-text">{{g.text}}</span>
         </div>
+      </div>
+      <div class="meeting-gossip-fab" ng-if="vm.gossipLog.length">
+        <button type="button" class="meeting-gossip-fab-btn" ng-if="!vm.gossipNearBottom && vm.gossipCanScroll"
+          ng-click="vm.gossipScrollToBottom()" title="Jump to the latest message">⬇</button>
+        <button type="button" class="meeting-gossip-fab-btn" ng-if="vm.gossipNearBottom && vm.gossipCanScroll"
+          ng-click="vm.gossipScrollToTop()" title="Jump to the first message">⬆</button>
       </div>
     </div>
   </div>

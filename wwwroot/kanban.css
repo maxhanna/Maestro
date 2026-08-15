@@ -1963,7 +1963,7 @@ body.dragging-active .card:hover {
 }
 
 .section-live-row .context-breakdown-pop {
-    bottom: 140%;
+    top: 150%;
     min-width: 240px;
     max-width: 360px;
 }

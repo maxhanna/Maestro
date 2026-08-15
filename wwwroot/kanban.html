@@ -1325,6 +1325,16 @@
               <span class="section-title">🤖 AI Analysis</span>
             </summary>
             <div class="section-body">
+              <!-- Command history (card._steps) -->
+              <details class="command-history-section" ng-if="card._steps && card._steps.length">
+                <summary>
+                  <span class="section-caret">▶</span>
+                  <span class="section-title">🕹 Command history ({{card._steps.length}})</span>
+                </summary>
+                <div class="section-body">
+                  <div ng-include="'command-history.html'"></div>
+                </div>
+              </details>
               <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
                 <strong>Summary:</strong> {{card.agentAnalysis.summary}}
               </div>
@@ -1571,6 +1581,17 @@
               </div>
             </div>
           </details>
+
+          <!-- Command history (card._steps) -->
+          <details class="card-section" ng-if="card._steps && card._steps.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">🕹 Command history ({{card._steps.length}})</span>
+            </summary>
+            <div class="section-body">
+              <div ng-include="'command-history.html'"></div>
+            </div>
+          </details>
         </div>
       </div>
     </div>
@@ -1624,6 +1645,17 @@
               <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
                 <strong>Summary:</strong> {{card.agentAnalysis.summary}}
               </div>
+            </div>
+          </details>
+
+          <!-- Command history (card._steps) -->
+          <details class="card-section" ng-if="card._steps && card._steps.length">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">🕹 Command history ({{card._steps.length}})</span>
+            </summary>
+            <div class="section-body">
+              <div ng-include="'command-history.html'"></div>
             </div>
           </details>
           <div class="card-actions">

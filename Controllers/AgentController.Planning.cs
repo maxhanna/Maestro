@@ -1208,14 +1208,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // (parent of benchmark_sandbox) with the sandbox itself. Reject and steer it to use
         // relative paths (handled by _create_file/_create_directory) or the correct absolute
         // project root so benchmark folders land inside the sandbox, not alongside it.
-        if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
+        // OS-filesystem tasks are EXEMPT: when the prompt itself demands the output on the
+        // Desktop/Downloads/etc. ("write a text file to my desktop"), writing there is the
+        // task — the guard only exists to stop REPO tasks (benchmark folders, sandbox work)
+        // from leaking out to the Desktop.
+        if (!osTask &&
+            string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(step.Change) &&
             !string.IsNullOrWhiteSpace(projectRoot))
         {
-            // Extract any absolute path embedded in the command (mkdir/New-Item/Set-Content/etc.)
-            var absPathMatch = Regex.Match(step.Change,
+            // Extract any absolute path embedded in the command (mkdir/New-Item/Set-Content/etc.).
+            // URL schemes (https://…, ftp://…, file://…) are stripped FIRST so they are never read
+            // as a drive/absolute path — otherwise a fetch command gets the wrong-root veto instead
+            // of the fetch-in-command veto. The (?<![A-Za-z]) lookbehind is belt-and-braces for the
+            // drive-prefix match on Windows.
+            var pathProbe = Regex.Replace(step.Change,
+                @"\b(?:https?|ftp|sftp|file)://[^\s""'|>&]+", " ", RegexOptions.IgnoreCase);
+            var absPathMatch = Regex.Match(pathProbe,
                 OperatingSystem.IsWindows()
-                    ? @"[A-Za-z]:[\\/][^\s""'|>&]+"
+                    ? @"(?<![A-Za-z])[A-Za-z]:[\\/][^\s""'|>&]+"
                     : @"/[^\s""'|>&]+",
                 RegexOptions.IgnoreCase);
             if (absPathMatch.Success)
@@ -1374,11 +1385,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // query/URL. The web-need gate decides whether web steps are allowed, not this guard;
         // rejecting them here deadlocks web-needing tasks (the model proposes the right tool
         // and the loop bounces it, exactly like the "Search the web…" run).
-        // _create_file is exempt too: its change field is a RELATIVE PATH, and legit paths
-        // can start with research verbs ("README.md", "findings.txt", "search_results.json").
+        // _browser_test/_scraper/_benchmark_verify are the same class: action markers whose
+        // change is the INSPECT/FETCH TARGET, and their change naturally starts with research
+        // verbs ("Inspect the benchmark game for correct rendering…") — rejecting them
+        // deadlocks the visual-verify flow (benchmark-22: the run burned all its slots after
+        // the gate bounced the final _browser_test). _create_file is exempt too: its change
+        // field is a RELATIVE PATH, and legit paths can start with research verbs
+        // ("README.md", "findings.txt", "search_results.json").
         if (!step.File.Equals("_discover", StringComparison.OrdinalIgnoreCase) &&
             !IsWebStep(step.File) &&
             !step.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) &&
+            !step.File.Equals("_browser_test", StringComparison.OrdinalIgnoreCase) &&
+            !step.File.Equals("_scraper", StringComparison.OrdinalIgnoreCase) &&
+            !step.File.Equals("_benchmark_verify", StringComparison.OrdinalIgnoreCase) &&
             researchVerbs.Any(v => changeLower.StartsWith(v)))
         {
             return (false, $"Research step rejected — '{changeLower.Split(' ')[0]}' is not an actionable edit. " +
@@ -2993,6 +3012,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return "latest information";
     }
 
+    // A concrete, inspectable label for an auto-injected _browser_test step when the
+    // visual classifier returned no target: prefer the first quoted human phrase in the
+    // prompt (e.g. the 'Benchmark 22' the task demands as a heading), skipping file-ish
+    // tokens (paths/extensions), then fall back to a generic label — FindTargetSection
+    // also scores against the prompt's own keywords, so a generic label still matches.
+    private static string BuildFallbackVisualTarget(string? prompt)
+    {
+        if (!string.IsNullOrWhiteSpace(prompt))
+        {
+            foreach (Match m in Regex.Matches(prompt, @"['""]\s*([^'""]{2,60}?)\s*['""]"))
+            {
+                var v = m.Groups[1].Value.Trim();
+                if (v.IndexOf('.') >= 0 || v.IndexOf('/') >= 0) continue; // file-ish, not a UI label
+                if (v.Length >= 2) return v;
+            }
+        }
+        return "the page";
+    }
+
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared,
         Dictionary<string, string> preEditSnapshots)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
@@ -3029,6 +3067,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var webNeedVerified = 0; // 0 = unchecked, 1 = task needs web, -1 = no web needed
         var webNeedVerifyFailures = 0; // consecutive failed classifier calls — caps re-confirmation at 2 per run
         string? webInjectedQuery = null; // search query from the same verification call, used if we auto-inject _web_search
+        var visualNeedVerified = 0; // 0 = unchecked, 1 = task needs visual inspection of a rendered page, -1 = no visual needed
+        string? visualNeedTarget = null; // inspect target from the same verification call, used if we auto-inject _browser_test
         var fetchCommandRejections = 0; // consecutive fetch-command rejections this slot — auto-inject _web_search at the regen cap
         string? webNeedVetoReason = null; // classifier's reason when web was vetoed — shown inline on the rejected step card
         // OS-filesystem task guard state: pure OS tasks reject repo file edits
@@ -3043,6 +3083,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // the cap the run halts into post-execution verification like any other failure.
         var webStepFailures = 0;
         const int MaxWebStepRetries = 2;
+        // Failed _command steps are fed back to the planner for a RECOVERY EDIT (bounded like
+        // web steps): the benchmark-22 failure — `node server.js` crashed with a SyntaxError
+        // but was reported "done", so no recovery edit was ever planned and the planner
+        // deadlocked re-proposing the same broken command. The error output gives the planner
+        // the diagnostic it needs to fix the failing file (or change approach) instead of
+        // halting; after the cap the run falls through to the halt + post-execution repair.
+        var commandStepFailures = 0;
+        const int MaxCommandStepRetries = 2;
         // Once the fetch retry budget is exhausted and the task still demands data, the loop
         // auto-injects ONE _scraper step (system-built scraper) for the failed URL instead of
         // halting straight into repair — the web tool and the scraper are different fetch
@@ -3267,6 +3315,50 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             pendingSteps.Enqueue(new PlanStep { File = "_web_search", Change = queryText });
                             await EmitLog(emitSse, "warn",
                                 $"The planner declared the plan complete without using _web_search after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a _web_search step: \"{queryText}\"", ct: ct);
+                            regenAttempts = 0;
+                            rejectionFeedback.Clear();
+                            continue; // loop top executes the injected step, then planning resumes
+                        }
+                        continue;
+                    }
+                }
+                // ── Visual-inspection gate ────────────────────────────────────────────────────
+                // A task that demands VISUAL verification of a rendered page ("check my game for
+                // visual bugs", "you must LOOK at the rendered page", "visually confirm the
+                // heading renders") is NOT complete while the run never executed a _browser_test
+                // step — the observed failure declared planComplete=true after only the build
+                // steps, so the live web test (and the Test Browser tab) never happened. Reject,
+                // and on the regen cap inject the _browser_test step so visual tasks cannot
+                // escape by claiming completion.
+                if (TestIntentClassifier.HasVisualInspectionHint(prompt) &&
+                    !planSoFar.Any(s => string.Equals(s.File, "_browser_test", StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (visualNeedVerified == 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            "Task demands visual verification — checking whether a _browser_test step is required…", ct: ct);
+                        var (needsVisual, target) = await ClassifyVisualInspectionPromptAsync(prompt, ct);
+                        visualNeedVerified = needsVisual ? 1 : -1;
+                        if (needsVisual) visualNeedTarget = target;
+                    }
+                    if (visualNeedVerified == 1)
+                    {
+                        var inspectTarget = string.IsNullOrWhiteSpace(visualNeedTarget)
+                            ? BuildFallbackVisualTarget(prompt)
+                            : visualNeedTarget.Trim();
+                        var fb = "The task demands VISUAL verification of the rendered page — it asks to LOOK at / " +
+                            "visually check what is actually on screen, but the run has not executed a _browser_test step. " +
+                            $"Plan a single \"_browser_test\" step whose change names what to inspect and verify (e.g. \"{inspectTarget}\"). " +
+                            "Do NOT declare the plan complete until the live web test has run and verified the page on screen.";
+                        await EmitRejectedLog(emitSse,
+                            "Interleaved execution: rejected plan-complete — the task demands visual verification but the plan has no _browser_test step",
+                            fb, ct);
+                        rejectionFeedback.Add(fb);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                        {
+                            pendingSteps.Enqueue(new PlanStep { File = "_browser_test", Change = inspectTarget });
+                            await EmitLog(emitSse, "warn",
+                                $"The planner declared the plan complete without a _browser_test step after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a live web test: \"{inspectTarget}\"", ct: ct);
                             regenAttempts = 0;
                             rejectionFeedback.Clear();
                             continue; // loop top executes the injected step, then planning resumes
@@ -4190,6 +4282,35 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             $"Web step failed ({webStepFailures}/{MaxWebStepRetries} retries used) — feeding the failure back to the planner",
                             fb, ct);
                         rejectionFeedback.Add(fb);
+                        continue;
+                    }
+                    // A FAILED _command is ALSO fed back for a recovery edit (bounded like web
+                    // steps): the benchmark-22 failure — `node server.js` crashed with a
+                    // SyntaxError but was reported "done", so no recovery edit was ever planned
+                    // and the planner deadlocked re-proposing the same broken command (rejected
+                    // as a duplicate) until the slot-failure valve threw. The error output gives
+                    // the planner the diagnostic it needs to fix the failing file (or change
+                    // approach) instead of halting into verification blind.
+                    var failedCommandStep = stepToRun?.File?.Equals("_command", StringComparison.OrdinalIgnoreCase) == true &&
+                                            commandStepFailures < MaxCommandStepRetries;
+                    if (failedCommandStep)
+                    {
+                        commandStepFailures++;
+                        var failedCmdResult = newResults.FirstOrDefault(r =>
+                            r.GetValueOrDefault("type")?.ToString() == "command" &&
+                            r.GetValueOrDefault("status")?.ToString() == "error");
+                        var cmdErr = failedCmdResult?.GetValueOrDefault("error")?.ToString()
+                                     ?? failedCmdResult?.GetValueOrDefault("output")?.ToString() ?? "";
+                        if (planSoFar.Count > 0) planSoFar.RemoveAt(planSoFar.Count - 1);
+                        var fb2 = $"The _command step '{stepToRun?.Change}' FAILED" +
+                                  $"{(string.IsNullOrWhiteSpace(cmdErr) ? "" : $": {TruncateForLlm(cmdErr, 300)}")}. " +
+                                  "Diagnose the failure from the error output and plan a recovery step: fix the " +
+                                  "failing file with an edit, or correct the command. Do NOT re-run the same " +
+                                  "failing command unchanged.";
+                        await EmitRejectedLog(emitSse,
+                            $"Command step failed ({commandStepFailures}/{MaxCommandStepRetries} retries used) — feeding the failure back to the planner",
+                            fb2, ct);
+                        rejectionFeedback.Add(fb2);
                         continue;
                     }
                     // AUTO-INJECT _scraper: the fetch retry budget is exhausted and the task

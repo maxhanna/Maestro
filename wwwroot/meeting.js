@@ -113,8 +113,11 @@ angular.module('kanbanApp')
             if (Array.isArray(_chat)) vm.gossipLog = _chat.slice(-500);
           }
         } catch (e) { }
-        vm.gossipExpanded = false;    
-        vm.toggleGossipExpanded = function () { vm.gossipExpanded = !vm.gossipExpanded; };
+        vm.gossipExpanded = false;
+        vm.toggleGossipExpanded = function () {
+          vm.gossipExpanded = !vm.gossipExpanded;
+          $timeout(gossipFeedEnsure, 30);
+        };
         vm.gossipSearch = '';         
         vm.gossipSearchActive = -1;   
         vm.gossipActiveLine = null;   
@@ -1494,6 +1497,22 @@ angular.module('kanbanApp')
           try { window.localStorage.setItem('weaver.meeting.font', String(vm.meetingFontSize)); } catch (e) { }
           if (vm.saveSettings) vm.saveSettings(true);
         }
+        // The panel's font size drives every readable element in the meeting view,
+        // including the OFFICE CHAT at the bottom. ng-style can't set CSS custom
+        // properties (jqLite assigns element.style['--x'] = v, which modern
+        // browsers ignore — only setProperty() works), so we apply the variable
+        // ourselves on the .meeting-body elements whenever the size changes.
+        vm.applyMeetingFont = function () {
+          var px = Math.max(9, Math.min(26, vm.meetingFontSize || 12));
+          var els = document.querySelectorAll('.meeting-body');
+          for (var i = 0; i < els.length; i++) {
+            els[i].style.setProperty('--meeting-font', px + 'px');
+          }
+        };
+        if ($scope) {
+          $scope.$watch(function () { if (vm.meetingFontSize) vm.applyMeetingFont(); return true; });
+        }
+        vm.applyMeetingFont();
         vm.meetingSoundTip = false;
         vm._soundTipShown = false;
         try { vm._soundTipShown = window.localStorage.getItem('weaver.meeting.soundTipSeen') === '1'; } catch (e) { }
@@ -2106,12 +2125,53 @@ angular.module('kanbanApp')
               if (!feed) return;
               var nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 48;
               if (nearBottom) feed.scrollTop = feed.scrollHeight;
+              gossipFeedEnsure();
             }, 0);
           } catch (e) { }
         }
         function saveChatLog() {
           try { window.localStorage.setItem('weaver.meeting.chat', JSON.stringify(vm.gossipLog.slice(-500))); } catch (e) { }
         }
+        // Chat jump buttons: a ↓ "jump to latest" chip floats over the feed while
+        // the user is scrolled up, and an ↑ "jump to first" chip replaces it when
+        // they're at the bottom of a long log. State is recomputed on every scroll
+        // (coalesced via $applyAsync) and whenever the feed appears or resizes.
+        function gossipScrollState(sh, st, ch) {
+          return { nearBottom: sh - st - ch < 48, canScroll: sh > ch + 4 };
+        }
+        function updateGossipScrollState() {
+          var feed = document.getElementById('meetingGossipFeed');
+          if (!feed) return;
+          var s = gossipScrollState(feed.scrollHeight, feed.scrollTop, feed.clientHeight);
+          vm.gossipNearBottom = s.nearBottom;
+          vm.gossipCanScroll = s.canScroll;
+        }
+        function bindGossipFeedScroll() {
+          var feed = document.getElementById('meetingGossipFeed');
+          if (!feed || feed.__meetingFeedBound) return;
+          feed.__meetingFeedBound = true;
+          feed.addEventListener('scroll', function () {
+            $scope.$applyAsync(updateGossipScrollState);
+          }, { passive: true });
+        }
+        function gossipFeedEnsure() {
+          bindGossipFeedScroll();
+          updateGossipScrollState();
+        }
+        vm.gossipNearBottom = true;
+        vm.gossipCanScroll = false;
+        vm.gossipScrollToBottom = function () {
+          var feed = document.getElementById('meetingGossipFeed');
+          if (!feed) return;
+          feed.scrollTop = feed.scrollHeight;
+          vm.gossipNearBottom = true;
+        };
+        vm.gossipScrollToTop = function () {
+          var feed = document.getElementById('meetingGossipFeed');
+          if (!feed) return;
+          feed.scrollTop = 0;
+          vm.gossipNearBottom = false;
+        };
         vm.clearGossipLog = function () {
           vm.gossipLog = [];
           try { window.localStorage.removeItem('weaver.meeting.chat'); } catch (e) { }
@@ -2148,6 +2208,7 @@ angular.module('kanbanApp')
           if (m.length) { vm.gossipSearchActive = 0; vm.gossipActiveLine = m[0]; }
           else { vm.gossipSearchActive = -1; vm.gossipActiveLine = null; }
           gossipScrollActive();
+          $timeout(gossipFeedEnsure, 30);
         };
         vm.gossipNextMatch = function () {
           var m = gossipMatches();
@@ -2179,6 +2240,7 @@ angular.module('kanbanApp')
           vm.gossipSearch = '';
           vm.gossipSearchActive = -1;
           vm.gossipActiveLine = null;
+          $timeout(gossipFeedEnsure, 30);
         };
         function legacyGossipCopy(text) {
           try {
@@ -6221,7 +6283,8 @@ angular.module('kanbanApp')
           ctx.fillStyle = '#f2ead6';
           rr(px2 + 3, py2 + 3, pw2 - 6, ph2 - 6, 2); ctx.fill();
           ctx.fillStyle = '#3a5a8c';
-          ctx.font = 'bold ' + Math.max(7, pw2 * 0.34) + 'px sans-serif';
+          var standFont = fitFont('STAND', pw2 * 0.34, pw2 - 8, true);
+          ctx.font = 'bold ' + standFont + 'px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText('STAND', px2 + pw2 / 2, py2 + ph2 * 0.3);
           ctx.fillText('UP', px2 + pw2 / 2, py2 + ph2 * 0.46);
@@ -6240,7 +6303,7 @@ angular.module('kanbanApp')
           ctx.lineTo(ax + pw2 * 0.08, ay - ph2 * 0.02);
           ctx.closePath(); ctx.fill();
           ctx.fillStyle = 'rgba(120,140,170,0.8)';
-          ctx.font = Math.max(5, pw2 * 0.18) + 'px sans-serif';
+          ctx.font = fitFont('EVERY · DAY', Math.max(5, pw2 * 0.18), pw2 - 10, false) + 'px sans-serif';
           ctx.fillText('EVERY · DAY', px2 + pw2 / 2, py2 + ph2 * 0.85);
           ctx.textAlign = 'left';
           // Framed web print
@@ -6578,7 +6641,10 @@ angular.module('kanbanApp')
           var padX = 10, padY = 12;
           var chartW = 52, chartH = 34;
           var chartShown = !!(scene && scene.postMortem && scene.postMortem.shown);
-          var maxChars = Math.max(8, Math.floor((bw - padX * 2 - (chartShown ? chartW + 4 : 0)) / mf(9)));
+          // Monospace char width ≈ 0.62 × font size; must match the mf(11) board font
+          // or wrapped lines spill past the board's right edge.
+          var boardCharW = mf(11) * 0.62;
+          var maxChars = Math.max(8, Math.floor((bw - padX * 2 - (chartShown ? chartW + 4 : 0)) / boardCharW));
           var lines = scene ? scene.boardLines.slice(-6) : [];
           ctx.font = 'bold ' + mf(11) + 'px monospace';
           ctx.textBaseline = 'top';
@@ -6638,6 +6704,18 @@ angular.module('kanbanApp')
           }
           if (cur) out.push(cur);
           return out;
+        }
+        // Shrinks a font until the text fits the given width, so wall text never
+        // spills past the frame it's drawn on. Sets ctx.font itself (bold or not).
+        function fitFont(text, maxFont, maxWidth, bold) {
+          var f = Math.max(4, maxFont);
+          var prefix = bold ? 'bold ' : '';
+          while (f > 4) {
+            ctx.font = prefix + f + 'px sans-serif';
+            if (ctx.measureText(text).width <= maxWidth) return f;
+            f -= 0.5;
+          }
+          return f;
         }
         function charsOf(lines, n) {
           var total = 0;
@@ -6871,13 +6949,17 @@ angular.module('kanbanApp')
             var off = 8 + i * 3;
             var stompLegs = s.stomping ? 7 * scale : 4 * scale;
             var sway = legSwing * (i % 2 === 0 ? 1 : -1) * stompLegs + (drunk > 0 ? Math.sin(dTime * 8 + i * 2.5 + s.drunkPhase) * 1.3 * scale * drunk : 0);
+            // Two-segment legs with a knee joint: shoulder → knee → foot.
+            var legSide = i % 2 === 0 ? -1 : 1;
+            var shX = px + legSide * bodyW * 0.35;
+            var fX = shX + legSide * (off * scale + sway * 0.4);
+            var fY = attachY + 9 * scale + sway * 0.6;
+            var kX = (shX + fX) / 2 - legSide * sway * 0.3;
+            var kY = (attachY + fY) / 2 + 2.4 * scale;
             ctx.beginPath();
-            ctx.moveTo(px - bodyW * 0.35, attachY);
-            ctx.lineTo(px - bodyW * 0.35 - off * scale, attachY + 8 * scale + sway);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(px + bodyW * 0.35, attachY);
-            ctx.lineTo(px + bodyW * 0.35 + off * scale, attachY + 8 * scale - sway);
+            ctx.moveTo(shX, attachY);
+            ctx.lineTo(kX, kY);
+            ctx.lineTo(fX, fY);
             ctx.stroke();
           }
           if (s.waveT > 0) {
@@ -6937,6 +7019,7 @@ angular.module('kanbanApp')
           ctx.fillStyle = '#111';
           ctx.beginPath(); ctx.arc(px - bodyW * 0.18 + ex * 0.4 + drunkPup, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
           ctx.beginPath(); ctx.arc(px + bodyW * 0.18 + ex * 0.4 - drunkPup, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
+          drawSpiderDetails(px, cy, bodyW, bodyH, scale, s, ey);
           if (scene.writer === s && s.state === 'write') {
             ctx.strokeStyle = '#222';
             ctx.lineWidth = 2.5 * scale;
@@ -6970,10 +7053,175 @@ angular.module('kanbanApp')
             drawSpeechBubble(W, H, px, cy - bodyH, s);
           }
         }
+        // Role-specific accessories give each spider its own silhouette so they're
+        // told apart by more than color: glasses, headlamp, pencil, captain hat,
+        // bow tie, pennant, headset, lightbulb, horns. Every spider also gets a
+        // small mouth line so the faces read as faces at a glance.
+        function drawSpiderDetails(px, cy, bodyW, bodyH, scale, s, eyeY) {
+          var r = s.role;
+          var hx = px, hy = cy - bodyH * 0.5;
+          ctx.save();
+          if (r === 'planner') {
+            ctx.strokeStyle = 'rgba(18,24,36,0.9)';
+            ctx.lineWidth = Math.max(1, 1.2 * scale);
+            ctx.beginPath();
+            ctx.arc(px - bodyW * 0.18, eyeY, bodyW * 0.17, 0, 6.283);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(px + bodyW * 0.18, eyeY, bodyW * 0.17, 0, 6.283);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(px - bodyW * 0.18 + bodyW * 0.17, eyeY);
+            ctx.lineTo(px + bodyW * 0.18 - bodyW * 0.17, eyeY);
+            ctx.stroke();
+          } else if (r === 'explorer') {
+            ctx.strokeStyle = '#39424f';
+            ctx.lineWidth = Math.max(1, 1.4 * scale);
+            ctx.beginPath();
+            ctx.moveTo(hx - bodyW * 0.38, hy + bodyH * 0.12);
+            ctx.quadraticCurveTo(hx - bodyW * 0.42, hy - bodyH * 0.2, hx, hy - bodyH * 0.28);
+            ctx.quadraticCurveTo(hx + bodyW * 0.42, hy - bodyH * 0.2, hx + bodyW * 0.38, hy + bodyH * 0.12);
+            ctx.stroke();
+            ctx.fillStyle = '#ffd93d';
+            ctx.beginPath();
+            ctx.arc(hx, hy - bodyH * 0.38, bodyH * 0.17, 0, 6.283);
+            ctx.fill();
+            ctx.fillStyle = '#fff8e1';
+            ctx.beginPath();
+            ctx.arc(hx, hy - bodyH * 0.4, bodyH * 0.08, 0, 6.283);
+            ctx.fill();
+          } else if (r === 'editor') {
+            ctx.strokeStyle = '#d8b56b';
+            ctx.lineWidth = Math.max(1.4, 2.2 * scale);
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(px + bodyW * 0.3, cy - bodyH * 0.52);
+            ctx.lineTo(px + bodyW * 0.62, cy - bodyH * 0.16);
+            ctx.stroke();
+            ctx.fillStyle = '#3a3f4a';
+            ctx.beginPath();
+            ctx.moveTo(px + bodyW * 0.6, cy - bodyH * 0.2);
+            ctx.lineTo(px + bodyW * 0.68, cy - bodyH * 0.08);
+            ctx.lineTo(px + bodyW * 0.54, cy - bodyH * 0.12);
+            ctx.closePath();
+            ctx.fill();
+          } else if (r === 'commander') {
+            ctx.fillStyle = '#2b3a55';
+            ctx.beginPath();
+            ctx.moveTo(hx - bodyW * 0.4, hy);
+            ctx.quadraticCurveTo(hx - bodyW * 0.44, hy - bodyH * 0.6, hx, hy - bodyH * 0.66);
+            ctx.quadraticCurveTo(hx + bodyW * 0.44, hy - bodyH * 0.6, hx + bodyW * 0.4, hy);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#e5c07b';
+            ctx.fillRect(hx - bodyW * 0.4, hy - bodyH * 0.16, bodyW * 0.8, bodyH * 0.12);
+            ctx.strokeStyle = '#1f2a3d';
+            ctx.lineWidth = Math.max(1.2, 1.6 * scale);
+            ctx.beginPath();
+            ctx.moveTo(hx - bodyW * 0.52, hy - bodyH * 0.16);
+            ctx.lineTo(hx + bodyW * 0.52, hy - bodyH * 0.16);
+            ctx.stroke();
+          } else if (r === 'verifier') {
+            var neckY = cy + bodyH * 0.3;
+            ctx.fillStyle = '#7a4d99';
+            ctx.beginPath();
+            ctx.moveTo(px - bodyW * 0.14, neckY - bodyH * 0.08);
+            ctx.lineTo(px - bodyW * 0.02, neckY);
+            ctx.lineTo(px - bodyW * 0.14, neckY + bodyH * 0.08);
+            ctx.closePath();
+            ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(px + bodyW * 0.14, neckY - bodyH * 0.08);
+            ctx.lineTo(px + bodyW * 0.02, neckY);
+            ctx.lineTo(px + bodyW * 0.14, neckY + bodyH * 0.08);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#5c3a75';
+            ctx.beginPath();
+            ctx.arc(px, neckY, bodyH * 0.055, 0, 6.283);
+            ctx.fill();
+          } else if (r === 'reviewer') {
+            ctx.strokeStyle = '#2b2f3a';
+            ctx.lineWidth = Math.max(1, 1.2 * scale);
+            ctx.beginPath();
+            ctx.moveTo(hx, hy);
+            ctx.lineTo(hx, hy - bodyH * 0.6);
+            ctx.stroke();
+            ctx.fillStyle = '#e06c75';
+            ctx.beginPath();
+            ctx.moveTo(hx, hy - bodyH * 0.6);
+            ctx.lineTo(hx + bodyW * 0.42, hy - bodyH * 0.47);
+            ctx.lineTo(hx, hy - bodyH * 0.34);
+            ctx.closePath();
+            ctx.fill();
+          } else if (r === 'itspecialist') {
+            ctx.strokeStyle = '#4a5260';
+            ctx.lineWidth = Math.max(1, 1.5 * scale);
+            ctx.beginPath();
+            ctx.moveTo(hx - bodyW * 0.34, hy + bodyH * 0.05);
+            ctx.quadraticCurveTo(hx - bodyW * 0.42, hy - bodyH * 0.3, hx, hy - bodyH * 0.36);
+            ctx.quadraticCurveTo(hx + bodyW * 0.42, hy - bodyH * 0.3, hx + bodyW * 0.34, hy + bodyH * 0.05);
+            ctx.stroke();
+            ctx.fillStyle = '#565f6e';
+            ctx.fillRect(hx - bodyW * 0.4, hy + bodyH * 0.02, bodyW * 0.13, bodyH * 0.14);
+            ctx.fillRect(hx + bodyW * 0.27, hy + bodyH * 0.02, bodyW * 0.13, bodyH * 0.14);
+          } else if (r === 'ideas') {
+            var bulbGlow = 0.5 + 0.5 * Math.sin(Date.now() / 420);
+            ctx.fillStyle = '#ffd975';
+            ctx.beginPath();
+            ctx.arc(hx, hy - bodyH * 0.32, bodyH * 0.22, 0, 6.283);
+            ctx.fill();
+            ctx.fillStyle = '#8a8f98';
+            ctx.fillRect(hx - bodyH * 0.07, hy - bodyH * 0.12, bodyH * 0.14, bodyH * 0.1);
+            ctx.globalAlpha = 0.2 * bulbGlow;
+            ctx.fillStyle = '#ffe9a8';
+            ctx.beginPath();
+            ctx.arc(hx, hy - bodyH * 0.32, bodyH * 0.42, 0, 6.283);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          } else if (r === 'complexity') {
+            ctx.fillStyle = '#8a1f2e';
+            ctx.beginPath();
+            ctx.moveTo(hx - bodyW * 0.26, hy);
+            ctx.quadraticCurveTo(hx - bodyW * 0.4, hy - bodyH * 0.48, hx - bodyW * 0.18, hy - bodyH * 0.58);
+            ctx.quadraticCurveTo(hx - bodyW * 0.16, hy - bodyH * 0.32, hx - bodyW * 0.08, hy);
+            ctx.closePath();
+            ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(hx + bodyW * 0.26, hy);
+            ctx.quadraticCurveTo(hx + bodyW * 0.4, hy - bodyH * 0.48, hx + bodyW * 0.18, hy - bodyH * 0.58);
+            ctx.quadraticCurveTo(hx + bodyW * 0.16, hy - bodyH * 0.32, hx + bodyW * 0.08, hy);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+            ctx.lineWidth = Math.max(1, 1.4 * scale);
+            ctx.beginPath();
+            ctx.moveTo(px - bodyW * 0.32, cy - bodyH * 0.32);
+            ctx.lineTo(px - bodyW * 0.06, cy - bodyH * 0.24);
+            ctx.moveTo(px + bodyW * 0.32, cy - bodyH * 0.32);
+            ctx.lineTo(px + bodyW * 0.06, cy - bodyH * 0.24);
+            ctx.stroke();
+          }
+          if (r !== 'complexity') {
+            ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+            ctx.lineWidth = Math.max(0.8, 1 * scale);
+            ctx.beginPath();
+            ctx.arc(px, cy + bodyH * 0.08, bodyW * 0.14, 0.3, Math.PI - 0.3);
+            ctx.stroke();
+          } else {
+            ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+            ctx.lineWidth = Math.max(0.8, 1 * scale);
+            ctx.beginPath();
+            ctx.arc(px, cy + bodyH * 0.2, bodyW * 0.13, Math.PI + 0.3, Math.PI * 2 - 0.3);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
         function drawSpeechBubble(W, H, px, py, s) {
           var text = s.speech;
-          ctx.font = mf(10) + 'px sans-serif';
-          var maxW = Math.min(W * 0.32, 220);
+          var bubbleFont = mf(10);
+          ctx.font = bubbleFont + 'px sans-serif';
+          var maxW = Math.min(W * 0.34, 240);
           var words = text.split(' ');
           var lines = []; var cur = '';
           for (var i = 0; i < words.length; i++) {
@@ -6982,8 +7230,13 @@ angular.module('kanbanApp')
             else cur = test;
           }
           if (cur) lines.push(cur);
-          var maxLines = 3, lineHeight = 13, pad = 6;
-          var visibleLines = Math.min(lines.length, maxLines);
+          // Keep bubbles compact but readable: fit up to five lines on screen.
+          // Anything longer scrolls past the window at a steady pace.
+          var maxLines = 5;
+          var lineHeight = Math.round(bubbleFont * 1.4);
+          var pad = mf(6);
+          var bhCap = Math.max(lineHeight + pad * 2, py - 8);
+          var visibleLines = Math.min(lines.length, maxLines, Math.max(1, Math.floor((bhCap - pad * 2) / lineHeight)));
           var bh = visibleLines * lineHeight + pad * 2;
           var bw = maxW + pad * 2;
           var bx = Math.max(4, Math.min(W - bw - 4, px - bw / 2));
@@ -6995,12 +7248,10 @@ angular.module('kanbanApp')
           var scrollable = Math.max(0, totalH - bh);
           var scroll = 0;
           if (scrollable > 0) {
-            var leg = Math.min(6, Math.max(2, lines.length * 0.45));
+            // Steady linear scroll — no ease-in-out bounce — so long quips move
+            // past the window cleanly and settle on the last lines.
             var elapsed = (Date.now() - (s._speechStart || Date.now())) / 1000;
-            var phase = (elapsed % (2 * leg)) / (2 * leg);
-            var tri = phase < 0.5 ? phase * 2 : (1 - (phase - 0.5) * 2);
-            var ease = tri * tri * (3 - 2 * tri);
-            scroll = scrollable * ease;
+            scroll = Math.min(scrollable, elapsed * 22);
           }
           ctx.fillStyle = 'rgba(15,20,35,0.92)';
           rr(bx, by, bw, bh, 6); ctx.fill();
@@ -7014,6 +7265,7 @@ angular.module('kanbanApp')
           ctx.fill();
           ctx.fillStyle = '#e8eef6';
           ctx.textBaseline = 'top';
+          ctx.textAlign = 'left';
           ctx.save();
           ctx.beginPath();
           ctx.rect(bx, by, bw, bh);
@@ -7023,6 +7275,7 @@ angular.module('kanbanApp')
           }
           ctx.restore();
           ctx.textBaseline = 'alphabetic';
+          ctx.textAlign = 'left';
         }
         var _stepStatusCache = {};
         $scope.$watch(function () {
@@ -7176,7 +7429,15 @@ angular.module('kanbanApp')
           }
         });
         $scope.$watch('vm.showMeeting', function (val) {
-          if (val) { startLoop(); if (vm._restoreMeetingReplayFromCards) vm._restoreMeetingReplayFromCards(); }
+          if (val) {
+            startLoop(); if (vm._restoreMeetingReplayFromCards) vm._restoreMeetingReplayFromCards();
+            // The chat feed is re-created with each open (the panel is ng-if'd),
+            // so re-bind the scroll handler and land on the latest message.
+            $timeout(function () {
+              gossipFeedEnsure();
+              vm.gossipScrollToBottom();
+            }, 60);
+          }
           else stopLoop();
         });
         $scope.$watch('vm.streamingActive', function (val, prev) {

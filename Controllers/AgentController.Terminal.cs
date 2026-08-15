@@ -109,9 +109,58 @@ partial class AgentController
         var command = step.Command ?? "";
         if (string.IsNullOrWhiteSpace(command)) { result["status"] = "error"; result["error"] = "No command"; return; }
         var output = await RunTerminalCommandWithRetryAsync(command, projectRoot, emitSse, ct);
+        // A _command whose output shows a HARD failure (a crash, compile error, or failed
+        // test run) is a FAILED step, not done — the benchmark-22 failure: `node server.js`
+        // crashed with a SyntaxError but was reported "done", so the planner never planned a
+        // recovery edit and deadlocked re-running the same broken command. Benign summaries
+        // ("Passed!", "Failed: 0", "0 Error(s)") are NOT failures — the detector's bare
+        // 'failed'/'error' substrings would otherwise flag a passing build/test run.
+        if (OutputShowsHardFailure(output))
+        {
+            result["status"] = "error";
+            result["command"] = command;
+            result["output"] = output;
+            // Carry the diagnostic excerpt in `error` so the interleaved loop's failed-command
+            // feedback hands the planner the actual error ("Error: boom"/SyntaxError), not a
+            // generic "see output" — the planner needs the real reason to plan the fix.
+            var excerpt = ExtractCommandFailureExcerpt(output);
+            result["error"] = "Command failed: " + excerpt;
+            await EmitLog(emitSse, "error", $"⛔ Command failed: {excerpt}", ct: ct);
+            return;
+        }
         result["status"] = "done"; result["command"] = command;
         result["output"] = output;
         result["snippet"] = output;
+    }
+
+    /// <summary>Builds the failure excerpt fed back to the planner. The PS terminal prefixes
+    /// every command with a prompt/echo line ("PS …&gt; Set-Location …; node server.js") that is
+    /// noise, not diagnostic — drop it so the actual error line (SyntaxError / Error: boom)
+    /// fits inside the truncation budget instead of being cut off by the head-truncate.</summary>
+    internal static string ExtractCommandFailureExcerpt(string output)
+    {
+        var lines = output.Replace("\r\n", "\n").Split('\n');
+        var start = 0;
+        if (lines.Length > 0 && lines[0].TrimStart().StartsWith("PS ", StringComparison.OrdinalIgnoreCase))
+            start = 1; // PowerShell prompt + echoed command line — noise
+        var rest = string.Join("\n", lines.Skip(start));
+        return TruncateForLlm(rest, 400);
+    }
+
+    /// <summary>True when command output shows a HARD failure, with benign success summaries
+    /// exempted so a passing build/test run is never mistaken for a crash. "Passed!" (with
+    /// the bang) only appears on xUnit's SUCCESS line — the failure line is "Failed! …".</summary>
+    internal static bool OutputShowsHardFailure(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return false;
+        var o = output.ToLowerInvariant();
+        if (o.Contains("passed!", StringComparison.Ordinal) ||
+            o.Contains("build succeeded", StringComparison.Ordinal) ||
+            Regex.IsMatch(o, @"\bfailed\s*[:=]?\s*0\b") ||   // "Failed: 0" / "failed = 0"
+            Regex.IsMatch(o, @"\b0\s+failed\b") ||           // "0 failed, 10 passed"
+            Regex.IsMatch(o, @"\b0\s+(?:errors?|warnings?)\b")) // "0 Error(s)", "0 warnings"
+            return false;
+        return TransientFailureDetector.LooksLikeCommandFailure(o);
     }
     private async Task<(string output, string? error)> WebSearchAsync(string query, CancellationToken ct)
     {

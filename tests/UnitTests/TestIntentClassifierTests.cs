@@ -125,4 +125,127 @@ public class TestIntentClassifierTests
         foreach (var p in new[] { "run pytest", "execute jest", "cargo test", "go test ./..." })
             Assert.Equal(TestIntentClassifier.Kind.None, TestIntentClassifier.Classify(p).Intent);
     }
+
+    // ── Visual-inspection hints (gate the LLM visual classifier) ────────────
+
+    [Theory]
+    [InlineData("check my game for visual bugs")]
+    [InlineData("verify visually")]
+    [InlineData("screenshot the homepage")]
+    [InlineData("does the nav bar look right")]
+    [InlineData("what does the settings page look like")]
+    [InlineData("check the page for visual bugs")]
+    [InlineData("how does the landing page look")]
+    [InlineData("the button looks broken on the game")]
+    public void HasVisualInspectionHint_VisualPhrasing_ReturnsTrue(string prompt)
+    {
+        Assert.True(TestIntentClassifier.HasVisualInspectionHint(prompt));
+    }
+
+    [Theory]
+    [InlineData("fix the kanban board")]
+    [InlineData("add a button to the calendar page")]
+    [InlineData("look up the calendar api docs")]
+    [InlineData("run the tests")]
+    [InlineData("search the web for the latest news")]
+    [InlineData("write a python script that tests the api")]
+    [InlineData("hello")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void HasVisualInspectionHint_NonVisual_ReturnsFalse(string? prompt)
+    {
+        Assert.False(TestIntentClassifier.HasVisualInspectionHint(prompt));
+    }
+
+    // The canonical case: a visual-bug prompt has NO strict test verb, so the
+    // deterministic classifier stays conservative (None) while the visual hint fires —
+    // that gap is exactly what the LLM-based classifier closes.
+    [Fact]
+    public void Classify_VisualBugPhrasing_NoneButHintsVisual()
+    {
+        Assert.Equal(TestIntentClassifier.Kind.None,
+            TestIntentClassifier.Classify("check my game for visual bugs").Intent);
+        Assert.True(TestIntentClassifier.HasVisualInspectionHint("check my game for visual bugs"));
+    }
+
+    // "verify visually" contains a strict verb, so it routes deterministically (free).
+    [Fact]
+    public void Classify_VerifyVisually_ReturnsUi()
+    {
+        Assert.Equal(TestIntentClassifier.Kind.Ui, TestIntentClassifier.Classify("verify visually").Intent);
+    }
+
+    // ── LLM visual verdict parsing ───────────────────────────────────────────
+
+    [Fact]
+    public void ParseVisualVerdict_TrueWithTarget()
+    {
+        var (needs, target) = TestIntentClassifier.ParseVisualVerdict(
+            "{\"needsVisual\": true, \"target\": \"the game\"}");
+        Assert.True(needs);
+        Assert.Equal("the game", target);
+    }
+
+    [Fact]
+    public void ParseVisualVerdict_False()
+    {
+        var (needs, target) = TestIntentClassifier.ParseVisualVerdict(
+            "{\"needsVisual\": false, \"target\": \"\"}");
+        Assert.False(needs);
+        Assert.Equal("", target);
+    }
+
+    [Fact]
+    public void ParseVisualVerdict_ProseWrappedJson()
+    {
+        var (needs, target) = TestIntentClassifier.ParseVisualVerdict(
+            "Here is my answer: {\"needsVisual\": true, \"target\": \"the nav bar\"} done.");
+        Assert.True(needs);
+        Assert.Equal("the nav bar", target);
+    }
+
+    // ── Edit-intent veto (build tasks must plan the build, then test) ──────────
+
+    [Theory]
+    [InlineData("build a small web game and check it for visual bugs")]
+    [InlineData("Create a folder called benchmark_test_22 at the project root")]
+    [InlineData("write a python server that serves index.html")]
+    [InlineData("fix the button and verify it renders")]
+    [InlineData("add a column to the csv")]
+    public void HasEditIntent_BuildOrEditPhrasing_ReturnsTrue(string prompt)
+    {
+        Assert.True(TestIntentClassifier.HasEditIntent(prompt));
+    }
+
+    [Theory]
+    [InlineData("check my game for visual bugs")]
+    [InlineData("verify visually")]
+    [InlineData("does the nav bar look right")]
+    [InlineData("screenshot the homepage")]
+    [InlineData("test the kanban board")]
+    public void HasEditIntent_PureInspection_ReturnsFalse(string prompt)
+    {
+        Assert.False(TestIntentClassifier.HasEditIntent(prompt));
+    }
+
+    // The benchmark 22 regression: a build task that ALSO mentions visual bugs must NOT
+    // short-circuit to the live web test — it must plan the build FIRST and test SECOND.
+    [Fact]
+    public void BuildPromptWithVisualHint_DoesNotShortCircuit()
+    {
+        const string prompt = "Create a folder called 'benchmark_test_22' at the project root. " +
+                              "Inside it, build a small web game and then check it for visual bugs.";
+        Assert.Equal(TestIntentClassifier.Kind.None, TestIntentClassifier.Classify(prompt).Intent);
+        Assert.True(TestIntentClassifier.HasVisualInspectionHint(prompt));
+        Assert.True(TestIntentClassifier.HasEditIntent(prompt));
+    }
+
+    [Fact]
+    public void ParseVisualVerdict_MalformedFailsClosed()
+    {
+        Assert.False(TestIntentClassifier.ParseVisualVerdict("not json at all").NeedsVisual);
+        Assert.False(TestIntentClassifier.ParseVisualVerdict(null).NeedsVisual);
+        Assert.False(TestIntentClassifier.ParseVisualVerdict("").NeedsVisual);
+        Assert.False(TestIntentClassifier.ParseVisualVerdict("{\"target\": \"missing needsVisual\"}").NeedsVisual);
+    }
 }

@@ -45,6 +45,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (!card) return;
         vm.selectedCardId = card.id;
         vm.aiPrompt = card.text;
+        // A completed card's persisted command history rehydrates the agent panel's
+        // "💻 Commands" list after a reload (vm.streamingSteps is otherwise transient).
+        if (!vm.streamingActive && vm.restoreCardSteps) {
+          if (vm.restoreCardSteps(card) && vm.agentPanelTab === 'browser' && !(vm.webtestEvents && vm.webtestEvents.length)) {
+            vm.agentPanelTab = 'activity';
+          }
+        }
       };
       vm.findCardById = function (cardId) {
         if (!cardId || !vm.state) return null;

@@ -1,0 +1,34 @@
+<!-- command-history.html — the executed-command list (card._steps) rendered on completed
+     cards. Every entry is a collapsible <details> showing the step and its FULL command
+     output (not truncated). The list is grouped into the same collapsible pipeline-phase
+     sections as the live Commands panel (🔎 Discover / 💭 Plan / ⚡ Execute / 🔍 Verify) via
+     vm.commandHistorySteps — each step's _phase was stamped onto card._steps at run end
+     (persistStepPhases) so the restored card shows the buckets the user watched live, with
+     stepPhaseOf as fallback for older cards. Included via ng-include inside each
+     completed-card template (done / self-improving / archived); the `card` binding comes
+     from the enclosing ng-repeat scope. -->
+<div class="command-history" ng-if="card._steps && card._steps.length">
+  <div class="command-history-step" ng-repeat="s in vm.commandHistorySteps(card) track by $index"
+    ng-class="s.status || 'pending'">
+    <div class="command-phase-header" ng-if="s._phaseFirst"
+      ng-click="vm.toggleCommandPhase(s._phase)"
+      ng-class="{'collapsed': vm.commandPhaseCollapsed(s._phase)}"
+      title="{{vm.commandPhaseCollapsed(s._phase) ? 'Expand' : 'Collapse'}} {{vm.commandPhaseLabel(s._phase)}} steps">
+      <span class="command-phase-caret">{{vm.commandPhaseCollapsed(s._phase) ? '▸' : '▾'}}</span>
+      <span class="command-phase-label">{{vm.commandPhaseLabel(s._phase)}}</span>
+      <span class="command-phase-count">{{s._phaseCount}}</span>
+    </div>
+    <details ng-if="!vm.commandPhaseCollapsed(s._phase)">
+      <summary class="command-history-summary">
+        <span class="step-status">{{s.status==='error'?'✕':(s.status==='done'?'✓':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':'○')))))}}</span>
+        <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+        <span class="command-history-size" ng-if="s.output">({{s.output.length}} chars)</span>
+      </summary>
+      <div class="step-body">
+        <pre class="step-output command-history-output">{{s.output || s.error || '(no output)'}}</pre>
+        <button type="button" class="web-copy-btn" ng-click="vm.copyStepOutput(s, $event)"
+          title="Copy step output">📋 Copy output</button>
+      </div>
+    </details>
+  </div>
+</div>
