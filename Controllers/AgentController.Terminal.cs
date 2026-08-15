@@ -117,6 +117,50 @@ partial class AgentController
         // 'failed'/'error' substrings would otherwise flag a passing build/test run.
         if (OutputShowsHardFailure(output))
         {
+            // Deterministic command self-heal: a _command whose output shows a HARD failure
+            // (crash / compile error / failed test run) gets a bounded chain of MECHANICAL
+            // fixes derived straight from the failure output BEFORE it is ever handed to the
+            // planner — zero thinking rounds, zero new plan steps. Each attempt derives a fix
+            // from the CURRENT output (fixes chain: patch the missing PORT parameter, then
+            // the re-run's EADDRINUSE gets the free-port fix), re-runs, and re-checks; when a
+            // fix is not applicable or the budget is exhausted, the failure falls through to
+            // the planner for a real recovery edit (a crash is still reported status=error,
+            // never done — the benchmark-22 deadlock fix). Benign summaries ("Passed!",
+            // "Failed: 0", "0 Error(s)") never reach this path.
+            const int MaxDeterministicRetries = 3;
+            var recoveredPort = (int?)null;
+            var recoveredBy = "";
+            for (var attempt = 0; attempt < MaxDeterministicRetries; attempt++)
+            {
+                var fix = BuildCommandRecoveryFix(command, output, projectRoot, out var fixPort);
+                if (fix == null) break; // no deterministic fix applies — fall through to the planner
+                if (fixPort.HasValue) { recoveredPort = fixPort; recoveredBy = "on a free port"; }
+                var retryOutput = await RunTerminalCommandWithRetryAsync(fix, projectRoot, emitSse, ct);
+                if (!OutputShowsHardFailure(retryOutput))
+                {
+                    result["status"] = "done";
+                    result["command"] = fix;
+                    result["output"] = retryOutput;
+                    result["snippet"] = retryOutput;
+                    if (recoveredPort.HasValue)
+                    {
+                        result["serverPort"] = recoveredPort.Value;
+                        result["serverUrl"] = $"http://localhost:{recoveredPort.Value}/";
+                        result["portRecovered"] = true;
+                        recoveredBy = $"on free port {recoveredPort.Value} (EADDRINUSE recovery)";
+                    }
+                    else
+                    {
+                        recoveredBy = "by deterministically patching the failing source from the error output";
+                    }
+                    await EmitLog(emitSse, "recovering",
+                        $"🔄 Command failed ({ExtractCommandFailureExcerpt(output)}) — recovered {recoveredBy} after {attempt + 1} deterministic fix(es)" +
+                        (recoveredPort.HasValue ? $"; resolved URL: http://localhost:{recoveredPort.Value}/" : ""),
+                        new { recovered = true, serverPort = recoveredPort }, ct: ct);
+                    return;
+                }
+                output = retryOutput; // derive the next fix from the new failure
+            }
             result["status"] = "error";
             result["command"] = command;
             result["output"] = output;
@@ -131,6 +175,159 @@ partial class AgentController
         result["status"] = "done"; result["command"] = command;
         result["output"] = output;
         result["snippet"] = output;
+    }
+
+    /// <summary>
+    /// Derives ONE deterministic fix from a failed command's output, or null when no mechanical
+    /// fix applies (the failure then goes to the planner). Fixes are ordered so they CHAIN:
+    /// (1) a port conflict (EADDRINUSE) re-runs the command with a free port injected (PORT
+    /// env + literal busy-port swap); (2) a node script referencing an UNDEFINED PORT — the
+    /// benchmark-22 shape where a recovery edit dropped the `const PORT` line — gets the
+    /// missing parameter defined in the script itself (the error message names it), so the
+    /// re-run either binds successfully or surfaces EADDRINUSE, which fix (1) then resolves.
+    /// </summary>
+    private string? BuildCommandRecoveryFix(string command, string output, string projectRoot, out int? freePort)
+    {
+        freePort = null;
+        var busyPort = ExtractBusyPort(output);
+        if (busyPort.HasValue)
+        {
+            var p = ServerLauncherService.FindFreePort();
+            freePort = p;
+            return InjectPortIntoCommand(command, p, busyPort.Value, _terminal.ShellName);
+        }
+        var missing = ExtractMissingIdentifier(output);
+        if (string.Equals(missing, "PORT", StringComparison.Ordinal) &&
+            TryResolveNodeScriptPath(command, projectRoot, out var scriptPath) &&
+            System.IO.File.Exists(scriptPath) &&
+            PatchMissingPortIntoScript(scriptPath))
+        {
+            return command; // same command — the file now defines PORT
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Extracts the identifier from a `ReferenceError: X is not defined` (node) or
+    /// `NameError: name 'X' is not defined` (python) style failure — the missing parameter the
+    /// command's error message itself names. Returns null for non-missing-identifier failures.
+    /// </summary>
+    internal static string? ExtractMissingIdentifier(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return null;
+        var m = Regex.Match(output, @"ReferenceError:\s*([A-Za-z_$][A-Za-z0-9_$]*)\s+is not defined", RegexOptions.IgnoreCase);
+        if (!m.Success)
+            m = Regex.Match(output, @"NameError:\s*name\s+'([A-Za-z_$][A-Za-z0-9_$]*)'\s+is not defined", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// Resolves the script a `node &lt;script&gt;` command runs, or returns false when the
+    /// command is not a plain script invocation (node -e, flags, other runtimes). Handles
+    /// quoted absolute paths (`node "C:\path with spaces\server.js"`) and bare relative
+    /// paths (`node server.js` resolved against projectRoot).
+    /// </summary>
+    internal static bool TryResolveNodeScriptPath(string command, string projectRoot, out string scriptPath)
+    {
+        scriptPath = "";
+        if (string.IsNullOrWhiteSpace(command)) return false;
+        var m = Regex.Match(command, @"\bnode(?:\.exe)?\s+(?:""([^""]+)""|([^\s""-][^\s""]*))", RegexOptions.IgnoreCase);
+        if (!m.Success) return false;
+        var arg = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+        if (string.IsNullOrWhiteSpace(arg) || arg.StartsWith("-", StringComparison.Ordinal)) return false;
+        if (!arg.EndsWith(".js", StringComparison.OrdinalIgnoreCase) &&
+            !arg.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase) &&
+            !arg.EndsWith(".cjs", StringComparison.OrdinalIgnoreCase)) return false;
+        scriptPath = Path.IsPathRooted(arg)
+            ? Path.GetFullPath(arg)
+            : Path.GetFullPath(Path.Combine(projectRoot, arg));
+        return true;
+    }
+
+    /// <summary>
+    /// Deterministically defines the missing PORT parameter in a node script: injects
+    /// `const PORT = process.env.PORT || 8765;` (the benchmark contract — read PORT env,
+    /// default 8765) right after the leading 'use strict' directive, so the re-run has the
+    /// parameter the error said was missing. Refuses to patch when PORT is already declared
+    /// (a duplicate const would swap the ReferenceError for a SyntaxError) or the file is
+    /// unreadable. Returns true when the patch was applied.
+    /// </summary>
+    internal static bool PatchMissingPortIntoScript(string scriptPath)
+    {
+        try
+        {
+            var content = System.IO.File.ReadAllText(scriptPath);
+            if (Regex.IsMatch(content, @"\b(?:const|let|var)\s+PORT\b\s*=", RegexOptions.IgnoreCase)) return false;
+            var insertAt = content.Length > 0 && content[0] == '\uFEFF' ? 1 : 0;
+            var strict = Regex.Match(content, @"^\s*['""]use strict['""]\s*;", RegexOptions.IgnoreCase);
+            if (strict.Success) insertAt = strict.Index + strict.Length;
+            // A leading newline would make the file start with a blank line — only needed
+            // when landing AFTER a directive; at the very top the declaration leads.
+            var patch = insertAt == 0
+                ? "const PORT = process.env.PORT || 8765;\n"
+                : "\nconst PORT = process.env.PORT || 8765;\n";
+            System.IO.File.WriteAllText(scriptPath, content.Insert(insertAt, patch));
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// True when the command output is a PORT-IN-USE failure (EADDRINUSE / "address already
+    /// in use") — the one command failure class that is recoverable DETERMINISTICALLY by
+    /// re-running on a free port, with no planner round. The user-facing benchmark contract
+    /// demands exactly this: "If the preconfigured port is busy, start the server on a
+    /// different free port."
+    /// </summary>
+    internal static bool IsPortInUseFailure(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return false;
+        var o = output.ToLowerInvariant();
+        return o.Contains("eaddrinuse", StringComparison.Ordinal) ||
+               o.Contains("address already in use", StringComparison.Ordinal) ||
+               o.Contains("port already in use", StringComparison.Ordinal) ||
+               o.Contains("permission denied to bind", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Parses the port number from a port-in-use failure, or null when the output is not a
+    /// port-conflict (or no port is reported). Node prints `{ code: 'EADDRINUSE', …, port:
+    /// 8765 }`; Python prints `[Errno 98] Address already in use` (no port); common CLIs
+    /// print `listen EADDRINUSE: address already in use :::8765`. Gated on the conflict
+    /// signature so an unrelated "port: 8765" in passing output can never misfire.
+    /// </summary>
+    internal static int? ExtractBusyPort(string? output)
+    {
+        if (!IsPortInUseFailure(output)) return null;
+        var o = output!;
+        Match m = Regex.Match(o, @"\bport[:""']?\s*[:=]\s*(\d{1,5})", RegexOptions.IgnoreCase);
+        if (m.Success && int.TryParse(m.Groups[1].Value, out var p) && p > 0 && p < 65536) return p;
+        m = Regex.Match(o, @"in use\s*:+\s*(\d{1,5})", RegexOptions.IgnoreCase);
+        if (m.Success && int.TryParse(m.Groups[1].Value, out p) && p > 0 && p < 65536) return p;
+        // Node's EADDRINUSE object literal carries `port: 8765` after the message.
+        m = Regex.Match(o, @"port:\s*(\d{1,5})", RegexOptions.IgnoreCase);
+        if (m.Success && int.TryParse(m.Groups[1].Value, out p) && p > 0 && p < 65536) return p;
+        return null;
+    }
+
+    /// <summary>
+    /// Rebuilds a server-start command to use a free port: (1) any literal occurrence of the
+    /// busy port in the command is swapped for the free port (covers `--port 8765`, `:8765`,
+    /// `python -m http.server 8765`, …) and (2) a shell-native `PORT` env injection is
+    /// prepended so servers that read `process.env.PORT` (the benchmark-22 contract) bind the
+    /// free port. The env set is scoped to the single command via the shell's one-shot
+    /// assignment (bash) or a same-line reset so it does not leak into later commands.
+    /// </summary>
+    internal static string InjectPortIntoCommand(string command, int freePort, int busyPort, string shellName)
+    {
+        var cmd = Regex.Replace(command ?? "", $@"\b{busyPort}\b", freePort.ToString());
+        var prefix = shellName.ToLowerInvariant() switch
+        {
+            "powershell" or "pwsh" => $"$env:PORT={freePort}; ",
+            "cmd" or "cmd.exe" => $"set PORT={freePort}&& ",
+            _ => $"PORT={freePort} " // bash/sh — one-shot env assignment for this command only
+        };
+        return prefix + cmd.TrimStart();
     }
 
     /// <summary>Builds the failure excerpt fed back to the planner. The PS terminal prefixes

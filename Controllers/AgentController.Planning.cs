@@ -2585,6 +2585,35 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
+    /// Carries a deterministically-recovered server forward in context: when a _command
+    /// server start hit EADDRINUSE and was restarted on a free port (portRecovered result),
+    /// the resolved URL MUST reach the planner so the next step — the _browser_test
+    /// navigation, a curl probe, or the /api/health check — targets the port that actually
+    /// answered instead of the busy default. Replaced in place so a later recovery (a
+    /// second port bump) never stacks stale sections.
+    /// </summary>
+    private static string AppendServerRecoveryToDiscoveryContext(
+        string discoveryContext, IEnumerable<Dictionary<string, object?>> newResults)
+    {
+        var recovered = newResults.FirstOrDefault(r => r.GetValueOrDefault("portRecovered") is true);
+        if (recovered == null) return discoveryContext;
+        var url = recovered.GetValueOrDefault("serverUrl")?.ToString();
+        var port = recovered.GetValueOrDefault("serverPort")?.ToString();
+        if (string.IsNullOrWhiteSpace(url)) return discoveryContext;
+        var note = $"\n### RUNNING SERVER ###\n" +
+                   $"The server from the previous step is RUNNING at {url}" +
+                   (string.IsNullOrWhiteSpace(port) ? "" : $" (free port {port})") +
+                   $" — the configured port was already in use, so this is the free port the server actually bound. " +
+                   $"Use THIS URL/port for the browser test, /api/health checks, and any navigation — do NOT retry the busy default port.\n";
+        const string marker = "### RUNNING SERVER ###";
+        var start = discoveryContext.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0) return discoveryContext + note;
+        var end = discoveryContext.IndexOf("\n### ", start + marker.Length, StringComparison.Ordinal);
+        var stale = end >= 0 ? discoveryContext[..start] + discoveryContext[(end + 1)..] : discoveryContext[..start];
+        return stale + note;
+    }
+
+    /// <summary>
     /// Harvests executed web results from the run's results for injection into the
     /// edit-resolution prompt, so FORMAT C/D / oldString-newString generation can copy real
     /// titles, URLs, and facts into newString instead of inventing them. This is the
@@ -3213,6 +3242,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     $"DIAG: After queued step — stepSucceeded={stepSucceeded}, planSoFar.Count={planSoFar.Count}", ct: ct);
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
                 discoveryContext = AppendCreatedPathsToDiscoveryContext(discoveryContext, newResults, projectRoot);
+                discoveryContext = AppendServerRecoveryToDiscoveryContext(discoveryContext, newResults);
                 await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
@@ -4052,6 +4082,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     ct: ct);
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
                 discoveryContext = AppendCreatedPathsToDiscoveryContext(discoveryContext, newResults, projectRoot);
+                discoveryContext = AppendServerRecoveryToDiscoveryContext(discoveryContext, newResults);
                 await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)

@@ -22,6 +22,11 @@ public class TerminalService : IDisposable
 
     public bool IsRunning => _process != null && !_process.HasExited;
 
+    /// <summary>The active shell's base name ("powershell", "pwsh", "cmd", "bash", …) —
+    /// used to build shell-native env injection for deterministic command recovery
+    /// (e.g. the EADDRINUSE free-port re-run prepends `$env:PORT=N; ` for PowerShell).</summary>
+    public string ShellName => _shellName;
+
     public void Start(string? shell = null, string args = "/K")
     {
         if (IsRunning) return;

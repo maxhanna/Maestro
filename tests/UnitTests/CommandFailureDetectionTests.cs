@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Weaver.Controllers;
 using Xunit;
 
@@ -108,5 +109,145 @@ public class CommandFailureDetectionTests
         const string output = "server.js:1\nthrow new Error(\"boom\");\nError: boom\n";
         var excerpt = AgentController.ExtractCommandFailureExcerpt(output);
         Assert.Contains("Error: boom", excerpt, StringComparison.Ordinal);
+    }
+
+    // ── Deterministic EADDRINUSE recovery ────────────────────────────────────
+    // A server-start _command whose port is already in use (the benchmark-22 shape —
+    // `node server.js` defaulting to 8765 while another process holds it) must be
+    // recovered DETERMINISTICALLY on a free port with zero planning rounds: the step
+    // never errors, and the resolved URL is carried forward for the browser test.
+
+    [Fact]
+    public void PortInUseFailure_IsDetected()
+    {
+        // The exact node shapes from the benchmark-22 failure log.
+        Assert.True(AgentController.IsPortInUseFailure("Failed to start HTTP listener due to: Error: listen EADDRINUSE: address already in use :::8765"));
+        Assert.True(AgentController.IsPortInUseFailure("{ code: 'EADDRINUSE', errno: -4091, syscall: 'listen', address: '::', port: 8765 }"));
+        Assert.True(AgentController.IsPortInUseFailure("OSError: [Errno 98] Address already in use"));
+        Assert.True(AgentController.IsPortInUseFailure("port already in use"));
+        // A NON-port failure is never confused with one.
+        Assert.False(AgentController.IsPortInUseFailure("SyntaxError: Unexpected token '}'"));
+        Assert.False(AgentController.IsPortInUseFailure("throw new Error(\"boom\")"));
+        Assert.False(AgentController.IsPortInUseFailure(null));
+    }
+
+    [Fact]
+    public void BusyPort_ExtractedFromCommonErrorShapes()
+    {
+        // node's EADDRINUSE object literal carries `port: 8765`.
+        Assert.Equal(8765, AgentController.ExtractBusyPort("... { code: 'EADDRINUSE', errno: -4091, syscall: 'listen', address: '::', port: 8765 }"));
+        // "address already in use :::PORT" (node's message line).
+        Assert.Equal(8765, AgentController.ExtractBusyPort("listen EADDRINUSE: address already in use :::8765"));
+        Assert.Equal(8080, AgentController.ExtractBusyPort("Error: listen EADDRINUSE: address already in use :::8080"));
+        // `port=1234` style.
+        Assert.Equal(1234, AgentController.ExtractBusyPort("Error: address already in use port=1234"));
+        // Non-conflict output (or missing port) never extracts one.
+        Assert.Null(AgentController.ExtractBusyPort("SyntaxError: Unexpected token '}'"));
+        Assert.Null(AgentController.ExtractBusyPort("OSError: [Errno 98] Address already in use"));
+        Assert.Null(AgentController.ExtractBusyPort(null));
+    }
+
+    [Fact]
+    public void InjectPort_SwapsLiteralBusyPort_AndPrependsShellEnv()
+    {
+        // The benchmark-22 shape: a PORT-env server with no literal port in the command —
+        // the PowerShell prefix injects the free port so process.env.PORT picks it up.
+        Assert.Equal("$env:PORT=3123; node benchmark_test_22/server.js",
+            AgentController.InjectPortIntoCommand("node benchmark_test_22/server.js", 3123, 8765, "powershell"));
+        Assert.Equal("$env:PORT=3123; node server.js",
+            AgentController.InjectPortIntoCommand("node server.js", 3123, 8765, "pwsh"));
+        // A literal busy port in the command is swapped too (python -m http.server PORT).
+        Assert.Equal("PORT=8080 python -m http.server 8080",
+            AgentController.InjectPortIntoCommand("python -m http.server 8765", 8080, 8765, "bash"));
+        Assert.Equal("PORT=8080 node app.js --port 8080",
+            AgentController.InjectPortIntoCommand("node app.js --port 8765", 8080, 8765, "bash"));
+        // cmd.exe gets the set-var form.
+        Assert.Equal("set PORT=8080&& node server.js",
+            AgentController.InjectPortIntoCommand("node server.js", 8080, 8765, "cmd"));
+        // Word-boundary: the busy port inside a larger number is NOT swapped.
+        Assert.Equal("PORT=8080 node app.js --port 18000",
+            AgentController.InjectPortIntoCommand("node app.js --port 18000", 8080, 8765, "bash"));
+        // Multiple occurrences all swap.
+        Assert.Equal("PORT=7777 python app.py 7777",
+            AgentController.InjectPortIntoCommand("python app.py 8765", 7777, 8765, "bash"));
+    }
+
+    // ── Deterministic missing-parameter recovery ─────────────────────────────
+    // A node server that references an undefined PORT (a recovery edit dropped the
+    // `const PORT` line) fails with "ReferenceError: PORT is not defined". The error message
+    // itself names the missing parameter, so the command pipeline can define it in the
+    // script and re-run — no planner round, no new plan step.
+
+    [Fact]
+    public void MissingIdentifier_ExtractedFromReferenceError()
+    {
+        // The exact benchmark-22 shape — PORT referenced but never defined.
+        Assert.Equal("PORT", AgentController.ExtractMissingIdentifier(
+            "C:\\...\\server.js:65\nserver.listen(PORT, () => {\n              ^\nReferenceError: PORT is not defined\n    at Object.<anonymous>"));
+        Assert.Equal("getOpenPort", AgentController.ExtractMissingIdentifier(
+            "ReferenceError: getOpenPort is not defined"));
+        Assert.Equal("port", AgentController.ExtractMissingIdentifier(
+            "ReferenceError: port is not defined"));
+        // Python's NameError shape is recognized too.
+        Assert.Equal("PORT", AgentController.ExtractMissingIdentifier(
+            "NameError: name 'PORT' is not defined"));
+        // Non-missing-identifier failures extract nothing.
+        Assert.Null(AgentController.ExtractMissingIdentifier(
+            "SyntaxError: Unexpected token '}'"));
+        Assert.Null(AgentController.ExtractMissingIdentifier(
+            "Error: listen EADDRINUSE: address already in use :::8765"));
+        Assert.Null(AgentController.ExtractMissingIdentifier(null));
+        Assert.Null(AgentController.ExtractMissingIdentifier(""));
+    }
+
+    [Fact]
+    public void NodeScriptPath_ResolvedFromCommand()
+    {
+        // Quoted absolute path (the benchmark-22 command shape).
+        Assert.True(AgentController.TryResolveNodeScriptPath(
+            "node \"C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.js\"",
+            "C:\\proj", out var abs));
+        Assert.Equal("C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.js", abs);
+        // Bare relative path resolves against the project root.
+        Assert.True(AgentController.TryResolveNodeScriptPath("node server.js", "C:\\proj", out var rel));
+        Assert.Equal("C:\\proj\\server.js", rel);
+        Assert.True(AgentController.TryResolveNodeScriptPath("node benchmark_test_22/server.js", "C:\\proj", out var rel2));
+        Assert.Equal("C:\\proj\\benchmark_test_22\\server.js", rel2);
+        // node -e / flags / non-JS targets are NOT plain script invocations.
+        Assert.False(AgentController.TryResolveNodeScriptPath("node -e \"console.log(1)\"", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("node --watch server.js", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("python app.py", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("node --version", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("", "C:\\proj", out _));
+    }
+
+    [Fact]
+    public void MissingPort_PatchedIntoScript_Once()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "weaver_portpatch_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // With 'use strict': the patch lands right after the directive.
+            var withStrict = Path.Combine(dir, "strict.js");
+            File.WriteAllText(withStrict, "\"use strict\";\nconst http = require('http');\nserver.listen(PORT, () => {});\n");
+            Assert.True(AgentController.PatchMissingPortIntoScript(withStrict));
+            var patched = File.ReadAllText(withStrict);
+            Assert.Contains("const PORT = process.env.PORT || 8765;", patched);
+            Assert.True(patched.StartsWith("\"use strict\";\nconst PORT ="), "the patch must follow the use-strict directive");
+            // Patching again is a NO-OP (PORT is already declared — never double-inject).
+            Assert.False(AgentController.PatchMissingPortIntoScript(withStrict));
+            Assert.Equal(1, Regex.Matches(File.ReadAllText(withStrict), "const PORT =").Count);
+
+            // No 'use strict': the patch lands at the top.
+            var noStrict = Path.Combine(dir, "plain.js");
+            File.WriteAllText(noStrict, "const http = require('http');\nserver.listen(PORT, () => {});\n");
+            Assert.True(AgentController.PatchMissingPortIntoScript(noStrict));
+            Assert.True(File.ReadAllText(noStrict).StartsWith("const PORT = process.env.PORT || 8765;"));
+
+            // Missing/unreadable file never patches.
+            Assert.False(AgentController.PatchMissingPortIntoScript(Path.Combine(dir, "nope.js")));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 }

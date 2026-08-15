@@ -723,6 +723,182 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task WebTask_ServerStart_PortInUse_RecoversOnFreePort_NoPlannerRound()
+    {
+        // The benchmark-22 live failure: `node server.js` defaulting to 8765 while another
+        // process holds the port → EADDRINUSE. Instead of failing the step and feeding it
+        // back to the planner for a recovery round, the system must recover DETERMINISTICALLY
+        // on a free port (zero thinking, zero new plan steps), mark the step done, and carry
+        // the resolved URL forward in context so the next connection/navigation targets the
+        // port that actually answered.
+        _clientFactory.Mode = PlannerMode.EaddrInUseRecovery;
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_22' at the project root. Write a Node.js server " +
+                     "in it that reads the PORT environment variable (default 8765) and serves any request, " +
+                     "then start the server.";
+        // The harness terminal inherits THIS session's environment, where PORT may be set
+        // (e.g. PORT=0 on this host) — `process.env.PORT || 8765` would then bind port 0 and
+        // never hit the port conflict. Clear it so the server genuinely defaults to 8765 and
+        // the EADDRINUSE failure is real (mirroring the user's environment, where PORT is
+        // unset).
+        var setupTermField = typeof(AgentController).GetField("_terminal", BindingFlags.NonPublic | BindingFlags.Instance);
+        if (setupTermField?.GetValue(controller) is TerminalService setupTerminal)
+        {
+            setupTerminal.Start();
+            await setupTerminal.WriteStdinAsync("Remove-Item Env:PORT -Force -ErrorAction SilentlyContinue");
+        }
+
+        // Hold port 8765 so the server's default port is genuinely taken. Bind EXACTLY like
+        // node does — IPv6-any with dual-mode (`::` + v4-mapped) — because an IPv4-only
+        // loopback bind does NOT conflict with node's dual-stack listen on Windows. If 8765
+        // is ALREADY in use the bind throws — which is fine, the port is busy either way and
+        // the EADDRINUSE failure is deterministic.
+        System.Net.Sockets.TcpListener? holder = null;
+        int? recoveredPort = null;
+        try
+        {
+            holder = new System.Net.Sockets.TcpListener(System.Net.IPAddress.IPv6Any, 8765);
+            holder.Server.DualMode = true; // node's default: `::` with IPV6_V6ONLY=0
+            holder.Start();
+        }
+        catch (System.Net.Sockets.SocketException) { /* already in use — even better */ }
+        try
+        {
+            var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+            Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+            // The server-start step did NOT error — it was recovered deterministically. The
+            // recovered re-run carries the PORT injection (the retry command).
+            var serverStep = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+                r => r.GetValueOrDefault("type")?.ToString() == "command" &&
+                     (r.GetValueOrDefault("command")?.ToString() ?? "").Contains("node benchmark_test_22/server.js"));
+            Assert.Equal("done", serverStep.GetValueOrDefault("status")?.ToString());
+            Assert.True(serverStep.GetValueOrDefault("portRecovered") is true,
+                "the step must be flagged as port-recovered — step: " + JsonSerializer.Serialize(serverStep));
+            var port = Assert.IsType<int>(serverStep.GetValueOrDefault("serverPort"));
+            Assert.NotEqual(8765, port);
+            Assert.Equal($"http://localhost:{port}/", serverStep.GetValueOrDefault("serverUrl")?.ToString());
+            recoveredPort = port;
+            // The resolved port was carried FORWARD in the discovery context: the final
+            // planner prompt (round 4, the planComplete turn) names the running server URL.
+            Assert.Contains(_clientFactory.PlannerUserPrompts, p =>
+                p.Contains("### RUNNING SERVER ###", StringComparison.Ordinal) &&
+                p.Contains($"http://localhost:{port}/", StringComparison.Ordinal));
+            // No planner-round feedback happened — the step never errored.
+            Assert.DoesNotContain(_clientFactory.PlannerUserPrompts, p =>
+                p.Contains("The _command step", StringComparison.OrdinalIgnoreCase));
+            Assert.Empty(_clientFactory.Unmatched);
+        }
+        finally
+        {
+            holder?.Stop();
+            // The recovered server runs inside the harness terminal (blocking that shell's
+            // stdin, so the kill CANNOT go through the terminal) — kill it OUT-OF-BAND by the
+            // exact port the recovery bound, never a broad process kill. Best-effort: on
+            // non-Windows hosts this is a no-op and the CI runner is ephemeral anyway.
+            if (recoveredPort.HasValue && OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    using var killer = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                        "powershell",
+                        $"-NoProfile -Command \"$c = Get-NetTCPConnection -LocalPort {recoveredPort.Value} -State Listen -ErrorAction SilentlyContinue; " +
+                        $"if ($c) {{ Stop-Process -Id $c.OwningProcess -Force }}\"") { CreateNoWindow = true, UseShellExecute = false });
+                    killer?.WaitForExit(15000);
+                }
+                catch { /* cleanup best-effort */ }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task WebTask_ServerStart_MissingPort_PatchedAndRecovered_NoPlannerRound()
+    {
+        // The benchmark-22 live failure AFTER the planner's recovery edit: the edit dropped
+        // the `const PORT` line, so `node server.js` crashed with "ReferenceError: PORT is
+        // not defined". The error message itself names the missing parameter — the command
+        // pipeline must define it in the script (const PORT = process.env.PORT || 8765;),
+        // re-run, and when the re-run hits the held default port, apply the free-port fix —
+        // all deterministic, zero thinking, zero new plan steps, and the resolved URL must
+        // ride forward in context so the browser test targets the port that answered.
+        _clientFactory.Mode = PlannerMode.MissingPortRecovery;
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_22' at the project root. Write a Node.js server " +
+                     "in it that reads the PORT environment variable (default 8765) and serves any request, " +
+                     "then start the server.";
+        // The harness terminal inherits THIS session's environment, where PORT may be set
+        // (e.g. PORT=0 on this host) — clear it so the server genuinely defaults to 8765 and
+        // the failure sequence is real (missing PORT first, then EADDRINUSE on 8765).
+        var setupTermField = typeof(AgentController).GetField("_terminal", BindingFlags.NonPublic | BindingFlags.Instance);
+        if (setupTermField?.GetValue(controller) is TerminalService setupTerminal)
+        {
+            setupTerminal.Start();
+            await setupTerminal.WriteStdinAsync("Remove-Item Env:PORT -Force -ErrorAction SilentlyContinue");
+        }
+
+        // Hold port 8765 EXACTLY like node binds (IPv6-any dual-mode) so the post-patch
+        // re-run deterministically hits EADDRINUSE and the free-port fix must kick in.
+        System.Net.Sockets.TcpListener? holder = null;
+        int? recoveredPort = null;
+        try
+        {
+            holder = new System.Net.Sockets.TcpListener(System.Net.IPAddress.IPv6Any, 8765);
+            holder.Server.DualMode = true;
+            holder.Start();
+        }
+        catch (System.Net.Sockets.SocketException) { /* already in use — even better */ }
+        try
+        {
+            var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+            Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}; calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+            // The server-start step did NOT error — the missing-PORT patch landed IN THE
+            // SCRIPT, the re-run hit the held 8765, and the free-port recovery completed it.
+            var serverStep = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+                r => r.GetValueOrDefault("type")?.ToString() == "command" &&
+                     (r.GetValueOrDefault("command")?.ToString() ?? "").Contains("node benchmark_test_22/server.js"));
+            Assert.Equal("done", serverStep.GetValueOrDefault("status")?.ToString());
+            Assert.True(serverStep.GetValueOrDefault("portRecovered") is true,
+                "the step must be flagged as port-recovered — step: " + JsonSerializer.Serialize(serverStep));
+            var port = Assert.IsType<int>(serverStep.GetValueOrDefault("serverPort"));
+            Assert.NotEqual(8765, port);
+            Assert.Equal($"http://localhost:{port}/", serverStep.GetValueOrDefault("serverUrl")?.ToString());
+            recoveredPort = port;
+            // The deterministic patch is IN the script — the planner never planned it.
+            var serverPath = Path.Combine(_projectRoot, "benchmark_test_22", "server.js");
+            Assert.True(File.Exists(serverPath), "server.js must exist after the create step");
+            Assert.Contains("const PORT = process.env.PORT || 8765;", File.ReadAllText(serverPath, Encoding.UTF8));
+            // The resolved port was carried FORWARD in the discovery context (the final
+            // planComplete turn names the running server URL).
+            Assert.Contains(_clientFactory.PlannerUserPrompts, p =>
+                p.Contains("### RUNNING SERVER ###", StringComparison.Ordinal) &&
+                p.Contains($"http://localhost:{port}/", StringComparison.Ordinal));
+            // No planner-round feedback happened — the step never errored, no recovery step
+            // was ever planned.
+            Assert.DoesNotContain(_clientFactory.PlannerUserPrompts, p =>
+                p.Contains("The _command step", StringComparison.OrdinalIgnoreCase));
+            Assert.Empty(_clientFactory.Unmatched);
+        }
+        finally
+        {
+            holder?.Stop();
+            // The recovered server runs inside the harness terminal (blocking that shell's
+            // stdin, so the kill CANNOT go through the terminal) — kill it OUT-OF-BAND by the
+            // exact port the recovery bound, never a broad process kill.
+            if (recoveredPort.HasValue && OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    using var killer = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                        "powershell",
+                        $"-NoProfile -Command \"$c = Get-NetTCPConnection -LocalPort {recoveredPort.Value} -State Listen -ErrorAction SilentlyContinue; " +
+                        $"if ($c) {{ Stop-Process -Id $c.OwningProcess -Force }}\"") { CreateNoWindow = true, UseShellExecute = false });
+                    killer?.WaitForExit(15000);
+                }
+                catch { /* cleanup best-effort */ }
+            }
+        }
+    }
+
+    [Fact]
     public async Task WebTask_CreateFileAsDirectory_RejectedWithCreateDirectorySteering()
     {
         // The same bounce from the other side: round 1 reaches for _create_file to make a
@@ -1640,7 +1816,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds, FetchThenCsvEdits, VisualVerifyBuild, MkdirThenPathlessCreateFile, BrokenCommandRecovery }
+    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds, FetchThenCsvEdits, VisualVerifyBuild, MkdirThenPathlessCreateFile, BrokenCommandRecovery, EaddrInUseRecovery, MissingPortRecovery }
 
     /// <summary>
     /// Fake system-built scraper: records the URLs it was asked to scrape and writes the
@@ -2117,6 +2293,42 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                             "throw new Error(\"boom\");",
                             "const http = require('http');\nconst server = http.createServer((req, res) => res.end('ok'));\nserver.listen(process.env.PORT || 8765);"), "planner-step");
                     return ("{\"planComplete\": true, \"completionReason\": \"fixed the crashing server and re-verified\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.EaddrInUseRecovery)
+                {
+                    // The benchmark-22 live failure: round 1 mkdir's the folder, round 2 creates
+                    // a REAL server reading process.env.PORT || 8765, round 3 runs
+                    // `node benchmark_test_22/server.js` WHILE port 8765 is held by the test —
+                    // the step must recover deterministically on a free port (status done, no
+                    // feedback, no new plan step) and the resolved URL must ride into round 4's
+                    // prompt via the ### RUNNING SERVER ### context note. Round 4 completes.
+                    if (n == 1)
+                        return (PlannerStepJson("_command", "mkdir \"benchmark_test_22\""), "planner-step");
+                    if (n == 2)
+                        return (PlannerCreateFileStepJson("benchmark_test_22/server.js",
+                            "const http = require('http');\nconst server = http.createServer((req, res) => res.end('ok'));\nserver.listen(process.env.PORT || 8765);"), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_command", "node benchmark_test_22/server.js"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"server running on a free port after the port-in-use recovery\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.MissingPortRecovery)
+                {
+                    // The benchmark-22 live failure AFTER the planner's recovery edit: the
+                    // edit replaced the port-selection block but DROPPED the `const PORT`
+                    // line, so `node server.js` crashed with "ReferenceError: PORT is not
+                    // defined". The error message names the missing parameter, so the command
+                    // pipeline must patch `const PORT = process.env.PORT || 8765;` into the
+                    // script itself and re-run — the re-run then hits the held default port
+                    // and gets the free-port fix — all WITHOUT a planner round (round 4
+                    // completes with no recovery step ever planned).
+                    if (n == 1)
+                        return (PlannerStepJson("_command", "mkdir \"benchmark_test_22\""), "planner-step");
+                    if (n == 2)
+                        return (PlannerCreateFileStepJson("benchmark_test_22/server.js",
+                            "const http = require('http');\nconst server = http.createServer((req, res) => res.end('ok'));\nserver.listen(PORT, () => {});"), "planner-step");
+                    if (n == 3)
+                        return (PlannerStepJson("_command", "node benchmark_test_22/server.js"), "planner-step");
+                    return ("{\"planComplete\": true, \"completionReason\": \"server running on a free port after the missing-PORT recovery\"}", "planner-step");
                 }
                 if (_owner.Mode == PlannerMode.MkdirThenPathlessCreateFile)
                 {
