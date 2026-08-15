@@ -47,14 +47,14 @@ public class BetweenStepsVerificationTests
     }
 
     private static (bool declare, string reason, bool failed) InvokeShouldDeclare(
-        bool isComplete, string? assessReason, bool requireAssessment = false)
+        bool isComplete, string? assessReason, bool requireAssessment = false, bool visualInspectionPending = false)
     {
         var method = typeof(AgentController).GetMethod(
             "ShouldDeclarePlanCompleteAfterAssessment", BindingFlags.NonPublic | BindingFlags.Static)
             ?? throw new InvalidOperationException("ShouldDeclarePlanCompleteAfterAssessment not found");
-        var args = new object?[] { isComplete, assessReason, requireAssessment, null, null };
+        var args = new object?[] { isComplete, assessReason, requireAssessment, visualInspectionPending, null, null };
         var result = (bool)method.Invoke(null, args)!;
-        return (result, (string)args[3]!, (bool)args[4]!);
+        return (result, (string)args[4]!, (bool)args[5]!);
     }
 
     private static bool InvokeIsLastWebStepComplete(List<object> results)
@@ -226,6 +226,64 @@ public class BetweenStepsVerificationTests
         Assert.True(declare);
         Assert.False(failed);
         Assert.Equal("All requested changes applied", reason);
+    }
+
+    /// <summary>
+    /// The visual-inspection regression (benchmark 22): a task that demands LOOKING
+    /// at the rendered page must NEVER be declared complete while no _browser_test
+    /// step has run — even when the assessment LLM is unavailable (the observed
+    /// failure declared planComplete after the build steps with the assessment down,
+    /// so the live web test and the Test Browser tab never happened).
+    /// </summary>
+    [Fact]
+    public void AssessmentTimedOut_VisualInspectionPending_KeepsPlanning()
+    {
+        var (declare, reason, failed) = InvokeShouldDeclare(
+            isComplete: false, assessReason: "Assessment timed out", visualInspectionPending: true);
+        Assert.False(declare);
+        Assert.True(failed);
+        Assert.Contains("live browser test", reason);
+    }
+
+    /// <summary>
+    /// The visual gate is DETERMINISTIC: even a healthy "complete" assessment verdict
+    /// cannot end a visual-inspection task before the _browser_test step ran.
+    /// </summary>
+    [Fact]
+    public void AssessmentSaysComplete_VisualInspectionPending_StillKeepsPlanning()
+    {
+        var (declare, reason, failed) = InvokeShouldDeclare(
+            isComplete: true, assessReason: "All requested changes applied", visualInspectionPending: true);
+        Assert.False(declare);
+        Assert.False(failed);
+        Assert.Contains("live browser test", reason);
+    }
+
+    /// <summary>
+    /// Once the _browser_test step HAS run (visualInspectionPending=false), the
+    /// normal assessment rules apply again — a complete verdict declares complete.
+    /// </summary>
+    [Fact]
+    public void AssessmentSaysComplete_BrowserTestRan_DeclaresComplete()
+    {
+        var (declare, reason, failed) = InvokeShouldDeclare(
+            isComplete: true, assessReason: "Live web test passed and all changes applied", visualInspectionPending: false);
+        Assert.True(declare);
+        Assert.False(failed);
+    }
+
+    /// <summary>
+    /// An assessment "not complete" verdict on a visual task still keeps planning even
+    /// after the browser test ran (unavailable-vs-genuine distinction is preserved).
+    /// </summary>
+    [Fact]
+    public void AssessmentSaysNotComplete_AfterBrowserTest_KeepsPlanning()
+    {
+        var (declare, reason, failed) = InvokeShouldDeclare(
+            isComplete: false, assessReason: "The button handler is still missing", visualInspectionPending: false);
+        Assert.False(declare);
+        Assert.False(failed);
+        Assert.Equal("The button handler is still missing", reason);
     }
 
     /// <summary>

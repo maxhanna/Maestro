@@ -3356,8 +3356,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // heading renders") is NOT complete while the run never executed a _browser_test
                 // step — the observed failure declared planComplete=true after only the build
                 // steps, so the live web test (and the Test Browser tab) never happened. Reject,
-                // and on the regen cap inject the _browser_test step so visual tasks cannot
-                // escape by claiming completion.
+                // and inject the _browser_test step so visual tasks cannot escape by claiming
+                // completion. The injection is IMMEDIATE (not gated on the regen cap): the
+                // weak-model failure mode is a planner that answers the "plan a _browser_test
+                // step" steering by proposing _command steps instead ("start the server and then
+                // visually inspect…"), whose own rejections RESET regenAttempts via the slot-
+                // failure path — so the 3-strike cap never accumulates and the run dead-ends
+                // into the repair loop with the browser test never run. The classifier already
+                // deterministically confirmed visual inspection is required, and _browser_test
+                // is a deterministic step (no model content), so inject it the moment the
+                // planner first tries to close the run without it.
                 if (TestIntentClassifier.HasVisualInspectionHint(prompt) &&
                     !planSoFar.Any(s => string.Equals(s.File, "_browser_test", StringComparison.OrdinalIgnoreCase)))
                 {
@@ -3374,24 +3382,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var inspectTarget = string.IsNullOrWhiteSpace(visualNeedTarget)
                             ? BuildFallbackVisualTarget(prompt)
                             : visualNeedTarget.Trim();
-                        var fb = "The task demands VISUAL verification of the rendered page — it asks to LOOK at / " +
-                            "visually check what is actually on screen, but the run has not executed a _browser_test step. " +
-                            $"Plan a single \"_browser_test\" step whose change names what to inspect and verify (e.g. \"{inspectTarget}\"). " +
-                            "Do NOT declare the plan complete until the live web test has run and verified the page on screen.";
-                        await EmitRejectedLog(emitSse,
-                            "Interleaved execution: rejected plan-complete — the task demands visual verification but the plan has no _browser_test step",
-                            fb, ct);
-                        rejectionFeedback.Add(fb);
-                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
-                        {
-                            pendingSteps.Enqueue(new PlanStep { File = "_browser_test", Change = inspectTarget });
-                            await EmitLog(emitSse, "warn",
-                                $"The planner declared the plan complete without a _browser_test step after {MAX_STEP_REGEN_ATTEMPTS} rejections — auto-injecting a live web test: \"{inspectTarget}\"", ct: ct);
-                            regenAttempts = 0;
-                            rejectionFeedback.Clear();
-                            continue; // loop top executes the injected step, then planning resumes
-                        }
-                        continue;
+                        await EmitLog(emitSse, "warn",
+                            $"The planner tried to close the run without a _browser_test step — auto-injecting a live web test: \"{inspectTarget}\"", ct: ct);
+                        pendingSteps.Enqueue(new PlanStep { File = "_browser_test", Change = inspectTarget });
+                        rejectionFeedback.Clear();
+                        regenAttempts = 0;
+                        continue; // loop top executes the injected step, then planning resumes
                     }
                 }
                 // ── OS output-file gate ─────────────────────────────────────────────────────
@@ -4522,8 +4518,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     // Web-gated assessments require a REAL verdict: a web step has no per-step
                     // verifier confirmation, so an unavailable LLM must NOT be read as
                     // "verified complete" (that would prematurely end a multi-step web chain).
+                    // Visual-inspection tasks are gated the same way but stronger — the live
+                    // browser test is a DETERMINISTIC requirement for tasks that demand LOOKING
+                    // at the rendered page (the benchmark-22 failure declared planComplete here
+                    // after the build steps because the assessment LLM was unavailable, so the
+                    // _browser_test step and the Test Browser tab never happened).
+                    var visualGated = TestIntentClassifier.HasVisualInspectionHint(prompt) &&
+                        !planSoFar.Any(s => string.Equals(s.File, "_browser_test", StringComparison.OrdinalIgnoreCase));
                     var shouldDeclareComplete = ShouldDeclarePlanCompleteAfterAssessment(
-                        isComplete, assessReason, requireAssessment: webGated, out var completeReason, out var assessFailed);
+                        isComplete, assessReason, requireAssessment: webGated || visualGated,
+                        visualInspectionPending: visualGated, out var completeReason, out var assessFailed);
                     if (shouldDeclareComplete)
                     {
                         planCompleteDeclared = true;
@@ -4550,11 +4554,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         break;
                     }
                     await EmitLog(emitSse, "metric",
-                        $"🔍 Between-steps verification: task NOT complete yet — {assessReason}", ct: ct);
+                        $"🔍 Between-steps verification: task NOT complete yet — {completeReason}", ct: ct);
                     // Persist the unmet assessment onto the card so a crash/stop/restart re-plans
                     // the remaining requirement instead of trusting the all-done plan marks.
                     if (!string.IsNullOrWhiteSpace(cardId))
-                        await PersistCardVerifyStateAsync(cardId, assessReason, null, emitSse, ct);
+                        await PersistCardVerifyStateAsync(cardId, completeReason, null, emitSse, ct);
                 }
             }
         }

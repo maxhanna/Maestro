@@ -54,18 +54,22 @@ function resetCtx() {
   sharedCtx.calls.strokes = 0;
   sharedCtx.calls.fillTexts = [];
   sharedCtx.calls.rrCalls = [];
+  sharedCtx.calls.alphas = [];
 }
 
 // ── Stubs ────────────────────────────────────────────────────────────────────
 // measureText is proportional to the current font so fitFont's shrink loop and
 // the bubble's word wrap behave like a real canvas (≈0.6em average char width).
 function makeCtx() {
-  const calls = { fills: 0, strokes: 0, fillTexts: [] };
+  const calls = { fills: 0, strokes: 0, fillTexts: [], alphas: [] };
+  let globalAlpha = 1;
   const ctx = {
     font: '10px sans-serif',
     fillStyle: '', strokeStyle: '', lineWidth: 1, lineCap: '', textAlign: 'left',
-    textBaseline: 'alphabetic', globalAlpha: 1,
+    textBaseline: 'alphabetic',
     calls,
+    get globalAlpha() { return globalAlpha; },
+    set globalAlpha(v) { globalAlpha = v; calls.alphas.push(v); },
     measureText(t) {
       const f = parseFloat(String(ctx.font).replace(/^bold /, '')) || 10;
       return { width: String(t).length * 0.6 * f };
@@ -108,50 +112,106 @@ test('fitFont: never returns below 4 (floor guard)', function () {
   assert.strictEqual(got, 4);
 });
 
-// ── drawSpeechBubble: clean, readable, never bouncing ──────────────────────
+// ── drawSpeechBubble: clean, readable, static, never popping ───────────────
+// Bubbles fade in/out instead of popping, and text never moves while reading.
+// Tests drive the fade timing by overriding Date.now (the bubble uses it both
+// for the fade-in ramp and the _speechStart bookkeeping).
+const realNow = Date.now;
+const T0 = 1000000;
+function withNow(fn) { Date.now = () => T0; try { return fn(); } finally { Date.now = realNow; } }
+function established(text, speechTtl, ageMs) {
+  return { speech: text, speechTtl: speechTtl, _speechText: text, _speechStart: T0 - ageMs };
+}
+
 test('bubble: short quip fits on one line with no scrolling', function () {
   resetCtx();
-  drawSpeechBubble(600, 400, 300, 100, { speech: 'hi there', speechTtl: 3 });
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 100, established('hi there', 3, 1000));
+  });
   assert.strictEqual(sharedCtx.calls.fillTexts.length, 1, 'one line of text');
   assert.strictEqual(sharedCtx.calls.fillTexts[0].text, 'hi there');
 });
 
-test('bubble: long text caps at five visible lines', function () {
+test('bubble: long text caps at five visible lines with an ellipsis on the cut', function () {
   resetCtx();
   const long = 'This is a very long quip that wraps onto many lines because spiders have a lot to say about the agent run, the edits, the verification, and everything in between.';
-  drawSpeechBubble(600, 400, 300, 300, { speech: long, speechTtl: 3 });
-  assert.ok(sharedCtx.calls.fillTexts.length >= 5, 'wrapped into several lines: ' + sharedCtx.calls.fillTexts.length);
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 300, established(long, 3, 1000));
+  });
+  assert.strictEqual(sharedCtx.calls.fillTexts.length, 5, 'wrapped into five capped lines');
+  assert.ok(sharedCtx.calls.fillTexts[4].text.endsWith('…'), 'the cut line carries an ellipsis');
   // The bubble body height must cap at 5 lines (5 × 14px lineHeight + 2 × 6px pad).
   assert.strictEqual(sharedCtx.calls.rrCalls.length, 1, 'one bubble body drawn');
-  const bh = sharedCtx.calls.rrCalls[0].h;
-  assert.strictEqual(bh, 5 * 14 + 2 * 6, 'bubble height capped at five lines, got ' + bh);
+  assert.strictEqual(sharedCtx.calls.rrCalls[0].h, 5 * 14 + 2 * 6, 'bubble height capped at five lines');
 });
 
-test('bubble: scroll is monotonic and bounded — no bounce back', function () {
+test('bubble: text never moves — static layout at any age, no scroll', function () {
   resetCtx();
-  const long = 'This is a very long quip that wraps onto many lines because spiders have a lot to say about the agent run, the edits, the verification, and everything in between, so it definitely overflows the five line window and must scroll.';
-  // Simulate t=0: speech just set → _speechStart = now → elapsed ≈ 0.
-  const s0 = { speech: long, speechTtl: 3 };
-  drawSpeechBubble(600, 400, 300, 300, s0);
-  const y0 = sharedCtx.calls.fillTexts[0].y;
-  // Simulate t=100s: scroll fully played out → the first line scrolls off the top.
+  const long = 'This is a very long quip that wraps onto many lines because spiders have a lot to say about the agent run, the edits, the verification, and everything in between, so it definitely overflows the five line window.';
+  let yFresh, yOld;
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 300, established(long, 3, 200));
+    yFresh = sharedCtx.calls.fillTexts[0].y;
+  });
   resetCtx();
-  const s1 = { speech: long, speechTtl: 3, _speechText: long, _speechStart: Date.now() - 100000 };
-  drawSpeechBubble(600, 400, 300, 300, s1);
-  const y100 = sharedCtx.calls.fillTexts[0].y;
-  assert.ok(y100 < y0, 'text must move up as time passes (' + y0 + ' → ' + y100 + ')');
-  assert.ok(y100 >= y0 - (sharedCtx.calls.fillTexts.length - 1) * 14 - 40, 'scroll must never overshoot the last line');
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 300, established(long, 3, 10000));
+    yOld = sharedCtx.calls.fillTexts[0].y;
+  });
+  assert.strictEqual(yOld, yFresh, 'the first line sits at the same spot no matter the bubble age');
+});
+
+test('bubble: very long text shrinks the font to fit the screen instead of scrolling', function () {
+  resetCtx();
+  const long = 'This is a very long quip that wraps onto many lines because spiders have a lot to say about the agent run, the edits, the verification, and everything in between.';
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 60, established(long, 3, 1000));
+  });
+  assert.strictEqual(sharedCtx.font, '8px sans-serif', 'font must shrink to the floor for a cramped spot');
+  assert.ok(sharedCtx.calls.fillTexts.length < 5, 'fewer lines fit, got ' + sharedCtx.calls.fillTexts.length);
+  assert.ok(sharedCtx.calls.fillTexts[sharedCtx.calls.fillTexts.length - 1].text.endsWith('…'), 'the cut is marked');
+});
+
+test('bubble: fades in — invisible at birth, full opacity after the ramp', function () {
+  resetCtx();
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 100, { speech: 'hi', speechTtl: 3 }); // brand new: age 0
+  });
+  assert.strictEqual(sharedCtx.calls.fillTexts.length, 0, 'nothing drawn at birth');
+  resetCtx();
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 100, established('hi', 3, 1000));
+  });
+  assert.strictEqual(sharedCtx.globalAlpha, 1, 'fully opaque once settled');
+});
+
+test('bubble: fades out during the final half second of its life', function () {
+  resetCtx();
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 100, established('hi', 0.2, 1000));
+  });
+  const drawAlpha = Math.max.apply(null, sharedCtx.calls.alphas.filter(a => a < 1));
+  assert.ok(Math.abs(drawAlpha - 0.4) < 0.001, 'alpha tracks ttl/0.5, got ' + drawAlpha);
+  resetCtx();
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 100, established('hi', 0, 1000));
+  });
+  assert.strictEqual(sharedCtx.calls.fillTexts.length, 0, 'a dead bubble draws nothing');
 });
 
 test('bubble: stays on screen when the spider is near the top edge', function () {
   resetCtx();
-  drawSpeechBubble(600, 400, 300, 10, { speech: 'tiny spider near the ceiling', speechTtl: 3 });
+  withNow(function () {
+    drawSpeechBubble(600, 400, 300, 10, established('tiny spider near the ceiling', 3, 1000));
+  });
   assert.ok(sharedCtx.calls.fillTexts.length >= 1);
 });
 
 test('bubble: stays within the horizontal bounds', function () {
   resetCtx();
-  drawSpeechBubble(600, 400, 590, 300, { speech: 'a quip from the right edge of the office', speechTtl: 3 });
+  withNow(function () {
+    drawSpeechBubble(600, 400, 590, 300, established('a quip from the right edge of the office', 3, 1000));
+  });
   assert.ok(sharedCtx.calls.fillTexts.length >= 1);
 });
 

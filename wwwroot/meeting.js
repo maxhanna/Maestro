@@ -209,7 +209,8 @@ angular.module('kanbanApp')
             shoutMatch: null,        
             shoutFired: false,       
             gripeSession: null,      
-            gripeFired: false        
+            gripeFired: false,       
+            bug: null                
           };
         }
         function spiderFor(role) {
@@ -2350,6 +2351,260 @@ angular.module('kanbanApp')
           bumpComplexityRage(5); 
           if (vm.showMeeting) playStomp();
           scene.lastLogAt = Date.now();
+        }
+        // ── Room bug: when an edit enters its deterministic resolution pipeline ──
+        // (edit-resolve SSE events / failing edit steps) a literal bug is let loose
+        // in the meeting room. The other spiders stomp it down while the editor
+        // keeps working; landing the edit squashes it for good. All positions are
+        // normalized (0..1), so roomBugWander is pure given an injected rnd.
+        var BUG_SPAWN_LINES = [
+          'A bug is loose in the room! SQUASH IT!',
+          'Bug spotted — it grows every failed resolution round!',
+          'Squash the bug so the edit can land!'
+        ];
+        var BUG_STOMP_LINES = [
+          'Gotcha!',
+          'Squash!',
+          'Bug report: CRUSHED',
+          'Die, bug!',
+          'Stomp!'
+        ];
+        var BUG_SQUISH_LINES = [
+          'BUG SQUASHED!',
+          'Squashed — the edit can land now!',
+          'Bug: squashed!'
+        ];
+        function bugSizeForFailStreak(streak) {
+          return 1 + Math.min(8, (streak || 0) * 2);
+        }
+        function bugSpawnState(attempt) {
+          return {
+            x: 0.3 + Math.random() * 0.4,
+            y: 0.55 + Math.random() * 0.25,
+            vx: (Math.random() - 0.5) * 0.1,
+            vy: (Math.random() - 0.5) * 0.1,
+            crawlT: 0,
+            turnT: 1 + Math.random() * 2,
+            hp: 3,
+            stomps: 0,
+            phase: 'crawl',
+            squishT: 0,
+            dodgeT: 0,
+            squashCd: 1.2,
+            stomper: null,
+            size: 1,
+            attempt: attempt || 0
+          };
+        }
+        function roomBugWander(b, W, H, dt, rnd) {
+          if (!b || b.phase !== 'crawl') return b;
+          b.crawlT += dt;
+          b.turnT -= dt;
+          if (b.turnT <= 0) {
+            b.vx = (rnd() - 0.5) * 0.14;
+            b.vy = (rnd() - 0.5) * 0.14;
+            b.turnT = 0.8 + rnd() * 2.2;
+          }
+          b.x += b.vx * dt;
+          b.y += b.vy * dt;
+          var minX = 0.06, maxX = 0.94, minY = 0.52, maxY = 0.88;
+          if (b.x < minX) { b.x = minX; b.vx = Math.abs(b.vx); }
+          else if (b.x > maxX) { b.x = maxX; b.vx = -Math.abs(b.vx); }
+          if (b.y < minY) { b.y = minY; b.vy = Math.abs(b.vy); }
+          else if (b.y > maxY) { b.y = maxY; b.vy = -Math.abs(b.vy); }
+          return b;
+        }
+        function bugTakeStomp(b, rnd) {
+          if (!b || b.phase !== 'crawl') return b;
+          b.hp -= 1;
+          b.stomps += 1;
+          b.dodgeT = 0.5;
+          b.x += (rnd() - 0.5) * 0.14;
+          b.y += (rnd() - 0.5) * 0.1;
+          if (b.x < 0.06) b.x = 0.06; else if (b.x > 0.94) b.x = 0.94;
+          if (b.y < 0.52) b.y = 0.52; else if (b.y > 0.88) b.y = 0.88;
+          if (b.hp <= 0) { b.phase = 'squished'; b.squishT = 0.9; }
+          return b;
+        }
+        function bugSceneBlocked() {
+          return !scene || scene.gossip || scene.watching || scene.standoff || scene.coolerTrip ||
+            scene.glare || scene.editorMeltdown || scene.shoutMatch || scene.verifierVictory ||
+            scene.gripeSession || scene.writer || scene.queue.length;
+        }
+        function dustBurst(x, y) {
+          if (!scene || !scene.confetti) return;
+          for (var i = 0; i < 8; i++) {
+            scene.confetti.push({
+              x: x, y: y,
+              vx: (Math.random() - 0.5) * 0.2,
+              vy: -(0.04 + Math.random() * 0.14),
+              rot: Math.random() * 6.28,
+              vr: (Math.random() - 0.5) * 8,
+              color: ['#8d6e63', '#a1887f', '#795548', '#bcaaa4'][(Math.random() * 4) | 0],
+              size: 0.007 + Math.random() * 0.009,
+              life: 0,
+              ttl: 0.4 + Math.random() * 0.4
+            });
+          }
+        }
+        function spawnRoomBug(attempt, fromReplay) {
+          if (!scene || scene.bug) return; // TEMP-VERIFY: meetingOn guard relaxed
+          scene.bug = bugSpawnState(attempt);
+          var streak = scene._editFailStreak || 0;
+          scene.bug.size = bugSizeForFailStreak(streak);
+          scene.bug.hp = Math.min(5, 3 + Math.floor(streak / 2));
+          var spotter = spiderFor('reviewer') || spiderFor('planner') || randomSpider();
+          if (spotter && !fromReplay) {
+            setSpeech(spotter, '🐛 ' + pick(BUG_SPAWN_LINES), 2.8, spotter.icon + ' ' + spotter.name + ' — bug spotted');
+            logGossipEntry(spotter.icon + ' ' + spotter.name, '🐛 A bug is loose! Resolution round ' + (attempt || 1) + ' — squash it!');
+          }
+          if (!fromReplay) {
+            pushTicker('bad', '🐛 bug spotted — squash it while the editor resolves the edit');
+            recordEvent({ type: 'bugspawn', attempt: attempt || 0 });
+          }
+          $scope.$applyAsync();
+        }
+        function growRoomBug() {
+          if (!scene || !scene.bug || scene.bug.phase !== 'crawl') return;
+          var streak = scene._editFailStreak || 0;
+          scene.bug.size = bugSizeForFailStreak(streak);
+          scene.bug.hp = Math.min(5, scene.bug.hp + 1);
+          var sp = spiderFor('planner') || spiderFor('reviewer');
+          if (sp && !_replay) {
+            setSpeech(sp, 'The bug grew! ' + scene.bug.hp + ' stomps to go', 2.2, sp.icon + ' ' + sp.name + ' — bug growing');
+          }
+        }
+        function updateRoomBug(dt) {
+          if (!scene || !scene.bug) return;
+          var b = scene.bug;
+          if (b.phase === 'squished') {
+            b.squishT -= dt;
+            if (b.squishT <= 0) scene.bug = null;
+            return;
+          }
+          roomBugWander(b, 1, 1, dt, Math.random);
+          if (b.dodgeT > 0) b.dodgeT -= dt;
+          b.squashCd -= dt;
+          if (b.squashCd > 0 || bugSceneBlocked()) return;
+          var candidates = [];
+          for (var i = 0; i < scene.spiders.length; i++) {
+            var s = scene.spiders[i];
+            if (s.role !== 'editor' && s.state === 'idle') candidates.push(s);
+          }
+          if (!candidates.length) { b.squashCd = 1.0; return; }
+          var stomper = candidates[(Math.random() * candidates.length) | 0];
+          b.stomper = stomper;
+          stomper.state = 'walk';
+          stomper.target = { x: b.x, y: b.y + 0.015 };
+          b.squashCd = 8;
+        }
+        function bugStompArrival(s) {
+          if (!scene || !scene.bug || scene.bug.stomper !== s || scene.bug.phase !== 'crawl') return false;
+          var squashed = bugTakeStomp(scene.bug, Math.random).phase === 'squished';
+          if (squashed) squishRoomBug(false, s);
+          else {
+            setSpeech(s, pick(BUG_STOMP_LINES), 1.6, s.icon + ' ' + s.name + ' — stomp');
+            s.reactT = 0.7;
+            s.reactKind = 'bad';
+            dustBurst(s.x, s.y);
+            if (vm.showMeeting) playStomp();
+          }
+          s.state = 'idle';
+          return true;
+        }
+        function squishRoomBug(instant, who, fromReplay) {
+          if (!scene || !scene.bug) return;
+          var b = scene.bug;
+          b.phase = 'squished';
+          b.squishT = instant ? 0.01 : 0.9;
+          b.stomper = null;
+          for (var i = 0; i < 12; i++) {
+            scene.sparkles.push({
+              x: b.x, y: b.y,
+              vx: (Math.random() - 0.5) * 0.05,
+              vy: -(0.02 + Math.random() * 0.05),
+              size: 0.008 + Math.random() * 0.01,
+              phase: Math.random() * 6.283,
+              twinkle: 4 + Math.random() * 5,
+              life: 0,
+              ttl: 0.7 + Math.random() * 0.5
+            });
+          }
+          if (!fromReplay) {
+            var text = pick(BUG_SQUISH_LINES);
+            if (who) setSpeech(who, '💥 ' + text, 2.6, who.icon + ' ' + who.name + ' — bug squashed');
+            pushTicker('good', '🐛 bug squashed — the edit can land now');
+            recordEvent({ type: 'bugsquish', instant: !!instant });
+            var gw = who ? who.icon + ' ' + who.name : 'The room';
+            logGossipEntry(gw, '🐛 BUG SQUASHED!');
+          }
+          $scope.$applyAsync();
+        }
+        function drawBug(W, H) {
+          if (!scene || !scene.bug) return;
+          var b = scene.bug;
+          var x = b.x * W, y = b.y * H;
+          var sz = Math.max(3, b.size * 0.012 * W);
+          ctx.save();
+          if (b.phase === 'squished') {
+            ctx.globalAlpha = Math.max(0, Math.min(1, b.squishT * 3));
+            ctx.fillStyle = 'rgba(0,0,0,0.18)';
+            ctx.beginPath(); ctx.ellipse(x, y + sz * 1.2, sz * 1.7, sz * 0.55, 0, 0, 6.283); ctx.fill();
+            ctx.fillStyle = '#7a6a4f';
+            ctx.beginPath(); ctx.ellipse(x, y, sz * 1.6, sz * 0.8, 0, 0, 6.283); ctx.fill();
+            ctx.fillStyle = '#4a3f2c';
+            ctx.beginPath(); ctx.ellipse(x - sz * 0.7, y + sz * 0.1, sz * 0.5, sz * 0.28, -0.5, 0, 6.283); ctx.fill();
+            ctx.beginPath(); ctx.ellipse(x + sz * 0.7, y + sz * 0.1, sz * 0.5, sz * 0.28, 0.5, 0, 6.283); ctx.fill();
+            ctx.strokeStyle = '#2c241a';
+            ctx.lineWidth = Math.max(1, sz * 0.12);
+            for (var li = 0; li < 6; li++) {
+              ctx.beginPath();
+              ctx.moveTo(x, y + sz * 0.3);
+              ctx.lineTo(x + (li % 2 ? 0.7 : -0.7) * sz * 0.5, y + sz * 1.05);
+              ctx.stroke();
+            }
+            ctx.beginPath(); ctx.moveTo(x - sz * 0.4, y - sz * 0.15); ctx.lineTo(x + sz * 0.1, y + sz * 0.2); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x + sz * 0.4, y - sz * 0.15); ctx.lineTo(x - sz * 0.1, y + sz * 0.2); ctx.stroke();
+            ctx.restore();
+            return;
+          }
+          var angry = b.hp <= 1;
+          var body = angry ? '#8e3b2f' : '#3e7d3e';
+          var legSwing = Math.sin(b.crawlT * 14);
+          ctx.fillStyle = 'rgba(0,0,0,0.20)';
+          ctx.beginPath(); ctx.ellipse(x, y + sz * 0.9, sz * 0.9, sz * 0.3, 0, 0, 6.283); ctx.fill();
+          ctx.fillStyle = body;
+          ctx.beginPath(); ctx.ellipse(x, y, sz, sz * 0.72, 0, 0, 6.283); ctx.fill();
+          ctx.fillStyle = angry ? '#a84537' : '#4f9450';
+          ctx.beginPath(); ctx.ellipse(x - sz * 0.62, y - sz * 0.06, sz * 0.45, sz * 0.4, 0, 0, 6.283); ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,0.25)';
+          ctx.beginPath(); ctx.ellipse(x - sz * 0.28, y - sz * 0.3, sz * 0.5, sz * 0.28, -0.4, 0, 6.283); ctx.fill();
+          ctx.strokeStyle = body;
+          ctx.lineWidth = Math.max(1, sz * 0.1);
+          ctx.beginPath(); ctx.moveTo(x + sz * 0.1, y); ctx.lineTo(x + sz * 0.75, y); ctx.stroke();
+          ctx.strokeStyle = '#23301f';
+          for (var i2 = -1; i2 <= 1; i2++) {
+            var off = i2 * sz * 0.55;
+            ctx.beginPath();
+            ctx.moveTo(x + off, y + sz * 0.15);
+            ctx.lineTo(x + off - (0.4 + legSwing * 0.12) * sz, y + sz * 0.95);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(x + off, y + sz * 0.15);
+            ctx.lineTo(x + off + (0.4 - legSwing * 0.12) * sz, y + sz * 0.95);
+            ctx.stroke();
+          }
+          ctx.strokeStyle = '#23301f';
+          ctx.lineWidth = Math.max(1, sz * 0.09);
+          ctx.beginPath(); ctx.moveTo(x - sz * 0.5, y - sz * 0.5); ctx.lineTo(x - sz * 0.65, y - sz * 0.9); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x - sz * 0.25, y - sz * 0.6); ctx.lineTo(x - sz * 0.15, y - sz * 0.95); ctx.stroke();
+          ctx.fillStyle = '#f2f2f2';
+          ctx.beginPath(); ctx.ellipse(x - sz * 0.72, y - sz * 0.28, sz * 0.14, sz * 0.18, 0, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.ellipse(x - sz * 0.45, y - sz * 0.32, sz * 0.14, sz * 0.18, 0, 0, 6.283); ctx.fill();
+          ctx.fillStyle = angry ? '#c0392b' : '#141414';
+          ctx.beginPath(); ctx.ellipse(x - sz * 0.72, y - sz * 0.24, sz * 0.06, sz * 0.09, 0, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.ellipse(x - sz * 0.45, y - sz * 0.28, sz * 0.06, sz * 0.09, 0, 0, 6.283); ctx.fill();
+          ctx.restore();
         }
         function spawnConfetti() {
           if (!scene) return;
@@ -5139,6 +5394,7 @@ angular.module('kanbanApp')
           resetEditRage();
           resetVerifierSmug();
           if (scene.editorMeltdown) endEditorMeltdownNow(); 
+          if (scene.bug) squishRoomBug(true, null, true); 
           scene.spiders.forEach(function (s) {
             if (s.role !== 'reviewer') {
               s.state = 'celebrate';
@@ -5200,6 +5456,9 @@ angular.module('kanbanApp')
               else if (ev.type === 'shout') startShoutMatch(ev); 
               else if (ev.type === 'ctxfight') startContextFight(ev); 
               else if (ev.type === 'gripe') startGripeSession(ev); 
+              else if (ev.type === 'bugspawn') spawnRoomBug(ev.attempt, true); 
+              else if (ev.type === 'bugstomp') { if (scene.bug && scene.bug.phase === 'crawl') bugTakeStomp(scene.bug, Math.random); } 
+              else if (ev.type === 'bugsquish') squishRoomBug(true, null, true); 
               else if (ev.type === 'meter') {
                 var _me = spiderFor('editor');
                 if (_me) { _me.rage = ev.rage; _me.stomping = ev.rage >= 60; }
@@ -5310,6 +5569,7 @@ angular.module('kanbanApp')
               var dist = Math.sqrt(dx * dx + dy * dy);
               if (dist < 0.012) {
                 s.x = s.target.x; s.y = s.target.y;
+                if (bugStompArrival(s)) return;
                 if (scene.writer === s) { s.state = 'write'; s.progress = 0; }
                 else {
                   if (s.stomping) {
@@ -5337,6 +5597,7 @@ angular.module('kanbanApp')
             if (s.reactT > 0) s.reactT -= dt;
             if (s.drunkT > 0) { s.drunkT -= dt; if (s.drunkT <= 0) s.drunk = 0; }
           });
+          updateRoomBug(dt);
           if (scene.writer && scene.writer.state === 'write') {
             var w = scene.writer;
             w.progress += dt * 42; 
@@ -5428,10 +5689,12 @@ angular.module('kanbanApp')
                   scene.streamNarratorText = tail;
                   setSpeech(narrSpider, '💬 ' + tail, 2.6, narrSpider.icon + ' ' + narrSpider.name + ' — talking out loud');
                   recordEvent({ type: 'stream', text: tail, role: narrSpider.role });
-                  scene.narrCd = 0.4;
+                  // Sentence pace: the bubble text swaps only every ~1.4s so the
+                  // stream reads as discrete sentences instead of flickering.
+                  scene.narrCd = 1.4;
                 }
                 // Keep the bubble alive while the stream keeps flowing.
-                narrSpider.speechTtl = Math.max(narrSpider.speechTtl || 0, 1.4);
+                narrSpider.speechTtl = Math.max(narrSpider.speechTtl || 0, 2.6);
               }
               scene.lastStreamLen = buf.length;
             } else if (scene.streamNarrator) {
@@ -5848,6 +6111,7 @@ angular.module('kanbanApp')
           drawBoard(W, H);
           drawMoodBoard(W, H);
           drawDesks(W, H);
+          drawBug(W, H);
           drawSpiders(W, H);
           drawDustMotes(W, H);
           drawSteam(W, H);
@@ -7235,39 +7499,52 @@ angular.module('kanbanApp')
         function drawSpeechBubble(W, H, px, py, s) {
           var text = s.speech;
           var bubbleFont = mf(10);
-          ctx.font = bubbleFont + 'px sans-serif';
-          var maxW = Math.min(W * 0.34, 240);
-          var words = text.split(' ');
-          var lines = []; var cur = '';
-          for (var i = 0; i < words.length; i++) {
-            var test = cur ? cur + ' ' + words[i] : words[i];
-            if (ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = words[i]; }
-            else cur = test;
-          }
-          if (cur) lines.push(cur);
-          // Keep bubbles compact but readable: fit up to five lines on screen.
-          // Anything longer scrolls past the window at a steady pace.
-          var maxLines = 5;
-          var lineHeight = Math.round(bubbleFont * 1.4);
           var pad = mf(6);
-          var bhCap = Math.max(lineHeight + pad * 2, py - 8);
-          var visibleLines = Math.min(lines.length, maxLines, Math.max(1, Math.floor((bhCap - pad * 2) / lineHeight)));
-          var bh = visibleLines * lineHeight + pad * 2;
+          var maxW = Math.min(W * 0.34, 240);
+          // Bubbles must never pop in or out of existence: fade in over the first
+          // third of a second and fade out over the final half second of life.
+          if (s._speechText !== text) { s._speechText = text; s._speechStart = Date.now(); }
+          var alpha = Math.min(1, (Date.now() - (s._speechStart || Date.now())) / 300);
+          var life = s.speechTtl || 0;
+          if (life < 0.5) alpha = Math.min(alpha, Math.max(0, life / 0.5));
+          if (alpha <= 0.02) return;
+          // Text must stay still while the user reads it: wrap at the base font,
+          // then shrink the font (never below 8px) until every line fits on the
+          // screen. Only if the floor is hit does the bubble clip, with an
+          // ellipsis marking the cut.
+          var bhCap = Math.max(bubbleFont * 2 + pad * 2, py - 8);
+          var words = text.split(' ');
+          function wrapAt(f) {
+            ctx.font = f + 'px sans-serif';
+            var lh = Math.round(f * 1.4);
+            var ls = []; var cur = '';
+            for (var i = 0; i < words.length; i++) {
+              var test = cur ? cur + ' ' + words[i] : words[i];
+              if (ctx.measureText(test).width > maxW && cur) { ls.push(cur); cur = words[i]; }
+              else cur = test;
+            }
+            if (cur) ls.push(cur);
+            return { lines: ls, lineHeight: lh };
+          }
+          var font = bubbleFont;
+          var wrapped = wrapAt(font);
+          for (var attempt = 0; attempt < 3; attempt++) {
+            if (wrapped.lines.length * wrapped.lineHeight + pad * 2 <= bhCap) break;
+            font = Math.max(8, font * 0.9);
+            wrapped = wrapAt(font);
+          }
+          if (font > 8 && wrapped.lines.length * wrapped.lineHeight + pad * 2 > bhCap) {
+            font = 8;
+            wrapped = wrapAt(8);
+          }
+          var lines = wrapped.lines;
+          var lineHeight = wrapped.lineHeight;
+          var visible = Math.min(lines.length, 5, Math.max(1, Math.floor((bhCap - pad * 2) / lineHeight)));
+          var bh = visible * lineHeight + pad * 2;
           var bw = maxW + pad * 2;
           var bx = Math.max(4, Math.min(W - bw - 4, px - bw / 2));
           var by = Math.max(2, py - bh - 6);
-          // Scroll state: reset whenever the speech text changes so the scroll
-          // restarts from the top for each new thing a spider says.
-          if (s._speechText !== text) { s._speechText = text; s._speechStart = Date.now(); }
-          var totalH = lines.length * lineHeight + pad * 2;
-          var scrollable = Math.max(0, totalH - bh);
-          var scroll = 0;
-          if (scrollable > 0) {
-            // Steady linear scroll — no ease-in-out bounce — so long quips move
-            // past the window cleanly and settle on the last lines.
-            var elapsed = (Date.now() - (s._speechStart || Date.now())) / 1000;
-            scroll = Math.min(scrollable, elapsed * 22);
-          }
+          ctx.globalAlpha = alpha;
           ctx.fillStyle = 'rgba(15,20,35,0.92)';
           rr(bx, by, bw, bh, 6); ctx.fill();
           ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1; ctx.stroke();
@@ -7276,19 +7553,17 @@ angular.module('kanbanApp')
           ctx.lineTo(px, by + bh + 7);
           ctx.lineTo(px + 4, by + bh);
           ctx.closePath();
-          ctx.fillStyle = 'rgba(15,20,35,0.92)';
           ctx.fill();
           ctx.fillStyle = '#e8eef6';
           ctx.textBaseline = 'top';
           ctx.textAlign = 'left';
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(bx, by, bw, bh);
-          ctx.clip();
-          for (var j = 0; j < lines.length; j++) {
-            ctx.fillText(lines[j], bx + pad, by + pad + j * lineHeight - scroll);
+          var clipped = lines.length > visible;
+          for (var j = 0; j < visible; j++) {
+            var line = lines[j];
+            if (clipped && j === visible - 1) line = line + '…';
+            ctx.fillText(line, bx + pad, by + pad + j * lineHeight);
           }
-          ctx.restore();
+          ctx.globalAlpha = 1;
           ctx.textBaseline = 'alphabetic';
           ctx.textAlign = 'left';
         }
@@ -7350,6 +7625,7 @@ angular.module('kanbanApp')
                   var okSpider = spiderForStepType(st.type);
                   if (okSpider && okSpider.role === 'editor') {
                     if (scene) scene._editFailStreak = 0;
+                    if (scene && scene.bug) squishRoomBug(true, okSpider);
                     bumpEditRage(-10);
                     bumpVerifierSmug(-8);
                     if (vm.showMeeting) {
@@ -7365,6 +7641,7 @@ angular.module('kanbanApp')
                     fireReaction('bad', editorRageLine(failSpider.rage || 0));
                     if (!_replay) {
                       scene._editFailStreak = (scene._editFailStreak || 0) + 1;
+                      if (scene.bug) growRoomBug(); else spawnRoomBug(scene._editFailStreak);
                       var bump = 6 + Math.min(14, scene._editFailStreak * 3);
                       bumpEditRage(bump);
                       bumpVerifierSmug(bump);
@@ -7401,6 +7678,11 @@ angular.module('kanbanApp')
         });
         $scope.$watch(function () { return vm.streamingSteps ? vm.streamingSteps.length : 0; }, function (len, prev) {
           if (len === 0 && prev > 0) _stepStatusCache = {};
+        });
+        $scope.$watch(function () { return vm.resolveStreams ? vm.resolveStreams.length : 0; }, function (n, prev) {
+          if (n <= (prev || 0)) return;
+          if (!scene || _replay || !vm.showMeeting) return; // TEMP-VERIFY: meetingOn guard relaxed
+          spawnRoomBug(n);
         });
         var _ctxGripedAt = 0;
         $scope.$watch(function () { return vm.streamingContextSize || 0; }, function (size, prev) {

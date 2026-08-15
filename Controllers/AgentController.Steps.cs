@@ -600,16 +600,30 @@ partial class AgentController
     /// complete" — that would prematurely end a multi-step web chain (search →
     /// fetch → write). Keep planning instead; the planner and the OS-output gate
     /// still protect completion.
+    /// Visual-inspection tasks (visualInspectionPending=true) are gated the SAME
+    /// way, but stronger: a task that demands LOOKING at the rendered page ("check
+    /// my game for visual bugs", "you must LOOK at the rendered page") is never
+    /// complete while the run has not executed a _browser_test step — the observed
+    /// failure declared planComplete right after the build steps because the
+    /// assessment LLM was unavailable, so the live web test (and the Test Browser
+    /// tab) never happened. Overrides even a healthy "complete" assessment: the
+    /// browser test is a deterministic requirement, not a model opinion.
     /// </summary>
     private static bool ShouldDeclarePlanCompleteAfterAssessment(
-        bool isComplete, string? assessReason, bool requireAssessment, out string completeReason, out bool assessFailed)
+        bool isComplete, string? assessReason, bool requireAssessment, bool visualInspectionPending,
+        out string completeReason, out bool assessFailed)
     {
         assessFailed = string.IsNullOrWhiteSpace(assessReason) ||
             assessReason.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
             assessReason.Contains("Could not parse", StringComparison.OrdinalIgnoreCase);
+        if (visualInspectionPending)
+        {
+            completeReason = "the task demands visual inspection — the live browser test (_browser_test) has not run yet";
+            return false;
+        }
         if (assessFailed && requireAssessment)
         {
-            completeReason = "web-only run — assessment LLM unavailable, continuing instead of declaring complete";
+            completeReason = "assessment LLM unavailable, continuing instead of declaring complete";
             return false;
         }
         completeReason = assessFailed

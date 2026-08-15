@@ -198,14 +198,16 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task VisualVerifyTask_BuildThenPlanComplete_IsRejectedAndSteeredToBrowserTest()
+    public async Task VisualVerifyTask_BuildThenPlanComplete_AutoInjectsBrowserTest()
     {
         // Regression for benchmark 22: a build-then-VISUALLY-VERIFY task ("check it for
         // visual bugs", "you must LOOK at the rendered page") used to declare the plan
         // complete after the BUILD steps — no _browser_test step, no server spin-up, no
-        // Test Browser tab. The plan-complete visual gate must REJECT the premature
-        // completion, steer the planner to a _browser_test step, and only accept completion
-        // once that step actually ran.
+        // Test Browser tab. The plan-complete visual gate must DETERMINISTICALLY auto-inject
+        // the _browser_test step the moment the planner tries to close the run without it
+        // (the weak-model failure was a planner that answered the steering by proposing
+        // _command steps forever, whose rejections reset the regen counter so the 3-strike
+        // cap never fired) — and only accept completion once that step actually ran.
         _clientFactory.Mode = PlannerMode.VisualVerifyBuild;
         var controller = BuildController();
         var prompt = "Create a folder called 'benchmark_test_22' at the project root. Inside it, build a small web game " +
@@ -226,10 +228,8 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.True(allSteps.OfType<Dictionary<string, object?>>()
                 .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"),
             "the run must have actually executed the browser test step");
-        // The planner was STEERED: the rejection feedback (with the _browser_test demand)
-        // reached a subsequent planner turn instead of being silently accepted.
-        Assert.True(_clientFactory.PlannerUserPrompts.Any(p => p.Contains("_browser_test")),
-            "a later planner turn must have seen the _browser_test steering feedback");
+        // The gate consulted the visual classifier, then INJECTED the browser test itself
+        // (deterministic — no planner round is trusted to propose _browser_test).
         Assert.Contains(_clientFactory.Calls, c => c == "visual-classifier");
     }
 
@@ -2134,19 +2134,16 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                 {
                     // The benchmark-22 shape (build-then-visually-verify): turn 1 builds the
                     // game page, turn 2 declares the plan complete WITHOUT any _browser_test
-                    // step — the pre-fix failure the visual gate must reject — turn 3 heeds
-                    // the feedback and plans the live browser test, turn 4 completes (the
-                    // gate passes because a _browser_test step ran).
+                    // step — the pre-fix failure the visual gate must DETERMINISTICALLY
+                    // auto-inject the live browser test (the real weak-model failure was a
+                    // planner that answered the steering by proposing _command steps forever,
+                    // whose rejections reset the regen counter, so the 3-strike cap never
+                    // fired and the browser test never ran). Turn 3 completes — the gate now
+                    // passes because the injected _browser_test step already ran.
                     if (n == 1)
                         return (PlannerStepJson("_create_file", "benchmark_test_22/index.html"), "planner-step");
                     if (n == 2)
                         return ("{\"planComplete\": true, \"completionReason\": \"built the game\"}", "planner-step");
-                    if (n == 3)
-                        // The EXACT real-world phrasing that was deadlocked pre-fix: the change
-                        // starts with the research verb 'Inspect', which the research-verb gate
-                        // used to reject _browser_test steps with — the step must be ACCEPTED.
-                        return (PlannerStepJson("_browser_test",
-                            "Inspect the benchmark game for correct rendering of 'Benchmark 22' header and functional clickable element"), "planner-step");
                     return ("{\"planComplete\": true, \"completionReason\": \"built the game and ran the live browser test\"}", "planner-step");
                 }
                 if (_owner.Mode == PlannerMode.SearchOnly)
