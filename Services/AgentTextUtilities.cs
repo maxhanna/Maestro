@@ -295,8 +295,8 @@ public static class AgentTextUtilities
             if (string.IsNullOrWhiteSpace(newString)) continue;
             var fullPath = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
             if (!System.IO.File.Exists(fullPath)) continue;
-            var normalized = NormalizeLineEndings(System.IO.File.ReadAllText(fullPath));
-            if (FindAnchorOffset(normalized, newString) >= 0)
+            var normalized = NormalizeParenSpacing(NormalizeLineEndings(System.IO.File.ReadAllText(fullPath)));
+            if (FindAnchorOffset(normalized, NormalizeParenSpacing(newString)) >= 0)
                 confirmedEdits.Add($"{path.Replace('/', Path.DirectorySeparatorChar)} — {OneLineSnippet(newString)}");
         }
         foreach (var (path, last) in lastEditPerPath)
@@ -310,8 +310,15 @@ public static class AgentTextUtilities
                     $"Applied edit for {path} is missing on disk — the target file no longer exists after the run.");
                 continue;
             }
-            var normalized = NormalizeLineEndings(System.IO.File.ReadAllText(fullPath));
-            if (FindAnchorOffset(normalized, newString) < 0)
+            // Paren spacing is normalized on BOTH sides before matching — the apply pipeline's
+            // HTML style self-heal rewrites the changed line (`button (` → `button(`), and the
+            // HtmlDomEditor FORMAT D path serializes the same way. The per-step ground-truth
+            // check (Formatting.cs) already normalizes; the post-execution disk check must agree
+            // or a LANDED HTML edit is falsely flagged "NOT present" (the exact churn that sent
+            // the run into the repair circuit breaker with the verifier's reason under a green
+            // "Verified complete" card).
+            var normalized = NormalizeParenSpacing(NormalizeLineEndings(System.IO.File.ReadAllText(fullPath)));
+            if (FindAnchorOffset(normalized, NormalizeParenSpacing(newString)) < 0)
                 missingEditIssues.Add(
                     $"Applied edit for {path} is NOT present in the current file — the change did not land " +
                     $"(or was overwritten/reverted). Expected: {OneLineSnippet(newString)}");

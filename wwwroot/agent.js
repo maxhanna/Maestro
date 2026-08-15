@@ -252,6 +252,21 @@ angular.module('kanbanApp')
                     return info;
                 }));
         }
+        // Pure split of a live 'plan' SSE payload into committed steps (checkable plan
+        // rows) and the transient activity marker ("Deep thinking for plan — Step 3…",
+        // "Proposing step 2…", "Applying edits — Step 2 — …"). The marker is a
+        // bottom-of-plan status line while the current step is being produced — it is
+        // never a plan item, never checked off as done, and never counted by the plan
+        // gate. Returns a marker even when items is empty (the initial discovery +
+        // pre-plan phase) so the plan panel keeps streaming.
+        // (tests/js/agent-plan-marker.test.js extracts this helper from the live source.)
+        function planPayloadParts(parsed) {
+            var items = (parsed && parsed.items) ? parsed.items : [];
+            var marker = (parsed && parsed.marker && parsed.marker.File)
+                ? { file: parsed.marker.File, change: parsed.marker.Change || '' }
+                : null;
+            return { items: items, marker: marker };
+        }
         function reconcilePlanItems(vm, $scope, $timeout) {
             if (!vm.planItems || !vm.planItems.length) return;
             var changed = false;
@@ -306,7 +321,7 @@ angular.module('kanbanApp')
                 vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.llmSpend = null; vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.streamingTokenBuffer = '';
                 vm.webtestEvents = []; vm.webtestCurrent = null; vm.agentPanelTab = 'activity';
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
-                vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
+                vm.abortController = new AbortController(); vm.planItems = []; vm.planMarker = null; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.agentRuns = []; vm.currentRun = null;
 
                 // BRANCH cards with an active isolated git worktree resolve their project
@@ -770,6 +785,7 @@ angular.module('kanbanApp')
                                 vm.streamingSteps = [];
                                 vm.streamingFilesEdited = [];
                                 vm.planItems = [];
+                                vm.planMarker = null;
                                 vm.agentActivityLog = [];
                                 vm._commandPhaseCollapsed = {}; // new run starts with every phase expanded
                                 vm.webtestEvents = [];
@@ -951,34 +967,46 @@ angular.module('kanbanApp')
                                                                 }
                                                                 break;
                                                             case 'plan':
-                                                                if (parsed && parsed.items && parsed.items.length) {
-                                                                    var existingState = {};
-                                                                    if (vm.planItems) vm.planItems.forEach(function (pi) { existingState[pi.file + '|' + pi.change] = { done: pi.done, diffs: pi.diffs, _diffApplied: pi._diffApplied, _diffStepStatus: pi._diffStepStatus }; });
-                                                                    // Persisted rejected steps (web-gate vetoes) are not carried by plan events —
-                                                                    // preserve them from the current card so a saveCards can never wipe them.
-                                                                    var preservedRejected = [];
-                                                                    var planCard = vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
-                                                                    if (planCard && planCard._plan && planCard._plan.items) {
-                                                                        preservedRejected = planCard._plan.items.filter(function (pi) { return pi.status === 'rejected'; });
+                                                                // Live plan stream: committed steps arrive in `items` (each a checkable
+                                                                // plan row) while the transient activity marker ("Deep thinking for plan
+                                                                // — Step 3…", "Proposing step 2…", "Applying edits — Step 2 — …") arrives
+                                                                // separately in `marker`. The marker is rendered as a bottom-of-plan
+                                                                // status line while the current step is being produced — it is never a
+                                                                // plan item, never checked off as done, and never counted by the plan
+                                                                // gate. Marker-only events (items empty, e.g. the discovery + pre-plan
+                                                                // thinking phase) still update the marker so the panel keeps streaming.
+                                                                if (parsed && ((parsed.items && parsed.items.length) || (parsed.marker && parsed.marker.File))) {
+                                                                    var parts = planPayloadParts(parsed);
+                                                                    vm.planMarker = parts.marker;
+                                                                    if (parts.items.length) {
+                                                                        var existingState = {};
+                                                                        if (vm.planItems) vm.planItems.forEach(function (pi) { existingState[pi.file + '|' + pi.change] = { done: pi.done, diffs: pi.diffs, _diffApplied: pi._diffApplied, _diffStepStatus: pi._diffStepStatus }; });
+                                                                        // Persisted rejected steps (web-gate vetoes) are not carried by plan events —
+                                                                        // preserve them from the current card so a saveCards can never wipe them.
+                                                                        var preservedRejected = [];
+                                                                        var planCard = vm.findCardById ? vm.findCardById(vm.activeCardId) : null;
+                                                                        if (planCard && planCard._plan && planCard._plan.items) {
+                                                                            preservedRejected = planCard._plan.items.filter(function (pi) { return pi.status === 'rejected'; });
+                                                                        }
+                                                                        vm.planItems = parts.items.map(function (item, i) {
+                                                                            var file = item.File || item.file || '?';
+                                                                            var change = item.Change || item.change || '';
+                                                                            var key = file + '|' + change;
+                                                                            var prev = existingState[key] || {};
+                                                                            return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '', groundTruth: item.GroundTruth || item.groundTruth || [] };
+                                                                        });
+                                                                        preservedRejected.forEach(function (ri) { ri.index = vm.planItems.length; vm.planItems.push(ri); });
+                                                                        vm.verifyDiffs(vm.planItems);
+                                                                        reconcilePlanItems(vm, $scope, $timeout);
+                                                                        var activeCard = vm.findCardById(vm.activeCardId);
+                                                                        if (activeCard) {
+                                                                            activeCard._plan = { items: angular.copy(vm.planItems), summary: parsed.summary, score: parsed.score };
+                                                                            vm.saveCards();
+                                                                        }
                                                                     }
-                                                                    vm.planItems = parsed.items.map(function (item, i) {
-                                                                        var file = item.File || item.file || '?';
-                                                                        var change = item.Change || item.change || '';
-                                                                        var key = file + '|' + change;
-                                                                        var prev = existingState[key] || {};
-                                                                        return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: prev.done || item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '', diffs: prev.diffs || [], _diffApplied: prev._diffApplied || false, _diffStepStatus: prev._diffStepStatus || '', groundTruth: item.GroundTruth || item.groundTruth || [] };
-                                                                    });
-                                                                    preservedRejected.forEach(function (ri) { ri.index = vm.planItems.length; vm.planItems.push(ri); });
-                                                                    vm.verifyDiffs(vm.planItems);
-                                                                    reconcilePlanItems(vm, $scope, $timeout);
                                                                     if (parsed.thinking) vm.streamingThinking = parsed.thinking;
                                                                     if (parsed.summary && !parsed.live) vm.streamingSummary = parsed.summary;
-                                                                    if (!parsed.live) pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + parsed.items.length + ' steps)', { itemCount: parsed.items.length, score: parsed.score });
-                                                                    var activeCard = vm.findCardById(vm.activeCardId);
-                                                                    if (activeCard) {
-                                                                        activeCard._plan = { items: angular.copy(vm.planItems), summary: parsed.summary, score: parsed.score };
-                                                                        vm.saveCards();
-                                                                    }
+                                                                    if (!parsed.live) pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + parts.items.length + ' steps)', { itemCount: parts.items.length, score: parsed.score });
                                                                 }
                                                                 break;
                                                             case 'edit-resolve':
@@ -1080,6 +1108,7 @@ angular.module('kanbanApp')
                                                             case 'done':
                                                                 if (run._doneProcessed) { pushAgentLog(vm, 'warn', 'Duplicate done event ignored'); break; }
                                                                 run._doneProcessed = true;
+                                                                vm.planMarker = null;
                                                                 vm.llmProgress = null; vm.llmProgressPercent = 0; vm.llmProgressState = '';
                                                                 // A lone benchmark (or any single card) chimes on completion, but a
                                                                 // Run-All batch defers the gold skulltula to _finishBenchmarkAll so it

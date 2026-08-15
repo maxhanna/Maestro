@@ -12,6 +12,7 @@ namespace Weaver.UnitTests;
 /// static HTML). Launch tests use the in-process static server (no external tools) and
 /// a process that exits immediately (cross-platform, no real server needed).
 /// </summary>
+[Collection("LiveProcessTests")]
 public class ServerLaunchPlanTests : IDisposable
 {
     private readonly string _tmp = Path.Combine(Path.GetTempPath(), "weaver-launch-tests-" + Guid.NewGuid().ToString("N"));
@@ -263,6 +264,54 @@ public class ServerLaunchPlanTests : IDisposable
     }
 
     // ── detection: static HTML ───────────────────────────────────────────────
+
+    [Fact]
+    public void Detect_BareServerJsInSubfolder_NodePlanRunsTheServer()
+    {
+        // The benchmark-22 shape: NO package.json — the agent wrote
+        // benchmark_test_22/{index.html,server.js} inside a sandbox root. The plan must
+        // run THAT server (working dir = the subfolder, entry = server.js) instead of
+        // silently serving index.html statically (which would 404 /api/health and never
+        // exercise the agent's actual server).
+        var dir = NewProject();
+        Write(dir, "benchmark_test_22/index.html", "<html><body><h1>Benchmark 22</h1></body></html>");
+        Write(dir, "benchmark_test_22/server.js", "require('http')");
+
+        var plan = ServerLauncherService.DetectLaunchPlan(dir);
+        Assert.NotNull(plan);
+        Assert.Equal("node", plan!.Kind);
+        Assert.Equal("node", plan.Command);
+        Assert.Equal("server.js", plan.Arguments);
+        Assert.Equal(Path.Combine(dir, "benchmark_test_22"), plan.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Detect_BareServerJsInSubfolder_StillStaticWhenNoNodeEntry()
+    {
+        // Only index.html (no server.js anywhere) — the static fallback is unchanged.
+        var dir = NewProject();
+        Write(dir, "benchmark_test_22/index.html", "<html><body>hi</body></html>");
+
+        var plan = ServerLauncherService.DetectLaunchPlan(dir);
+        Assert.NotNull(plan);
+        Assert.Equal("static", plan!.Kind);
+        Assert.Equal(Path.Combine(dir, "benchmark_test_22"), plan.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Detect_BareServerJs_NodeModulesEntryIgnored()
+    {
+        // A server.js copy inside node_modules must never win the detection.
+        var dir = NewProject();
+        Write(dir, "benchmark_test_22/index.html", "<html><body>hi</body></html>");
+        Write(dir, "benchmark_test_22/server.js", "require('http')");
+        Write(dir, "node_modules/left-pad/server.js", "throw new Error('never run')");
+
+        var plan = ServerLauncherService.DetectLaunchPlan(dir);
+        Assert.NotNull(plan);
+        Assert.Equal("node", plan!.Kind);
+        Assert.Equal(Path.Combine(dir, "benchmark_test_22"), plan.WorkingDirectory);
+    }
 
     [Fact]
     public void Detect_IndexHtmlOnly_StaticKind()

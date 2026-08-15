@@ -1044,6 +1044,54 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.Empty(_clientFactory.Unmatched);
     }
 
+    // ── Card shows the VERIFIER's verdict, not the overridden run flag ──────────────────
+    // The benchmark-22 symptom: the run ENDED (agent stopped) but the verifier's final verdict
+    // was INCOMPLETE — a completion fallback (phantom-issue skip / circuit breaker / "replanner
+    // proposed no further steps") flipped the RUN's taskComplete=true, and the card persisted
+    // that flipped flag: green "✅ Verified complete" with the verifier's incomplete reason
+    // underneath. The card must persist the VERIFIER's verdict (yellow "⚠️ Verified
+    // incomplete") even when the run itself completed via a fallback.
+
+    [Fact]
+    public async Task WebTask_VerifierIncomplete_RunEndedByFallback_CardPersistsIncompleteVerdict()
+    {
+        const string cardId = "verify-verdict";
+        await _boardData.SaveRawAsync(BoardWithCard(cardId, "doing"));
+        _clientFactory.Mode = PlannerMode.SearchThenEdit;
+        // The verifier's FINAL verdict is INCOMPLETE (with a concrete absence claim that
+        // survives verifier-issue triage), while the run itself still ends — the planner
+        // declares planComplete and the repair replanner has nothing to add.
+        _clientFactory.PostVerifyComplete = false;
+        var linksPath = Path.Combine(_projectRoot, LinksRel.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(linksPath)!);
+        File.WriteAllText(linksPath, "export const links: string[] = [];", Encoding.UTF8);
+        var controller = BuildController();
+        // "find … online" is an EXPLICIT web command, so the web-step gate lets the search
+        // through without a classifier call (same shape as the CrossToolCarry test).
+        var prompt = "Find a recent AI article online and add a link to the best article into src/links.ts";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt, cardId);
+
+        // 1) The RUN ended: the planner declared planComplete and the repair replanner had
+        //    nothing further to propose (empty plan), so the run-level flag flipped to
+        //    complete — exactly the "agent stopped" the user described.
+        Assert.True(complete,
+            $"run must end via the completion fallback — calls=[{string.Join(",", _clientFactory.Calls)}]; unmatched={string.Join(";", _clientFactory.Unmatched)}");
+        Assert.NotNull(plan);
+        // 2) The repair loop RAN (the replanner was consulted and proposed nothing) — the
+        //    fallback that completed the run is the exhausted-with-no-steps override.
+        Assert.NotEmpty(_clientFactory.RepairUserPrompts);
+        // 3) The CARD must show the verifier's verdict: incomplete (yellow "⚠️ Verified
+        //    incomplete"), NOT the run's flipped flag (green "✅ Verified complete").
+        var raw = await _boardData.LoadRawAsync();
+        var (vComplete, vReason) = ReadCardVerification(raw, cardId);
+        Assert.False(vComplete, $"card verification must persist complete=false (the verifier's verdict), not the run flag — reason: {vReason}");
+        Assert.NotNull(vReason);
+        Assert.Contains("scripted verifier", vReason, StringComparison.OrdinalIgnoreCase);
+        // 4) Every LLM call the run made was accounted for by the script.
+        Assert.Empty(_clientFactory.Unmatched);
+    }
+
     // ── Web-only completion assessment (no OS-output demand) ─────────────────────────────
     // The between-steps whole-task assessment previously NEVER ran for web-only runs:
     // IsLastEditVerifiedComplete requires an edit result, so a run whose last step was a
@@ -1658,6 +1706,14 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         /// its output lands, exactly like the AssessComplete pattern in the synthetic suite.
         /// Null defaults to complete=true.</summary>
         public Func<bool>? WebAssessComplete { get; set; }
+        /// <summary>Deterministic verdict for the post-execution verifier ("meticulous code
+        /// reviewer verifying if a task is fully complete"). Defaults to complete=true; a test
+        /// flips it to false to script a verifier that says INCOMPLETE while the run itself
+        /// still ends (via a completion fallback) — locking what the CARD must then show.
+        /// The issue text is bare prose with a concrete absence claim and no backticked/
+        /// qualified/method-call symbols, so verifier-issue triage keeps it and the repair
+        /// loop drives to the "replanner proposed no further steps" fallback.</summary>
+        public bool PostVerifyComplete { get; set; } = true;
         private int _plannerCalls;
 
         public WebTaskScriptedClientFactory(PlannerMode mode, string steerTarget)
@@ -1862,7 +1918,9 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                 if (system.Contains("You detect code cohesion issues after an edit. Output ONLY JSON.", StringComparison.Ordinal))
                     return ("{\"issues\": []}", "cohesion");
                 if (system.Contains("meticulous code reviewer verifying if a task is fully complete", StringComparison.Ordinal))
-                    return ("{\"complete\": true, \"reason\": \"done\", \"issues\": []}", "post-verify");
+                    return (_owner.PostVerifyComplete
+                        ? "{\"complete\": true, \"reason\": \"done\", \"issues\": []}"
+                        : "{\"complete\": false, \"reason\": \"scripted verifier: the demanded change was not applied\", \"issues\": [\"the article link from the search results is missing from src/links.ts\"]}", "post-verify");
                 // The discovery-phase architecture one-liner (fires only when the project
                 // actually has files — the edit arm's fixture makes it run).
                 if (system.Contains("You are a project architect. Given a project file tree", StringComparison.Ordinal))

@@ -533,8 +533,8 @@
           </div>
 
           <div class="agent-streaming-thinking"
-            ng-if="vm.agentPanelTabIs('activity') && (vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length)">
-            <details ng-attr-open="{{(vm.streamingSteps.length || vm.planItems.length) ? 'open' : undefined}}">
+            ng-if="vm.agentPanelTabIs('activity') && (vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length || vm.planMarker)">
+            <details ng-attr-open="{{(vm.streamingSteps.length || vm.planItems.length || vm.planMarker) ? 'open' : undefined}}">
               <summary>
                 <span>🧠 Plan</span>
                 <span class="plan-count" ng-if="vm.planItems.length || vm.streamingSteps.length">({{(vm.streamingSteps |
@@ -550,7 +550,7 @@
               </summary>
               <pre class="streaming-text" ng-style="{'font-size': vm.planFontSize + 'px'}"
                 ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
-              <div ng-if="vm.planItems.length || vm.streamingSteps.length" class="plan-items-list"
+              <div ng-if="vm.planItems.length || vm.streamingSteps.length || vm.planMarker" class="plan-items-list"
                 style="margin-top: 8px;">
                 <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
                   ng-style="{'font-size': vm.planFontSize + 'px'}"
@@ -648,6 +648,21 @@
                     <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
                       style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
                       {{s.error}}
+                    </div>
+                  </div>
+                </div>
+                <!-- Transient activity marker ("Deep thinking for plan — Step 3…", "Proposing
+                     step 2…", "Applying edits — Step 2 — …") — a bottom-of-plan status line for
+                     the step currently being produced. It is never a checkable plan step and
+                     never shows a done state; the ⏳ spinner + 💭/⚡/🔍/🔎 icon distinguish it. -->
+                <div ng-if="vm.planMarker" class="plan-item-row plan-marker-row"
+                  ng-style="{'font-size': vm.planFontSize + 'px'}">
+                  <span class="plan-item-icon" title="Working…">⏳</span>
+                  <div class="plan-item-body" style="flex:1;min-width:0;">
+                    <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                      <span class="plan-item-file">{{vm.planMarkerIcon(vm.planMarker.file)}}</span>
+                      <span class="plan-item-change plan-item-thinking"
+                        style="flex:1;min-width:0;">{{vm.planMarkerLabel(vm.planMarker.file, vm.planMarker.change)}}</span>
                     </div>
                   </div>
                 </div>

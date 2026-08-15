@@ -971,6 +971,26 @@ partial class AgentController
                             sb.AppendLine($"  {hint}");
                         }
                     }
+                    // IDENTIFIER-GROUNDED RE-ANCHOR HINT: the oldString was NOT found verbatim
+                    // (whitespace drift, extra/missing line). Show where the anchor's OWN
+                    // identifier actually lives in the file so the model can copy the REAL
+                    // lines — an "edit the edit" correction. Without this the model re-emits
+                    // the same drifted anchor and burns the retry budget (the benchmark-22
+                    // loop: the identical oldString 3× → abort).
+                    if (h.error.Contains("not found verbatim", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var groundedBlock = AgentEditHeuristics.TryIdentifierAnchoredReanchor(
+                            fileContent, h.old, 0)?.correctedBlock;
+                        groundedBlock ??= AgentEditHeuristics.FindIdentifierGroundedLines(fileContent, h.old);
+                        if (!string.IsNullOrWhiteSpace(groundedBlock))
+                        {
+                            sb.AppendLine($"  Your oldString's anchor was NOT found verbatim (indentation/context differs). " +
+                                          $"Copy THESE REAL lines from the file VERBATIM — with their real indentation — as your oldString:");
+                            sb.AppendLine($"  ```");
+                            sb.AppendLine($"  {groundedBlock}");
+                            sb.AppendLine($"  ```");
+                        }
+                    }
                 }
                 else if (h.error.Contains("FORMAT C failed", StringComparison.OrdinalIgnoreCase) || h.error.Contains("not found in file", StringComparison.OrdinalIgnoreCase))
                 {

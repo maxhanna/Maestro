@@ -2248,25 +2248,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             NewString = s.NewString,
             done = runningIndex == null || idx < runningIndex.Value
         }).ToList<object>();
-        // Always emit the activity row — even before the first step is committed
-        // (stepItems empty) — so the UI streams verbose thinking/planning/editing
-        // updates instead of freezing on the initial "Reading task…" placeholder
-        // during the (often minutes-long) discovery + pre-plan thinking phase.
-        var items = stepItems.Concat(new[] {
-            new {
-                File = activityFile,
-                Change = activityChange,
-                Line = 0,
-                OldString = "",
-                NewString = "",
-                done = activityFile != "_planning"
-            }
-        }).ToList();
+        // The transient activity marker ("Deep thinking for plan — Step 3…",
+        // "Proposing step 2…", "Applying edits — Step 2 — …") is NEVER a plan step:
+        // it must not appear in `items` (no checkbox, no done flag, not counted by
+        // the plan gate). It is sent as a separate `marker` so the UI renders it as
+        // a bottom-of-plan status line while the current step is being produced.
+        // Emitted even before the first step is committed (items empty) so the UI
+        // streams verbose thinking/planning/editing updates instead of freezing on
+        // the initial "Reading task…" placeholder during the (often minutes-long)
+        // discovery + pre-plan thinking phase.
         await SendSse(Response, "plan", new
         {
             thinking = thinkingLog.ToString(),
             summary = summary,
-            items = items,
+            items = stepItems,
+            marker = new { File = activityFile, Change = activityChange },
             incremental = true,
             live = true
         }, ct);
@@ -3103,7 +3099,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 thinking = "",
                 summary = "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far",
-                items = new[] { new { File = "_planning", Change = "Reading task & discovery context…", Line = 0, OldString = "", NewString = "", done = false } },
+                items = Array.Empty<object>(),
+                marker = new { File = "_planning", Change = "Reading task & discovery context…" },
                 incremental = true
             }, ct);
         }

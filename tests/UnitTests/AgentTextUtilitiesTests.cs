@@ -155,6 +155,39 @@ public class AgentTextUtilitiesTests
     }
 
     [Fact]
+    public void CheckAppliedEditsPresent_DomNormalizedParenSpacing_StillConfirmed()
+    {
+        // The HtmlDomEditor FORMAT D path (and the apply pipeline's HTML style self-heal)
+        // serialize the changed line with `button(` — no space before the attribute paren.
+        // The edit's newStringPreview carries the spaced form, so a verbatim match would
+        // false-negative a LANDED edit and fail verification with a phantom "NOT present"
+        // issue (the churn that sent the run into the repair circuit breaker with the
+        // verifier's reason under a green "Verified complete" card). Both sides must be
+        // paren-spacing-normalized before matching — the same normalization the per-step
+        // ground-truth check applies.
+        var dir = TempDir();
+        try
+        {
+            var newStr = "<button (click)=\"vm.openCard(card.id)\">Details</button> " +
+                         "<button (click)=\"vm.openCard(card.id)\">Open</button>";
+            // What the DOM serializer actually wrote: `<button(click)=…` (space dropped).
+            File.WriteAllText(Path.Combine(dir, HtmlRel),
+                "<div class=\"card-list\">\n" +
+                "  <div *ngFor=\"let card of vm.items\" class=\"card-item\">\n" +
+                "    <button(click)=\"vm.openCard(card.id)\">Details</button> " +
+                "<button(click)=\"vm.openCard(card.id)\">Open</button>\n" +
+                "  </div>\n</div>\n" + new string('q', 12000));
+
+            var (confirmed, missing) = AgentTextUtilities.CheckAppliedEditsPresent(dir, new object[] { DoneEdit(newStr) });
+
+            Assert.Single(confirmed);
+            Assert.Contains("vm.openCard(card.id)", confirmed[0]);
+            Assert.Empty(missing);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void CheckAppliedEditsPresent_EditNotOnDisk_IsMissingIssue()
     {
         // A step that reports status=done but whose newString is NOT in the current file

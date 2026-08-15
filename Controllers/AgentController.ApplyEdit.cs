@@ -1192,13 +1192,31 @@ partial class AgentController
                 // instead of escalating to a full LLM re-resolve (which risks the whole-section
                 // rewrite failure mode). Falls through to the whole-file fuzzy match below when
                 // no surrounding alignment is confident enough.
-                var surroundingReanchor = AgentEditHeuristics.TrySurroundingLineReanchor(
-                    fileContent, oldStr!, step.LineNumber, step.Change);
-                var correctedBlock = surroundingReanchor?.correctedBlock
+                // IDENTIFIER-GROUNDED RE-ANCHOR (deterministic, zero-LLM) — FIRST choice: the
+                // LLM/plan oldString failed verbatim because of whitespace or line drift (the
+                // benchmark-22 loop: the same 80-char oldString re-emitted 3× until the slot
+                // valve threw). Instead of escalating (which repeats the same drifted anchor),
+                // find where the anchor's OWN identifier actually lives in the file and rebuild
+                // the block from the REAL file text — real indentation, real surrounding lines.
+                // Grounded on an identifier the oldString itself names, it can never select an
+                // unrelated block (a "tradeNotifsCount" line) the tolerant matcher would.
+                var idReanchor = AgentEditHeuristics.TryIdentifierAnchoredReanchor(
+                    fileContent, oldStr!, step.LineNumber);
+                var surroundingReanchor = idReanchor == null
+                    ? AgentEditHeuristics.TrySurroundingLineReanchor(
+                        fileContent, oldStr!, step.LineNumber, step.Change)
+                    : null;
+                var correctedBlock = idReanchor?.correctedBlock
+                    ?? surroundingReanchor?.correctedBlock
                     ?? BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
-                    if (surroundingReanchor != null)
+                    if (idReanchor != null)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"🎯 Identifier-grounded re-anchor for {relPath}: found the anchor's own identifier at file line {idReanchor.Value.startLineIdx + 1} — rebuilt the block from the real file text (real indentation) instead of escalating to the LLM", ct: ct);
+                    }
+                    else if (surroundingReanchor != null)
                     {
                         await EmitLog(emitSse, "info",
                             $"↔ Surrounding-line re-anchor for {relPath}: matched {surroundingReanchor.Value.score} of {oldStr!.Split('\n').Length} anchor line(s) at file line {surroundingReanchor.Value.startLineIdx + 1} — applying file-exact block instead of escalating", ct: ct);

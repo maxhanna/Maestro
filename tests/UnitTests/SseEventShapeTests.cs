@@ -1,6 +1,9 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Weaver.Controllers;
 using Xunit;
 
@@ -74,6 +77,64 @@ public class SseEventShapeTests
         Assert.Contains("event: thinking\n", all);
         // Each frame is self-contained: exactly two blank-line terminators for two frames.
         Assert.Equal(2, all.Split("\n\n", StringSplitOptions.None).Length - 1);
+    }
+
+    /// <summary>
+    /// Locks the plan-marker contract: the transient activity marker ("Deep thinking for
+    /// plan — Step N…", "Proposing step N…", "Applying edits — Step N — …") must travel in
+    /// a separate `marker` field — never as a row inside `items` — so the UI renders it as
+    /// a bottom-of-plan status line instead of a checkable plan step that gets marked done
+    /// while the step is still being produced.
+    /// </summary>
+    [Fact]
+    public void PlanEvent_MarkerIsSeparate_NotAplanItem()
+    {
+        var controller = (AgentController)RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
+        var ctx = new DefaultHttpContext();
+        using var stream = new MemoryStream();
+        ctx.Response.Body = stream;
+        controller.ControllerContext = new ControllerContext { HttpContext = ctx };
+
+        var method = typeof(AgentController).GetMethod("SendPlanActivityEventAsync", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("SendPlanActivityEventAsync not found");
+        var planSoFar = new List<PlanStep>
+        {
+            new() { File = "_command", Change = "mkdir \"benchmark_test_22\"" },
+            new() { File = "benchmark_test_22/index.html", Change = "Create index.html" }
+        };
+        // runningIndex = planSoFar.Count - 1: the step currently being produced (idx 1)
+        // must NOT be marked done — only the completed steps before it are.
+        var task = (Task)method.Invoke(controller, new object?[]
+        {
+            new StringBuilder(), planSoFar, true, "_planning",
+            "Deep thinking for plan — Step 3…", "Deep thinking for plan — Step 3…",
+            1, CancellationToken.None
+        })!;
+        task.GetAwaiter().GetResult();
+
+        stream.Position = 0;
+        using var reader = new StreamReader(stream);
+        var frame = reader.ReadToEnd();
+        Assert.StartsWith("event: plan\n", frame);
+        var dataLine = frame.Split('\n').First(l => l.StartsWith("data: "));
+        using var doc = JsonDocument.Parse(dataLine["data: ".Length..]);
+
+        var items = doc.RootElement.GetProperty("items");
+        Assert.Equal(2, items.GetArrayLength());
+        var markerFiles = new[] { "_planning", "_executing", "_verifying", "_exploring" };
+        foreach (var item in items.EnumerateArray())
+        {
+            var file = item.GetProperty("File").GetString();
+            Assert.DoesNotContain(file, markerFiles);
+        }
+        // Committed steps keep their done semantics: completed step done, in-flight step not.
+        Assert.True(items[0].GetProperty("done").GetBoolean());
+        Assert.False(items[1].GetProperty("done").GetBoolean(),
+            "the step currently being produced must not be marked done");
+
+        var marker = doc.RootElement.GetProperty("marker");
+        Assert.Equal("_planning", marker.GetProperty("File").GetString());
+        Assert.Equal("Deep thinking for plan — Step 3…", marker.GetProperty("Change").GetString());
     }
 
     [Fact]

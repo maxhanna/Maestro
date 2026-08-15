@@ -3106,7 +3106,7 @@ h3 .small.ghost:hover {
 
 .context-breakdown-pop {
 	position: absolute;
-	bottom: 150%;
+	top: 150%;
 	left: 0;
 	z-index: 300000;
 	display: flex;
@@ -4144,6 +4144,24 @@ h3 .small.ghost:hover {
 .plan-item-row.plan-cancelled {
 	opacity: 0.5;
 	text-decoration: line-through;
+}
+
+.plan-item-row.plan-marker-row {
+	opacity: 0.75;
+	border-top: 1px dashed rgba(255, 255, 255, 0.12);
+	margin-top: 2px;
+	padding-top: 6px;
+	font-style: italic;
+}
+
+.plan-item-row.plan-marker-row .plan-item-icon {
+	cursor: default;
+	animation: plan-marker-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes plan-marker-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.35; }
 }
 
 .plan-item-icon {

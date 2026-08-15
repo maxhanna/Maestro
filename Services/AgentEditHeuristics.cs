@@ -819,6 +819,180 @@ public static class AgentEditHeuristics
                (at.StartsWith(bt, StringComparison.Ordinal) || bt.StartsWith(at, StringComparison.Ordinal));
     }
 
+    /// <summary>Words too generic to serve as an anchor identifier (type names, modifiers,
+    /// keywords) — "musicTodoCount" anchors an edit; "number"/"null" would match every
+    /// declaration in the file.</summary>
+    private static readonly HashSet<string> AnchorStopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "number", "null", "true", "false", "void", "string", "boolean", "object", "array",
+        "public", "private", "protected", "readonly", "static", "const", "let", "var",
+        "this", "return", "import", "export", "async", "await", "default", "class",
+        "interface", "function", "new", "undefined", "value", "index", "count", "list",
+        "data", "items", "item", "name", "type", "date", "time"
+    };
+
+    /// <summary>Identifier tokens (≥5 chars, snake/camel/Pascal/dotted-safe) extracted from
+    /// <paramref name="code"/>, minus generic type/keyword words. These are the anchor words
+    /// the edit itself names — the most trustworthy pointer to where the edit belongs.</summary>
+    public static List<string> ExtractAnchorIdentifierTokens(string code)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(code)) return result;
+        foreach (Match m in Regex.Matches(code, @"\b[A-Za-z_][A-Za-z0-9_]{4,}\b"))
+        {
+            if (AnchorStopWords.Contains(m.Value)) continue;
+            result.Add(m.Value);
+        }
+        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>Grounds an oldString to the real file: picks its RAREST identifier token (the
+    /// most distinctive word the edit itself names) and returns that token plus every file
+    /// line containing it (whole-word). Returns null when the oldString carries no usable
+    /// identifier or the token is too common (&gt; <paramref name="maxOccurrences"/>) to be
+    /// distinctive. This is the "introspect on the new variable name" step — instead of
+    /// re-bouncing a drifted anchor to the LLM, find where the anchor's own word actually
+    /// lives in the file.</summary>
+    private static (string token, List<int> lineIdxs)? GroundAnchorToken(
+        string fileContent, string oldStr, int maxOccurrences = 3)
+    {
+        var tokens = ExtractAnchorIdentifierTokens(oldStr);
+        if (tokens.Count == 0) return null;
+        string? best = null;
+        var bestCount = int.MaxValue;
+        foreach (var t in tokens)
+        {
+            var c = CountWordOccurrences(fileContent, t);
+            if (c > 0 && c < bestCount) { bestCount = c; best = t; }
+        }
+        if (best == null || bestCount > maxOccurrences) return null;
+        var fileLines = fileContent.Split('\n');
+        var lines = new List<int>();
+        for (var i = 0; i < fileLines.Length; i++)
+            if (ContainsWord(fileLines[i], best)) lines.Add(i);
+        return lines.Count > 0 ? (best, lines) : null;
+    }
+
+    /// <summary>
+    /// Identifier-grounded re-anchor for a drifted oldString. When the anchor failed verbatim
+    /// (whitespace/line drift — e.g. the model dropped indentation, or the file gained a
+    /// line), this finds the anchor's OWN identifier in the real file and rebuilds the
+    /// replacement block from the ACTUAL file text (real indentation, real surrounding
+    /// lines), so the edit applies deterministically instead of escalating to the LLM — which
+    /// re-emits the same drifted anchor and burns the retry budget (the benchmark-22 loop:
+    /// the same 80-char oldString 3× → abort). Because the block is grounded on an identifier
+    /// the OLDSTRING itself names, it can never select an unrelated block (e.g. a
+    /// "tradeNotifsCount" line) the tolerant matcher would otherwise pick.
+    /// Returns null when grounding is ambiguous, the oldString's sibling lines don't map to
+    /// real lines (a fabricated line — the LLM must see the real file and fix its own
+    /// anchor), or the alignment is not confident.
+    /// </summary>
+    public static (string correctedBlock, int startLineIdx, int score)? TryIdentifierAnchoredReanchor(
+        string fileContent, string oldStr, int targetLine = 0)
+    {
+        if (string.IsNullOrWhiteSpace(oldStr)) return null;
+        var normFile = NormalizeLineEndings(fileContent);
+        var normOld = NormalizeLineEndings(oldStr);
+        var oldLines = normOld.Split('\n'); // keep blanks — the walk aligns positionally
+        var grounded = GroundAnchorToken(normFile, normOld);
+        if (grounded == null) return null;
+        var (token, candidates) = grounded.Value;
+
+        var aIdx = ResolveAnchorLine(candidates, normFile, normOld, token, targetLine);
+        if (aIdx == null) return null;
+        var fileLines = normFile.Split('\n');
+
+        // Which old line does the anchor file line correspond to? It must tolerantly match
+        // one of the old lines (the token line is that line's content).
+        var anchorOldIdx = -1;
+        for (var oi = 0; oi < oldLines.Length; oi++)
+            if (!string.IsNullOrWhiteSpace(oldLines[oi]) && LinesTolerantlyMatch(oldLines[oi], fileLines[aIdx.Value]))
+            { anchorOldIdx = oi; break; }
+        if (anchorOldIdx < 0) return null;
+
+        var startIdx = aIdx.Value - anchorOldIdx;
+        if (startIdx < 0) return null;
+
+        // Blank-tolerant positional walk: every non-blank old line must map to a matching real
+        // line in order (blank differences on either side are absorbed). Any real mismatch
+        // (e.g. a fabricated sibling line) → null → the resolver gets the real-content hint.
+        var fi = startIdx;
+        var o = 0;
+        while (o < oldLines.Length)
+        {
+            if (fi >= fileLines.Length) return null;
+            var fBlank = string.IsNullOrWhiteSpace(fileLines[fi]);
+            var oBlank = string.IsNullOrWhiteSpace(oldLines[o]);
+            if (fBlank && oBlank) { fi++; o++; continue; }
+            if (fBlank) { fi++; continue; }
+            if (oBlank) { o++; continue; }
+            if (!LinesTolerantlyMatch(oldLines[o], fileLines[fi])) return null;
+            fi++; o++;
+        }
+        var block = string.Join("\n", fileLines.Skip(startIdx).Take(fi - startIdx));
+        if (string.IsNullOrWhiteSpace(block)) return null;
+        if (string.Equals(block, normOld, StringComparison.Ordinal)) return null; // already exact
+        return (block, startIdx, oldLines.Count(l => !string.IsNullOrWhiteSpace(l)));
+    }
+
+    /// <summary>Resolves which candidate file line is the anchor. One candidate wins outright;
+    /// otherwise the candidate whose line trimmed-equals the old line containing the token
+    /// (the DECLARATION vs identical-token USAGE lines) wins; otherwise a targetLine hint
+    /// picks the nearest (within 50 lines). Ambiguous → null.</summary>
+    private static int? ResolveAnchorLine(
+        List<int> candidates, string normFile, string normOld, string token, int targetLine)
+    {
+        if (candidates.Count == 1) return candidates[0];
+        var oldLines = normOld.Split('\n');
+        var oiOfToken = -1;
+        for (var oi = 0; oi < oldLines.Length; oi++)
+            if (!string.IsNullOrWhiteSpace(oldLines[oi]) && ContainsWord(oldLines[oi], token))
+            { oiOfToken = oi; break; }
+        if (oiOfToken >= 0)
+        {
+            var fileLines = normFile.Split('\n');
+            var oldTrim = oldLines[oiOfToken].Trim();
+            var trimmed = candidates
+                .Where(i => string.Equals(fileLines[i].Trim(), oldTrim, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (trimmed.Count == 1) return trimmed[0];
+        }
+        if (targetLine > 0)
+        {
+            var nearest = candidates.OrderBy(i => Math.Abs(i + 1 - targetLine)).First();
+            if (Math.Abs(nearest + 1 - targetLine) <= 50) return nearest;
+        }
+        return null;
+    }
+
+    /// <summary>Display-only probe for the resolver feedback: returns the REAL file lines
+    /// around the oldString's most distinctive identifier (the anchor line ± its neighbors),
+    /// so the model can copy the correct verbatim text when its own oldString drifted.
+    /// Unlike <see cref="TryIdentifierAnchoredReanchor"/> it does not require the sibling
+    /// lines to map — it shows where the anchor lives even when the rest of the oldString
+    /// was fabricated (the model then fixes its own anchor — an "edit an edit").</summary>
+    public static string? FindIdentifierGroundedLines(string fileContent, string oldStr)
+    {
+        if (string.IsNullOrWhiteSpace(oldStr)) return null;
+        var normFile = NormalizeLineEndings(fileContent);
+        var normOld = NormalizeLineEndings(oldStr);
+        var grounded = GroundAnchorToken(normFile, normOld);
+        if (grounded == null) return null;
+        var (token, candidates) = grounded.Value;
+        var best = ResolveAnchorLine(candidates, normFile, normOld, token, 0);
+        if (best == null) return null;
+        var fileLines = normFile.Split('\n');
+        var start = Math.Max(0, best.Value - 1);
+        var end = Math.Min(fileLines.Length, best.Value + 2);
+        return string.Join("\n", fileLines.Skip(start).Take(end - start));
+    }
+
+    private static int CountWordOccurrences(string text, string word) =>
+        Regex.Matches(text, @"\b" + Regex.Escape(word) + @"\b", RegexOptions.IgnoreCase).Count;
+
+    private static bool ContainsWord(string line, string word) =>
+        Regex.IsMatch(line, @"\b" + Regex.Escape(word) + @"\b", RegexOptions.IgnoreCase);
+
     public static string? GetUnsafeEditPayloadReason(string oldString, string newString)
     {
         foreach (var marker in UnsafeEditMarkers)

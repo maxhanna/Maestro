@@ -200,6 +200,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         // Also clear the regular plan if it exists
         delete card._plan;
         vm.planItems = [];
+        vm.planMarker = null;
         vm.saveCards();
       };
 
@@ -599,6 +600,16 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         return items.filter(function (i) { return i.done; }).length;
       };
 
+      // Real plan steps only — transient activity markers (_planning/_executing/
+      // _verifying/_exploring) that legacy cards persisted before the backend moved
+      // them out of the plan items list must never render as checkable steps, count
+      // toward the badge, or gate completion. They are display-filtered everywhere
+      // the persisted plan is shown.
+      vm.planRealItems = function (card) {
+        if (!card || !card._plan || !card._plan.items) return [];
+        return card._plan.items.filter(function (i) { return i && !vm.isPlanMarker(i.file); });
+      };
+
       // Number of 'recovering' log entries for this card — the count of times the
       // run healed itself mid-stream (stream drop retry, finish-this continuation).
       // Persisted runs read card.agentLog; the live run reads the streaming log.
@@ -669,6 +680,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           delete card.agentResult.planItems;
         }
         vm.planItems = [];
+        vm.planMarker = null;
         vm.saveCards();
       };
 

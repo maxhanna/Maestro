@@ -10,6 +10,7 @@ namespace Weaver.UnitTests;
 /// failure path: no-server project, launch failure, absent target. The browser-mode path
 /// is covered live in ServerLaunchE2ETests (real headless Edge/Chrome when installed).
 /// </summary>
+[Collection("LiveProcessTests")]
 public class BrowserAutomationServiceTests : IDisposable
 {
     private readonly string _tmp = Path.Combine(Path.GetTempPath(), "weaver-batests-" + Guid.NewGuid().ToString("N"));
@@ -39,6 +40,129 @@ public class BrowserAutomationServiceTests : IDisposable
         AllowBrowser = allowBrowser,
         ServerTimeout = TimeSpan.FromSeconds(60)
     };
+
+    // ── Benchmark 22 end-to-end: the agent's subfolder server must run and its
+    //    rendered page must stream back as webtest progress (the payload the agent
+    //    section's "Test Browser" tab renders when it auto-opens). ───────────────────
+
+    private const string Benchmark22Html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><title>Benchmark 22</title></head>
+        <body>
+          <h1>Benchmark22</h1>
+          <p>Click the button to raise the score.</p>
+          <div id="score">Score: 0</div>
+          <button onclick="document.getElementById('score').textContent='Score: 1'">Click Me!</button>
+        </body>
+        </html>
+        """;
+
+    // The benchmark-22 server contract: read PORT from the environment (the launcher's
+    // free port — never the 8765 default), serve index.html at /, /api/health → 200 JSON.
+    private const string Benchmark22ServerJs = """
+        const http = require('http');
+        const fs = require('fs');
+        const PORT = parseInt(process.env.PORT) || 8765;
+        const server = http.createServer((req, res) => {
+          if (req.url === '/api/health') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'ok' }));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(fs.readFileSync('./index.html'));
+          }
+        });
+        server.listen(PORT, () => console.log('Server running at http://localhost:' + PORT + '/'));
+        """;
+
+    /// <summary>Builds the exact benchmark-22 sandbox layout: index.html + server.js in a
+    /// benchmark_test_22 subfolder, with NO package.json at the root.</summary>
+    private string NewBenchmark22Project()
+    {
+        var root = Path.Combine(_tmp, Guid.NewGuid().ToString("N"));
+        var bench = Path.Combine(root, "benchmark_test_22");
+        Directory.CreateDirectory(bench);
+        File.WriteAllText(Path.Combine(bench, "index.html"), Benchmark22Html);
+        File.WriteAllText(Path.Combine(bench, "server.js"), Benchmark22ServerJs);
+        return root;
+    }
+
+    [Fact]
+    public async Task Benchmark22_SubfolderServer_LaunchesOnFreePort_AndStreamsRenderedPage()
+    {
+        // The end-to-end contract behind the "Test Browser" tab: the live web test must
+        // (a) RUN the agent's own server.js (not fall back to the in-process static file
+        //     server, which would 404 /api/health), (b) start it on a launcher-chosen
+        //     free port — DIFFERENT from the 8765 default the server.js hardcodes — with
+        //     PORT injected via env, and (c) stream a snapshot of the rendered page as
+        //     webtest progress so the UI can open a tab showing what the browser saw.
+        var root = NewBenchmark22Project();
+        var events = new List<BrowserTestEvent>();
+        var service = ServiceFor(root); // HTTP fallback — deterministic, no browser needed
+        service.OnProgress = (e, _) => { lock (events) events.Add(e); return Task.CompletedTask; };
+
+        var report = await service.RunUiTestAsync(root, "benchmark 22", "test the game page");
+
+        Assert.True(report.Passed, report.ToString());
+        // (a) The agent's server RAN — mode "http" here only because the test forces the
+        //     deterministic probe; ServerKind is what proves which process served the page.
+        Assert.Equal("node", report.ServerKind);
+        // (b) A different port: the server.js hardcodes 8765, the launcher must override it.
+        Assert.NotNull(report.ServerUrl);
+        var port = new Uri(report.ServerUrl!).Port;
+        Assert.NotEqual(8765, port);
+        // (c) The rendered page streamed back as a snapshot progress event — exactly what
+        //     the agent section's "Test Browser" tab displays (title/headings/body).
+        var snapEvent = events.FirstOrDefault(e => e.Snapshot != null);
+        Assert.NotNull(snapEvent);
+        Assert.Equal("Benchmark 22", snapEvent!.Snapshot!.Title);
+        Assert.Contains("Benchmark22", snapEvent.Snapshot.Headings);
+        Assert.Contains("Score: 0", snapEvent.Snapshot.BodyText);
+    }
+
+    [Fact]
+    public async Task Benchmark22_SubfolderServer_ApiHealth_ReturnsRealJson()
+    {
+        // The /api/health endpoint only exists on the agent's REAL server — the static
+        // fallback would serve index.html for it and this would fail. Proves the launched
+        // process is the server.js, not a file server.
+        var root = NewBenchmark22Project();
+
+        var report = await ServiceFor(root).RunApiTestAsync(root, "/api/health");
+
+        Assert.True(report.Passed, report.ToString());
+        Assert.Equal("node", report.ServerKind);
+        Assert.Contains("ok", report.BodyTextExcerpt, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Benchmark22_SubfolderServer_LiveBrowser_StreamsScreenshotOfTheSite()
+    {
+        // The "send a visual of the site to the user" half: with a real Chromium installed
+        // the inspection runs headless and the snapshot streams a JPEG screenshot data URL
+        // — the exact payload the Test Browser tab's <img> renders. Skipped on hosts with
+        // no browser (the HTTP fallback still streams title/headings/body).
+        var root = NewBenchmark22Project();
+        var events = new List<BrowserTestEvent>();
+        var service = new BrowserAutomationService
+        {
+            Launcher = new ServerLauncherService(),
+            BrowserFactory = CdpBrowserDriver.TryCreateAsync,
+            AllowBrowser = true,
+            ServerTimeout = TimeSpan.FromSeconds(60)
+        };
+        service.OnProgress = (e, _) => { lock (events) events.Add(e); return Task.CompletedTask; };
+
+        var report = await service.RunUiTestAsync(root, "benchmark 22", "test the game page");
+        if (report.Mode != "browser") return; // no Chromium on this host — HTTP fallback covered above
+
+        Assert.True(report.Passed, report.ToString());
+        var snapEvent = events.FirstOrDefault(e => e.Snapshot?.ScreenshotDataUrl != null);
+        Assert.NotNull(snapEvent);
+        Assert.StartsWith("data:image/jpeg;base64,", snapEvent!.Snapshot!.ScreenshotDataUrl);
+        Assert.Contains("Benchmark22", snapEvent.Snapshot.Headings);
+    }
 
     private const string SiteHtml = """
         <!DOCTYPE html>

@@ -175,6 +175,23 @@ public class ServerLauncherService
                     $"ruby {rubyEntry}");
         }
 
+        // ── Bare Node entry (no package.json) ────────────────────────────────
+        // An agent-written server in a SUBFOLDER — the benchmark-22 shape
+        // (benchmark_test_22/server.js reading process.env.PORT) — must actually run.
+        // Without this, the static fallback below serves index.html from disk and 404s
+        // every route the server owns (/api/health), so the live browser test shows a
+        // page that never went through the agent's real server. Shallowest-first so the
+        // most project-like entry wins; node_modules/build output is already filtered.
+        var bareNode = FindShallowestNodeEntry(projectRoot);
+        if (bareNode != null)
+        {
+            var dir = Path.GetDirectoryName(bareNode) ?? projectRoot;
+            var entry = Path.GetFileName(bareNode);
+            var relDir = Path.GetRelativePath(projectRoot, dir);
+            return new ServerLaunchPlan("node", "node", entry, dir, 3000,
+                $"node {entry} ({(relDir == "." ? "project root" : relDir)})");
+        }
+
         // ── Static HTML (no server — serve the index ourselves) ─────────────
         var index = FindIndexHtml(projectRoot);
         if (index != null)
@@ -440,6 +457,30 @@ public class ServerLauncherService
             if (File.Exists(path)) return name;
         }
         return null;
+    }
+
+    /// <summary>Node entry names in priority order (mirrors the package.json branch).</summary>
+    private static readonly string[] NodeEntryNames = { "index.js", "server.js", "app.js", "main.js", "index.ts" };
+
+    /// <summary>
+    /// Recursively finds the shallowest bare node entry (no package.json required) — a
+    /// server the agent wrote in a subfolder (benchmark_test_22/server.js). Returns the
+    /// full path, or null. At equal depth the name-priority order wins; ignored dirs
+    /// (node_modules, dist, …) are skipped so a stray dependency copy never wins.
+    /// </summary>
+    private static string? FindShallowestNodeEntry(string root)
+    {
+        var best = (Depth: int.MaxValue, NameIndex: int.MaxValue, Path: (string?)null);
+        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        {
+            if (IsIgnoredPath(root, file)) continue;
+            var nameIndex = Array.IndexOf(NodeEntryNames, Path.GetFileName(file));
+            if (nameIndex < 0) continue;
+            var depth = file.Split(Path.DirectorySeparatorChar).Length;
+            if (depth < best.Depth || (depth == best.Depth && nameIndex < best.NameIndex))
+                best = (depth, nameIndex, file);
+        }
+        return best.Path;
     }
 
     private static string? FindIndexHtml(string root)

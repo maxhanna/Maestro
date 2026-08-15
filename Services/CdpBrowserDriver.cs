@@ -128,13 +128,18 @@ public sealed class CdpBrowserDriver : IAsyncDisposable
 
         var userDataDir = Path.Combine(Path.GetTempPath(), "weaver-cdp-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(userDataDir);
+        // An EXPLICIT free port, never `--remote-debugging-port=0`: recent Edge builds
+        // (151+) silently exit/hand off when asked for a random debugging port, and some
+        // versions no longer print "DevTools listening" to stderr at all — the DevTools
+        // HTTP endpoint on the known port is the deterministic way to find the ws URL.
+        var debugPort = ServerLauncherService.FindFreePort();
         var psi = new ProcessStartInfo
         {
             FileName = exe,
             Arguments =
                 "--headless=new --disable-gpu --no-sandbox --no-first-run --no-default-browser-check " +
                 "--disable-extensions --disable-background-networking --disable-dev-shm-usage " +
-                "--remote-debugging-port=0 --user-data-dir=\"" + userDataDir + "\" about:blank",
+                $"--remote-debugging-port={debugPort} --user-data-dir=\"{userDataDir}\" about:blank",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -147,7 +152,7 @@ public sealed class CdpBrowserDriver : IAsyncDisposable
             return null;
         }
 
-        // The DevTools websocket URL is printed to stderr: "DevTools listening on ws://…".
+        // Fallback: some Chromium builds print "DevTools listening on ws://…" to stderr.
         // The browser keeps running (and its stderr pipe stays open), so the URL must be
         // discovered line-by-line — a blocking ReadToEndAsync would never complete.
         var wsTcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -167,7 +172,28 @@ public sealed class CdpBrowserDriver : IAsyncDisposable
         }, CancellationToken.None);
         // Drain stdout so the browser's output pipe never fills and blocks it.
         _ = process.StandardOutput.ReadToEndAsync();
-        var wsUrl = await wsTcs.Task.WaitAsync(TimeSpan.FromSeconds(30), ct);
+        // Primary: poll the DevTools HTTP endpoint on the known port for the websocket URL
+        // (works on every Chromium version; the endpoint answers once DevTools is up).
+        string? wsUrl = null;
+        using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) })
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            while (DateTime.UtcNow < deadline && wsUrl == null)
+            {
+                if (process.HasExited) break;
+                try
+                {
+                    var resp = await http.GetStringAsync($"http://127.0.0.1:{debugPort}/json/version", ct);
+                    using var doc = JsonDocument.Parse(resp);
+                    if (doc.RootElement.TryGetProperty("webSocketDebuggerUrl", out var wsEl))
+                        wsUrl = wsEl.GetString();
+                }
+                catch { /* DevTools not up yet — keep polling */ }
+                if (wsUrl == null) await Task.Delay(200, ct);
+            }
+        }
+        // Fallback: the stderr "DevTools listening" line (older builds / non-HTTP setups).
+        wsUrl ??= await wsTcs.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
         if (wsUrl == null)
         {
             try { process.Kill(entireProcessTree: true); } catch { }

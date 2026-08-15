@@ -100,7 +100,7 @@ public class FileEditController : ControllerBase
                     return BadRequest("Path outside project root is not allowed.");
                 }
                 var matchingDirs = Directory.EnumerateDirectories(searchRoot, "*", SearchOption.AllDirectories)
-                    .Where(d => Path.GetFileName(d).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0
+                    .Where(d => FileNameMatches(Path.GetFileName(d), searchTerm)
                         && !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, d).Replace("\\", "/"), ignoreDirs))
                     .Select(d => new
                     {
@@ -109,7 +109,7 @@ public class FileEditController : ControllerBase
                         isDirectory = true
                     });
                 var matchingFiles = Directory.EnumerateFiles(searchRoot, "*", SearchOption.AllDirectories)
-                    .Where(f => Path.GetFileName(f).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0
+                    .Where(f => FileNameMatches(Path.GetFileName(f), searchTerm)
                         && !ContainsIgnoredSegment(Path.GetRelativePath(projectRoot, f).Replace("\\", "/"), ignoreDirs))
                     .Select(f => new
                     {
@@ -197,6 +197,37 @@ public class FileEditController : ControllerBase
             return StatusCode(500, ex.Message);
         }
     }
+    /// <summary>
+    /// True when <paramref name="name"/> matches <paramref name="term"/> under the file
+    /// picker's search rules: a plain case-insensitive substring, OR a FUZZY substring
+    /// that ignores filename separators ('.', '-', '_', spaces). So searching
+    /// "movieservice" matches "movie.service.js" and "movie-service" — users rarely
+    /// type the exact separators a file actually uses. The fuzzy pass is ADDITIVE
+    /// (strict still wins when the term itself contains separators, e.g. "service.js").
+    /// </summary>
+    internal static bool FileNameMatches(string name, string term)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        if (string.IsNullOrEmpty(term)) return true;
+        if (name.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        var nameNorm = NormalizeForFuzzyMatch(name);
+        var termNorm = NormalizeForFuzzyMatch(term);
+        // A separator-only term ("-", ".") normalizes to empty and would match EVERY
+        // file — that's not fuzzy, it's a blank search. Fall back to the strict result.
+        if (termNorm.Length == 0) return false;
+        return nameNorm.IndexOf(termNorm, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    /// <summary>Keeps letters/digits only, so "movie.service", "movie-service",
+    /// "movie_service" and "movie service" all collapse to "movieservice".</summary>
+    private static string NormalizeForFuzzyMatch(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s)
+            if (char.IsLetterOrDigit(c)) sb.Append(c);
+        return sb.ToString();
+    }
+
     /// <summary>
     /// Default ignore-list for build/vcs/dependency folders. Users can extend it via
     /// the Editor:IgnoreDirs config key (array or comma-separated). Entries prefixed

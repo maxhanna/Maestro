@@ -72,6 +72,55 @@ angular.module('kanbanApp')
                     } catch (e) { }
                     return out;
                 }
+                function capRemoteString(s, n) {
+                    if (typeof s === 'string' && s.length > n) return s.slice(0, n) + '…';
+                    return s;
+                }
+                function slimCardForRemote(card) {
+                    if (!card || typeof card !== 'object') return card;
+                    var c = {};
+                    for (var k in card) { if (Object.prototype.hasOwnProperty.call(card, k)) c[k] = card[k]; }
+                    delete c._meetingReplay;
+                    delete c._appliedDiffs;
+                    delete c.confirmedContextFiles;
+                    delete c._cohesion;
+                    if (Array.isArray(c.agentLog)) {
+                        c.agentLog = c.agentLog.slice(-15).map(function (e) {
+                            if (!e || typeof e !== 'object') return e;
+                            var o = {};
+                            for (var k2 in e) { if (Object.prototype.hasOwnProperty.call(e, k2)) o[k2] = e[k2]; }
+                            o.detail = capRemoteString(o.detail, 2000);
+                            o.message = capRemoteString(o.message, 2000);
+                            return o;
+                        });
+                    }
+                    if (c.agentAnalysis && typeof c.agentAnalysis === 'object') {
+                        var a = {};
+                        for (var k3 in c.agentAnalysis) { if (Object.prototype.hasOwnProperty.call(c.agentAnalysis, k3)) a[k3] = c.agentAnalysis[k3]; }
+                        a.thinking = capRemoteString(a.thinking, 15000);
+                        a.summary = capRemoteString(a.summary, 15000);
+                        a.question = capRemoteString(a.question, 15000);
+                        if (Array.isArray(a.steps)) {
+                            a.steps = a.steps.slice(-20).map(function (s) {
+                                if (!s || typeof s !== 'object') return s;
+                                var o = {};
+                                for (var k4 in s) { if (Object.prototype.hasOwnProperty.call(s, k4)) o[k4] = s[k4]; }
+                                o.output = capRemoteString(o.output, 2000);
+                                return o;
+                            });
+                        }
+                        c.agentAnalysis = a;
+                    }
+                    return c;
+                }
+                function slimStateForRemote(state) {
+                    var out = {};
+                    for (var k5 in state) { if (Object.prototype.hasOwnProperty.call(state, k5)) out[k5] = state[k5]; }
+                    ['todo', 'doing', 'done', 'archived', 'selfImproving'].forEach(function (col) {
+                        if (Array.isArray(out[col])) out[col] = out[col].map(slimCardForRemote);
+                    });
+                    return out;
+                }
                 function buildHeartbeatPayload() {
                     var rank = collectRankPayload();
                     return {
@@ -86,7 +135,7 @@ angular.module('kanbanApp')
                                         BuildCommands: p.BuildCommands 
                                     }; 
                                 }), 
-                                state: vm.state, 
+                                state: slimStateForRemote(vm.state), 
                                 agentActive: vm.streamingActive || false, 
                                 agentPhase: vm.streamingPhase || '',
                                 agentThinking: vm.streamingThinking || '', 

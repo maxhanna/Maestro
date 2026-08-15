@@ -959,6 +959,27 @@ body.dragging-active .card:hover {
     text-decoration: line-through;
 }
 
+/* Transient activity marker ("Deep thinking for plan — Step N…") — a bottom-of-plan
+   status line while the current step is being produced. Never a checkable step: dimmed,
+   italic, with a gently pulsing spinner icon so it reads as "in progress". */
+.plan-item-row.plan-marker-row {
+    opacity: .75;
+    border-top: 1px dashed rgba(255, 255, 255, 0.12);
+    margin-top: 2px;
+    padding-top: 6px;
+    font-style: italic;
+}
+
+.plan-item-row.plan-marker-row .plan-item-icon {
+    cursor: default;
+    animation: plan-marker-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes plan-marker-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .35; }
+}
+
 .plan-item-icon {
     flex-shrink: 0;
     width: 1.4em;
@@ -1070,7 +1091,7 @@ body.dragging-active .card:hover {
 }
 
 .verification-fail {
-    color: #e06c75;
+    color: #e5c07b; /* yellow — "Verified incomplete" is a warning, not a hard error */
 }
 
 .verification-reason {
@@ -1090,9 +1111,9 @@ body.dragging-active .card:hover {
 }
 
 .verification-reason-fail {
-    background: rgba(224, 108, 117, 0.10);
-    border-left-color: rgba(224, 108, 117, 0.6);
-    color: #e06c75;
+    background: rgba(229, 192, 123, 0.10);
+    border-left-color: rgba(229, 192, 123, 0.6);
+    color: #e5c07b;
 }
 
 .verification-at {

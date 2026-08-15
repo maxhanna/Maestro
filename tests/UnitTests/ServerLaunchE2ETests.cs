@@ -16,7 +16,7 @@ namespace Weaver.UnitTests;
 /// The browser tests pass in degraded HTTP mode when no browser exists, keeping the
 /// Linux CI green.
 /// </summary>
-[Collection("ServerLaunchE2E")]
+[Collection("LiveProcessTests")]
 public class ServerLaunchE2ETests : IDisposable
 {
     private static readonly string RepoRoot = FindRepoRoot();

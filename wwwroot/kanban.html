@@ -116,18 +116,18 @@
           </div>
 
           <!-- Plan -->
-          <details class="card-section" ng-if="card._plan && card._plan.items && card._plan.items.length">
+          <details class="card-section" ng-if="vm.planRealItems(card).length">
             <summary>
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}</span>
-              <span class="section-badge">{{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}}</span>
+              <span class="section-badge">{{vm.planDoneCount(vm.planRealItems(card))}}/{{vm.planRealItems(card).length}}</span>
               <button class="section-clear"
                 ng-click="vm.clearPlan(card); $event.stopPropagation(); $event.preventDefault();"
                 title="Delete entire plan and start fresh">🗑</button>
             </summary>
             <div class="section-body">
               <div class="plan-items-list">
-                <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
+                <div ng-repeat="item in vm.planRealItems(card) track by item.index" class="plan-item-row"
                   ng-class="{'plan-done': item.done, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && item.status!=='rejected'}"
                   title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.metaGroup ? item.metaGroup + ' — ' : ''}}{{item.file}}:{{item.line}} {{item.change}}">
                   <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
@@ -230,7 +230,7 @@
               <span class="section-caret">▶</span>
               <span class="section-title"
                 ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
-                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
+                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verified incomplete'}}
               </span>
             </summary>
             <div class="section-body">
@@ -537,20 +537,20 @@
 
           <!-- Plan (with live steps) -->
           <details class="card-section" ng-attr-open="{{vm.isCardActive(card.id) ? 'open' : undefined}}"
-            ng-if="(card._plan && card._plan.items && card._plan.items.length) || (vm.isCardActive(card.id) && vm.streamingSteps.length)">
+            ng-if="vm.planRealItems(card).length || (vm.isCardActive(card.id) && vm.streamingSteps.length)">
             <summary>
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Plan{{card._plan && card._plan.summary ? ': ' + card._plan.summary :
                 ''}}</span>
               <span class="section-badge"
-                ng-if="card._plan && card._plan.items">{{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}}</span>
+                ng-if="card._plan && card._plan.items">{{vm.planDoneCount(vm.planRealItems(card))}}/{{vm.planRealItems(card).length}}</span>
               <button class="section-clear"
                 ng-click="vm.clearPlan(card); $event.stopPropagation(); $event.preventDefault();"
                 title="Delete entire plan and start fresh">🗑</button>
             </summary>
             <div class="section-body">
               <div class="plan-items-list">
-                <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
+                <div ng-repeat="item in vm.planRealItems(card) track by item.index" class="plan-item-row"
                   ng-class="{'plan-done': item.done, 'plan-cancelled': item.cancelled, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && !item.cancelled && item.status!=='rejected'}"
                   title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.file}}:{{item.line}} {{item.change}}">
                   <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
@@ -674,7 +674,7 @@
               <span class="section-caret">▶</span>
               <span class="section-title"
                 ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
-                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
+                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verified incomplete'}}
               </span>
             </summary>
             <div class="section-body">
@@ -1042,15 +1042,15 @@
           </div>
 
           <!-- Plan -->
-          <details class="card-section" ng-if="card._plan && card._plan.items && card._plan.items.length">
+          <details class="card-section" ng-if="vm.planRealItems(card).length">
             <summary>
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}</span>
-              <span class="section-badge">{{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}}</span>
+              <span class="section-badge">{{vm.planDoneCount(vm.planRealItems(card))}}/{{vm.planRealItems(card).length}}</span>
             </summary>
             <div class="section-body">
               <div class="plan-items-list">
-                <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
+                <div ng-repeat="item in vm.planRealItems(card) track by item.index" class="plan-item-row"
                   ng-class="{'plan-done': item.done, 'plan-rejected': item.status==='rejected', 'plan-pending': !item.done && item.status!=='rejected'}"
                   title="{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}} {{item.file}}:{{item.line}} {{item.change}}">
                   <span class="plan-item-icon">{{item.status==='rejected' ? '✗' : (item.done ? '✅' : '⬜')}}</span>
@@ -1149,7 +1149,7 @@
               <span class="section-caret">▶</span>
               <span class="section-title"
                 ng-class="card._verification.complete ? 'verification-ok' : 'verification-fail'">
-                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verification incomplete'}}
+                {{card._verification.complete ? '✅ Verified complete' : '⚠️ Verified incomplete'}}
               </span>
             </summary>
             <div class="section-body">

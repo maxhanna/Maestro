@@ -14,6 +14,7 @@ namespace Weaver.UnitTests;
 /// shape (platform-agnostic server + port fallback + live verification) and the launcher's
 /// port-conflict behavior.
 /// </summary>
+[Collection("LiveProcessTests")]
 public class BenchmarkLiveWebTestTests : IDisposable
 {
     private readonly string _tmp = Path.Combine(Path.GetTempPath(), "weaver-liveweb-" + Guid.NewGuid().ToString("N"));

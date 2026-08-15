@@ -625,6 +625,14 @@ partial class AgentController
             }
         }
         var taskComplete = planCompleteDeclared;
+        // The VERIFIER's verdict, tracked separately from taskComplete: several completion
+        // fallbacks below (phantom-issue skip, repair circuit breaker, "replanner proposed no
+        // further steps") flip taskComplete=true so the RUN ends — but the verifier's final
+        // verdict was INCOMPLETE. The card must show what the verifier SAID ("Verified
+        // incomplete", yellow), not the overridden run flag — the benchmark-22 run: verifier
+        // said incomplete, a phantom-issue skip completed the run, and the card displayed a
+        // green "Verified complete" with the verifier's incomplete reason underneath.
+        var verifierVerdict = taskComplete;
         var verificationDetails = planCompleteDeclared
             ? "Planner declared plan complete — post-execution verification skipped."
             : (string?)null;
@@ -651,6 +659,9 @@ partial class AgentController
             verificationDetails = "No edits were applied — skipping post-execution verification.";
             await EmitLog(emitSse, "warn", verificationDetails, ct: ct);
         }
+        // The verifier's verdict is whatever PostExecuteVerify just said (or false when
+        // verification was skipped). All later taskComplete=true overrides leave it untouched.
+        verifierVerdict = taskComplete;
         if (!taskComplete)
         {
             var stepTruthCompleted = await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct);
@@ -665,6 +676,7 @@ partial class AgentController
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
                     taskComplete = true;
+                    verifierVerdict = reverifyComplete;
                     verificationDetails = reverifyDetails;
                 }
                 else if (reverifyIssues.Count == 0)
@@ -755,6 +767,7 @@ partial class AgentController
                             await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext,
                                 atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
                         taskComplete = dumpVerified;
+                        verifierVerdict = dumpVerified;
                         verificationDetails = dumpDetails;
                         verificationIssues = dumpIssues;
                         speculativeVerificationIssues = dumpSpeculative;
@@ -982,6 +995,7 @@ partial class AgentController
                 var (reVerified, reDetails, reIssues, reSpeculative, _) =
                     await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
                 taskComplete = reVerified;
+                verifierVerdict = reVerified;
                 verificationDetails = reDetails;
                 verificationIssues = reIssues;
                 speculativeVerificationIssues = reSpeculative;
@@ -1040,7 +1054,11 @@ partial class AgentController
         {
             var verifiedEntry = allSteps.OfType<Dictionary<string, object?>>()
                 .LastOrDefault(s => s.GetValueOrDefault("type")?.ToString() == "verified_complete");
-            await PublishVerificationAsync(cardId, taskComplete,
+            // Persist the VERIFIER's verdict, not the run-level taskComplete: a run that
+            // ended via a completion fallback (phantom-issue skip / circuit breaker /
+            // replanner-exhausted) is still "Verified incomplete" on the card — yellow, with
+            // the verifier's reason underneath — even though the agent stopped.
+            await PublishVerificationAsync(cardId, verifierVerdict,
                 verifiedEntry?.GetValueOrDefault("reason")?.ToString(), emitSse, ct);
         }
         // Final context event at run end: the discovery context is at its PEAK now (all
