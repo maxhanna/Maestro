@@ -1481,8 +1481,8 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         var searchGets = _clientFactory.FetchedUrls.Count(u =>
             u.Contains("duckduckgo", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(1, searchGets);
-        Assert.Single(allSteps.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() == "_web_search"));
+        Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "_web_search");
 
         // The web re-run rejection reached a LATER planner turn (the rejected duplicate is
         // fed back), steering the planner to use the results instead of re-searching.
@@ -1550,8 +1550,8 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // The fetch budget was exhausted BEFORE the halt, so the system auto-injected ONE
         // _scraper attempt at the failing URL (deterministic, no LLM call) — and it failed
         // too, which is what let the repair auto-dump close the run.
-        var scraperResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() == "scraper"));
+        var scraperResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "scraper");
         Assert.Equal("error", scraperResult.GetValueOrDefault("status")?.ToString());
         Assert.Equal("https://www.example.com/latest-ai-breakthrough", scraperResult.GetValueOrDefault("url")?.ToString());
         Assert.Empty(_clientFactory.Unmatched);
@@ -1582,8 +1582,8 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         Assert.Equal(new[] { "_web_search", "_scraper" }, plan!.Plan.Select(s => s.File).ToArray());
         Assert.Equal("https://www.example.com/latest-ai-breakthrough", plan.Plan[1].Change);
         Assert.Equal(new[] { "https://www.example.com/latest-ai-breakthrough" }, fake.Urls.ToArray());
-        var scraperResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>()
-            .Where(r => r.GetValueOrDefault("type")?.ToString() == "scraper"));
+        var scraperResult = Assert.Single(allSteps.OfType<Dictionary<string, object?>>(),
+            r => r.GetValueOrDefault("type")?.ToString() == "scraper");
         Assert.Equal("done", scraperResult.GetValueOrDefault("status")?.ToString());
 
         // Exactly the 3 planned fetch attempts (first fetch + the 2 retries) — the budget

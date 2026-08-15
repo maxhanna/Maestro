@@ -221,7 +221,7 @@ public class TestIntentPipelineTests : IDisposable
         public FakeMessageHandler(bool shouldFail) => _shouldFail = shouldFail;
         public HttpClient CreateClient(string name) => new(new Handler(_shouldFail));
         public HttpClient CreateClient() => CreateClient("default");
-        public new void Dispose() { }
+        public void Dispose() { }
 
         private sealed class Handler : HttpMessageHandler
         {

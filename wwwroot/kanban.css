@@ -1334,6 +1334,33 @@ body.dragging-active .card:hover {
     border-color: rgba(245, 158, 11, 0.7);
 }
 
+/* Done-button verdict coloring — the Done / Done & Delete buttons mirror the color of the
+   verification header above them (green = Verified complete, yellow = Verified incomplete)
+   instead of the type-based green/gold/amber. Colors match .verification-ok/.verification-fail. */
+.card .card-actions button.verdict-fail {
+    border-color: #e5c07b;
+    color: #e5c07b;
+    background: rgba(229, 192, 123, 0.08);
+    font-weight: 700;
+}
+
+.card .card-actions button.verdict-fail:hover {
+    background: rgba(229, 192, 123, 0.18);
+    border-color: #e5c07b;
+}
+
+.card .card-actions button.verdict-ok {
+    border-color: rgba(152, 195, 121, 0.95);
+    color: rgba(152, 195, 121, 0.95);
+    background: rgba(152, 195, 121, 0.08);
+    font-weight: 700;
+}
+
+.card .card-actions button.verdict-ok:hover {
+    background: rgba(152, 195, 121, 0.18);
+    border-color: rgba(152, 195, 121, 0.95);
+}
+
 .card-endpoint-select {
     font-size: 11px;
     padding: 3px 24px 3px 8px;

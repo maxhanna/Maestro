@@ -39,6 +39,17 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
     init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
       vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
+      // Done-button verdict color — the Done / Done & Delete buttons mirror the color of the
+      // verification header above them (green = Verified complete, yellow = Verified
+      // incomplete) instead of the type-based green/gold/amber. Returns 'ok' | 'fail' |
+      // null (no verification verdict on the card → callers fall back to type-based styling).
+      vm.cardDoneVerdict = function (card) {
+        if (card && card._verification) {
+          if (card._verification.complete === true) return 'ok';
+          if (card._verification.complete === false) return 'fail';
+        }
+        return null;
+      }
       // Card click — selects the card and pre-fills the AI prompt. Restored after
       // being lost in the app.js decoupling refactor (kanban.html still binds it).
       vm.selectCard = function (card) {

@@ -2341,7 +2341,9 @@
   <script src="/bughosted.js"></script>
   <script src="/filepicker.js"></script>
   <script src="/terminal.js"></script>
-  <script src="/agent.js"></script>
+  <!-- Versioned to bust stale browser caches — bump when agent.js changes (the
+       agent panel streams live SSE and a stale copy shows stale bugs). -->
+  <script src="/agent.js?v=20260815-1"></script>
   <script src="/voice-input.js"></script>
   <script src="/filetree.js"></script>
   <script src="/ide.js"></script>

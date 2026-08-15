@@ -2343,7 +2343,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// </summary>
     private static bool IsDumpTask(string? prompt, string projectRoot) =>
         TaskHintsWebNeed(prompt) &&
-        AgentOsOutputVerifier.TryGetFileOutputTarget(prompt, projectRoot, out _) &&
+        prompt is { } nonNullPrompt &&
+        AgentOsOutputVerifier.TryGetFileOutputTarget(nonNullPrompt, projectRoot, out _) &&
         !TaskExplicitlyRequestsScript(prompt);
 
     /// <summary>

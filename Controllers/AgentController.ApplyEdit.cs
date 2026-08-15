@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http.Features;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -1082,7 +1083,7 @@ partial class AgentController
                 }
                 if (wipeReason == null)
                 {
-                    wipeReason = AgentEditHeuristics.DetectDuplicatePropertyAddition(oldStr!, newStr!);
+                    wipeReason = AgentEditHeuristics.DetectDuplicatePropertyAddition(oldStr!, newStr!, relPath);
                 }
                 if (wipeReason == null)
                 {
@@ -1758,15 +1759,41 @@ partial class AgentController
                 {
                     try { await onActivity("verifying"); } catch { }
                 }
+                // ── Deterministic Python syntax gate (pre-check) ──────────────────────
+                // The real interpreter outranks the LLM verifier for .py files. A file that
+                // compiles is provably free of syntax errors (the LLM's "syntax error"
+                // abandonments on FORMAT C inserts are false positives), and a file that does
+                // NOT compile is rejected with the ACTUAL compiler error instead of a vague
+                // "syntax error in function definition" the retry cannot act on. Verdicts:
+                //   keep    — edited file compiles cleanly
+                //   abandon — edited file fails to compile and the failure is NEW (pre-edit
+                //             content compiled, or failed with a DIFFERENT error)
+                //   neutral — pre-edit content fails with the IDENTICAL error (pre-existing
+                //             breakage, not caused by this edit) → LLM verdict decides, but
+                //             the real error is surfaced in the reason
+                var pyGate = (Verdict: "", Error: "");
+                // Deterministic (server-synthesized) edits skip the gate — their content is
+                // generated mechanically and already trusted.
+                if (!isDeterministicEdit &&
+                    relPath.EndsWith(".py", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(newContent))
+                {
+                    pyGate = await TryPythonSyntaxGateAsync(newContent, preEditContent, ct);
+                }
                 var (decisions, reasons, scores, needsExtraStepFlags, deterministicPlaceholderReject) =
                     isDeterministicEdit
                         ? (new List<string> { "keep", "keep", "keep" },
                            new List<string> { "Deterministic edit — old/new synthesized server-side; verification bypassed", string.Empty, string.Empty },
                            new List<int> { 100, 100, 100 },
                            new List<bool> { false, false, false }, false)
-                        : await RunLlmVerifyRoundsAsync(newStr, oldStr, relPath, prompt, step.Change,
-                            preEditContent, newContent, emitSse, ct, attemptScores, explorationContext ?? "",
-                            plan, planItemIndex, sqlMigrationNote, causalContext);
+                        : pyGate.Verdict == "abandon"
+                            ? (new List<string> { "abandon" },
+                               new List<string> { "🐍 Deterministic Python syntax check FAILED — " + pyGate.Error },
+                               new List<int> { 0 },
+                               new List<bool> { false }, false)
+                            : await RunLlmVerifyRoundsAsync(newStr, oldStr, relPath, prompt, step.Change,
+                                preEditContent, newContent, emitSse, ct, attemptScores, explorationContext ?? "",
+                                plan, planItemIndex, sqlMigrationNote, causalContext);
                 stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
                 stepExtraStepReason = reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
                 var roundsDone = decisions.Count;
@@ -1786,6 +1813,34 @@ partial class AgentController
                     $"scores [{string.Join(", ", scores)}] — final: {llmGateDecision} (avg {avgScore}/100). " +
                     $"Reasons: [{string.Join(" | ", truncatedReasons)}]";
                 var llmGateScore = avgScore;
+                // ── Deterministic Python syntax gate (post-LLM override) ───────────────
+                // The compile result outranks the LLM verifier: a compiling file is KEPT even
+                // when the LLM abandons on a syntax claim; a non-compiling file is rejected
+                // with the real compiler error and cannot be flipped back to keep by the
+                // heuristic overrides below.
+                var pythonGateHardReject = false;
+                if (pyGate.Verdict == "keep")
+                {
+                    if (llmGateDecision == "abandon")
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"  🐍 Deterministic Python gate: edited {relPath} compiles cleanly (python -m py_compile) — overriding LLM abandon to KEEP", ct: ct);
+                        llmGateDecision = "keep";
+                        llmGateScore = Math.Max(llmGateScore, 85);
+                        llmGateReason = "🐍 Deterministic Python syntax gate PASSED (edited file compiles) — " + llmGateReason;
+                    }
+                }
+                else if (pyGate.Verdict == "abandon")
+                {
+                    pythonGateHardReject = true;
+                    llmGateDecision = "abandon";
+                    llmGateScore = 0;
+                    llmGateReason = "🐍 Deterministic Python syntax check FAILED — " + pyGate.Error;
+                }
+                else if (pyGate.Verdict == "neutral" && !string.IsNullOrEmpty(pyGate.Error))
+                {
+                    llmGateReason = "🐍 Python compile error is PRE-EXISTING (identical in the pre-edit file, unchanged by this edit): " + pyGate.Error + " — " + llmGateReason;
+                }
                 attemptScores.Add((attempt + 1, llmGateScore, llmGateReason, newStr));
                 if (llmGateScore > bestScore)
                 {
@@ -1871,14 +1926,14 @@ partial class AgentController
                                     ct: ct);
                             }
                         }
-                        if (llmGateDecision == "abandon" && !deterministicPlaceholderReject)
+                        if (llmGateDecision == "abandon" && !deterministicPlaceholderReject && !pythonGateHardReject)
                         {
                             llmGateDecision = "keep";
                             llmGateScore = Math.Max(llmGateScore, 70);
                         }
                     }
                 }
-                if (llmGateDecision == "abandon" && oldStr != null && !deterministicPlaceholderReject)
+                if (llmGateDecision == "abandon" && oldStr != null && !deterministicPlaceholderReject && !pythonGateHardReject)
                 {
                     var methodDecls = CountNewMethodsInNewCode(newStr ?? "", oldStr);
                     if (methodDecls > 0)
@@ -2037,5 +2092,108 @@ partial class AgentController
         return await HandleStepFailureAsync(history, attemptScores, bestScore, bestAttempt, relPath,
             step, stepIndex, planItemIndex, cardId, allResults, emitSse, ct, replanDepth,
             plan, prompt, attachedFiles, projectRoot, onActivity);
+    }
+
+    // ── Deterministic Python syntax gate ─────────────────────────────────────────────
+    /// <summary>
+    /// Verdicts for the edited .py content vs. the pre-edit content:
+    /// "keep" — edited file compiles (python -m py_compile exit 0);
+    /// "abandon" — edited file fails AND the failure is new (pre-edit compiled, or failed
+    ///             with a different error);
+    /// "neutral" — pre-edit failed with the IDENTICAL normalized error (pre-existing
+    ///             breakage this edit neither caused nor fixed) or python is unavailable.
+    /// </summary>
+    private async Task<(string Verdict, string Error)> TryPythonSyntaxGateAsync(
+        string newContent, string preEditContent, CancellationToken ct)
+    {
+        try
+        {
+            var tmpDir = Path.Combine(Path.GetTempPath(), "weaver-pyverify");
+            Directory.CreateDirectory(tmpDir);
+            var editedPath = Path.Combine(tmpDir, "edited_" + Guid.NewGuid().ToString("N") + ".py");
+            await System.IO.File.WriteAllTextAsync(editedPath, newContent, new UTF8Encoding(false), ct);
+            var (editedCode, editedErr) = await RunPyCompileAsync(editedPath, ct);
+            try { System.IO.File.Delete(editedPath); } catch { }
+            if (editedCode == 0) return ("keep", "");
+            if (editedCode == -2) return ("neutral", ""); // python unavailable — no gate
+            var editedMsg = NormalizePyCompileError(editedErr, editedPath);
+            if (string.IsNullOrWhiteSpace(preEditContent))
+                return ("abandon", editedMsg);
+            var prePath = Path.Combine(tmpDir, "pre_" + Guid.NewGuid().ToString("N") + ".py");
+            await System.IO.File.WriteAllTextAsync(prePath, preEditContent, new UTF8Encoding(false), ct);
+            var (preCode, preErr) = await RunPyCompileAsync(prePath, ct);
+            try { System.IO.File.Delete(prePath); } catch { }
+            var preMsg = NormalizePyCompileError(preErr, prePath);
+            var verdict = PythonSyntaxGateVerdict(editedCode, editedMsg, !string.IsNullOrWhiteSpace(preEditContent), preCode, preMsg);
+            return (verdict, verdict == "abandon" ? editedMsg : "");
+        }
+        catch
+        {
+            return ("neutral", "");
+        }
+    }
+
+    /// <summary>Pure verdict derivation for the Python syntax gate — unit-tested.
+    /// Codes: 0 = compiles, -1 = compile failed, -2 = interpreter unavailable.</summary>
+    public static string PythonSyntaxGateVerdict(
+        int editedCode, string editedErrorNormalized,
+        bool hasPreEditContent, int preCode, string preErrorNormalized)
+    {
+        if (editedCode == 0) return "keep";
+        if (editedCode == -2) return "neutral"; // interpreter unavailable — no gate
+        if (!hasPreEditContent) return "abandon";
+        if (preCode == -2) return "neutral";
+        if (preCode != 0 && string.Equals(preErrorNormalized, editedErrorNormalized, StringComparison.OrdinalIgnoreCase))
+            return "neutral"; // identical pre-existing error — not caused by this edit
+        return "abandon";
+    }
+
+    /// <summary>exit code 0 = compiles; -1 = compile failed; -2 = interpreter unavailable.</summary>
+    private static async Task<(int Code, string Error)> RunPyCompileAsync(string filePath, CancellationToken ct)
+    {
+        var exe = ScraperEnvironmentService.StaticInterpreterAvailable("python")
+            ? "python"
+            : ScraperEnvironmentService.StaticInterpreterAvailable("python3")
+                ? "python3"
+                : null;
+        if (exe == null) return (-2, "");
+        var psi = new ProcessStartInfo
+        {
+            FileName = exe,
+            Arguments = "-m py_compile \"" + filePath + "\"",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        try
+        {
+            using var p = Process.Start(psi);
+            if (p == null) return (-2, "");
+            var stdoutTask = p.StandardOutput.ReadToEndAsync(ct);
+            var stderrTask = p.StandardError.ReadToEndAsync(ct);
+            if (!p.WaitForExit(20000))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return (-2, "");
+            }
+            var err = await stderrTask;
+            var outp = await stdoutTask;
+            return (p.ExitCode, (err + outp).Trim());
+        }
+        catch
+        {
+            return (-2, "");
+        }
+    }
+
+    /// <summary>Strips the temp file path + collapses whitespace so pre-edit and edited
+    /// compile errors compare equal when the SAME error appears at the SAME source line.</summary>
+    public static string NormalizePyCompileError(string error, string filePath)
+    {
+        var msg = error.Replace(filePath.Replace('\\', '/'), "<file>").Replace(filePath, "<file>");
+        msg = Regex.Replace(msg, @"\r\n?", "\n");
+        msg = Regex.Replace(msg, @"\s+", " ").Trim();
+        return msg;
     }
 }

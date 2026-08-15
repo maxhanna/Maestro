@@ -220,7 +220,7 @@ public class RejectedPlanStepPersistenceTests
     }
 
     [Fact]
-    public void LoadPlanFromBoardDataAsync_PreservesRejectedStatusForReplaySkip()
+    public async Task LoadPlanFromBoardDataAsync_PreservesRejectedStatusForReplaySkip()
     {
         // The benchmark-run shape: the card's persisted plan contains a step the interleaved
         // validator REJECTED (the `mkdir` _command, status=rejected, done=false). When the
@@ -237,8 +237,8 @@ public class RejectedPlanStepPersistenceTests
 
             var method = typeof(AgentController).GetMethod("LoadPlanFromBoardDataAsync", BindingFlags.NonPublic | BindingFlags.Instance)
                 ?? throw new InvalidOperationException("LoadPlanFromBoardDataAsync not found");
-            var result = ((Task<(AgentPlan? plan, HashSet<int>? completed, bool isBenchmark, List<Dictionary<string, object?>>? webResults)>)method
-                .Invoke(controller, new object?[] { "card-replay" })!).GetAwaiter().GetResult();
+            var result = await ((Task<(AgentPlan? plan, HashSet<int>? completed, bool isBenchmark, List<Dictionary<string, object?>>? webResults)>)method
+                .Invoke(controller, new object?[] { "card-replay" })!);
             Assert.Null(result.webResults); // no web steps in this fixture — the 4th slot stays null
 
             Assert.NotNull(result.plan);
@@ -250,7 +250,7 @@ public class RejectedPlanStepPersistenceTests
             // The rejected step was never done, so it is NOT in the completed set — the
             // replay skip must come from the Status marker, not from completedIndices.
             Assert.NotNull(result.completed);
-            Assert.False(result.completed!.Contains(2));
+            Assert.DoesNotContain(2, result.completed!);
         }
         finally { try { Directory.Delete(dir, true); } catch { /* db file stays locked — best effort */ } }
     }

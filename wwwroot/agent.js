@@ -976,9 +976,12 @@ angular.module('kanbanApp')
                                                                 // gate. Marker-only events (items empty, e.g. the discovery + pre-plan
                                                                 // thinking phase) still update the marker so the panel keeps streaming.
                                                                 if (parsed && ((parsed.items && parsed.items.length) || (parsed.marker && parsed.marker.File))) {
-                                                                    var parts = planPayloadParts(parsed);
-                                                                    vm.planMarker = parts.marker;
-                                                                    if (parts.items.length) {
+                                                                    // NOTE: this local MUST NOT be named `parts` — the SSE chunk array above
+                                                                    // (for (var p = 0; p < parts.length; ...)) lives in the same function scope
+                                                                    // and `var` hoisting would shadow it with undefined and crash the reader.
+                                                                    var planParts = planPayloadParts(parsed);
+                                                                    vm.planMarker = planParts.marker;
+                                                                    if (planParts.items.length) {
                                                                         var existingState = {};
                                                                         if (vm.planItems) vm.planItems.forEach(function (pi) { existingState[pi.file + '|' + pi.change] = { done: pi.done, diffs: pi.diffs, _diffApplied: pi._diffApplied, _diffStepStatus: pi._diffStepStatus }; });
                                                                         // Persisted rejected steps (web-gate vetoes) are not carried by plan events —
@@ -988,7 +991,7 @@ angular.module('kanbanApp')
                                                                         if (planCard && planCard._plan && planCard._plan.items) {
                                                                             preservedRejected = planCard._plan.items.filter(function (pi) { return pi.status === 'rejected'; });
                                                                         }
-                                                                        vm.planItems = parts.items.map(function (item, i) {
+                                                                        vm.planItems = planParts.items.map(function (item, i) {
                                                                             var file = item.File || item.file || '?';
                                                                             var change = item.Change || item.change || '';
                                                                             var key = file + '|' + change;
@@ -1006,7 +1009,7 @@ angular.module('kanbanApp')
                                                                     }
                                                                     if (parsed.thinking) vm.streamingThinking = parsed.thinking;
                                                                     if (parsed.summary && !parsed.live) vm.streamingSummary = parsed.summary;
-                                                                    if (!parsed.live) pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + parts.items.length + ' steps)', { itemCount: parts.items.length, score: parsed.score });
+                                                                    if (!parsed.live) pushAgentLog(vm, 'info', '📋 Plan: ' + parsed.summary + ' (' + planParts.items.length + ' steps)', { itemCount: planParts.items.length, score: parsed.score });
                                                                 }
                                                                 break;
                                                             case 'edit-resolve':

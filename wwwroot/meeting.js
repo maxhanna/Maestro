@@ -6936,12 +6936,16 @@ angular.module('kanbanApp')
           var smugFactor = Math.min(1, (s.smug || 0) / 100);
           var bodyColor = rageFactor > 0 ? blendHex(s.color, '#ff3b30', rageFactor) : s.color;
           if (smugFactor > 0) bodyColor = blendHex(bodyColor, '#ffcf6b', smugFactor * 0.55);
-          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          // Soft ground shadow: radial falloff reads as depth, not a cartoon blob
+          var shG = ctx.createRadialGradient(px, py + bodyH * 0.66, bodyW * 0.1, px, py + bodyH * 0.66, bodyW * 0.95);
+          shG.addColorStop(0, 'rgba(0,0,0,0.30)');
+          shG.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = shG;
           ctx.beginPath();
-          ctx.ellipse(px, py + bodyH * 0.7, bodyW * 0.9, bodyH * 0.28, 0, 0, 6.283);
+          ctx.ellipse(px, py + bodyH * 0.66, bodyW * 0.9, bodyH * 0.28, 0, 0, 6.283);
           ctx.fill();
           ctx.strokeStyle = bodyColor;
-          ctx.lineWidth = Math.max(1.5, 2 * scale);
+          ctx.lineWidth = Math.max(1.3, 1.7 * scale);
           ctx.lineCap = 'round';
           var legSwing = s.state === 'walk' ? Math.sin(s.walkPhase) : Math.sin(s.walkPhase * 0.6) * 0.35;
           for (var i = 0; i < 4; i++) {
@@ -6992,33 +6996,44 @@ angular.module('kanbanApp')
             ctx.fill();
             ctx.globalAlpha = 1;
           }
-          var bodyG = ctx.createRadialGradient(px - bodyW * 0.18, cy - bodyH * 0.35, bodyW * 0.12, px, cy, bodyW * 0.85);
-          bodyG.addColorStop(0, blendHex(bodyColor, '#ffffff', 0.4));
-          bodyG.addColorStop(0.5, bodyColor);
-          bodyG.addColorStop(1, blendHex(bodyColor, '#000000', 0.38));
+          // Body: a soft head+abdomen egg silhouette with one continuous gradient.
+          // No hard outline — the silhouette is read from the gradient's dark edge,
+          // which keeps the spiders looking like characters, not stickers.
+          var bodyG = ctx.createRadialGradient(px - bodyW * 0.2, cy - bodyH * 0.42, bodyW * 0.1, px, cy + bodyH * 0.05, bodyW * 0.9);
+          bodyG.addColorStop(0, blendHex(bodyColor, '#ffffff', 0.30));
+          bodyG.addColorStop(0.55, bodyColor);
+          bodyG.addColorStop(1, blendHex(bodyColor, '#000000', 0.32));
           ctx.fillStyle = bodyG;
-          rr(px - bodyW / 2, cy - bodyH / 2, bodyW, bodyH, 6 * scale);
+          ctx.beginPath();
+          ctx.ellipse(px, cy + bodyH * 0.16, bodyW * 0.47, bodyH * 0.36, 0, 0, 6.283);
           ctx.fill();
-          ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-          ctx.fillStyle = 'rgba(255,255,255,0.28)';
-          rr(px - bodyW / 2 + 3 * scale, cy - bodyH / 2 + 2 * scale, bodyW * 0.4, bodyH * 0.28, 3 * scale);
+          ctx.beginPath();
+          ctx.ellipse(px, cy - bodyH * 0.2, bodyW * 0.42, bodyH * 0.3, 0, 0, 6.283);
+          ctx.fill();
+          // Core shadow pooling at the abdomen's lower curve
+          ctx.fillStyle = 'rgba(0,0,0,0.10)';
+          ctx.beginPath();
+          ctx.ellipse(px, cy + bodyH * 0.31, bodyW * 0.33, bodyH * 0.12, 0, 0, 6.283);
+          ctx.fill();
+          // Gentle rim light on the upper-left, replaces the flat highlight strip
+          ctx.fillStyle = 'rgba(255,255,255,0.16)';
+          ctx.beginPath();
+          ctx.ellipse(px - bodyW * 0.17, cy - bodyH * 0.35, bodyW * 0.2, bodyH * 0.1, -0.5, 0, 6.283);
           ctx.fill();
           var look = s.state === 'walk' ? 1 : 0;
           var ex = px + (s.target.x > s.x ? 3 : s.target.x < s.x ? -3 : 0) * scale;
-          var eyeR = s.glaringAt ? 2.6 * scale : 3.2 * scale;
+          var eyeR = s.glaringAt ? 2.2 * scale : 2.6 * scale;
           if (s.glaringAt) {
             ex = px + (s.glaringAt.x > s.x ? 1 : -1) * 3.4 * scale;
           }
           var lookUp = (s.waveT > 0 || (scene.watching && scene.watching.star === s)) ? 1.4 * scale : 0;
           var ey = cy - bodyH * 0.1 - lookUp;
-          ctx.fillStyle = '#fff';
+          ctx.fillStyle = 'rgba(245,248,252,0.95)';
           ctx.beginPath(); ctx.arc(px - bodyW * 0.18, ey, eyeR, 0, 6.283); ctx.fill();
           ctx.beginPath(); ctx.arc(px + bodyW * 0.18, ey, eyeR, 0, 6.283); ctx.fill();
-          ctx.fillStyle = '#111';
-          ctx.beginPath(); ctx.arc(px - bodyW * 0.18 + ex * 0.4 + drunkPup, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
-          ctx.beginPath(); ctx.arc(px + bodyW * 0.18 + ex * 0.4 - drunkPup, ey - lookUp * 0.4, 1.6 * scale, 0, 6.283); ctx.fill();
+          ctx.fillStyle = 'rgba(15,18,24,0.92)';
+          ctx.beginPath(); ctx.arc(px - bodyW * 0.18 + ex * 0.4 + drunkPup, ey - lookUp * 0.4 - 0.3 * scale, 1.15 * scale, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.arc(px + bodyW * 0.18 + ex * 0.4 - drunkPup, ey - lookUp * 0.4 - 0.3 * scale, 1.15 * scale, 0, 6.283); ctx.fill();
           drawSpiderDetails(px, cy, bodyW, bodyH, scale, s, ey);
           if (scene.writer === s && s.state === 'write') {
             ctx.strokeStyle = '#222';
@@ -7203,16 +7218,16 @@ angular.module('kanbanApp')
             ctx.stroke();
           }
           if (r !== 'complexity') {
-            ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+            ctx.strokeStyle = 'rgba(0,0,0,0.30)';
             ctx.lineWidth = Math.max(0.8, 1 * scale);
             ctx.beginPath();
-            ctx.arc(px, cy + bodyH * 0.08, bodyW * 0.14, 0.3, Math.PI - 0.3);
+            ctx.arc(px, cy + bodyH * 0.02, bodyW * 0.13, 0.3, Math.PI - 0.3);
             ctx.stroke();
           } else {
-            ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+            ctx.strokeStyle = 'rgba(0,0,0,0.38)';
             ctx.lineWidth = Math.max(0.8, 1 * scale);
             ctx.beginPath();
-            ctx.arc(px, cy + bodyH * 0.2, bodyW * 0.13, Math.PI + 0.3, Math.PI * 2 - 0.3);
+            ctx.arc(px, cy + bodyH * 0.06, bodyW * 0.12, Math.PI + 0.3, Math.PI * 2 - 0.3);
             ctx.stroke();
           }
           ctx.restore();

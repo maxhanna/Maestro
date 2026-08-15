@@ -975,12 +975,12 @@
           <!-- Actions -->
           <div class="card-actions">
             <button ng-if="!card._benchmark && !card._fromCron" ng-click="vm.moveCard(card.id,'doing','done')"
-              class="{{vm.isCardActive(card.id) ? 'ghost' : 'success'}} small"
+              class="{{vm.isCardActive(card.id) ? 'ghost' : (vm.cardDoneVerdict(card) === 'fail' ? 'verdict-fail' : 'success')}} small"
               title="{{vm.isCardActive(card.id) ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.isCardActive(card.id)">✔ Done</button>
             <button ng-if="card._benchmark || card._fromCron" ng-click="vm.deleteCard(card.id, 'doing')"
-              class="small {{ vm.isCardActive(card.id) ? 'ghost' : (card._fromCron ? 'btn-cron-done' : '') }}"
-              ng-style="{'color': vm.isCardActive(card.id) ? '' : (card._fromCron ? '#fbbf24' : '#e5c07b') }"
+              class="small {{ vm.isCardActive(card.id) ? 'ghost' : (vm.cardDoneVerdict(card) === 'fail' ? 'verdict-fail' : (vm.cardDoneVerdict(card) === 'ok' ? 'verdict-ok' : (card._fromCron ? 'btn-cron-done' : ''))) }}"
+              ng-style="{'color': vm.isCardActive(card.id) || vm.cardDoneVerdict(card) ? '' : (card._fromCron ? '#fbbf24' : '#e5c07b') }"
               title="{{ vm.isCardActive(card.id) ? 'Disabled while active' : (card._fromCron ? 'Deletes the scheduled card once its task is complete.' : 'Deletes the card.') }}"
               ng-disabled="vm.isCardActive(card.id)">{{ card._fromCron ? '⏰ Done &amp; Delete' : '🗑 Done &amp; Delete'
               }}</button>

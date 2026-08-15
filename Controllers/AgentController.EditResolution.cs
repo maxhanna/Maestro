@@ -389,6 +389,15 @@ partial class AgentController
             formatted = newCode;
         }
 
+        // Python is indentation-significant: the generic min-indent realignment below counts
+        // a tab as ONE character, so a block whose lines mix tabs and spaces (a very common
+        // LLM emission) gets misaligned and the file dies with TabError. Rebuild the block
+        // against the anchor's own indent unit, preserving RELATIVE depth.
+        if (filePath != null && Path.GetExtension(filePath).Equals(".py", StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentCodeFormatting.ReindentPythonBlock(formatted, baseIndent);
+        }
+
         var lines = formatted.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
         var minIndent = int.MaxValue;
         foreach (var line in lines)
@@ -1653,6 +1662,11 @@ partial class AgentController
                                         var methodBaseIndent = oldFirstRealLine != null
                                             ? Regex.Match(oldFirstRealLine, @"^(\s*)").Groups[1].Value
                                             : "";
+                                        if (string.Equals(ext, ".py", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            newStr = astOldStr + "\n\n" + AgentCodeFormatting.ReindentPythonBlock(newCodeStr, methodBaseIndent);
+                                            return (astOldStr, newStr, false, null, false, null, true);
+                                        }
                                         var lines = newCodeStr.Split('\n');
                                         var nonEmpty = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
                                         var minIndent = nonEmpty.Count > 0

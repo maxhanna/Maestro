@@ -263,8 +263,23 @@ public static class AgentEditHeuristics
         return null;
     }
 
-    public static string? DetectDuplicatePropertyAddition(string oldStr, string newStr)
+    /// <summary>Python block-header keywords that form a `word:` line — never object/dict
+    /// keys. Without this, a FORMAT C insert of a method containing `else:`/`elif:`/`if:`
+    /// lines trips the duplicate-property guard ("newString contains 2 occurrences of
+    /// property 'else'"), killing otherwise-good Python edits.</summary>
+    private static readonly HashSet<string> PythonBlockKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
+        "if", "elif", "else", "for", "while", "with", "try", "except", "finally",
+        "def", "class", "match", "case", "lambda", "yield", "async", "await"
+    };
+
+    public static string? DetectDuplicatePropertyAddition(string oldStr, string newStr, string? relPath = null)
+    {
+        // Python has no brace-object `key: value` shape this guard understands — its `word:`
+        // lines are block headers, not properties. Running the guard on .py just produces
+        // false "DUPLICATE PROPERTY ADDITION" rejections on else/elif/def lines.
+        if (relPath != null && Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase))
+            return null;
         string StripStrings(string s)
         {
             s = Regex.Replace(s, @"`[^`]*`", "``", RegexOptions.Singleline);
@@ -286,6 +301,7 @@ public static class AgentEditHeuristics
             var g2 = m.Groups[2].Value;
             var key = (g1.Length > 0 ? g1 : g2.Length > 0 ? g2 : m.Groups[3].Value).Trim();
             if (string.IsNullOrEmpty(key)) continue;
+            if (PythonBlockKeywords.Contains(key)) continue;
             if (!oldCounts.ContainsKey(key)) oldCounts[key] = 0;
             oldCounts[key]++;
         }
@@ -300,6 +316,7 @@ public static class AgentEditHeuristics
             var g2 = m.Groups[2].Value;
             var key = (g1.Length > 0 ? g1 : g2.Length > 0 ? g2 : m.Groups[3].Value).Trim();
             if (string.IsNullOrEmpty(key)) continue;
+            if (PythonBlockKeywords.Contains(key)) continue;
             if (!newCounts.ContainsKey(key)) newCounts[key] = 0;
             newCounts[key]++;
         }

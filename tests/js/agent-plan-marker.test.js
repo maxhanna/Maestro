@@ -97,5 +97,31 @@ test('index.html renders the marker as a bottom-of-plan row with a spinner, no c
   assert.ok(/vm\.planMarkerLabel\(vm\.planMarker\.file, vm\.planMarker\.change\)/.test(html), 'marker row must show the activity text');
 });
 
+// ── SSE reader scope: the plan handler must NEVER declare `var parts` ──────
+// The reader splits each chunk with `var parts = buffer.split('\n\n')` and iterates
+// `for (var p = 0; p < parts.length; p++)`. The plan case lives in the SAME
+// $applyAsync function scope, so `var parts = planPayloadParts(parsed)` there
+// hoists to the top of that function and shadows the chunk array with `undefined`
+// — crashing the panel with "TypeError: Cannot read properties of undefined
+// (reading 'length')" at the for loop on every chunk whose first event is not a
+// plan event. The split local must keep a distinct name (planParts).
+const readerMatch = /var parts = buffer\.split\('\\n\\n'\); buffer = parts\.pop\(\);\n\s*\$scope\.\$applyAsync\(function \(\) \{([\s\S]*?)\n\s*\}\);\n\s*try \{ \$scope\.\$applyAsync\(\); \} catch \(e\) \{ \}\n\s*readNext\(\);/;
+const readerExec = readerMatch.exec(src);
+assert(readerExec, 'SSE reader pattern not found in wwwroot/agent.js — chunk loop may have drifted');
+const applyBody = readerExec[1];
+const chunkArrayDecls = (applyBody.match(/\bvar parts\b/g) || []).length;
+
+test('plan handler must not declare `var parts` inside the SSE $applyAsync scope (var-hoisting crash)', () => {
+  assert.strictEqual(chunkArrayDecls, 0,
+    'found `var parts` inside the SSE reader scope — it hoists over the for-loop and crashes `parts.length` (TypeError: Cannot read properties of undefined)');
+});
+
+test('plan handler names its split-payload local `planParts` (distinct from the chunk array)', () => {
+  assert.ok(/\bvar planParts = planPayloadParts\(parsed\)/.test(applyBody),
+    'plan case must assign planPayloadParts(parsed) to a distinct local named planParts');
+  assert.ok(/vm\.planMarker = planParts\.marker/.test(applyBody), 'marker must be read from planParts');
+  assert.ok(/vm\.planItems = planParts\.items\.map/.test(applyBody), 'plan items must be mapped from planParts');
+});
+
 console.log('\nagent-plan-marker.test.js: ' + passed + ' passed / ' + failed + ' failed / ' + (passed + failed) + ' tests');
 process.exit(failed > 0 ? 1 : 0);

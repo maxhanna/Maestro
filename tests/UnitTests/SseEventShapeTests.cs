@@ -87,7 +87,7 @@ public class SseEventShapeTests
     /// while the step is still being produced.
     /// </summary>
     [Fact]
-    public void PlanEvent_MarkerIsSeparate_NotAplanItem()
+    public async Task PlanEvent_MarkerIsSeparate_NotAplanItem()
     {
         var controller = (AgentController)RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
         var ctx = new DefaultHttpContext();
@@ -110,7 +110,7 @@ public class SseEventShapeTests
             "Deep thinking for plan — Step 3…", "Deep thinking for plan — Step 3…",
             1, CancellationToken.None
         })!;
-        task.GetAwaiter().GetResult();
+        await task;
 
         stream.Position = 0;
         using var reader = new StreamReader(stream);

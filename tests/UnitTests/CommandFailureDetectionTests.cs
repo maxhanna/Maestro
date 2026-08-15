@@ -234,16 +234,16 @@ public class CommandFailureDetectionTests
             Assert.True(AgentController.PatchMissingPortIntoScript(withStrict));
             var patched = File.ReadAllText(withStrict);
             Assert.Contains("const PORT = process.env.PORT || 8765;", patched);
-            Assert.True(patched.StartsWith("\"use strict\";\nconst PORT ="), "the patch must follow the use-strict directive");
+            Assert.StartsWith("\"use strict\";\nconst PORT =", patched);
             // Patching again is a NO-OP (PORT is already declared — never double-inject).
             Assert.False(AgentController.PatchMissingPortIntoScript(withStrict));
-            Assert.Equal(1, Regex.Matches(File.ReadAllText(withStrict), "const PORT =").Count);
+            Assert.Single(Regex.Matches(File.ReadAllText(withStrict), "const PORT ="));
 
             // No 'use strict': the patch lands at the top.
             var noStrict = Path.Combine(dir, "plain.js");
             File.WriteAllText(noStrict, "const http = require('http');\nserver.listen(PORT, () => {});\n");
             Assert.True(AgentController.PatchMissingPortIntoScript(noStrict));
-            Assert.True(File.ReadAllText(noStrict).StartsWith("const PORT = process.env.PORT || 8765;"));
+            Assert.StartsWith("const PORT = process.env.PORT || 8765;", File.ReadAllText(noStrict));
 
             // Missing/unreadable file never patches.
             Assert.False(AgentController.PatchMissingPortIntoScript(Path.Combine(dir, "nope.js")));

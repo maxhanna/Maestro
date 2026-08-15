@@ -415,27 +415,27 @@ public class TabularFileServiceTests
         // STEP 2 — add a type column (empty for existing rows).
         Assert.True(TabularFileService.TryEditDelimited(csv, ',', "add a type column", out csv, out _));
         // STEP 3 — add the three custom rows with the placeholder type.
-        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+        Assert.True(TabularFileService.TryEditDelimited(csv!, ',',
             "add a row with id=1026, name=weavmon, type=unknown", out csv, out _));
-        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+        Assert.True(TabularFileService.TryEditDelimited(csv!, ',',
             "add a row with id=1027, name=kanbanite, type=unknown", out csv, out _));
-        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+        Assert.True(TabularFileService.TryEditDelimited(csv!, ',',
             "add a row with id=1028, name=bugcatcher, type=unknown", out csv, out _));
         // STEP 4 — MASS EDIT: one op fills the ORIGINAL rows' empty type cells with 'normal',
         // leaving the three custom rows' 'unknown' placeholder untouched.
-        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+        Assert.True(TabularFileService.TryEditDelimited(csv!, ',',
             "set type to 'normal' where type is empty", out csv, out var massReason));
         Assert.Contains("2 row(s)", massReason);
         Assert.Contains("(empty)", massReason);
         // STEP 5 — EDIT ROWS: each custom pokemon gets its real type (overwrites the placeholder).
-        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+        Assert.True(TabularFileService.TryEditDelimited(csv!, ',',
             "set type to 'electric' where name is 'weavmon'", out csv, out _));
-        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+        Assert.True(TabularFileService.TryEditDelimited(csv!, ',',
             "set type to 'ghost' where name is 'kanbanite'", out csv, out _));
-        Assert.True(TabularFileService.TryEditDelimited(csv, ',',
+        Assert.True(TabularFileService.TryEditDelimited(csv!, ',',
             "set type to 'fairy' where name is 'bugcatcher'", out csv, out _));
 
-        var t = TabularFileService.ParseCsv(csv);
+        var t = TabularFileService.ParseCsv(csv!);
         Assert.Equal(new[] { "FETCHED_AT: 2026-08-13" }, t.Preamble);
         Assert.Equal(new[] { "id", "name", "url", "type" }, t.Header);
         Assert.Equal(5, t.Rows.Count);

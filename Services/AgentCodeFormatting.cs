@@ -188,6 +188,80 @@ public static class AgentCodeFormatting
         return string.Join("\n", result);
     }
 
+    /// <summary>
+    /// Re-indents a Python code block so it can be inserted at a given anchor indentation.
+    /// The LLM's newCode often mixes tabs and spaces (or drops indentation on some lines),
+    /// which the generic min-indent realignment mishandles (tabs count as 1 char each) and
+    /// which Python rejects outright (TabError). This normalizes every line's leading
+    /// whitespace to the ANCHOR's own unit (tabs or spaces), measures indentation in that
+    /// unit, and rebuilds the block with relative depth preserved: the first non-empty line
+    /// lands exactly at <paramref name="anchorBaseIndent"/> and each following line keeps
+    /// its depth RELATIVE to it (so a def at the anchor level gets its body indented by one
+    /// unit, exactly as the anchor's own body is). Blank lines stay blank. The body text is
+    /// preserved verbatim; only leading whitespace is rewritten.
+    /// </summary>
+    public static string ReindentPythonBlock(string newCode, string anchorBaseIndent, int tabWidth = 4)
+    {
+        if (string.IsNullOrWhiteSpace(newCode)) return newCode;
+        if (tabWidth <= 0) tabWidth = 4;
+        var lines = newCode.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+        var anchorTabs = anchorBaseIndent.Contains('\t');
+        var normalized = new string[lines.Length];
+        var indents = new int[lines.Length];
+        int? baseIndent = null;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (string.IsNullOrWhiteSpace(line)) { normalized[i] = ""; indents[i] = 0; continue; }
+            var ws = new StringBuilder();
+            var pos = 0;
+            while (pos < line.Length && (line[pos] == ' ' || line[pos] == '\t'))
+            {
+                if (line[pos] == '\t') ws.Append(' ', tabWidth); else ws.Append(' ');
+                pos++;
+            }
+            indents[i] = ws.Length;
+            normalized[i] = line.Substring(pos);
+            if (baseIndent == null || indents[i] < baseIndent) baseIndent = indents[i];
+        }
+        if (baseIndent == null) baseIndent = 0;
+        // The block's OWN indent unit (GCD of distinct positive indents): a body written with
+        // 8 spaces under a flush-left def means ONE level (8-space file), not two — measuring
+        // relative depth in this unit, not raw characters, keeps the block internally valid.
+        var unit = tabWidth;
+        var positiveIndents = indents.Where(i => i > 0).Distinct().OrderBy(i => i).ToList();
+        if (positiveIndents.Count > 0)
+        {
+            var g = positiveIndents[0];
+            foreach (var v in positiveIndents.Skip(1)) g = Gcd(g, v);
+            if (g > 0) unit = g;
+        }
+        var sb = new StringBuilder();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace(normalized[i])) { sb.AppendLine(); continue; }
+            var relative = Math.Max(0, indents[i] - baseIndent.Value);
+            var relUnits = (int)Math.Round(relative / (double)unit);
+            string indentStr;
+            if (anchorTabs)
+            {
+                indentStr = anchorBaseIndent + new string('\t', relUnits);
+            }
+            else
+            {
+                indentStr = anchorBaseIndent + new string(' ', relUnits * unit);
+            }
+            sb.Append(indentStr).AppendLine(normalized[i]);
+        }
+        return sb.ToString().TrimEnd('\r', '\n');
+    }
+
+    private static int Gcd(int a, int b)
+    {
+        while (b != 0) { var t = a % b; a = b; b = t; }
+        return Math.Max(1, a);
+    }
+
     public static string ReindentToLevel(string code, string indent)
     {
         if (string.IsNullOrEmpty(code)) return code;
