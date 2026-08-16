@@ -584,6 +584,23 @@ public class BenchmarkService
                     Check.LiveUiTest("Heading renders on screen", "benchmark_test_22", "Benchmark 22"),
                     Check.LiveApiTest("Health endpoint answers", "benchmark_test_22", "/api/health")
                 ]
+            },
+            new()
+            {
+                Level = 23, Name = "Live Web Test 2: animated canvas spider (4 legs → 6 legs)",
+                Description = "Create a folder called 'benchmark_test_23' at the project root. Inside it, build a small web app that draws an ANIMATED spider on a <canvas>, then FIX the animation and VISUALLY VERIFY the fix with the live browser test suite by counting the spider's legs on screen.\n\nSTEP 1 — THE GAME (4 LEGS): Serve 'index.html' at / with a heading that says exactly 'Benchmark 23', a short paragraph, and a <canvas> that ANIMATES a spider (use requestAnimationFrame — the spider should move, not sit still). Start by drawing EXACTLY 4 legs. The page MUST expose the current leg count as a global JS variable named window.legCount, kept in sync by the same code that draws the legs, so the test suite can read the real animated state from the page. The server must read its port from the PORT environment variable, defaulting to 8765 — choose whatever language, runtime, or library you prefer.\n\nSTEP 2 — VISUALLY CONFIRM 4 LEGS: This is the important part — you must LOOK at the rendered page, not just the source. Use the live browser test to spin up the game and visually confirm the spider on the canvas has EXACTLY 4 legs. Write what you saw to benchmark_test_23/legs_report.txt with a line in this exact format: LEGS: 4\n\nSTEP 3 — THE FIX (a separate step): edit the animation to add 2 more legs — the spider must now draw EXACTLY 6 legs, and window.legCount must equal 6.\n\nSTEP 4 — RELOAD AND CONFIRM 6 LEGS: reload the server, run the live browser test again, and visually confirm the spider on the canvas now has EXACTLY 6 legs. Append a line to legs_report.txt in this exact format: LEGS: 6\n\nReport exactly what you saw at each stage. The benchmark passes only if the leg count confirmed by the live browser test goes from 4 to 6 on the canvas.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_23"),
+                    Check.File("Index page exists", "benchmark_test_23/index.html"),
+                    Check.AnyFileContains("Canvas element present", "benchmark_test_23", "<canvas"),
+                    Check.AnyFileContains("Animation loop present", "benchmark_test_23", "requestAnimationFrame"),
+                    Check.AnyFileContains("Leg count exposed to the test", "benchmark_test_23", "window.legCount"),
+                    Check.File("Legs report exists", "benchmark_test_23/legs_report.txt"),
+                    Check.Contains("Initial 4 legs recorded", "benchmark_test_23/legs_report.txt", "LEGS: 4"),
+                    Check.Contains("Final 6 legs recorded", "benchmark_test_23/legs_report.txt", "LEGS: 6"),
+                    Check.LiveJsTest("Canvas confirms 6 legs on screen", "benchmark_test_23", "window.legCount === 6")
+                ]
             }
         };
     }
@@ -756,17 +773,21 @@ public class BenchmarkService
                     break;
                 case BenchmarkCheckType.LiveUiTest:
                 case BenchmarkCheckType.LiveApiTest:
+                case BenchmarkCheckType.LiveJsTest:
                 {
                     // The LIVE WEB TEST check: spin up the benchmark folder's own server and
                     // verify the named target is actually present on screen (or the endpoint
-                    // answers over HTTP). This is the deterministic "testing suite" — the same
-                    // BrowserAutomationService the agent uses for "test the …" prompts.
+                    // answers over HTTP, or a JS expression evaluates true in a real browser).
+                    // This is the deterministic "testing suite" — the same BrowserAutomationService
+                    // the agent uses for "test the …" prompts.
                     var target = check.Value ?? "";
                     if (target.Length == 0) { result.Message = "Empty live-test target."; break; }
                     if (!Directory.Exists(path)) { result.Message = $"Missing directory: {check.Path}"; break; }
                     BrowserTestReport report;
                     if (check.Type == BenchmarkCheckType.LiveApiTest)
                         report = await BrowserTest.RunApiTestAsync(path, target, ct);
+                    else if (check.Type == BenchmarkCheckType.LiveJsTest)
+                        report = await BrowserTest.RunJsTestAsync(path, target, ct);
                     else
                         report = await BrowserTest.RunUiTestAsync(path, target, null, ct);
                     result.Passed = report.Passed;
@@ -873,7 +894,7 @@ public class BenchmarkPlanDefinition
     public List<BenchmarkAcceptanceCheck> AcceptanceChecks { get; set; } = new();
 }
 
-public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals, FileFreshTimestamp, DirectoryContains, LiveUiTest, LiveApiTest }
+public enum BenchmarkCheckType { DirectoryExists, FileExists, FileContains, FileNotContains, FileOccurrenceCount, FileEquals, FileFreshTimestamp, DirectoryContains, LiveUiTest, LiveApiTest, LiveJsTest }
 
 public static class Check
 {
@@ -925,6 +946,18 @@ public static class Check
     /// verifying it answers 2xx. The target is a route (e.g. "/api/health").</summary>
     public static BenchmarkAcceptanceCheck LiveApiTest(string name, string dir, string target, double weight = 2) =>
         new() { Name = name, Type = BenchmarkCheckType.LiveApiTest, Path = dir, Value = target, Weight = weight };
+
+    /// <summary>
+    /// LIVE JS TEST check: launches the folder's server, opens the page in a REAL browser,
+    /// and evaluates a JS expression against the RENDERED page — the expression must return
+    /// true for the check to pass. This is how a benchmark verifies canvas/animation state
+    /// that no amount of source-grepping or static-HTML probing can see: the page exposes a
+    /// readable global (e.g. <c>window.legCount</c>) and the check confirms its LIVE value
+    /// (e.g. <c>window.legCount === 6</c>). Requires a real browser (the HTTP/AngleSharp
+    /// fallback cannot run JS), so it reports a clear failure when none is available.
+    /// </summary>
+    public static BenchmarkAcceptanceCheck LiveJsTest(string name, string dir, string jsExpression, double weight = 3) =>
+        new() { Name = name, Type = BenchmarkCheckType.LiveJsTest, Path = dir, Value = jsExpression, Weight = weight };
 }
 
 public class BenchmarkAcceptanceCheck

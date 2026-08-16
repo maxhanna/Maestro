@@ -36,25 +36,47 @@ const body = kanbanSrc.slice(fnStart, fnEnd + 2).replace('vm.scrollLog = ', 'var
 const api = eval('(function () { ' + body + '\n return { scrollLog: scrollLog }; })()');
 const scrollLog = api.scrollLog;
 
-// A fake button + section: closest('.card-section') → querySelector('.log-entries').
-function fakeButton(container) {
+// A fake button + section: closest(SELECTORS) → querySelector finds the right
+// scroll container. The section mimics either a kanban card section (.card-section
+// → .log-entries) or an agent panel section (.agent-activity-log → .log-entries,
+// .agent-streaming-tokens → .streaming-tokens).
+function fakeButton(container, containerQuery, sectionClass) {
   return {
     closest: function (sel) {
-      assert.strictEqual(sel, '.card-section');
-      return { querySelector: function (q) { assert.strictEqual(q, '.log-entries'); return container; } };
+      assert.ok(sel.includes('.card-section') && sel.includes('.agent-activity-log')
+        && sel.includes('.agent-streaming-tokens'),
+        'scrollLog must target all section types, got: ' + sel);
+      return {
+        querySelector: function (q) {
+          if (q !== containerQuery) return null;
+          return container;
+        }
+      };
     }
   };
 }
 
-test('scrollLog bottom sets scrollTop to the full height', () => {
+test('scrollLog bottom sets scrollTop to the full height (kanban card section)', () => {
   const container = { scrollTop: 0, scrollHeight: 1000 };
-  scrollLog('bottom', { currentTarget: fakeButton(container), stopPropagation: () => {}, preventDefault: () => {} });
+  scrollLog('bottom', { currentTarget: fakeButton(container, '.log-entries'), stopPropagation: () => {}, preventDefault: () => {} });
   assert.strictEqual(container.scrollTop, 1000);
 });
 
-test('scrollLog top resets scrollTop to 0', () => {
+test('scrollLog top resets scrollTop to 0 (kanban card section)', () => {
   const container = { scrollTop: 500, scrollHeight: 1000 };
-  scrollLog('top', { currentTarget: fakeButton(container), stopPropagation: () => {}, preventDefault: () => {} });
+  scrollLog('top', { currentTarget: fakeButton(container, '.log-entries'), stopPropagation: () => {}, preventDefault: () => {} });
+  assert.strictEqual(container.scrollTop, 0);
+});
+
+test('scrollLog scrolls the agent panel 📋 Log section (.agent-activity-log → .log-entries)', () => {
+  const container = { scrollTop: 0, scrollHeight: 900 };
+  scrollLog('bottom', { currentTarget: fakeButton(container, '.log-entries'), stopPropagation: () => {}, preventDefault: () => {} });
+  assert.strictEqual(container.scrollTop, 900);
+});
+
+test('scrollLog scrolls the agent panel 💬 LLM Streaming section (.agent-streaming-tokens → .streaming-tokens)', () => {
+  const container = { scrollTop: 300, scrollHeight: 1200 };
+  scrollLog('top', { currentTarget: fakeButton(container, '.streaming-tokens'), stopPropagation: () => {}, preventDefault: () => {} });
   assert.strictEqual(container.scrollTop, 0);
 });
 
@@ -84,6 +106,27 @@ test('the Activity Log section specifically has the buttons wired too', () => {
   const actBlock = html.split('<span class="section-title">📋 Activity Log</span>')[1] || '';
   assert.ok(actBlock.includes(scrollMarkup), 'Activity Log section must have a scroll-to-top button');
   assert.ok(actBlock.includes(scrollDownMarkup), 'Activity Log section must have a scroll-to-bottom button');
+});
+
+// ── The agent panel (index.html) wires its 📋 Log and 💬 LLM Streaming sections ──
+const indexHtml = fs.readFileSync(path.join(__dirname, '../../wwwroot/index.html'), 'utf8');
+
+test('agent panel 📋 Log section has ▲/▼ wired to vm.scrollLog', () => {
+  const logMark = '<span>📋 Log ({{vm.agentActivityLogLength}})</span>';
+  assert.ok(indexHtml.includes(logMark), 'agent panel Log section header found');
+  const logBlock = indexHtml.split(logMark)[1] || '';
+  const logTop = logBlock.slice(0, logBlock.indexOf('</summary>'));
+  assert.ok(logTop.includes(scrollMarkup), 'Log section must have scroll-to-top button');
+  assert.ok(logTop.includes(scrollDownMarkup), 'Log section must have scroll-to-bottom button');
+});
+
+test('agent panel 💬 LLM Streaming section has ▲/▼ wired to vm.scrollLog', () => {
+  const llmMark = '<span>💬 LLM Streaming';
+  assert.ok(indexHtml.includes(llmMark), 'agent panel LLM Streaming header found');
+  const llmBlock = indexHtml.split(llmMark)[1] || '';
+  const llmTop = llmBlock.slice(0, llmBlock.indexOf('</summary>'));
+  assert.ok(llmTop.includes(scrollMarkup), 'LLM Streaming section must have scroll-to-top button');
+  assert.ok(llmTop.includes(scrollDownMarkup), 'LLM Streaming section must have scroll-to-bottom button');
 });
 
 function countLogSections(htmlText) {

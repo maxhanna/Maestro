@@ -3738,6 +3738,23 @@ h3 .small.ghost:hover {
 	color: var(--text);
 }
 
+.log-scroll-btn {
+	background: none;
+	border: 1px solid var(--border-color, #555);
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 10px;
+	line-height: 1;
+	padding: 0 5px;
+	border-radius: 3px;
+	user-select: none;
+}
+
+.log-scroll-btn:hover {
+	background: rgba(255, 255, 255, 0.1);
+	color: var(--text);
+}
+
 .log-font-size-label {
 	font-size: 10px;
 	color: var(--muted);

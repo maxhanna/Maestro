@@ -60,8 +60,10 @@ public class BenchmarkLiveWebTestTests : IDisposable
     {
         public BrowserTestReport? NextUiReport { get; set; }
         public BrowserTestReport? NextApiReport { get; set; }
+        public BrowserTestReport? NextJsReport { get; set; }
         public string? LastUiTarget { get; private set; }
         public string? LastApiTarget { get; private set; }
+        public string? LastJsExpression { get; private set; }
 
         public override Task<BrowserTestReport> RunUiTestAsync(string projectRoot, string target, string? prompt, CancellationToken ct = default)
         {
@@ -73,6 +75,12 @@ public class BenchmarkLiveWebTestTests : IDisposable
         {
             LastApiTarget = target;
             return Task.FromResult(NextApiReport ?? new BrowserTestReport { Target = target, Mode = "http", Passed = true });
+        }
+
+        public override Task<BrowserTestReport> RunJsTestAsync(string projectRoot, string expression, CancellationToken ct = default)
+        {
+            LastJsExpression = expression;
+            return Task.FromResult(NextJsReport ?? new BrowserTestReport { Target = expression, Mode = "browser", Passed = true });
         }
     }
 
@@ -196,6 +204,99 @@ public class BenchmarkLiveWebTestTests : IDisposable
         var root = NewStaticSite("x");
         var result = RunCheck(service, Check.LiveUiTest("heading", ".", ""), root);
         Assert.False(result.Passed);
+    }
+
+    // ── Benchmark 23 shape (animated canvas spider, 4 → 6 legs) ───────────
+
+    [Fact]
+    public void Level23_Description_DemandsAnimatedCanvasAndLegCountProgression()
+    {
+        var desc = BenchmarkService.GetBenchmarkPlans().First(p => p.Level == 23).Description;
+        // The canvas animation is the point: it must be ANIMATED (requestAnimationFrame),
+        // not a static image — that is what proves the browser can load live canvases.
+        Assert.Contains("canvas", desc, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("requestAnimationFrame", desc, StringComparison.OrdinalIgnoreCase);
+        // The two-stage fix: 4 legs first, then a separate step adds 2 more (6 total).
+        Assert.Contains("4 legs", desc, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("6 legs", desc, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("add 2 more legs", desc, StringComparison.OrdinalIgnoreCase);
+        // The count must be exposed to the test suite so it can be read from the LIVE page.
+        Assert.Contains("window.legCount", desc);
+        Assert.Contains("legs_report.txt", desc, StringComparison.OrdinalIgnoreCase);
+        // Visual inspection is demanded (the LLM must LOOK at the canvas) — the trigger
+        // that routes this benchmark through the live browser test.
+        Assert.Contains("LOOK at the rendered page", desc, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("visually confirm", desc, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Level23_Checks_IncludeLiveJsVerification()
+    {
+        var checks = BenchmarkService.GetBenchmarkPlans().First(p => p.Level == 23).AcceptanceChecks;
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.DirectoryExists && c.Path == "benchmark_test_23");
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.FileExists && c.Path == "benchmark_test_23/index.html");
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.DirectoryContains && c.Value == "<canvas");
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.DirectoryContains && c.Value == "requestAnimationFrame");
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.DirectoryContains && c.Value == "window.legCount");
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.FileExists && c.Path == "benchmark_test_23/legs_report.txt");
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.FileContains && c.Value == "LEGS: 4");
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.FileContains && c.Value == "LEGS: 6");
+        // The decisive check: the live page's window.legCount must equal 6 in a real browser.
+        Assert.Contains(checks, c => c.Type == BenchmarkCheckType.LiveJsTest && c.Value == "window.legCount === 6");
+    }
+
+    // ── LiveJsTest check (canned runner — mapping, not a real browser) ─────
+
+    [Fact]
+    public void LiveJsTest_ReportPassed_MapsToPass()
+    {
+        var fake = new FakeBrowserAutomationService
+        {
+            NextJsReport = new BrowserTestReport { Target = "window.legCount === 6", Mode = "browser", Passed = true }
+        };
+        var root = NewStaticSite("x");
+        var service = new BenchmarkService(SubstituteDb()) { BrowserTest = fake };
+        var result = RunCheck(service, Check.LiveJsTest("legs", ".", "window.legCount === 6"), root);
+        Assert.True(result.Passed, result.Message);
+        Assert.Equal("window.legCount === 6", fake.LastJsExpression);
+    }
+
+    [Fact]
+    public void LiveJsTest_ReportFailed_MapsToFail()
+    {
+        var fake = new FakeBrowserAutomationService
+        {
+            NextJsReport = new BrowserTestReport
+            {
+                Target = "window.legCount === 6", Mode = "browser", Passed = false,
+                Findings = { new TestFinding("fail", "JS `window.legCount === 6` evaluated false — expected true.") }
+            }
+        };
+        var root = NewStaticSite("x");
+        var service = new BenchmarkService(SubstituteDb()) { BrowserTest = fake };
+        var result = RunCheck(service, Check.LiveJsTest("legs", ".", "window.legCount === 6"), root);
+        Assert.False(result.Passed);
+        Assert.Contains("evaluated false", result.Message);
+    }
+
+    // ── LiveJsTest needs a REAL browser (no silent HTTP fallback) ─────────
+
+    [Fact]
+    public void LiveJsTest_NoBrowserAvailable_FailsWithClearMessage()
+    {
+        var root = NewStaticSite("x");
+        var service = new BenchmarkService(SubstituteDb())
+        {
+            BrowserTest = new BrowserAutomationService
+            {
+                Launcher = new ServerLauncherService(),
+                BrowserFactory = null, // no Chromium → the JS check must NOT false-pass
+                ServerTimeout = TimeSpan.FromSeconds(60)
+            }
+        };
+        var result = RunCheck(service, Check.LiveJsTest("legs", ".", "window.legCount === 6"), root);
+        Assert.False(result.Passed);
+        Assert.Contains("requires a real browser", result.Message);
     }
 
     // ── End-to-end: benchmark 22's full check list (the "testing suite" bridge) ──

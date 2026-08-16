@@ -90,6 +90,64 @@ public class BrowserAutomationService
         catch { }
     }
 
+    /// <summary>
+    /// Runs a LIVE JS test: launch the project's server, open the page in a REAL browser,
+    /// evaluate <paramref name="expression"/> against the RENDERED page, and pass only when
+    /// it returns boolean true. This is how a benchmark verifies canvas/animation state that
+    /// static HTML probing cannot see (e.g. an animated spider's live leg count). Unlike the
+    /// UI/API tests there is NO HTTP-probe fallback — evaluating JS requires a real browser,
+    /// so a browserless host gets a clear failure rather than a false pass.
+    /// </summary>
+    public virtual async Task<BrowserTestReport> RunJsTestAsync(
+        string projectRoot, string expression, CancellationToken ct = default)
+    {
+        var report = new BrowserTestReport { Target = expression };
+        var server = await LaunchServerAsync(projectRoot, report, ct);
+        if (server == null)
+        {
+            await Progress("done", null, "Live web test could not start (" + (report.LaunchError ?? "no server") + ")", ct);
+            return report;
+        }
+        try
+        {
+            var driver = AllowBrowser && BrowserFactory != null ? await BrowserFactory(ct) : null;
+            if (driver == null)
+            {
+                report.Mode = "http";
+                report.Findings.Add(new TestFinding("fail",
+                    "Live JS test requires a real browser — the HTTP/AngleSharp probe cannot evaluate \"" + expression + "\" on the rendered page."));
+                await Progress("done", report.ServerUrl, "Live JS test FAILED (no browser available)", ct);
+                return report;
+            }
+
+            report.Mode = "browser";
+            await driver.NavigateAsync(server.Url, ct);
+            await Progress("navigating", server.Url, $"Browser navigated to {server.Url}", ct);
+            await driver.SettleAsync(BrowserSettleTime, ct);
+            var raw = await driver.EvaluateAsync(expression, ct);
+            var passed = raw.ValueKind == System.Text.Json.JsonValueKind.True;
+            report.Findings.Add(passed
+                ? new TestFinding("pass", $"JS `{expression}` evaluated true on the rendered page.")
+                : new TestFinding("fail", $"JS `{expression}` evaluated {raw.GetRawText()} — expected true."));
+            var snapshot = await driver.GetSnapshotAsync(ct);
+            await EmitSnapshot(snapshot, server.Url, ct);
+            report.BodyTextExcerpt = Excerpt(snapshot.BodyText);
+        }
+        catch (Exception ex)
+        {
+            report.Findings.Add(new TestFinding("fail", $"Browser/JS error: {ex.Message}"));
+        }
+        finally
+        {
+            server.Stop();
+        }
+        report.Passed = !report.HasFailures;
+        await Progress("done", report.ServerUrl, report.Passed
+            ? $"Live web test PASSED — `{expression}` is true ({report.Mode})"
+            : "Live web test FAILED", ct);
+        return report;
+    }
+
     /// <summary>Runs a UI test: launch the project's server and inspect the section the
     /// prompt names in a real browser (or HTTP probe fallback).</summary>
     public virtual async Task<BrowserTestReport> RunUiTestAsync(

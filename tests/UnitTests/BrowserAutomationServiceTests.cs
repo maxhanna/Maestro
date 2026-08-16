@@ -164,6 +164,115 @@ public class BrowserAutomationServiceTests : IDisposable
         Assert.Contains("Benchmark22", snapEvent.Snapshot.Headings);
     }
 
+    // ── Benchmark 23: LIVE JS tests on an animated canvas ──────────────────
+
+    // The benchmark-23 game contract: an ANIMATED canvas spider exposing its live leg
+    // count as window.legCount (the same value the draw loop uses) so the test suite can
+    // read the REAL rendered state — the "count the spider's legs in the browser" check.
+    private const string Benchmark23Html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><title>Benchmark 23</title></head>
+        <body>
+          <h1>Benchmark 23</h1>
+          <p>An animated spider on a canvas.</p>
+          <canvas id="spider" width="300" height="200"></canvas>
+          <script>
+            window.legCount = 6;
+            var canvas = document.getElementById('spider');
+            var ctx = canvas.getContext('2d');
+            function draw() {
+              ctx.clearRect(0, 0, 300, 200);
+              // draw the spider body
+              ctx.beginPath(); ctx.arc(150, 100, 30, 0, Math.PI * 2); ctx.stroke();
+              // draw window.legCount legs (this is what the test reads)
+              for (var i = 0; i < window.legCount; i++) {
+                ctx.beginPath();
+                ctx.moveTo(150, 100);
+                ctx.lineTo(120 + i * 6, 160);
+                ctx.stroke();
+              }
+              requestAnimationFrame(draw);
+            }
+            draw();
+          </script>
+        </body>
+        </html>
+        """;
+
+    /// <summary>Builds the benchmark-23 sandbox layout: animated-canvas index.html + the
+    /// same node server contract as benchmark 22 (PORT env, serves index.html).</summary>
+    private string NewBenchmark23Project()
+    {
+        var root = Path.Combine(_tmp, Guid.NewGuid().ToString("N"));
+        var bench = Path.Combine(root, "benchmark_test_23");
+        Directory.CreateDirectory(bench);
+        File.WriteAllText(Path.Combine(bench, "index.html"), Benchmark23Html);
+        File.WriteAllText(Path.Combine(bench, "server.js"), Benchmark22ServerJs);
+        return root;
+    }
+
+    [Fact]
+    public async Task RunJsTestAsync_NoBrowser_FailsWithClearMessage()
+    {
+        // The HTTP/AngleSharp probe CANNOT evaluate JS — a JS check must fail loudly,
+        // never silently false-pass on the static source.
+        var root = NewBenchmark23Project();
+        var report = await ServiceFor(root).RunJsTestAsync(root, "window.legCount === 6");
+
+        Assert.False(report.Passed);
+        Assert.Contains("requires a real browser", report.ToString());
+    }
+
+    [Fact]
+    public async Task Benchmark23_AnimatedCanvas_LiveBrowser_ReadsLegCountFromTheRenderedPage()
+    {
+        // The benchmark-23 core: the browser must LOAD the animated canvas page and the JS
+        // check must read the REAL rendered state (window.legCount = 6), not the source.
+        // Skipped on hosts with no Chromium — the no-browser failure above covers those.
+        var root = NewBenchmark23Project();
+        var events = new List<BrowserTestEvent>();
+        var service = new BrowserAutomationService
+        {
+            Launcher = new ServerLauncherService(),
+            BrowserFactory = CdpBrowserDriver.TryCreateAsync,
+            AllowBrowser = true,
+            ServerTimeout = TimeSpan.FromSeconds(60)
+        };
+        service.OnProgress = (e, _) => { lock (events) events.Add(e); return Task.CompletedTask; };
+
+        var report = await service.RunJsTestAsync(root, "window.legCount === 6");
+        if (report.Mode != "browser") return; // no Chromium on this host — covered above
+
+        Assert.True(report.Passed, report.ToString());
+        Assert.Equal("node", report.ServerKind);
+        // The live canvas page streamed back so the Test Browser tab can show the spider.
+        var snapEvent = events.FirstOrDefault(e => e.Snapshot != null);
+        Assert.NotNull(snapEvent);
+        Assert.Contains("Benchmark 23", snapEvent!.Snapshot!.Headings);
+    }
+
+    [Fact]
+    public async Task Benchmark23_AnimatedCanvas_LiveBrowser_WrongLegCount_Fails()
+    {
+        // The leg-count check must be exact: a 6-leg spider must NOT satisfy "=== 4".
+        // Proves the JS evaluation reads the live value, not a source grep.
+        var root = NewBenchmark23Project();
+        var service = new BrowserAutomationService
+        {
+            Launcher = new ServerLauncherService(),
+            BrowserFactory = CdpBrowserDriver.TryCreateAsync,
+            AllowBrowser = true,
+            ServerTimeout = TimeSpan.FromSeconds(60)
+        };
+
+        var report = await service.RunJsTestAsync(root, "window.legCount === 4");
+        if (report.Mode != "browser") return; // no Chromium on this host
+
+        Assert.False(report.Passed);
+        Assert.Contains("evaluated false", report.ToString());
+    }
+
     private const string SiteHtml = """
         <!DOCTYPE html>
         <html>

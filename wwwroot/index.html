@@ -426,6 +426,8 @@
               <summary>
                 <span>📋 Log ({{vm.agentActivityLogLength}})</span>
                 <span class="log-font-controls">
+                  <button class="log-scroll-btn" ng-click="vm.scrollLog('top', $event)" title="Scroll log to top">▲</button>
+                  <button class="log-scroll-btn" ng-click="vm.scrollLog('bottom', $event)" title="Scroll log to bottom">▼</button>
                   <button class="log-font-btn" ng-click="vm.decreaseLogFont(); $event.stopPropagation()"
                     title="Decrease font size">−</button>
                   <span class="log-font-size-label">{{vm.logFontSize}}px</span>
@@ -473,6 +475,8 @@
                 <span>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : ''
                   }}</span>
                 <span class="log-font-controls">
+                  <button class="log-scroll-btn" ng-click="vm.scrollLog('top', $event)" title="Scroll log to top">▲</button>
+                  <button class="log-scroll-btn" ng-click="vm.scrollLog('bottom', $event)" title="Scroll log to bottom">▼</button>
                   <button class="log-font-btn" ng-click="vm.decreaseLlmFont(); $event.stopPropagation()"
                     title="Decrease font size">−</button>
                   <span class="log-font-size-label">{{vm.llmFontSize}}px</span>

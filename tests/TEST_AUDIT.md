@@ -6,7 +6,7 @@ sources in `tests/` — every file and test method is accounted for below.
 
 **Last audited:** August 15, 2026 · **Suite size:** 120 C# test classes
 (2,111 runtime test cases per `dotnet test` on Windows) + 34 standalone JS suites
-(350 tests), run together via `node tests/js/run-all.js`. The CI workflow builds
+(354 tests), run together via `node tests/js/run-all.js`. The CI workflow builds
 framework-dependent with `-p:RuntimeIdentifier=linux-x64 -p:SelfContained=false`
 and runs the suite on the Linux runner, so OS-branched tests (`OperatingSystem.IsWindows()`)
 must stay green on BOTH hosts. The live-browser E2E tests (`ServerLaunchE2ETests`)
@@ -271,7 +271,7 @@ strict test verb — "check my game for visual bugs", "verify visually" — are 
 
 ---
 
-## 3. Inventory — JS client-logic suites (34 files, 350 tests)
+## 3. Inventory — JS client-logic suites (34 files, 354 tests)
 
 Each file is a self-contained node script with its own mini-runner
 (`test(name, fn)` + exit-code). They test extracted client logic modules
@@ -284,7 +284,7 @@ new CI workflow runs on every push:
 |---|---|---|
 | `agent-browser-tab.test.js` | 7 | The browser-test tab state: opening/closing the live-browser test report tab, its status chips, the report panel wiring, and the **auto-open** half of the "agent sends a visual" contract — a `webtest` SSE event (extracted verbatim from the EventSource handler) switches the agent panel to the Browser tab and stages the snapshot (title/headings/imageDataUrl) that the panel's `<img>` renders, both with and without a snapshot payload. Plus the **no-visual regression**: `handleWebtest` carries the last snapshot forward across trailing phase-only events (`server`/`navigating`/`section`/`done`), so the screenshot stays rendered through the end of the run instead of being wiped the moment the `done` event lands — the "5 events but never a visual" bug. |
 | `agent-runtime-tag.test.js` | 5 | The 🧰 **runtime tag** (agent panel + kanban live row): `captureRuntimeAvailability` parses the `Phase 1 — runtime availability: …` log message into `vm.runtimeAvailability`, keeps the corrected availability (`npm ✓, npx ✓` — the Windows `.cmd` shim fix) verbatim, only fires on the discovery-level line, never wipes a value on non-matching logs, and resets on each new run. |
-| `log-scroll-buttons.test.js` | 5 | The log-section **scroll buttons**: `vm.scrollLog(direction, $event)` finds the button's own `.card-section` and scrolls that section's `.log-entries` to top/bottom (section-scoped, never the wrong card's log), tolerates a missing button/container, and every `📋 Log` + `📋 Activity Log` section in kanban.html is wired with both ▲ and ▼. |
+| `log-scroll-buttons.test.js` | 9 | The log-section **scroll buttons**: `vm.scrollLog(direction, $event)` finds the button's own section — kanban `.card-section` or the live agent panel's `.agent-activity-log` / `.agent-streaming-tokens` — and scrolls that section's `.log-entries` (or `.streaming-tokens`) to top/bottom (section-scoped, never the wrong card's log), tolerates a missing button/container, and every `📋 Log` + `📋 Activity Log` section in kanban.html plus the agent panel's 📋 Log + 💬 LLM Streaming sections in index.html are wired with both ▲ and ▼. |
 | `command-history-partial.test.js` | 8 | The `wwwroot/command-history.html` partial that renders a completed card's `card._steps` inside every column's Previous/AI-analysis area (todo/done/archived `ng-include` sites, each gated on a non-empty `_steps`): one collapsible `<details>` entry per step, FULL untruncated `s.output` (no `limitTo` anywhere in the partial), a descriptor + char-count label, a copy-output button, a `(no output)` placeholder, and the pipeline-PHASE grouping — a collapsible header (label + per-phase count, `vm.toggleCommandPhase`) at each `_phaseFirst` boundary with the steps hidden when the phase is collapsed. Also asserts the persist sites stamp phases (`card._steps = persistStepPhases(finalSteps);` / `mvCard._steps = persistStepPhases(concAnalysis.steps);`) and that `vm.commandHistorySteps` prefers the persisted bucket (`preferPersisted: true`). |
 | `agent-done-verdict.test.js` | 5 | The `done` verdict rendering: "done" confirmation paths, failed/unverified verdicts, and the verdict banner logic. |
 | `agent-plan-marker.test.js` | 9 | The **plan-marker split** (`planPayloadParts`, extracted verbatim from the live SSE handler): committed steps stay in `items` while the transient activity marker ("Deep thinking for plan — Step 3…", "Proposing step 2…", "Applying edits — Step 2 — …") returns separately — marker-only events (initial discovery phase) still yield the marker with zero plan items, a `_planning`/`_executing` marker NEVER leaks into the items list, the step currently being produced keeps `done=false`, a payload without a marker yields `marker=null` (final persisted plan), and malformed payloads fall back safely. Plus the template contract: the live plan panel renders when ONLY the marker exists (no frozen "Reading task…" placeholder) and renders the marker as a bottom-of-plan row with the phase icon + activity text (no checkbox). Plus the **SSE var-hoisting guard**: the plan handler must NOT declare `var parts` inside the reader's `$applyAsync` scope (it would hoist over the `for (p < parts.length)` chunk loop and crash the panel with `TypeError: Cannot read properties of undefined (reading 'length')`); the split local must be named `planParts`. |
@@ -521,7 +521,7 @@ Ordered by how much they matter.
 | Complexity scoring & benchmarks | 3 classes | ~36 | Good |
 | File tree | 1 class | 2 | **Fixed** — embedded-manifest helper lookup; green from any output dir |
 | Live web-server testing | 6 classes | 84 | **New** — classifier, launch plans, HTTP probe, browser service, pipeline wiring, and real-process E2E (incl. Weaver itself + live CDP) |
-| JS client logic | 34 files | 350 | Good per-module; `run-all.js` aggregator + CI workflow (§4.2); meeting canvas helpers (bubble layout, poster text fitting, spider accessories, de-cartooned spider body/eyes), the chat jump-chip state, the runtime tag, and the log scroll buttons locked in §3 |
+| JS client logic | 34 files | 354 | Good per-module; `run-all.js` aggregator + CI workflow (§4.2); meeting canvas helpers (bubble layout, poster text fitting, spider accessories, de-cartooned spider body/eyes), the chat jump-chip state, the runtime tag, and the log scroll buttons locked in §3 |
 | Feedback / context-SSE / SSE shape / guard interactions | 3 classes + 2 JS | ~35 | Covered (§5.1–5.2, §5.4); abort-branch + diff system still open (§5.1) |
 
 Bottom line: the edit-application layer is the most thoroughly tested part of the
