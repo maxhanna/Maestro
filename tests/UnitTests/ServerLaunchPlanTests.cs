@@ -430,4 +430,62 @@ public class ServerLaunchPlanTests : IDisposable
         listener.Start(); // binds → proves the port was free
         listener.Stop();
     }
+
+    // ── missing-dependency (MODULE_NOT_FOUND) detection ──────────────────────
+    // The launch recovery and the command pipeline both key off the node missing-module
+    // signature to deterministically run `npm install` before re-spawning / re-running.
+
+    [Fact]
+    public void IsNodeMissingModuleFailure_DetectsCannotFindModule()
+    {
+        Assert.True(ServerLauncherService.IsNodeMissingModuleFailure(
+            "node:internal/modules/cjs/loader:1401 Cannot find module 'express'"));
+        Assert.True(ServerLauncherService.IsNodeMissingModuleFailure(
+            "Error: Cannot find module 'express' { code: 'MODULE_NOT_FOUND' }"));
+        Assert.True(ServerLauncherService.IsNodeMissingModuleFailure(
+            "Could not resolve module not found error"));
+        // Non-missing-module failures never match.
+        Assert.False(ServerLauncherService.IsNodeMissingModuleFailure("ReferenceError: PORT is not defined"));
+        Assert.False(ServerLauncherService.IsNodeMissingModuleFailure("listen EADDRINUSE: address already in use :::8765"));
+        Assert.False(ServerLauncherService.IsNodeMissingModuleFailure(null));
+        Assert.False(ServerLauncherService.IsNodeMissingModuleFailure(""));
+    }
+
+    // ── Python missing-module (ModuleNotFoundError) detection ────────────────
+    // The mirror of the node recovery: a python server that dies on `No module named 'X'`
+    // gets a deterministic `pip install` before re-spawning, so a Flask/FastAPI app written
+    // without ever running pip still gets live-tested.
+
+    [Fact]
+    public void IsPythonMissingModuleFailure_DetectsNoModuleNamed()
+    {
+        Assert.True(ServerLauncherService.IsPythonMissingModuleFailure(
+            "ModuleNotFoundError: No module named 'flask'"));
+        Assert.True(ServerLauncherService.IsPythonMissingModuleFailure(
+            "Traceback (most recent call last):\nModuleNotFoundError: No module named 'flask'"));
+        // Bare ImportError is NOT enough — "cannot import name X from Y" is a bug inside an
+        // installed module, not an installable dependency.
+        Assert.False(ServerLauncherService.IsPythonMissingModuleFailure(
+            "ImportError: cannot import name 'helper' from 'app'"));
+        // Non-missing-module failures never match.
+        Assert.False(ServerLauncherService.IsPythonMissingModuleFailure("SyntaxError: invalid syntax"));
+        Assert.False(ServerLauncherService.IsPythonMissingModuleFailure("ReferenceError: PORT is not defined"));
+        Assert.False(ServerLauncherService.IsPythonMissingModuleFailure("listen EADDRINUSE: address already in use :::8765"));
+        Assert.False(ServerLauncherService.IsPythonMissingModuleFailure(null));
+        Assert.False(ServerLauncherService.IsPythonMissingModuleFailure(""));
+    }
+
+    [Fact]
+    public void ExtractMissingPythonModule_PullsTheNamedModule()
+    {
+        Assert.Equal("flask",
+            ServerLauncherService.ExtractMissingPythonModule("ModuleNotFoundError: No module named 'flask'"));
+        Assert.Equal("fastapi",
+            ServerLauncherService.ExtractMissingPythonModule("ModuleNotFoundError: No module named 'fastapi'"));
+        // Non-missing-module output and null/empty never name a module.
+        Assert.Null(ServerLauncherService.ExtractMissingPythonModule("SyntaxError: invalid syntax"));
+        Assert.Null(ServerLauncherService.ExtractMissingPythonModule("Cannot find module 'express'"));
+        Assert.Null(ServerLauncherService.ExtractMissingPythonModule(null));
+        Assert.Null(ServerLauncherService.ExtractMissingPythonModule(""));
+    }
 }

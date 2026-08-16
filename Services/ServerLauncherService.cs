@@ -234,6 +234,8 @@ public class ServerLauncherService
         psi.Environment["HOST"] = "127.0.0.1";
 
         var log = new StringBuilder();
+        var npmInstallAttempted = false;
+        var pipInstallAttempted = false;
         var process = ProcessFactory(psi);
         var pump = PumpOutputAsync(process, log);
 
@@ -248,6 +250,46 @@ public class ServerLauncherService
                 try { await pump.WaitAsync(TimeSpan.FromSeconds(2), ct); } catch { }
                 string tail;
                 lock (log) tail = log.ToString();
+                // AGILE DEPENDENCY RECOVERY: the process died because a require() module is
+                // missing (e.g. the agent wrote `require('express')` but never ran `npm install`
+                // — the exact benchmark-22 failure "Cannot find module 'express'"). The launcher
+                // installs the project's declared dependencies deterministically and re-spawns
+                // ONCE — no model round, no planner step — so a server that merely lacks its
+                // node_modules still gets live-tested instead of failing the whole run.
+                if (!npmInstallAttempted && IsNodeMissingModuleFailure(tail) &&
+                    File.Exists(Path.Combine(plan.WorkingDirectory, "package.json")))
+                {
+                    npmInstallAttempted = true;
+                    var installed = RunNpmInstall(plan.WorkingDirectory);
+                    log.AppendLine($"[launcher] npm install {(installed ? "succeeded" : "failed")} — re-spawning {plan.Command} {plan.Arguments}");
+                    if (installed)
+                    {
+                        KillTree(process);
+                        process = ProcessFactory(psi);
+                        pump = PumpOutputAsync(process, log);
+                        continue;
+                    }
+                }
+                // Python mirror of the same recovery: the process died because an import is
+                // missing (e.g. the agent wrote `from flask import Flask` but never ran
+                // `pip install`). Install the named module deterministically and re-spawn
+                // ONCE — no model round — so a server that merely lacks its dependency still
+                // gets live-tested. requirements.txt, when present, covers every declared
+                // dependency in one shot (mirrors `npm install` pulling package.json).
+                if (!pipInstallAttempted && IsPythonMissingModuleFailure(tail))
+                {
+                    pipInstallAttempted = true;
+                    var module = ExtractMissingPythonModule(tail);
+                    var installed = RunPipInstall(plan.WorkingDirectory, module);
+                    log.AppendLine($"[launcher] pip install {(installed ? "succeeded" : "failed")} — re-spawning {plan.Command} {plan.Arguments}");
+                    if (installed)
+                    {
+                        KillTree(process);
+                        process = ProcessFactory(psi);
+                        pump = PumpOutputAsync(process, log);
+                        continue;
+                    }
+                }
                 throw new InvalidOperationException(
                     $"Server process exited before becoming ready (code {process.ExitCode}). " +
                     $"Command: {plan.Command} {plan.Arguments}.\nOutput:\n{tail}");
@@ -274,6 +316,125 @@ public class ServerLauncherService
         throw new InvalidOperationException(
             $"Server did not become ready within {(timeout ?? TimeSpan.FromSeconds(120)).TotalSeconds}s " +
             $"at {url} (last error: {lastError}). Command: {plan.Command} {plan.Arguments}.\nOutput:\n{output}");
+    }
+
+    /// <summary>True when the process output is a Node MODULE_NOT_FOUND failure (a required
+    /// dependency is missing — "Cannot find module 'express'").</summary>
+    internal static bool IsNodeMissingModuleFailure(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return false;
+        return output.Contains("Cannot find module", StringComparison.Ordinal) ||
+               output.Contains("MODULE_NOT_FOUND", StringComparison.Ordinal) ||
+               output.Contains("module not found", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>True when the process output is a Python missing-module failure (a required
+    /// dependency is missing — "ModuleNotFoundError: No module named 'flask'"). Bare
+    /// ImportError is NOT enough — "cannot import name X from Y" is a different bug inside
+    /// an installed module, not an installable dependency.</summary>
+    internal static bool IsPythonMissingModuleFailure(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return false;
+        var o = output.ToLowerInvariant();
+        return o.Contains("modulenotfounderror", StringComparison.Ordinal) ||
+               o.Contains("no module named", StringComparison.Ordinal);
+    }
+
+    /// <summary>Extracts the missing module name from a Python ModuleNotFoundError
+    /// ("No module named 'flask'"), or null when the output names no module. Mirrors
+    /// AgentController.ExtractMissingModule but lives in the launcher so the launch
+    /// recovery needs no controller dependency.</summary>
+    internal static string? ExtractMissingPythonModule(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return null;
+        var m = Regex.Match(output, @"No module named\s*'([^']+)'", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.Trim() : null;
+    }
+
+    /// <summary>
+    /// Runs the python dependency install for the missing-module recovery: `pip install -r
+    /// requirements.txt` when the project declares one (mirrors `npm install` pulling
+    /// package.json), else `pip install <module>` for the exact module the error named.
+    /// Uses `python -m pip` so the pip .cmd shim on Windows never has to be exec'd directly;
+    /// bounded timeout. Returns true when the install exited 0.
+    /// </summary>
+    internal static bool RunPipInstall(string workDir, string? module)
+    {
+        try
+        {
+            var reqFile = Path.Combine(workDir, "requirements.txt");
+            string args;
+            if (File.Exists(reqFile))
+                args = "-m pip install --no-input --no-cache-dir -r requirements.txt";
+            else if (!string.IsNullOrWhiteSpace(module))
+                args = $"-m pip install --no-input --no-cache-dir {module}";
+            else
+                return false; // nothing to install and nothing named — let the error surface
+            var psi = new ProcessStartInfo
+            {
+                FileName = "python",
+                Arguments = args,
+                WorkingDirectory = workDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi);
+            if (p == null) return false;
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(TimeSpan.FromSeconds(240)))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return false;
+            }
+            Task.WaitAll(stdout, stderr);
+            return p.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Runs `npm install` in the project (cmd /c on Windows — npm is a .cmd shim
+    /// Process.Start cannot exec directly) with a bounded timeout. Returns true when the
+    /// install exited 0.</summary>
+    internal static bool RunNpmInstall(string workDir)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = OperatingSystem.IsWindows()
+                    ? (Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe")
+                    : "npm",
+                Arguments = OperatingSystem.IsWindows()
+                    ? "/c npm install --no-audit --no-fund"
+                    : "install --no-audit --no-fund",
+                WorkingDirectory = workDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi);
+            if (p == null) return false;
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(TimeSpan.FromSeconds(180)))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return false;
+            }
+            Task.WaitAll(stdout, stderr);
+            return p.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>Reads stdout/stderr line-by-line into the log so failures always carry

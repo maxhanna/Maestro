@@ -219,6 +219,17 @@ angular.module('kanbanApp')
             steps.forEach(function (s) { if (s) s._phase = stepPhaseOf(s); });
             return steps;
         }
+        // Pins the discovery runtime line onto the panel: "Phase 1 — runtime availability:
+        // python ✓, node ✓, npm ✓, …" becomes the 🧰 tag next to the focus stat, so users SEE
+        // the corrected availability (npm/npx now detected on Windows via the .cmd shim fix)
+        // and understand why the planner can run `npm install` — not just read it buried in
+        // the log. Pure + extracted for tests (tests/js/agent-runtime-tag.test.js).
+        function captureRuntimeAvailability(vm, level, message) {
+            if (level !== 'info' || !message) return;
+            const prefix = 'Phase 1 — runtime availability:';
+            if (message.indexOf(prefix) !== 0) return;
+            vm.runtimeAvailability = message.substring(prefix.length).trim();
+        }
         function pushAgentLog(vm, level, message, detail) {
             if (!message || level === 'status') return;
             try {
@@ -229,6 +240,7 @@ angular.module('kanbanApp')
                 vm.agentActivityLog.push(entry); vm.agentActivityLogLength = vm.agentActivityLog.length;
                 if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift();
                 if (vm.currentRun && vm.currentRun.log) { vm.currentRun.log.push(entry); if (vm.currentRun.log.length > 200) vm.currentRun.log.shift(); }
+                captureRuntimeAvailability(vm, level, message);
                 // Focus-stats metrics (bootstrap auto-read, _discover, _explore) aggregate into
                 // vm.focusStats for the panel's stat row — run-level totals of files focused and
                 // chars saved, plus the effective focus threshold from the bootstrap phase.
@@ -752,7 +764,7 @@ angular.module('kanbanApp')
                         function startAgent() {
                             run._doneProcessed = false; vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingContextChars = 0; vm.streamingContextBreakdown = []; vm.llmSpend = null; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
-                            vm.focusStats = null;
+                            vm.focusStats = null; vm.runtimeAvailability = '';
                             vm.complexityScore = null; vm.complexityLabel = ''; vm.complexityTokenCap = null; vm.complexityMaxTokens = null; vm.complexityAtomicSteps = null;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.llmProgress = null; vm.llmProgressPercent = null; vm.llmProgressState = '';
@@ -1027,12 +1039,20 @@ angular.module('kanbanApp')
                                                             case 'webtest':
                                                                 // Live web-test progress — the "Test Browser" panel watches the agent
                                                                 // navigate and verify the running app in real time. Snapshot-phase
-                                                                // events carry the rendered page (title/headings/visible text).
+                                                                // events carry the rendered page (title/headings/visible text + the
+                                                                // JPEG screenshot the panel's <img> renders).
                                                                 if (parsed) {
                                                                     if (!vm.webtestEvents) vm.webtestEvents = [];
                                                                     vm.webtestEvents.push({ phase: parsed.phase, url: parsed.url || null, message: parsed.message || '', snapshot: parsed.snapshot || null, ts: Date.now() });
                                                                     if (vm.webtestEvents.length > 250) vm.webtestEvents.shift();
-                                                                    vm.webtestCurrent = { phase: parsed.phase, url: parsed.url || null, message: parsed.message || '', snapshot: parsed.snapshot || null };
+                                                                    // KEEP THE LAST SNAPSHOT: only snapshot-phase events carry the visual
+                                                                    // (imageDataUrl), and the trailing server/navigating/section/done events
+                                                                    // arrive WITHOUT one. Replacing webtestCurrent wholesale on every event
+                                                                    // wiped the screenshot the moment the next phase-only event landed — the
+                                                                    // panel showed "5 events" but never a visual. Carry the previous snapshot
+                                                                    // forward so the image stays rendered through the end of the run.
+                                                                    var keptSnap = parsed.snapshot || (vm.webtestCurrent && vm.webtestCurrent.snapshot) || null;
+                                                                    vm.webtestCurrent = { phase: parsed.phase, url: parsed.url || null, message: parsed.message || '', snapshot: keptSnap };
                                                                     vm.agentPanelTab = 'browser';
                                                                 }
                                                                 break;

@@ -71,5 +71,36 @@ test('webtest event without a snapshot still opens the browser tab (phase only)'
   assert.strictEqual(vm.webtestEvents.length, 1);
 });
 
+test('trailing phase-only events keep the last screenshot rendered (the no-visual bug)', () => {
+  // The real event sequence: server → navigating → snapshot (WITH imageDataUrl) → section →
+  // done. Each phase-only event used to REPLACE webtestCurrent.snapshot with null, so the
+  // panel showed "5 events" but the <img> never rendered — the snapshot's imageDataUrl was
+  // gone by the time the run reached the final `done` event. The snapshot must persist.
+  var vm = { webtestEvents: [], webtestCurrent: null, agentPanelTab: 'activity' };
+  handleWebtest({ phase: 'server', url: 'http://127.0.0.1:3000/', message: 'Server started' }, vm);
+  handleWebtest({ phase: 'navigating', url: 'http://127.0.0.1:3000/', message: 'Navigating' }, vm);
+  handleWebtest({ phase: 'snapshot', url: 'http://127.0.0.1:3000/', message: 'Rendered',
+    snapshot: { title: 'Benchmark 22', headings: ['Benchmark22'], body: 'Score: 0', imageDataUrl: 'data:image/jpeg;base64,xxx' } }, vm);
+  handleWebtest({ phase: 'section', url: 'http://127.0.0.1:3000/', message: 'Found section' }, vm);
+  handleWebtest({ phase: 'done', url: 'http://127.0.0.1:3000/', message: 'Live web test PASSED — 5 checks' }, vm);
+  assert.strictEqual(vm.webtestEvents.length, 5);
+  // The final phase is `done` but the screenshot from the snapshot phase is still there.
+  assert.strictEqual(vm.webtestCurrent.phase, 'done');
+  assert.ok(vm.webtestCurrent.snapshot, 'snapshot must survive the trailing phase-only events');
+  assert.strictEqual(vm.webtestCurrent.snapshot.imageDataUrl, 'data:image/jpeg;base64,xxx');
+  assert.strictEqual(vm.webtestCurrent.snapshot.title, 'Benchmark 22');
+});
+
+test('a later real snapshot replaces the kept one (fresh visual wins)', () => {
+  var vm = { webtestEvents: [], webtestCurrent: null, agentPanelTab: 'activity' };
+  handleWebtest({ phase: 'snapshot', url: 'http://127.0.0.1:3000/', message: 'Rendered',
+    snapshot: { title: 'Page A', imageDataUrl: 'data:image/jpeg;base64,aaa' } }, vm);
+  handleWebtest({ phase: 'done', url: 'http://127.0.0.1:3000/', message: 'Done' }, vm);
+  handleWebtest({ phase: 'snapshot', url: 'http://127.0.0.1:3000/page2', message: 'Rendered',
+    snapshot: { title: 'Page B', imageDataUrl: 'data:image/jpeg;base64,bbb' } }, vm);
+  assert.strictEqual(vm.webtestCurrent.snapshot.imageDataUrl, 'data:image/jpeg;base64,bbb');
+  assert.strictEqual(vm.webtestCurrent.snapshot.title, 'Page B');
+});
+
 console.log('\nagent-browser-tab.test.js: ' + passed + ' passed / ' + failed + ' failed / ' + (passed + failed) + ' tests');
 process.exit(failed ? 1 : 0);

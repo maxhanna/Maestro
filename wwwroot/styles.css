@@ -3177,6 +3177,19 @@ h3 .small.ghost:hover {
 	white-space: nowrap;
 }
 
+/* Discovery runtime line — corrected host availability (npm/npx now detected on Windows) */
+.agent-status .runtime-tag {
+	margin-left: 6px;
+	padding: 2px 6px;
+	border-radius: 4px;
+	background: rgba(251, 191, 36, 0.12);
+	color: #fbbf24;
+	font-size: 11px;
+	font-weight: 500;
+	cursor: help;
+	white-space: nowrap;
+}
+
 .llm-progress {
 	display: flex;
 	align-items: center;

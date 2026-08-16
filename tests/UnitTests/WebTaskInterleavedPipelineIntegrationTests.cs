@@ -85,15 +85,36 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
 
     /// <summary>A canned live-browser runner so a scripted _browser_test plan step
     /// passes deterministically without launching a real server (mirrors
-    /// BenchmarkLiveWebTestTests.FakeBrowserAutomationService).</summary>
+    /// BenchmarkLiveWebTestTests.FakeBrowserAutomationService). When FailUiTestCount is
+    /// > 0, the first that-many UI-test calls FAIL exactly like the benchmark-22 live
+    /// failure (the server process exits before becoming ready — missing 'express'),
+    /// then subsequent calls pass — letting the repair-loop re-run prove the server
+    /// starts after the fix.</summary>
     private sealed class FakeBrowserAutomationService : BrowserAutomationService
     {
         public string? LastUiTarget { get; private set; }
         public string? LastApiTarget { get; private set; }
+        /// <summary>Number of leading RunUiTestAsync calls that fail (server could not
+        /// start). int.MaxValue fails every call.</summary>
+        public int FailUiTestCount { get; set; }
 
         public override Task<BrowserTestReport> RunUiTestAsync(string projectRoot, string target, string? prompt, CancellationToken ct = default)
         {
             LastUiTarget = target;
+            if (FailUiTestCount > 0)
+            {
+                FailUiTestCount--;
+                return Task.FromResult(new BrowserTestReport
+                {
+                    Target = target, Mode = "failed", Passed = false,
+                    LaunchError = "Cannot find module 'express'",
+                    Findings =
+                    {
+                        new TestFinding("fail",
+                            "server process exited before becoming ready — node: Cannot find module 'express'")
+                    }
+                });
+            }
             return Task.FromResult(new BrowserTestReport { Target = target, Mode = "http", Passed = true });
         }
 
@@ -253,6 +274,118 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
             "a pure styling edit must never get a forced browser test");
         Assert.True(!allSteps.OfType<Dictionary<string, object?>>()
             .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"));
+    }
+
+    [Fact]
+    public async Task VisualVerifyTask_FailedBrowserTest_BlocksCompletion()
+    {
+        // Regression for the benchmark-22 live failure: the browser test FAILED (the server
+        // process exited before becoming ready — `node app.js` crashed with "Cannot find
+        // module 'express'"), and the run then COMPLETED anyway as "Verified complete":
+        // the file-level LLM verifier reads FILES, not a running server, so the broken
+        // server looked fine on disk and the run was declared done over a game that could
+        // never render. A failed live web test is DETERMINISTIC ground truth — the visual
+        // verification the task demanded cannot have happened — so PostExecuteVerify must
+        // surface it as a CONFIRMED issue, the repair loop must feed it to the replanner,
+        // and NOTHING (triage, phantom-skip, churn breaker, replanner-exhausted fallback)
+        // may complete the run while the browser test still fails.
+        _clientFactory.Mode = PlannerMode.VisualVerifyBuild;
+        var controller = BuildController();
+        var fakeBrowser = (FakeBrowserAutomationService)GetField(controller, "_browserTestService");
+        fakeBrowser.FailUiTestCount = int.MaxValue; // the server NEVER starts
+        var prompt = "Create a folder called 'benchmark_test_22' at the project root. Inside it, build a small web game " +
+                     "and then CHECK IT FOR VISUAL BUGS — you must LOOK at the rendered page to visually confirm " +
+                     "the heading renders on screen. Use the live browser test suite.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        // The run must NOT complete: the browser test failed (server never started), and the
+        // file-level verifier saying "done" must not override that ground truth.
+        Assert.False(complete, $"a run whose live web test failed must stay incomplete — plan summary: {plan?.Summary}");
+        // No verified_complete entry is ever recorded.
+        Assert.True(!allSteps.OfType<Dictionary<string, object?>>()
+            .Any(r => r.GetValueOrDefault("type")?.ToString() == "verified_complete"));
+        // The failed browser test is recorded with status "error" (server could not start).
+        var failedTest = allSteps.OfType<Dictionary<string, object?>>()
+            .Last(r => r.GetValueOrDefault("type")?.ToString() == "browser_test");
+        Assert.Equal("error", failedTest.GetValueOrDefault("status")?.ToString());
+        // The deterministic failure reached the repair-loop replanner (the plan-fixer ran and
+        // saw the live-web-test failure as the issue to fix).
+        Assert.NotEmpty(_clientFactory.RepairUserPrompts);
+        Assert.Contains("Live web test failed", _clientFactory.RepairUserPrompts[0], StringComparison.OrdinalIgnoreCase);
+        // The default scripted replanner proposes no steps — the repair loop must then fall
+        // to the "replanner exhausted" path and STILL not complete over the failing test.
+        Assert.Contains("replanner", _clientFactory.Calls);
+    }
+
+    [Fact]
+    public async Task VisualVerifyTask_FailedBrowserTest_RepairReRun_UnblocksCompletion()
+    {
+        // The recovery half of the benchmark-22 fix: the browser test fails on the first run
+        // (server could not start — missing 'express'), the repair loop's replanner produces
+        // a fix (a dependency-free plain-http server), and the loop must RE-RUN the live web
+        // test deterministically after the repair — only the browser test itself can prove
+        // the server starts. A passing re-run REPLACES the stale failure (its fresh result
+        // is what the deterministic completion check sees), so the run completes.
+        _clientFactory.Mode = PlannerMode.VisualVerifyBrokenServer;
+        var controller = BuildController();
+        var fakeBrowser = (FakeBrowserAutomationService)GetField(controller, "_browserTestService");
+        fakeBrowser.FailUiTestCount = 1; // first live web test fails, the re-run passes
+        var prompt = "Create a folder called 'benchmark_test_22' at the project root. Inside it, build a small web game " +
+                     "and then CHECK IT FOR VISUAL BUGS — you must LOOK at the rendered page to visually confirm " +
+                     "the heading renders on screen. Use the live browser test suite.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete after the repair re-run passed — plan summary: {plan?.Summary}");
+        // The repair actually created the fixed server file (dependency-free http server).
+        var serverPath = Path.Combine(_projectRoot, "benchmark_test_22", "server.js");
+        Assert.True(File.Exists(serverPath), "the repair step must have created server.js");
+        var serverContent = File.ReadAllText(serverPath, Encoding.UTF8);
+        Assert.DoesNotContain("express", serverContent, StringComparison.OrdinalIgnoreCase);
+        // TWO browser_test results: the original failure AND the repair-loop re-run that
+        // passed — the re-run (last) result is what the completion check saw.
+        var browserTests = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "browser_test").ToList();
+        Assert.Equal(2, browserTests.Count);
+        Assert.Equal("error", browserTests[0].GetValueOrDefault("status")?.ToString());
+        Assert.Equal("done", browserTests[1].GetValueOrDefault("status")?.ToString());
+        Assert.Contains("re-run", browserTests[1].GetValueOrDefault("description")?.ToString() ?? "",
+            StringComparison.OrdinalIgnoreCase);
+        // The repair replanner was fed the deterministic live-web-test failure.
+        Assert.NotEmpty(_clientFactory.RepairUserPrompts);
+        Assert.Contains("Live web test failed", _clientFactory.RepairUserPrompts[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task VisualVerifyTask_HaltedLoop_StillRunsBrowserTest()
+    {
+        // Regression for the benchmark-22 exit that does NOT go through planComplete: the
+        // planner's step proposals were rejected until the regen budget exhausted (the real
+        // live failure — the oversized-anchor edit to backend/server.py was rejected twice,
+        // then the response was unparseable), so the interleaved loop broke with
+        // planCompleteDeclared=false. The planComplete visual gate never fired (it only runs
+        // when the planner DECLARES completion), so a pre-fix run halted into post-execution
+        // verification with NO _browser_test ever executed and finished "incomplete" without
+        // ever opening the browser. The halted-run visual gate must inject + execute the
+        // live web test deterministically the moment the loop breaks without one.
+        _clientFactory.Mode = PlannerMode.VisualVerifyHalted;
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_22' at the project root. Inside it, build a small web game " +
+                     "and then CHECK IT FOR VISUAL BUGS — you must LOOK at the rendered page to visually confirm " +
+                     "the heading renders on screen. Use the live browser test suite.";
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        // The loop broke without planComplete (the planner's later turns were all rejected),
+        // yet the run still executed the live browser test and completed.
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}");
+        var browserTests = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.GetValueOrDefault("type")?.ToString() == "browser_test").ToList();
+        Assert.NotEmpty(browserTests);
+        Assert.Equal("done", browserTests[^1].GetValueOrDefault("status")?.ToString());
+        // The halted-run injection went through the classifier (deterministic confirmation).
+        Assert.Contains(_clientFactory.Calls, c => c == "visual-classifier");
     }
 
     [Fact]
@@ -1798,6 +1931,14 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         field.SetValue(target, value);
     }
 
+    private static object GetField(object target, string name)
+    {
+        var field = target.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException($"Field {name} not found");
+        return field.GetValue(target)
+            ?? throw new InvalidOperationException($"Field {name} is null");
+    }
+
     private static void SetStaticField(string name, object value)
     {
         var field = typeof(AgentController).GetField(name, BindingFlags.NonPublic | BindingFlags.Static)
@@ -1816,7 +1957,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds, FetchThenCsvEdits, VisualVerifyBuild, MkdirThenPathlessCreateFile, BrokenCommandRecovery, EaddrInUseRecovery, MissingPortRecovery }
+    private enum PlannerMode { WebChain, SteeringWrite, NeverWrites, SearchOnly, FetchRetry, FetchAlwaysFails, SearchThenEdit, RepeatedSearch, NewsDigestWrite, CommandFetchSteer, RepoRelativeDump, FetchFirstDump, MkdirCommandPrep, CreateFileAsDirectory, ScraperScriptRejected, ScraperAfterWebSteps, RunScraperCommandRejected, ScraperStepFallback, FetchExhaustedScraperSucceeds, FetchThenCsvEdits, VisualVerifyBuild, VisualVerifyBrokenServer, VisualVerifyHalted, MkdirThenPathlessCreateFile, BrokenCommandRecovery, EaddrInUseRecovery, MissingPortRecovery }
 
     /// <summary>
     /// Fake system-built scraper: records the URLs it was asked to scrape and writes the
@@ -2019,6 +2160,38 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     // The repair loop must run but NEVER produce a write: an empty plan means
                     // "replanner returned no steps" and the loop breaks with the run incomplete.
                     lock (_owner.RepairUserPrompts) _owner.RepairUserPrompts.Add(user);
+                    if (_owner.Mode == PlannerMode.VisualVerifyBrokenServer)
+                    {
+                        // The benchmark-22 live failure: the browser test could not start the
+                        // server (node crashed with "Cannot find module 'express'"). Script the
+                        // repair the real replanner should produce — a dependency-free
+                        // plain-http server replacing the express one — so the repair loop's
+                        // deterministic live web RE-RUN can pass and unblock completion.
+                        var repairPlan = new Dictionary<string, object?>
+                        {
+                            ["plan"] = new object[]
+                            {
+                                new Dictionary<string, object?>
+                                {
+                                    ["file"] = "_create_file",
+                                    ["change"] = "benchmark_test_22/server.js",
+                                    ["newString"] =
+                                        "const http = require('http');\n" +
+                                        "const fs = require('fs');\n" +
+                                        "const path = require('path');\n" +
+                                        "const PORT = process.env.PORT || 8765;\n" +
+                                        "http.createServer((req, res) => {\n" +
+                                        "  if (req.url === '/api/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ status: 'ok' })); return; }\n" +
+                                        "  res.writeHead(200, { 'Content-Type': 'text/html' });\n" +
+                                        "  res.end(fs.readFileSync(path.join(__dirname, 'index.html')));\n" +
+                                        "}).listen(PORT, () => console.log('listening on ' + PORT));\n",
+                                    ["priority"] = 1,
+                                    ["line"] = 1
+                                }
+                            }
+                        };
+                        return (JsonSerializer.Serialize(repairPlan), "replanner");
+                    }
                     return ("{\"plan\": []}", "replanner");
                 }
                 if (system.Contains("You are the deep-reasoning engine of an autonomous coding agent", StringComparison.Ordinal))
@@ -2130,7 +2303,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     // each premature completion until the regen budget is exhausted.
                     return ("{\"planComplete\": true, \"completionReason\": \"nothing to do\"}", "planner-step");
                 }
-                if (_owner.Mode == PlannerMode.VisualVerifyBuild)
+                if (_owner.Mode is PlannerMode.VisualVerifyBuild or PlannerMode.VisualVerifyBrokenServer)
                 {
                     // The benchmark-22 shape (build-then-visually-verify): turn 1 builds the
                     // game page, turn 2 declares the plan complete WITHOUT any _browser_test
@@ -2145,6 +2318,20 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
                     if (n == 2)
                         return ("{\"planComplete\": true, \"completionReason\": \"built the game\"}", "planner-step");
                     return ("{\"planComplete\": true, \"completionReason\": \"built the game and ran the live browser test\"}", "planner-step");
+                }
+                if (_owner.Mode == PlannerMode.VisualVerifyHalted)
+                {
+                    // The OTHER benchmark-22 exit: turn 1 builds the game, then every later
+                    // turn returns an UNPARSEABLE proposal (no step, no planComplete) — the
+                    // interleaved loop rejects it ("returned neither planComplete, exploreFile,
+                    // nor a step"), the regen budget (3) exhausts, and the loop BREAKS without
+                    // EVER declaring planComplete (the observed live failure: the planner's
+                    // oversized-anchor edit was rejected twice, then its response was
+                    // unparseable). The planComplete visual gate never fires on this path — the
+                    // halted-run visual gate must inject + execute the _browser_test anyway.
+                    if (n == 1)
+                        return (PlannerStepJson("_create_file", "benchmark_test_22/index.html"), "planner-step");
+                    return ("{\"planComplete\": false, \"thinking\": \"no step\"}", "planner-step");
                 }
                 if (_owner.Mode == PlannerMode.SearchOnly)
                 {

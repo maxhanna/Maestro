@@ -32,6 +32,23 @@ public class RuntimeProbeService
         ProcessRunner = processRunner ?? RunProcess;
     }
 
+    /// <summary>
+    /// Resolves the (fileName, arguments) pair actually passed to Process.Start. On Windows,
+    /// npm/npx ship as `.cmd` shims that Process.Start cannot exec directly, so they are
+    /// launched through cmd.exe /c (which resolves them via PATH like a shell). Everything
+    /// else passes through unchanged. Hermetically testable — no process is spawned here.
+    /// </summary>
+    internal static (string File, string Args) ResolveCommandForExecution(string fileName, string arguments)
+    {
+        if (OperatingSystem.IsWindows() &&
+            (fileName.Equals("npm", StringComparison.OrdinalIgnoreCase) ||
+             fileName.Equals("npx", StringComparison.OrdinalIgnoreCase)))
+        {
+            return (Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", $"/c {fileName} {arguments}");
+        }
+        return (fileName, arguments);
+    }
+
     private static (int Code, string StdOut, string StdErr) RunProcess(string fileName, string arguments, string workDir)
     {
         try
@@ -46,6 +63,15 @@ public class RuntimeProbeService
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            // Windows shim handling: npm/npx ship as `.cmd` scripts (C:\Program Files\nodejs\npm.cmd),
+            // which Process.Start cannot exec directly (Win32Error "not a valid application") — so
+            // the probe reported them UNAVAILABLE even on machines with node fully installed, and
+            // the planner was told it could never `npm install` (the benchmark-22 "Cannot find
+            // module 'express'" failure: the agent wrote express code believing npm did not exist).
+            // Launch the shims through cmd.exe /c so they resolve via PATH exactly like a shell.
+            var (resolvedFile, resolvedArgs) = ResolveCommandForExecution(fileName, arguments);
+            psi.FileName = resolvedFile;
+            psi.Arguments = resolvedArgs;
             using var p = Process.Start(psi);
             if (p == null) return (-1, "", "");
             var stdout = p.StandardOutput.ReadToEnd();

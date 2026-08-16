@@ -399,6 +399,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Log</span>
               <span class="section-badge">{{card.agentLog.length}}</span>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('top', $event)" title="Scroll log to top">▲</button>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('bottom', $event)" title="Scroll log to bottom">▼</button>
               <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋
                 Copy</button>
             </summary>
@@ -506,6 +508,9 @@
                 title="Discovery focus: {{vm.focusStats.files}} file(s) read as focused regions, saved ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ', effective focus threshold ' + (vm.focusStats.threshold) + ' chars' : ''}}">📊
                 {{vm.focusStats.files}} · ~{{vm.focusStats.chars}} chars{{vm.focusStats.threshold ? ' · thr ' +
                 (vm.focusStats.threshold) : ''}}</span>
+              <span ng-if="vm.runtimeAvailability" class="section-live-context runtime-tag"
+                title="Host runtimes the planner can use (npm/npx detected on Windows since the .cmd shim fix) — why the planner can run npm install">🧰
+                {{vm.runtimeAvailability}}</span>
             </div>
             <div class="section-body" ng-if="vm.streamingSteps.length">
               <div class="analysis-step" ng-repeat="s in vm.streamingSteps track by s.index" ng-class="s.status">
@@ -761,6 +766,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Activity Log</span>
               <span class="section-badge">{{vm.agentActivityLog.length}}</span>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('top', $event)" title="Scroll log to top">▲</button>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('bottom', $event)" title="Scroll log to bottom">▼</button>
             </summary>
             <div class="section-body">
               <div class="log-entries">
@@ -954,6 +961,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Log</span>
               <span class="section-badge">{{card.agentLog.length}}</span>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('top', $event)" title="Scroll log to top">▲</button>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('bottom', $event)" title="Scroll log to bottom">▼</button>
               <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋
                 Copy</button>
             </summary>
@@ -1437,6 +1446,8 @@
               <span class="section-caret">▶</span>
               <span class="section-title">📋 Log</span>
               <span class="section-badge">{{card.agentLog.length}}</span>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('top', $event)" title="Scroll log to top">▲</button>
+              <button class="log-scroll-btn" ng-click="vm.scrollLog('bottom', $event)" title="Scroll log to bottom">▼</button>
               <button class="log-copy-btn" ng-click="vm.copyCardLog(card, $event)" title="Copy entire log">📋
                 Copy</button>
             </summary>

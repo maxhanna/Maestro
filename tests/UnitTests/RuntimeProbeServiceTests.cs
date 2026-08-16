@@ -139,4 +139,44 @@ public class RuntimeProbeServiceTests
         Assert.Contains("python ✓", summary);
         Assert.Contains("node ✗", summary);
     }
+
+    // ── Windows shim resolution (npm/npx are .cmd scripts Process.Start can't exec) ──
+
+    [Fact]
+    public void ResolveCommandForExecution_WindowsNpmShim_RoutesThroughCmdExe()
+    {
+        // The benchmark-22 root cause: npm exists on the machine but the probe reported it
+        // UNAVAILABLE because Process.Start cannot exec the npm.cmd shim directly, so the
+        // planner believed `npm install` was impossible. The shim must route through cmd /c.
+        var (file, args) = RuntimeProbeService.ResolveCommandForExecution("npm", "--version");
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.EndsWith("cmd.exe", file, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("/c npm --version", args);
+        }
+        else
+        {
+            Assert.Equal("npm", file);
+            Assert.Equal("--version", args);
+        }
+    }
+
+    [Fact]
+    public void ResolveCommandForExecution_NpxShimAndPlainTools_PassThrough()
+    {
+        var (npxFile, npxArgs) = RuntimeProbeService.ResolveCommandForExecution("npx", "--version");
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.EndsWith("cmd.exe", npxFile, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("/c npx --version", npxArgs);
+        }
+        else
+        {
+            Assert.Equal("npx", npxFile);
+        }
+        // Non-shim tools (node, python, git) never get rewritten.
+        var (nodeFile, nodeArgs) = RuntimeProbeService.ResolveCommandForExecution("node", "--version");
+        Assert.Equal("node", nodeFile);
+        Assert.Equal("--version", nodeArgs);
+    }
 }

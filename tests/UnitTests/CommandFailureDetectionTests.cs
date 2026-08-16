@@ -222,6 +222,27 @@ public class CommandFailureDetectionTests
     }
 
     [Fact]
+    public void PythonScriptPath_ResolvedFromCommand()
+    {
+        // Quoted absolute path (the benchmark-22 command shape for a python server).
+        Assert.True(AgentController.TryResolvePythonScriptPath(
+            "python \"C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.py\"",
+            "C:\\proj", out var abs));
+        Assert.Equal("C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.py", abs);
+        // Bare relative path resolves against the project root.
+        Assert.True(AgentController.TryResolvePythonScriptPath("python app.py", "C:\\proj", out var rel));
+        Assert.Equal("C:\\proj\\app.py", rel);
+        Assert.True(AgentController.TryResolvePythonScriptPath("python3 benchmark_test_22/server.py", "C:\\proj", out var rel2));
+        Assert.Equal("C:\\proj\\benchmark_test_22\\server.py", rel2);
+        // python -c / flags / non-PY targets are NOT plain script invocations.
+        Assert.False(AgentController.TryResolvePythonScriptPath("python -c \"print(1)\"", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("python -m flask run", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("node server.js", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("python --version", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("", "C:\\proj", out _));
+    }
+
+    [Fact]
     public void MissingPort_PatchedIntoScript_Once()
     {
         var dir = Path.Combine(Path.GetTempPath(), "weaver_portpatch_" + Guid.NewGuid().ToString("N"));
@@ -249,5 +270,62 @@ public class CommandFailureDetectionTests
             Assert.False(AgentController.PatchMissingPortIntoScript(Path.Combine(dir, "nope.js")));
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // ── Deterministic missing-dependency recovery ─────────────────────────────
+    // `node server.js` fails with "Cannot find module 'express'" (the benchmark-22 live
+    // failure — the agent wrote express code without ever running `npm install`). The
+    // command pipeline must extract the module name, confirm it is not a node builtin
+    // (builtins can never be npm-installed), and deterministically run `npm install`
+    // before re-running — no planner round.
+
+    [Fact]
+    public void MissingModule_ExtractsNodeAndPythonModuleNames()
+    {
+        Assert.Equal("express",
+            AgentController.ExtractMissingModule("Error: Cannot find module 'express' Require stack: - C:\\app.js"));
+        Assert.Equal("flask",
+            AgentController.ExtractMissingModule("ModuleNotFoundError: No module named 'flask'"));
+        // Single-quoted module names are matched; double quotes and other failures are not.
+        Assert.Equal("morgan",
+            AgentController.ExtractMissingModule("node:internal/modules/cjs/loader:1401 Cannot find module 'morgan'"));
+        Assert.Null(AgentController.ExtractMissingModule("SyntaxError: Unexpected token '}'"));
+        Assert.Null(AgentController.ExtractMissingModule("ReferenceError: PORT is not defined"));
+        Assert.Null(AgentController.ExtractMissingModule(null));
+        Assert.Null(AgentController.ExtractMissingModule(""));
+    }
+
+    [Fact]
+    public void MissingModule_NodeBuiltins_AreNotInstallable()
+    {
+        // Builtins (and node: prefixed) can never come from npm — a missing-builtin claim is
+        // a different bug and must reach the planner, not an npm install.
+        Assert.True(AgentController.IsNodeBuiltinModule("fs"));
+        Assert.True(AgentController.IsNodeBuiltinModule("http"));
+        Assert.True(AgentController.IsNodeBuiltinModule("path"));
+        Assert.True(AgentController.IsNodeBuiltinModule("node:test"));
+        Assert.True(AgentController.IsNodeBuiltinModule("zlib"));
+        // Third-party modules ARE installable.
+        Assert.False(AgentController.IsNodeBuiltinModule("express"));
+        Assert.False(AgentController.IsNodeBuiltinModule("morgan"));
+        Assert.False(AgentController.IsNodeBuiltinModule(""));
+    }
+
+    [Fact]
+    public void MissingModule_PythonStdlib_AreNotInstallable()
+    {
+        // Stdlib modules can never come from pip — a missing-stdlib claim is a different bug
+        // and must reach the planner, not a pip install.
+        Assert.True(AgentController.IsPythonStdlibModule("os"));
+        Assert.True(AgentController.IsPythonStdlibModule("sys"));
+        Assert.True(AgentController.IsPythonStdlibModule("json"));
+        Assert.True(AgentController.IsPythonStdlibModule("http"));
+        Assert.True(AgentController.IsPythonStdlibModule("dataclasses"));
+        Assert.True(AgentController.IsPythonStdlibModule("pathlib"));
+        // Third-party modules ARE installable.
+        Assert.False(AgentController.IsPythonStdlibModule("flask"));
+        Assert.False(AgentController.IsPythonStdlibModule("fastapi"));
+        Assert.False(AgentController.IsPythonStdlibModule("requests"));
+        Assert.False(AgentController.IsPythonStdlibModule(""));
     }
 }

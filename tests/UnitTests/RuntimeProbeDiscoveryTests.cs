@@ -139,4 +139,35 @@ public class RuntimeProbeDiscoveryTests : IDisposable
         Assert.Contains("RUNTIME AVAILABILITY", second);
         Assert.Contains("python (Python 3.12.4)", second);
     }
+
+    [Fact]
+    public async Task Discovery_StaleVersionlessCache_IsReProbedFresh()
+    {
+        var probe = new CountingProbeService();
+        var controller = BuildController(probe);
+        var prompt = "Create a simple HTTP server on port 9969.";
+
+        // Simulate a cache written BEFORE the probe-format versioning — the pre-fix Windows
+        // npm/npx .cmd shim bug wrote blobs with NO version field claiming npm/npx missing,
+        // and the 24h TTL would otherwise serve that lie for a full day. A version-less (or
+        // wrong-version) blob must be treated as stale and re-probed.
+        _db.SetRuntimeProbe("proj", "{\"probedAtUtc\":\"" + DateTime.UtcNow.AddMinutes(-5).ToString("o") +
+            "\",\"probes\":[{\"name\":\"python\",\"version\":\"Python 3.12.4\"},{\"name\":\"node\",\"version\":\"v22.5.1\"},{\"name\":\"npm\"},{\"name\":\"npx\"}]}");
+
+        var (discovery, _) = await InvokeRunBootstrapDiscovery(controller, prompt, _projectRoot);
+
+        // The stale blob was discarded → a fresh probe ran, and the corrected availability
+        // (npm/npx present, per the fake probe's node/python results) surfaces.
+        Assert.Equal(1, probe.ProbeCalls);
+        Assert.Contains("RUNTIME AVAILABILITY", discovery);
+        Assert.Contains("python (Python 3.12.4)", discovery);
+
+        // The re-probe wrote a versioned blob back — the next run reuses it (no new probe).
+        var cached = _db.GetRuntimeProbe("proj");
+        Assert.NotNull(cached);
+        Assert.Contains("\"version\":2", cached);
+        var (second, _) = await InvokeRunBootstrapDiscovery(controller, prompt, _projectRoot);
+        Assert.Equal(1, probe.ProbeCalls);
+        Assert.Contains("RUNTIME AVAILABILITY", second);
+    }
 }

@@ -562,10 +562,20 @@ partial class AgentController
         }
     }
 
-    /// <summary>DB-cached runtime probe for a project (24h TTL); probes fresh only when stale/missing.</summary>
+    /// <summary>DB-cached runtime probe for a project (24h TTL); probes fresh only when stale/missing.
+    /// The cached blob carries a FORMAT VERSION so a probe-logic change invalidates old caches:
+    /// the Windows npm/npx shim fix (ProbeFormatVersion bumped 1 → 2) means any cache written
+    /// before it still claims "npm ✗, npx ✗" — the 24h TTL would otherwise keep serving that
+    /// lie to the agent panel for a full day. A version mismatch (or a version-less legacy blob)
+    /// is treated as stale and re-probed.</summary>
     private async Task<List<RuntimeProbeService.RuntimeInfo>?> LoadOrProbeRuntimesAsync(
         string projectRoot, bool emitSse, CancellationToken ct)
     {
+        // Bump whenever the probe's RESULT SEMANTICS change (a tool that was reported missing
+        // becomes detectable, a new runtime joins the probe list, …) — NOT for cosmetic edits.
+        // v2: Windows npm/npx .cmd shims are routed through cmd /c, so npm/npx that genuinely
+        // exist are now reported available instead of missing.
+        const int ProbeFormatVersion = 2;
         const int cacheTtlHours = 24;
         var projectKey = _editKnowledge?.GetProjectKey(projectRoot)
             ?? Path.GetFileName(projectRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
@@ -576,7 +586,12 @@ partial class AgentController
             {
                 using var doc = JsonDocument.Parse(cached);
                 var root = doc.RootElement;
-                if (root.TryGetProperty("probedAtUtc", out var at) &&
+                var versionOk = root.TryGetProperty("version", out var ver) &&
+                                ver.ValueKind == JsonValueKind.Number &&
+                                ver.TryGetInt32(out var cachedVer) &&
+                                cachedVer == ProbeFormatVersion;
+                if (versionOk &&
+                    root.TryGetProperty("probedAtUtc", out var at) &&
                     at.TryGetDateTime(out var probedAt) &&
                     (DateTime.UtcNow - probedAt).TotalHours < cacheTtlHours &&
                     root.TryGetProperty("probes", out var probesEl) &&
@@ -607,6 +622,7 @@ partial class AgentController
             using (var writer = new Utf8JsonWriter(stream))
             {
                 writer.WriteStartObject();
+                writer.WriteNumber("version", ProbeFormatVersion);
                 writer.WriteString("probedAtUtc", DateTime.UtcNow.ToString("o"));
                 writer.WritePropertyName("probes");
                 writer.WriteStartArray();
@@ -1632,7 +1648,7 @@ partial class AgentController
         var hasFatalStepErrors = allSteps.OfType<Dictionary<string, object?>>()
             .Any(s => s.TryGetValue("status", out var status) && s.TryGetValue("type", out var type)
                 && status?.ToString() == "error"
-                && type?.ToString() is not ("list" or "_web_search" or "_web_fetch" or "web_search" or "web_fetch" or "scraper" or "command"));
+                && type?.ToString() is not ("list" or "_web_search" or "_web_fetch" or "web_search" or "web_fetch" or "scraper" or "command" or "browser_test"));
         if (hasFatalStepErrors)
         {
             complete = false;

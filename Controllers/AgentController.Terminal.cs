@@ -204,7 +204,120 @@ partial class AgentController
         {
             return command; // same command — the file now defines PORT
         }
+        // AGILE DEPENDENCY RECOVERY: a node command failed with "Cannot find module 'X'"
+        // (e.g. `node server.js` requiring 'express' before any `npm install` — the exact
+        // benchmark-22 failure). Deterministically install the project's declared deps in
+        // the SCRIPT's directory and re-run the original command — no planner round, no new
+        // plan step. The re-run then either serves (done) or surfaces the NEXT failure
+        // (EADDRINUSE / missing PORT), which the fixes above chain-resolve.
+        var missingModule = ExtractMissingModule(output);
+        if (!string.IsNullOrWhiteSpace(missingModule) &&
+            !IsNodeBuiltinModule(missingModule) &&
+            TryResolveNodeScriptPath(command, projectRoot, out var nodeScript) &&
+            System.IO.File.Exists(nodeScript))
+        {
+            var scriptDir = Path.GetDirectoryName(nodeScript);
+            if (!string.IsNullOrWhiteSpace(scriptDir) &&
+                System.IO.File.Exists(Path.Combine(scriptDir, "package.json")))
+            {
+                var shell = _terminal.ShellName.ToLowerInvariant();
+                var isPs = shell is "powershell" or "pwsh" or "cmd" or "cmd.exe";
+                var cdPart = isPs
+                    ? $"Set-Location -LiteralPath \"{scriptDir}\"; "
+                    : $"cd \"{scriptDir}\" && ";
+                var installPart = isPs
+                    ? "npm install --no-audit --no-fund 2>$null | Out-Null; "
+                    : "npm install --no-audit --no-fund >/dev/null 2>&1; ";
+                return cdPart + installPart + command.TrimStart();
+            }
+        }
+        // PYTHON mirror of the dependency recovery: `python app.py` failed with
+        // "ModuleNotFoundError: No module named 'flask'" — the agent wrote the import without
+        // ever running `pip install`. Deterministically install the missing dependency and
+        // re-run the original command — no planner round. When the SCRIPT's directory
+        // declares requirements.txt, install it (covers every dependency in one shot,
+        // mirroring `npm install` pulling package.json); otherwise install the exact module
+        // the error named — the agile form: a lone `import flask` with no manifest still
+        // self-heals. The re-run then either serves (done) or surfaces the NEXT failure
+        // (EADDRINUSE / missing PORT), which the fixes above chain-resolve.
+        if (!string.IsNullOrWhiteSpace(missingModule) &&
+            !IsPythonStdlibModule(missingModule) &&
+            TryResolvePythonScriptPath(command, projectRoot, out var pyScript) &&
+            System.IO.File.Exists(pyScript))
+        {
+            var scriptDir = Path.GetDirectoryName(pyScript);
+            if (!string.IsNullOrWhiteSpace(scriptDir))
+            {
+                var shell = _terminal.ShellName.ToLowerInvariant();
+                var isPs = shell is "powershell" or "pwsh" or "cmd" or "cmd.exe";
+                var cdPart = isPs
+                    ? $"Set-Location -LiteralPath \"{scriptDir}\"; "
+                    : $"cd \"{scriptDir}\" && ";
+                var hasReq = System.IO.File.Exists(Path.Combine(scriptDir, "requirements.txt"));
+                var target = hasReq ? "-r requirements.txt" : missingModule;
+                var installPart = isPs
+                    ? $"python -m pip install --no-input --no-cache-dir {target} 2>$null | Out-Null; "
+                    : $"python -m pip install --no-input --no-cache-dir {target} >/dev/null 2>&1; ";
+                return cdPart + installPart + command.TrimStart();
+            }
+        }
         return null;
+    }
+
+    /// <summary>
+    /// Extracts the module name from a `Cannot find module 'X'` (node) or
+    /// `ModuleNotFoundError: No module named 'X'` (python) failure. Returns null for
+    /// non-missing-module failures.
+    /// </summary>
+    internal static string? ExtractMissingModule(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return null;
+        var m = Regex.Match(output, @"Cannot find module\s*'([^']+)'", RegexOptions.IgnoreCase);
+        if (!m.Success)
+            m = Regex.Match(output, @"No module named\s*'([^']+)'", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.Trim() : null;
+    }
+
+    /// <summary>True when the module name is a python STDLIB module (os, sys, json, …) — a
+    /// stdlib module can never be pip-installed, so a missing-stdlib claim is a different
+    /// bug (a stripped/corrupt interpreter) and must go to the planner instead. Mirrors
+    /// IsNodeBuiltinModule for the node side of the same recovery.</summary>
+    internal static bool IsPythonStdlibModule(string module)
+    {
+        return module.ToLowerInvariant() switch
+        {
+            "abc" or "argparse" or "array" or "asyncio" or "base64" or "bisect" or "builtins"
+            or "collections" or "contextlib" or "copy" or "csv" or "ctypes" or "dataclasses"
+            or "datetime" or "decimal" or "enum" or "errno" or "fnmatch" or "fractions"
+            or "functools" or "gc" or "getopt" or "getpass" or "glob" or "hashlib" or "heapq"
+            or "html" or "http" or "importlib" or "inspect" or "io" or "itertools" or "json"
+            or "logging" or "math" or "mimetypes" or "multiprocessing" or "os" or "pathlib"
+            or "pdb" or "pickle" or "platform" or "queue" or "random" or "re" or "select"
+            or "shlex" or "shutil" or "signal" or "socket" or "sqlite3" or "ssl" or "statistics"
+            or "string" or "struct" or "subprocess" or "sys" or "sysconfig" or "tempfile"
+            or "threading" or "time" or "traceback" or "types" or "typing" or "unittest"
+            or "urllib" or "uuid" or "warnings" or "weakref" or "xml" or "zipfile" => true,
+            _ => false
+        };
+    }
+
+    /// <summary>True when the module name is a node BUILT-IN (fs, http, path, …) — a
+    /// builtin can never be npm-installed, so a missing-builtin claim is a different bug
+    /// (a stripped/corrupt runtime) and must go to the planner instead.</summary>
+    internal static bool IsNodeBuiltinModule(string module)
+    {
+        if (module.StartsWith("node:", StringComparison.Ordinal)) return true;
+        return module.ToLowerInvariant() switch
+        {
+            "assert" or "async_hooks" or "buffer" or "child_process" or "cluster" or "console"
+            or "constants" or "crypto" or "dgram" or "diagnostics_channel" or "dns" or "domain"
+            or "events" or "fs" or "http" or "http2" or "https" or "inspector" or "module"
+            or "net" or "os" or "path" or "perf_hooks" or "process" or "punycode" or "querystring"
+            or "readline" or "repl" or "stream" or "string_decoder" or "sys" or "timers" or "tls"
+            or "trace_events" or "tty" or "url" or "util" or "v8" or "vm" or "wasi" or "worker_threads"
+            or "zlib" => true,
+            _ => false
+        };
     }
 
     /// <summary>
@@ -219,6 +332,27 @@ partial class AgentController
         if (!m.Success)
             m = Regex.Match(output, @"NameError:\s*name\s+'([A-Za-z_$][A-Za-z0-9_$]*)'\s+is not defined", RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// Resolves the script a `python &lt;script&gt;` command runs, or returns false when the
+    /// command is not a plain script invocation (python -c, flags, other runtimes). Handles
+    /// quoted absolute paths (`python "C:\path with spaces\app.py"`) and bare relative
+    /// paths (`python app.py` resolved against projectRoot).
+    /// </summary>
+    internal static bool TryResolvePythonScriptPath(string command, string projectRoot, out string scriptPath)
+    {
+        scriptPath = "";
+        if (string.IsNullOrWhiteSpace(command)) return false;
+        var m = Regex.Match(command, @"\bpython(?:3(?:\.\d+)?)?(?:\.exe)?\s+(?:""([^""]+)""|([^\s""-][^\s""]*))", RegexOptions.IgnoreCase);
+        if (!m.Success) return false;
+        var arg = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+        if (string.IsNullOrWhiteSpace(arg) || arg.StartsWith("-", StringComparison.Ordinal)) return false;
+        if (!arg.EndsWith(".py", StringComparison.OrdinalIgnoreCase)) return false;
+        scriptPath = Path.IsPathRooted(arg)
+            ? Path.GetFullPath(arg)
+            : Path.GetFullPath(Path.Combine(projectRoot, arg));
+        return true;
     }
 
     /// <summary>

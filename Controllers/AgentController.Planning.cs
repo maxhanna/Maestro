@@ -4562,6 +4562,55 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
             }
         }
+        // ── HALTED-RUN VISUAL GATE ───────────────────────────────────────────────────────
+        // The planComplete visual gate above only fires when the planner DECLARES completion.
+        // A run can ALSO exit this loop without EVER proposing planComplete: the planner's
+        // step proposals were rejected until the regen budget exhausted (the observed
+        // benchmark-22 halt — the planner's oversized-anchor edit to backend/server.py was
+        // rejected twice, then its third response was unparseable, and the loop broke with
+        // planCompleteDeclared=false and NO _browser_test ever executed). For a task that
+        // demands LOOKING at the rendered page, that is the same violation as declaring
+        // completion early: the visual verification never happened, and post-execution
+        // verification (which reads FILES, not a rendered page) would happily finish the run
+        // without it. Inject + execute the live web test deterministically — the classifier
+        // and _browser_test are both deterministic (no model content to trust) — so the run
+        // cannot halt past the visual requirement. A browser_test result that FAILED is
+        // handled downstream (deterministic PostExecuteVerify issue + repair re-run); this
+        // gate only fires when NO browser test ran at all.
+        if (!planCompleteDeclared &&
+            TestIntentClassifier.HasVisualInspectionHint(prompt) &&
+            !allResults.OfType<Dictionary<string, object?>>()
+                .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"))
+        {
+            if (visualNeedVerified == 0)
+            {
+                await EmitLog(emitSse, "info",
+                    "Task demands visual verification — checking whether a _browser_test step is required…", ct: ct);
+                var (needsVisual, target) = await ClassifyVisualInspectionPromptAsync(prompt, ct);
+                visualNeedVerified = needsVisual ? 1 : -1;
+                if (needsVisual) visualNeedTarget = target;
+            }
+            if (visualNeedVerified == 1)
+            {
+                var inspectTarget = string.IsNullOrWhiteSpace(visualNeedTarget)
+                    ? BuildFallbackVisualTarget(prompt)
+                    : visualNeedTarget.Trim();
+                await EmitLog(emitSse, "warn",
+                    $"The interleaved loop halted without a _browser_test step — deterministically injecting a live web test: \"{inspectTarget}\"", ct: ct);
+                planSoFar.Add(new PlanStep { File = "_browser_test", Change = inspectTarget });
+                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext,
+                    new AgentPlan
+                    {
+                        Plan = new List<PlanStep> { new PlanStep { File = "_browser_test", Change = inspectTarget } },
+                        Summary = "Injected live web test", Score = 90
+                    },
+                    ct, allResults,
+                    steeringContext: steeringContext, attachedFiles: attachedFiles,
+                    cardId: cardId);
+                await EmitLog(emitSse, "info",
+                    $"_browser_test injected at loop halt — live web test of \"{inspectTarget}\" executed; the fresh result feeds the deterministic completion check.", ct: ct);
+            }
+        }
         var finalPlan = new AgentPlan
         {
             Thinking = thinkingLog.ToString(),

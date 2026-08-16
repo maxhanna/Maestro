@@ -205,6 +205,7 @@ partial class AgentController
             ["path"] = "browser_test",
             ["url"] = report.ServerUrl,
             ["mode"] = report.Mode,
+            ["target"] = target,
             ["section"] = report.SectionLabel,
             ["description"] = $"Live web test \"{target}\": {(report.Passed ? "PASSED" : "FAILED")}",
             ["output"] = report.ToString()
@@ -404,6 +405,91 @@ partial class AgentController
             }
             await SendSse(Response, "webtest", new { phase = e.Phase, url = e.Url, message = e.Message, snapshot = snap }, ct2);
         };
+
+    /// <summary>True when the MOST RECENT _browser_test result failed — the deterministic
+    /// gate that blocks completion: a live web test that failed (server never started /
+    /// page never rendered) is ground truth the run is not done, no matter what the
+    /// file-level verifier says about the source. A fresh passing re-run replaces the
+    /// failure.</summary>
+    private static bool MostRecentBrowserTestFailed(IEnumerable<object> allResults)
+    {
+        var last = allResults.OfType<Dictionary<string, object?>>()
+            .LastOrDefault(r => r.GetValueOrDefault("type")?.ToString() == "browser_test");
+        return last != null && last.GetValueOrDefault("status")?.ToString() == "error";
+    }
+
+    /// <summary>
+    /// Re-runs the live web test when the most recent _browser_test result failed — the
+    /// deterministic way the repair loop confirms a server fix actually starts the server.
+    /// The file-level verifier reads FILES, not a running server: a missing module
+    /// (express), a broken PORT read, or a syntax error all look fine on disk, so only the
+    /// browser test itself can prove the server starts. Appends a fresh browser_test result
+    /// (target preserved) so PostExecuteVerify's deterministic check sees the CURRENT state;
+    /// the next repair pass / completion decision reads the fresh verdict.
+    /// </summary>
+    private async Task ReRunFailedBrowserTestAsync(
+        string prompt, string projectRoot, bool emitSse,
+        List<object> allSteps, CancellationToken ct)
+    {
+        var last = allSteps.OfType<Dictionary<string, object?>>()
+            .LastOrDefault(r => r.GetValueOrDefault("type")?.ToString() == "browser_test");
+        if (last == null || last.GetValueOrDefault("status")?.ToString() != "error") return;
+        var target = last.GetValueOrDefault("target")?.ToString();
+        if (string.IsNullOrWhiteSpace(target)) return;
+        await EmitLog(emitSse, "info",
+            $"_browser_test: re-running live web test \"{target}\" after the repair — verifying the server fix…", ct: ct);
+        var testIntent = new TestClassifierTarget(target);
+        BrowserTestReport report;
+        _browserTestService.OnProgress = MakeWebtestProgressSink(emitSse);
+        try
+        {
+            report = testIntent.IsApi
+                ? await _browserTestService.RunApiTestAsync(projectRoot, target, ct)
+                : await _browserTestService.RunUiTestAsync(projectRoot, target, prompt, ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            report = new BrowserTestReport
+            {
+                Target = target, Mode = "failed", LaunchError = ex.Message,
+                Findings = { new TestFinding("fail", $"Live web test crashed: {ex.Message}") }
+            };
+        }
+        finally
+        {
+            _browserTestService.OnProgress = null;
+        }
+
+        allSteps.Add(new Dictionary<string, object?>
+        {
+            ["index"] = allSteps.Count,
+            ["type"] = "browser_test",
+            ["status"] = report.Passed ? "done" : "error",
+            ["path"] = "browser_test",
+            ["url"] = report.ServerUrl,
+            ["mode"] = report.Mode,
+            ["target"] = target,
+            ["section"] = report.SectionLabel,
+            ["description"] = $"Live web test re-run \"{target}\": {(report.Passed ? "PASSED" : "FAILED")}",
+            ["output"] = report.ToString()
+        });
+        if (emitSse)
+            await SendSse(Response, "step", new
+            {
+                index = allSteps.Count - 1,
+                type = "browser_test",
+                status = report.Passed ? "done" : "error",
+                path = "browser_test",
+                url = report.ServerUrl,
+                mode = report.Mode,
+                target,
+                section = report.SectionLabel,
+                description = $"Live web test re-run \"{target}\": {(report.Passed ? "PASSED" : "FAILED")}",
+                message = report.ToString()
+            }, ct);
+        await EmitLog(emitSse, report.Passed ? "success" : "error", report.ToString(), ct: ct);
+    }
 
     /// <summary>Whether a "_browser_test" step targets an API endpoint vs the UI.
     /// Mirrors the classifier's API rule for plan steps whose change names a route.</summary>

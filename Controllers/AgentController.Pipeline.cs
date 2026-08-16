@@ -830,7 +830,7 @@ partial class AgentController
                         }
                     }
                     verificationIssues = keptIssues;
-                    if (verificationIssues.Count == 0)
+                    if (verificationIssues.Count == 0 && !MostRecentBrowserTestFailed(allSteps))
                     {
                         await EmitLog(emitSse, "info",
                             "All verifier issues were triaged out as speculative/phantom — treating verification as complete (changes kept).", ct: ct);
@@ -839,6 +839,21 @@ partial class AgentController
                         verificationDetails += " — all verifier issues triaged as non-actionable (speculative/phantom)";
                         taskComplete = true;
                         break;
+                    }
+                    if (verificationIssues.Count == 0 && MostRecentBrowserTestFailed(allSteps))
+                    {
+                        // The browser-test failure is NOT triageable — a server that never
+                        // started is deterministic ground truth (the stack-trace symbols can
+                        // look like "hallucinated references" to the triage, which would drop
+                        // the issue and falsely complete the run). Keep the run incomplete and
+                        // replan with the live web test failure as the issue to fix.
+                        await EmitLog(emitSse, "warn",
+                            "All verifier issues triaged out BUT the live web test is still failing — keeping the run incomplete; " +
+                            "the browser test failure is deterministic ground truth, not a triageable concern.", ct: ct);
+                        verificationIssues = new List<string>
+                        {
+                            "Live web test failed (deterministic — the server could not start / the page never rendered); fix the server so it starts, then re-run the live web test"
+                        };
                     }
                 }
                 var qualityCheckReason = new StringBuilder();
@@ -949,6 +964,14 @@ partial class AgentController
                         completedStepIndices: mergedDone, cardId: cardId,
                         skipLlmPreResolution: ShouldApplyDirectly(singleStep));
                 }
+                // LIVE WEB RE-TEST after the repair: the file-level verifier cannot know
+                // whether the server actually starts — only the browser test can. If a
+                // _browser_test step failed earlier (server could not start / page never
+                // rendered), re-run it deterministically against the CURRENT project state.
+                // A passing re-run replaces the stale failure (its fresh result is what
+                // PostExecuteVerify's deterministic check and the completion fallbacks see);
+                // a failing re-run keeps the run incomplete so the next pass repairs further.
+                await ReRunFailedBrowserTestAsync(prompt, projectRoot, emitSse, allSteps, ct);
                 // If repair step was "already done", the verifier issue was a phantom —
                 // remove it and skip re-verify so the next pass tries the next issue.
                 var (isPhantomIssue, phantomText, remainingIssues) =
@@ -959,7 +982,7 @@ partial class AgentController
                     await EmitLog(emitSse, "info",
                         $"Repair step was already done — issue \"{phantomText}\" was a phantom. " +
                         $"Remaining issues: {verificationIssues.Count}", ct: ct);
-                    if (verificationIssues.Count == 0)
+                    if (verificationIssues.Count == 0 && !MostRecentBrowserTestFailed(allSteps))
                     {
                         taskComplete = true;
                         break;
@@ -975,7 +998,7 @@ partial class AgentController
                 var (newZeroChangeCount, breakerTripped) = AdvanceRepairChurnBreaker(
                     zeroChangeRepairs, successfulEditsAfter != successfulEditsBefore, MaxZeroChangeRepairs);
                 zeroChangeRepairs = newZeroChangeCount;
-                if (breakerTripped)
+                if (breakerTripped && !MostRecentBrowserTestFailed(allSteps))
                 {
                     await EmitLog(emitSse, "warn",
                         $"⛔ Repair circuit breaker tripped — {zeroChangeRepairs} consecutive repair passes produced zero file changes. " +
@@ -984,6 +1007,18 @@ partial class AgentController
                     verificationDetails += $" — repair circuit breaker tripped after {zeroChangeRepairs} consecutive zero-change passes " +
                         $"(verifier issue likely non-actionable); changes kept";
                     taskComplete = true;
+                    break;
+                }
+                if (breakerTripped && MostRecentBrowserTestFailed(allSteps))
+                {
+                    // The breaker exists to stop FALSE-POSITIVE verifier churn — but a failed
+                    // live web test is NOT a false positive (the server genuinely never
+                    // started), so the breaker must not complete the run. Keep it incomplete
+                    // so the repair budget / final verdict reflect the real failure.
+                    await EmitLog(emitSse, "warn",
+                        "⛔ Repair circuit breaker would trip, but the live web test is still failing — the browser test is deterministic " +
+                        "ground truth, so the run stays incomplete instead of completing over a broken server.", ct: ct);
+                    taskComplete = false;
                     break;
                 }
                 if (zeroChangeRepairs > 0)
@@ -1024,6 +1059,16 @@ partial class AgentController
                     await EmitLog(emitSse, "warn",
                         "Repair replanner proposed no further steps BUT the demanded OS output file was never written — " +
                         "keeping the task incomplete instead of falsely marking it complete.", ct: ct);
+                }
+                else if (MostRecentBrowserTestFailed(allSteps))
+                {
+                    // The replanner ran out of steps, but the live web test is STILL failing
+                    // (server never started) — nothing left to fix in the replanner's eyes, yet
+                    // the browser test is deterministic ground truth. Keep the run incomplete
+                    // instead of the "treating as complete" fallback.
+                    await EmitLog(emitSse, "warn",
+                        "Repair replanner proposed no further steps BUT the live web test is still failing — the server never " +
+                        "started, so the run stays incomplete rather than falsely completing.", ct: ct);
                 }
                 else
                 {
@@ -1724,6 +1769,22 @@ partial class AgentController
         // land or was reverted, and that must fail verification deterministically.
         var (confirmedEdits, missingEditIssues) = AgentTextUtilities.CheckAppliedEditsPresent(projectRoot, allResults);
         deterministicIssues.AddRange(missingEditIssues);
+        // A FAILED live web test (_browser_test step with status "error") is deterministic
+        // ground truth the run is NOT done: the server never started / the page never
+        // rendered, so the visual verification the task demanded cannot have happened. The
+        // LLM verifier reads FILES, not a running server — a server that cannot launch
+        // (missing 'express', broken PORT read, syntax error) looks perfectly fine on disk.
+        // Only the most recent browser_test result counts: a repair-pass re-run that passes
+        // replaces the earlier failure, so a fixed server is not blocked by a stale error.
+        if (MostRecentBrowserTestFailed(allResults))
+        {
+            var lastBrowserTest = allResults.OfType<Dictionary<string, object?>>()
+                .LastOrDefault(r => r.GetValueOrDefault("type")?.ToString() == "browser_test");
+            var btOutput = lastBrowserTest?.GetValueOrDefault("output")?.ToString()
+                ?? lastBrowserTest?.GetValueOrDefault("description")?.ToString()
+                ?? "Live web test failed (server could not start)";
+            deterministicIssues.Add("Live web test failed: " + TruncateForLlm(btOutput, 600));
+        }
         if (deterministicIssues.Count > 0)
         {
             await EmitLog(emitSse, "warn",

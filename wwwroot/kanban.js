@@ -452,6 +452,19 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         } else { legacyCopyLog(text); copied(); }
       };
 
+      // Scrolls the log-entries container of the log section the button lives in to the
+      // top or bottom — the ▲/▼ buttons next to 📋 Copy. Section-scoped (never the global
+      // first .log-entries) so a multi-section board scrolls the right log.
+      vm.scrollLog = function (direction, $event) {
+        if ($event) { $event.stopPropagation(); $event.preventDefault(); }
+        var btn = $event && $event.currentTarget;
+        if (!btn) return;
+        var section = btn.closest ? btn.closest('.card-section') : null;
+        var container = section ? section.querySelector('.log-entries') : null;
+        if (!container) return;
+        container.scrollTop = direction === 'top' ? 0 : container.scrollHeight;
+      };
+
       vm.openDeleteCardConfirm = function (id, col) {
         vm.confirmDeleteCardId = id;
         var col = col || 'done';
