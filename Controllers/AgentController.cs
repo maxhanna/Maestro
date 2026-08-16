@@ -1564,7 +1564,28 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                 {
                     if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
                         continue;
-                    return cardObj["_benchmark"] is JsonValue bv && bv.TryGetValue<bool>(out var isBench) && isBench;
+                    if (cardObj["_benchmark"] is JsonValue bv && bv.TryGetValue<bool>(out var isBench) && isBench)
+                        return true;
+                    // Cards that live in the benchmark project are benchmark cards even when
+                    // created by hand without the _benchmark flag (e.g. a benchmark prompt
+                    // pasted into a normal card in the "Weaver Benchmarks" project). Match
+                    // the card's project path against the effective benchmark root so no
+                    // suggestion generation can ever target sandbox cards.
+                    if (cardObj["filePath"] is JsonValue fp && fp.TryGetValue<string>(out var filePath) &&
+                        !string.IsNullOrWhiteSpace(filePath))
+                    {
+                        var custom = new BenchmarkService(_db).LoadCustomSystemInfo();
+                        var benchRoot = BenchmarkService.ResolveBenchmarkRoot(custom?.BenchmarkProjectRoot);
+                        try
+                        {
+                            var normalizedCardPath = Path.GetFullPath(filePath)
+                                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                            if (string.Equals(normalizedCardPath, benchRoot, StringComparison.OrdinalIgnoreCase))
+                                return true;
+                        }
+                        catch { }
+                    }
+                    return false;
                 }
             }
         }
@@ -1733,25 +1754,17 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
     }
     private static List<object> ExtractFilesEdited(List<object> steps)
     {
-        var result = new List<object>();
-        var paths = new List<string?>();
+        // Collect every successful edit/rename step first (dictionary steps; the JSON
+        // fallback below covers serialized step objects from older flows).
+        var collected = new List<(Dictionary<string, object?> Step, string? Path)>();
         foreach (var step in steps)
         {
             if (step is not Dictionary<string, object?> s) continue;
             if (!(s.TryGetValue("type", out var t) && (t?.ToString() == "edit" || t?.ToString() == "rename") &&
                   s.TryGetValue("status", out var st) && st?.ToString() == "done")) continue;
-            result.Add((object)new
-            {
-                path = s.GetValueOrDefault("path"),
-                action = s.GetValueOrDefault("editAction"),
-                toPath = s.GetValueOrDefault("toPath"),
-                linesAdded = s.GetValueOrDefault("linesAdded"),
-                linesRemoved = s.GetValueOrDefault("linesRemoved"),
-                preview = s.GetValueOrDefault("diffPreview")
-            });
-            paths.Add(s.GetValueOrDefault("path")?.ToString());
+            collected.Add((s, s.GetValueOrDefault("path")?.ToString()));
         }
-        if (result.Count == 0)
+        if (collected.Count == 0)
         {
             foreach (var step in steps)
             {
@@ -1765,26 +1778,66 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
                     var status = root.TryGetProperty("status", out var st) ? st.GetString() : "";
                     if ((type == "edit" || type == "rename") && status == "done")
                     {
-                        result.Add(new { path = root.TryGetProperty("path", out var p) ? p.GetString() : null, action = (string?)null, toPath = (string?)null, linesAdded = 0, linesRemoved = 0, preview = (string?)null });
-                        paths.Add(root.TryGetProperty("path", out var p2) ? p2.GetString() : null);
+                        collected.Add((new Dictionary<string, object?>
+                        {
+                            ["path"] = root.TryGetProperty("path", out var p) ? p.GetString() : null,
+                            ["editAction"] = null,
+                            ["toPath"] = null,
+                            ["linesAdded"] = 0,
+                            ["linesRemoved"] = 0,
+                            ["diffPreview"] = null
+                        }, root.TryGetProperty("path", out var p2) ? p2.GetString() : null));
                     }
                 }
                 catch { }
             }
         }
-        // A file edited across multiple steps appears once per step. Dedupe by path — the
-        // LAST edit per file wins (its preview is the final state). Duplicate paths crash
-        // the client's ng-repeat ('track by f.path') and are meaningless for the
-        // "files changed" list.
-        var keep = new HashSet<int>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        for (var i = result.Count - 1; i >= 0; i--)
+        // Aggregate per path: a file edited across multiple steps appears once, with the
+        // line counts SUMMED across every edit (git-style cumulative stat) while the LAST
+        // edit's preview/action wins (its diff shows the final change). Duplicate paths
+        // crash the client's ng-repeat ('track by f.path'). First-seen order is preserved.
+        int LinesOf(object? v) => v switch
         {
-            var p = paths[i];
-            if (string.IsNullOrWhiteSpace(p)) continue;
-            if (seen.Add(p.Replace('\\', '/')))
-                keep.Add(i);
+            int i => i,
+            long l => (int)l,
+            double d => (int)d,
+            JsonElement je when je.ValueKind == JsonValueKind.Number => je.GetInt32(),
+            _ => 0
+        };
+        var order = new List<string>();
+        var byPath = new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
+        var unpathed = new List<Dictionary<string, object?>>();
+        foreach (var (entry, rawPath) in collected)
+        {
+            var norm = rawPath?.Replace('\\', '/');
+            if (string.IsNullOrWhiteSpace(norm))
+            {
+                unpathed.Add(entry);
+                continue;
+            }
+            if (!byPath.TryGetValue(norm, out var acc))
+            {
+                order.Add(norm);
+                acc = new Dictionary<string, object?>
+                {
+                    ["path"] = rawPath,
+                    ["action"] = entry.GetValueOrDefault("editAction"),
+                    ["toPath"] = entry.GetValueOrDefault("toPath"),
+                    ["linesAdded"] = 0,
+                    ["linesRemoved"] = 0,
+                    ["preview"] = entry.GetValueOrDefault("diffPreview")
+                };
+                byPath[norm] = acc;
+            }
+            acc["path"] = rawPath;
+            acc["action"] = entry.GetValueOrDefault("editAction");
+            acc["toPath"] = entry.GetValueOrDefault("toPath");
+            acc["preview"] = entry.GetValueOrDefault("diffPreview");
+            acc["linesAdded"] = LinesOf(acc.GetValueOrDefault("linesAdded")) + LinesOf(entry.GetValueOrDefault("linesAdded"));
+            acc["linesRemoved"] = LinesOf(acc.GetValueOrDefault("linesRemoved")) + LinesOf(entry.GetValueOrDefault("linesRemoved"));
         }
-        return result.Where((_, i) => keep.Contains(i)).ToList();
+        var result = order.Select(k => (object)byPath[k]).ToList();
+        result.AddRange(unpathed);
+        return result;
     }
 }

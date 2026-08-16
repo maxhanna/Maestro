@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Weaver.Services;
 
@@ -295,6 +297,10 @@ public class BrowserAutomationService
         }
         report.BodyTextExcerpt = Excerpt(snapshot.BodyText);
         report.Findings.AddRange(WebPageProbeService.Verify(snapshot, target));
+        var probes = ExtractWindowStateProbes(prompt);
+        if (probes.Count > 0)
+            report.Findings.Add(new TestFinding("info",
+                $"No browser available — cannot evaluate the live state ({string.Join(", ", probes.Select(p => "window." + p))}) over HTTP; JavaScript-rendered canvas/animation state needs a real browser."));
     }
 
     private async Task RunBrowserInspectionAsync(CdpBrowserDriver driver, string baseUrl, string target, string? prompt,
@@ -346,6 +352,75 @@ public class BrowserAutomationService
         }
         report.BodyTextExcerpt = Excerpt(snapshot.BodyText);
         report.Findings.AddRange(WebPageProbeService.Verify(snapshot, target));
+        // Read the benchmark's live canvas/animation state (e.g. `window.legCount`) off the
+        // rendered page — the actual leg count, not just a heading match. This is what makes
+        // the pass/fail and the agent's feedback reflect what is really on the canvas.
+        await AppendLiveStateProbesAsync(prompt, driver.EvaluateAsync, report.Findings, ct);
+    }
+
+    /// <summary>
+    /// Unique `window.&lt;name&gt;` state globals the prompt names (e.g. `window.legCount`).
+    /// These are the benchmark contract's readable animation/canvas state — the page exposes
+    /// a global so the test can read the REAL rendered value instead of guessing from a
+    /// heading. Only the plain `window.name` form is matched (never `window.name.sub`), so
+    /// probes stay simple and safe to evaluate.
+    /// </summary>
+    private static readonly Regex WindowStateRegex = new(
+        @"\bwindow\.([A-Za-z_$][\w$]*)", RegexOptions.Compiled);
+
+    internal static IReadOnlyList<string> ExtractWindowStateProbes(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return Array.Empty<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var names = new List<string>();
+        foreach (Match m in WindowStateRegex.Matches(prompt))
+        {
+            var name = m.Groups[1].Value;
+            if (seen.Add(name)) names.Add(name);
+        }
+        return names;
+    }
+
+    private static string DescribeValue(JsonElement raw) => raw.ValueKind switch
+    {
+        JsonValueKind.String => raw.GetString() ?? "",
+        JsonValueKind.Number => raw.GetRawText(),
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        JsonValueKind.Null => "null",
+        JsonValueKind.Undefined => "undefined",
+        _ => raw.GetRawText()
+    };
+
+    /// <summary>
+    /// Reads every `window.&lt;name&gt;` state global the prompt names off the RENDERED page
+    /// and reports its LIVE value — the canvas/animation state a benchmark exposes
+    /// (e.g. `window.legCount`), which heading/section matching alone cannot see. A
+    /// readable value is reported so the agent sees the actual count (4 legs vs 6 legs);
+    /// a missing global FAILS, because these benchmarks promise "the page MUST expose
+    /// `window.legCount`" — an absent global is a broken contract, not a neutral detail.
+    /// </summary>
+    internal static async Task AppendLiveStateProbesAsync(
+        string? prompt,
+        Func<string, CancellationToken, Task<JsonElement>> evaluate,
+        List<TestFinding> findings,
+        CancellationToken ct)
+    {
+        foreach (var name in ExtractWindowStateProbes(prompt))
+        {
+            var expr = "window." + name;
+            try
+            {
+                var raw = await evaluate(expr, ct);
+                findings.Add(new TestFinding("info",
+                    $"{expr} = {DescribeValue(raw)} (live canvas/animation state)"));
+            }
+            catch (Exception)
+            {
+                findings.Add(new TestFinding("fail",
+                    $"{expr} is not defined on the rendered page — the required state is missing."));
+            }
+        }
     }
 
     /// <summary>Resolves a possibly-relative target/href against the server base URL.

@@ -180,4 +180,40 @@ public class PythonEditFixesTests
         var b = AgentController.NormalizePyCompileError("line 9\nNameError: y", "p.py");
         Assert.NotEqual(a, b);
     }
+
+    // ── PythonDeclarationKind (focused-replacement scope guard) ─────────────────────────
+
+    [Fact]
+    public void DeclarationKind_ClassMethodAndFragment_Classified()
+    {
+        Assert.Equal("class", AgentEditHeuristics.PythonDeclarationKind("class MyHTTPRequestHandler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        pass"));
+        Assert.Equal("function", AgentEditHeuristics.PythonDeclarationKind("def do_GET(self):\n    pass"));
+        Assert.Equal("function", AgentEditHeuristics.PythonDeclarationKind("async def fetch(self):\n    pass"));
+        Assert.Null(AgentEditHeuristics.PythonDeclarationKind("    pass"));
+        Assert.Null(AgentEditHeuristics.PythonDeclarationKind(""));
+    }
+
+    [Fact]
+    public void DeclarationKind_ClassOldString_DefReplacement_IsScopeMismatch()
+    {
+        // The exact benchmark-4 pair: AST resolved the whole class as oldString, the focused
+        // LLM returned just the do_GET method → applying it would delete the class and die.
+        var oldKind = AgentEditHeuristics.PythonDeclarationKind(
+            "class MyHTTPRequestHandler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        if self.path == '/api/hello':\n            pass\n        else:\n            return super().do_get()");
+        var newKind = AgentEditHeuristics.PythonDeclarationKind(
+            "def do_GET(self):\n    if self.path == '/api/hello':\n        pass\n    else:\n        super().do_GET()");
+        Assert.Equal("class", oldKind);
+        Assert.Equal("function", newKind);
+        Assert.NotEqual(oldKind, newKind);
+    }
+
+    [Fact]
+    public void DeclarationKind_MethodToMethod_IsNotScopeMismatch()
+    {
+        var oldKind = AgentEditHeuristics.PythonDeclarationKind("def do_GET(self):\n    pass");
+        var newKind = AgentEditHeuristics.PythonDeclarationKind("def do_GET(self):\n    super().do_GET()");
+        Assert.Equal("function", oldKind);
+        Assert.Equal("function", newKind);
+        Assert.Equal(oldKind, newKind);
+    }
 }

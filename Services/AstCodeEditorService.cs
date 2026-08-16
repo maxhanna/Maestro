@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using TreeSitter;
 namespace Weaver.Services;
 public static class AstCodeEditorService
@@ -327,8 +328,50 @@ public static class AstCodeEditorService
             return results;
         }
     }
+    // Node types that represent a CLASS-like declaration across the supported grammars.
+    // Used to decide whether a resolved target is a whole class (so we can narrow it to
+    // an inner method when the change description references `Class.method`).
+    private static readonly HashSet<string> ClassLikeNodeTypes = new(StringComparer.Ordinal)
+    {
+        "class_definition",
+        "class_declaration",
+        "class_specifier",
+        "struct_declaration",
+        "struct_specifier",
+        "interface_declaration",
+        "record_declaration",
+        "trait_definition",
+        "object_definition",
+        "enum_declaration",
+        "enum_definition",
+        "module",
+    };
+
+    /// <summary>
+    /// Extracts the `method` part of a `Class.method` reference in a change description,
+    /// e.g. "In MyHTTPRequestHandler.do_GET method (around line 23)" → "do_GET".
+    /// Only dotted references anchored to the given class name are accepted, so a generic
+    /// "method X" mention in a class-scoped step never narrows to the wrong member.
+    /// </summary>
+    public static string? ExtractInnerMethodFromChange(string? changeDescription, string className)
+    {
+        if (string.IsNullOrWhiteSpace(changeDescription) || string.IsNullOrWhiteSpace(className))
+            return null;
+        var m = Regex.Match(changeDescription,
+            $@"\b{Regex.Escape(className)}\s*\.\s*([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="targetSymbol"/> to its exact source text. Supports dotted
+    /// `Class.method` symbols (resolves the method inside the class), and — when the symbol
+    /// resolves to a whole CLASS — narrows the oldString to the inner method referenced by
+    /// <paramref name="changeDescription"/> (e.g. "In MyHTTPRequestHandler.do_GET method"
+    /// resolves just the <c>do_GET</c> method instead of the entire class, which previously
+    /// made the focused replacement replace the whole class with a bare method → SyntaxError).
+    /// </summary>
     public static (string? oldString, int startLine, string? error) FindFunctionSource(
-        string fileContent, string targetSymbol, string fileExtension)
+        string fileContent, string targetSymbol, string fileExtension, string? changeDescription = null)
     {
         if (!LanguageMap.TryGetValue(fileExtension.ToLowerInvariant(), out var langName))
             return (null, 0, $"Unsupported extension: {fileExtension}");
@@ -342,6 +385,11 @@ public static class AstCodeEditorService
             using var tree = parser.Parse(fileContent);
             if (tree == null)
                 return (null, 0, "Failed to parse file");
+            // Execute ALL query patterns and collect every declaration target (class and
+            // function/method nodes) with its name into one list — the dotted and class-narrowing
+            // logic needs to see methods AND their enclosing class across patterns.
+            var classTargets = new List<(Node Node, string Name)>();
+            var declTargets = new List<(Node Node, string Name)>();
             foreach (var pattern in patterns)
             {
                 Query q2;
@@ -361,27 +409,56 @@ public static class AstCodeEditorService
                     {
                         if (capture.Name != "method" && capture.Name != "target" && capture.Name != "func")
                             continue;
-                        // Find the @name capture that falls WITHIN this target node's range
-                        // (the name is always a child of the target node in the syntax tree)
-                        var targetStart = capture.Node.StartIndex;
-                        var targetEnd = capture.Node.EndIndex;
-                        var resolvedName = nameByStart
-                            .Where(kvp => kvp.Key >= targetStart && kvp.Key < targetEnd)
-                            .OrderBy(kvp => kvp.Key)
-                            .Select(kvp => kvp.Value)
-                            .FirstOrDefault();
-                        if (resolvedName == null || resolvedName != targetSymbol)
+                        var resolvedName = ResolveNameForTarget(nameByStart, capture.Node);
+                        if (string.IsNullOrWhiteSpace(resolvedName))
                             continue;
-                        var startIndex = capture.Node.StartIndex;
-                        var endIndex = capture.Node.EndIndex;
-                        var lineStart = fileContent.LastIndexOf('\n', startIndex) + 1;
-                        if (lineStart < 0) lineStart = 0;
-                        var fullOldStr = fileContent[lineStart..endIndex];
-                        fullOldStr = fullOldStr.Replace("\r\n", "\n").Replace("\r", "\n");
-                        var startLine = capture.Node.StartPosition.Row + 1;
-                        return (fullOldStr, startLine, null);
+                        declTargets.Add((capture.Node, resolvedName));
+                        if (ClassLikeNodeTypes.Contains(capture.Node.Type))
+                            classTargets.Add((capture.Node, resolvedName));
                     }
                 }
+            }
+            // ── Dotted symbol: `Class.method` → resolve the method inside the class ──
+            var dotIdx = targetSymbol.LastIndexOf('.');
+            if (dotIdx > 0 && dotIdx < targetSymbol.Length - 1)
+            {
+                var clsName = targetSymbol[..dotIdx];
+                var methName = targetSymbol[(dotIdx + 1)..];
+                foreach (var (clsNode, clsMatch) in classTargets)
+                {
+                    if (!string.Equals(clsMatch, clsName, StringComparison.Ordinal))
+                        continue;
+                    foreach (var (fnNode, fnName) in declTargets)
+                    {
+                        if (string.Equals(fnName, methName, StringComparison.Ordinal)
+                            && fnNode.StartIndex >= clsNode.StartIndex && fnNode.EndIndex <= clsNode.EndIndex)
+                            return BuildSource(fileContent, fnNode);
+                    }
+                    return (null, 0, $"'{methName}' not found inside class '{clsName}' in {langName} file");
+                }
+            }
+            // ── Exact symbol match ──
+            foreach (var (node, name) in declTargets)
+            {
+                if (!string.Equals(name, targetSymbol, StringComparison.Ordinal))
+                    continue;
+                // If the target is a whole CLASS but the change description names a member
+                // (`Class.method`), narrow the oldString to just that method so the focused
+                // replacement rewrites the method — not the entire class.
+                if (ClassLikeNodeTypes.Contains(node.Type))
+                {
+                    var inner = ExtractInnerMethodFromChange(changeDescription, targetSymbol);
+                    if (inner != null)
+                    {
+                        foreach (var (fnNode, fnName) in declTargets)
+                        {
+                            if (string.Equals(fnName, inner, StringComparison.Ordinal)
+                                && fnNode.StartIndex >= node.StartIndex && fnNode.EndIndex <= node.EndIndex)
+                                return BuildSource(fileContent, fnNode);
+                        }
+                    }
+                }
+                return BuildSource(fileContent, node);
             }
             return (null, 0, $"'{targetSymbol}' not found in {langName} file");
         }
@@ -389,5 +466,26 @@ public static class AstCodeEditorService
         {
             return (null, 0, $"Tree-sitter error: {ex.Message}");
         }
+    }
+
+    private static string? ResolveNameForTarget(Dictionary<int, string> nameByStart, Node targetNode)
+    {
+        return nameByStart
+            .Where(kvp => kvp.Key >= targetNode.StartIndex && kvp.Key < targetNode.EndIndex)
+            .OrderBy(kvp => kvp.Key)
+            .Select(kvp => kvp.Value)
+            .FirstOrDefault();
+    }
+
+    private static (string oldString, int startLine, string? error) BuildSource(string fileContent, Node node)
+    {
+        var startIndex = node.StartIndex;
+        var endIndex = node.EndIndex;
+        var lineStart = fileContent.LastIndexOf('\n', startIndex) + 1;
+        if (lineStart < 0) lineStart = 0;
+        var fullOldStr = fileContent[lineStart..endIndex];
+        fullOldStr = fullOldStr.Replace("\r\n", "\n").Replace("\r", "\n");
+        var startLine = node.StartPosition.Row + 1;
+        return (fullOldStr, startLine, null);
     }
 }

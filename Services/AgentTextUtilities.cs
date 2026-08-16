@@ -128,6 +128,35 @@ public static class AgentTextUtilities
     public static string NormalizeLineEndings(string s) => s.Replace("\r\n", "\n");
 
     /// <summary>
+    /// Restores a REAL space where the editor model wrote an HTML non-breaking-space entity
+    /// (<c>&amp;nbsp;</c> / <c>&amp;#160;</c> / <c>&amp;#xA0;</c>) to represent a literal space in a
+    /// heading/title. The weak model keeps DROPPING the space inside a required heading
+    /// (benchmark 23's 'Benchmark 23' → 'Benchmark23'), so it is trained to emit the entity
+    /// instead; this deterministic pass converts it back to a plain space once the edit lands.
+    /// </summary>
+    public static string NormalizeNbsp(string s)
+        => s.Replace("&nbsp;", " ").Replace("&#160;", " ").Replace("&#xA0;", " ");
+
+    /// <summary>
+    /// Applies <see cref="NormalizeNbsp"/> to every content field of a <see cref="PlanStep"/>
+    /// (NewString, FullFile, NewCode lines, and each batch EditPair's NewString) so the
+    /// pipeline's file writes — <c>_create_file</c>, TryCreateFileAsync, plan-provided edits,
+    /// FORMAT C/D, fullFile — all carry the real space instead of the entity.
+    /// </summary>
+    public static void NormalizeNbspInStep(PlanStep step)
+    {
+        if (step == null) return;
+        if (!string.IsNullOrWhiteSpace(step.NewString)) step.NewString = NormalizeNbsp(step.NewString);
+        if (!string.IsNullOrWhiteSpace(step.FullFile)) step.FullFile = NormalizeNbsp(step.FullFile);
+        if (step.Edits is { Count: > 0 })
+            foreach (var e in step.Edits)
+                if (!string.IsNullOrWhiteSpace(e.NewString)) e.NewString = NormalizeNbsp(e.NewString);
+        if (step.NewCode is { Count: > 0 })
+            for (var i = 0; i < step.NewCode.Count; i++)
+                if (!string.IsNullOrWhiteSpace(step.NewCode[i])) step.NewCode[i] = NormalizeNbsp(step.NewCode[i]);
+    }
+
+    /// <summary>
     /// Locates an anchor (typically the newString of an applied edit) inside normalized file
     /// content. Matches verbatim first; when that fails (an edit later reformatted or merged),
     /// falls back to the anchor's longest distinctive line (selector/method-signature lines

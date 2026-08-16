@@ -2853,6 +2853,8 @@ angular.module('kanbanApp')
           cols.forEach(function (cards) {
             if (!cards || !cards.length) return;
             cards.forEach(function (card) {
+              // Benchmark cards are sandbox noise — never surface their suggestions.
+              if (vm.isBenchmarkCard && vm.isBenchmarkCard(card)) return;
               var sugs = card && card._suggestions;
               if (!Array.isArray(sugs) || !sugs.length) return;
               var topic = (card.text || 'a completed task').trim();

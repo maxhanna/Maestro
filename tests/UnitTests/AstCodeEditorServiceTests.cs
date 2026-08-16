@@ -123,6 +123,112 @@ public class AstCodeEditorServiceTests
         Assert.True(startLine > 0);
     }
 
+    // The benchmark-4 failure mode: the planner targeted the CLASS name, the AST returned the
+    // whole 15-line class as oldString, and the focused replacement ("output a complete
+    // method/function declaration") came back as just the do_GET method — replacing the class
+    // with a bare method and dying with IndentationError. The resolver must narrow to the
+    // inner method when the change description references `Class.method`.
+    [Fact]
+    public void FindFunctionSource_Python_ClassSymbol_WithDottedChangeDescription_NarrowsToMethod()
+    {
+        var source = """
+            import json
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+
+            class MyHTTPRequestHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    if self.path == '/api/hello':
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        response_data = {'message': 'Hello'}
+                        self.wfile.write(json.dumps(response_data).encode())
+                    else:
+                        return super().do_get()
+
+            if __name__ == '__main__':
+                HTTPServer(('', 9969), MyHTTPRequestHandler).serve_forever()
+            """;
+
+        var (block, startLine, error) = AstCodeEditorService.FindFunctionSource(
+            source, "MyHTTPRequestHandler", ".py",
+            "In MyHTTPRequestHandler.do_GET method (around line 23): replace `return super().do_get()` with `super().do_GET()`");
+
+        Assert.Null(error);
+        Assert.NotNull(block);
+        Assert.StartsWith("def do_GET(self):", block.TrimStart());
+        Assert.Contains("super().do_get()", block);
+        Assert.DoesNotContain("class MyHTTPRequestHandler", block);
+        Assert.DoesNotContain("if __name__", block);
+        Assert.Equal(5, startLine);
+    }
+
+    [Fact]
+    public void FindFunctionSource_Python_DottedSymbol_ReturnsMethodOnly()
+    {
+        var source = """
+            class Spider:
+                def spin(self):
+                    return 'web'
+
+                def crawl(self):
+                    return 'creep'
+            """;
+
+        var (block, startLine, error) = AstCodeEditorService.FindFunctionSource(source, "Spider.crawl", ".py");
+
+        Assert.Null(error);
+        Assert.NotNull(block);
+        Assert.StartsWith("def crawl(self):", block.TrimStart());
+        Assert.Contains("'creep'", block);
+        Assert.DoesNotContain("spin", block);
+        Assert.Equal(5, startLine);
+    }
+
+    [Fact]
+    public void FindFunctionSource_Python_DottedSymbol_UnknownMethod_ReturnsError()
+    {
+        var source = """
+            class Spider:
+                def crawl(self):
+                    return 'creep'
+            """;
+
+        var (block, _, error) = AstCodeEditorService.FindFunctionSource(source, "Spider.fly", ".py");
+
+        Assert.Null(block);
+        Assert.NotNull(error);
+        Assert.Contains("fly", error);
+    }
+
+    [Fact]
+    public void FindFunctionSource_Python_ClassSymbol_NoMethodReference_ReturnsWholeClass()
+    {
+        var source = """
+            class Spider:
+                def crawl(self):
+                    return 'creep'
+            """;
+
+        var (block, _, error) = AstCodeEditorService.FindFunctionSource(source, "Spider", ".py", "add a venom property");
+
+        Assert.Null(error);
+        Assert.NotNull(block);
+        Assert.StartsWith("class Spider:", block.TrimStart());
+        Assert.Contains("def crawl", block);
+    }
+
+    [Fact]
+    public void ExtractInnerMethodFromChange_DottedReference_ReturnsMethodName()
+    {
+        Assert.Equal("do_GET", AstCodeEditorService.ExtractInnerMethodFromChange(
+            "In MyHTTPRequestHandler.do_GET method (around line 23): replace the typo", "MyHTTPRequestHandler"));
+        Assert.Equal("__init__", AstCodeEditorService.ExtractInnerMethodFromChange(
+            "Fix Spider.__init__ to set legs", "Spider"));
+        Assert.Null(AstCodeEditorService.ExtractInnerMethodFromChange(
+            "add a venom property to the class", "Spider"));
+    }
+
     // ── FindFunctionSource — Go ──────────────────────────────────────────────
 
     [Fact]

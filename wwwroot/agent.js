@@ -258,7 +258,9 @@ angular.module('kanbanApp')
             vm.streamingFilesEdited = dedupeFilesEdited(vm.streamingSteps
                 .filter(function (s) { return (s.type === 'edit' || s.type === 'create' || s.type === 'rename') && s.status === 'done' && s.path; })
                 .map(function (s) {
-                    var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved };
+                    // Carry the step's diff so the live "Files changed" rows can be clicked
+                    // to show the change inline (edit steps always carry diffPreview).
+                    var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved, preview: s.diffPreview };
                     if (s.type === 'rename') info.editAction = 'renamed → ' + (s.toPath || '');
                     else if (s.type === 'create') info.editAction = 'created';
                     return info;
@@ -947,6 +949,9 @@ angular.module('kanbanApp')
                                                                     if (vm._streamingLengthTimer) { $timeout.cancel(vm._streamingLengthTimer); }
                                                                     vm._streamingLengthTimer = $timeout(function () { vm.streamingStableCount = vm.streamingTokenBuffer.length; }, 100);
                                                                     if (vm.resolveStreams) { var buf = vm.resolveStreams; if (buf && buf.length) buf[buf.length - 1].content += parsed.token; }
+                                                                    // Keep the streaming view pinned to the bottom while the user is
+                                                                    // already there (no-op when they've scrolled up to read).
+                                                                    if (vm.scrollToBottom) vm.scrollToBottom();
                                                                 }
                                                                 break;
                                                             case 'thinking':
@@ -1181,7 +1186,7 @@ angular.module('kanbanApp')
                                                                             vm.state.done.push(mvCard);
                                                                         }
                                                                         vm.saveCards();
-                                                                        if (vm.suggestImprovements && mvCol === 'doing' && !mvCard.selfImproving && !mvCard._fromCron && !mvCard._benchmark) vm.suggestImprovements(mvCard, concAnalysis.summary, proj);
+                                                                        if (vm.suggestImprovements && mvCol === 'doing' && !mvCard.selfImproving && !mvCard._fromCron && !(vm.isBenchmarkCard && vm.isBenchmarkCard(mvCard))) vm.suggestImprovements(mvCard, concAnalysis.summary, proj);
                                                                     } else if (vm.saveCards) { vm.saveCards(); }
                                                                     if (vm.reconcileBenchmarkRunning) vm.reconcileBenchmarkRunning();
                                                                     $scope.$applyAsync(); return;
@@ -1269,7 +1274,7 @@ angular.module('kanbanApp')
                                                                         }
                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
                                                                         vm.moveCardToDone(card);
-                                                                        if (vm.suggestImprovements && !card.selfImproving && !card._benchmark) vm.suggestImprovements(card, finalSummary, proj);
+                                                                        if (vm.suggestImprovements && !card.selfImproving && !(vm.isBenchmarkCard && vm.isBenchmarkCard(card))) vm.suggestImprovements(card, finalSummary, proj);
                                                                         $timeout(function () {
                                                                             if (!vm.autoQueue) return;
                                                                             vm.processQueuedCards();
@@ -1487,6 +1492,9 @@ angular.module('kanbanApp')
                 }
                 vm.suggestImprovements = function (card, summary, project, opts) {
                     if (!card) return false;
+                    // Benchmark cards (runner-created or any card living in the benchmark
+                    // project) never get suggestions — sandbox noise.
+                    if (vm.isBenchmarkCard && vm.isBenchmarkCard(card)) return false;
                     var proj = project || card.filePath || vm.selectedProject;
                     if (!proj) return false;
                     // Idle-only: suggestion generation must NEVER start while a card is
@@ -1707,7 +1715,7 @@ angular.module('kanbanApp')
                     if (!vm.state || !Array.isArray(vm.state.done)) return need;
                     (vm.state.done).forEach(function (c) {
                         if (!c) return;
-                        if (c._benchmark) return;
+                        if (vm.isBenchmarkCard && vm.isBenchmarkCard(c)) return;
                         if (c._suggestionsSaturated) return;
                         if (c._suggestionsGenerating) return;
                         var maxFor = vm.projectMaxSuggestions(c.filePath || vm.selectedProject);
@@ -2379,6 +2387,18 @@ angular.module('kanbanApp')
                             });
                         }
                     });
+                };
+                // Benchmark-root prefetch: vm.defaultBenchmarkRoot powers the
+                // benchmark-card detection that keeps suggestions off sandbox cards, so it
+                // must be known even before the Benchmarks panel is opened — a hand-created
+                // benchmark card's suggestions fire right after its run finishes.
+                vm.refreshBenchmarkRoot = function () {
+                    $http.get('/api/benchmark/system-info').then(function (resp) {
+                        if (resp && resp.data) {
+                            vm.systemInfoCustom = resp.data.custom || vm.systemInfoCustom || {};
+                            if (resp.data.defaultBenchmarkRoot) vm.defaultBenchmarkRoot = resp.data.defaultBenchmarkRoot;
+                        }
+                    }).catch(function () { });
                 };
                 vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; vm.compareMode = false; vm.compareA = null; vm.compareB = null; vm.compareResult = null; vm.checkLlmReachable(); $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; if (vm._hydrateRestoredBenchmarkQueue) vm._hydrateRestoredBenchmarkQueue(); }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; vm.defaultBenchmarkRoot = resp.data.defaultBenchmarkRoot || vm.defaultBenchmarkRoot || ''; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };

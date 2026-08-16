@@ -48,6 +48,16 @@ public class ExtractFilesEditedTests
             root.TryGetProperty("preview", out var pr) ? pr.GetString() ?? "" : "");
     }
 
+    private static (int added, int removed) ReadCounts(object entry)
+    {
+        var json = JsonSerializer.Serialize(entry);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        return (
+            root.TryGetProperty("linesAdded", out var a) ? a.GetInt32() : 0,
+            root.TryGetProperty("linesRemoved", out var r) ? r.GetInt32() : 0);
+    }
+
     [Fact]
     public void SameFileEditedTwice_CollapsesToOneEntry_LastEditWins()
     {
@@ -123,5 +133,53 @@ public class ExtractFilesEditedTests
     public void EmptySteps_ReturnsEmpty()
     {
         Assert.Empty(InvokeExtractFilesEdited(new List<object>()));
+    }
+
+    [Fact]
+    public void SameFileEditedTwice_LineCountsAreSummed_LastPreviewWins()
+    {
+        var first = Step("edit", "done", "src/app.ts", "preview-1");
+        first["linesAdded"] = 3; first["linesRemoved"] = 1;
+        var second = Step("edit", "done", "src/app.ts", "preview-2");
+        second["linesAdded"] = 2; second["linesRemoved"] = 2;
+        var result = InvokeExtractFilesEdited(new List<object> { first, second });
+        var entry = Assert.Single(result);
+        Assert.Equal("preview-2", ReadEntry(entry).preview);
+        var (added, removed) = ReadCounts(entry);
+        Assert.Equal(5, added);   // 3 + 2 across both edits
+        Assert.Equal(3, removed); // 1 + 2 across both edits
+    }
+
+    [Fact]
+    public void ThreeEdits_CountsAccumulateAcrossAllSteps()
+    {
+        var steps = new List<object>();
+        var counts = new[] { (1, 0), (2, 1), (4, 3) };
+        for (var i = 0; i < counts.Length; i++)
+        {
+            var s = Step("edit", "done", "x.py", $"preview-{i + 1}");
+            s["linesAdded"] = counts[i].Item1; s["linesRemoved"] = counts[i].Item2;
+            steps.Add(s);
+        }
+        var result = InvokeExtractFilesEdited(steps);
+        var entry = Assert.Single(result);
+        Assert.Equal("preview-3", ReadEntry(entry).preview);
+        var (added, removed) = ReadCounts(entry);
+        Assert.Equal(7, added);
+        Assert.Equal(4, removed);
+    }
+
+    [Fact]
+    public void LastEditActionWins_ForMultiEditFile()
+    {
+        var first = Step("edit", "done", "a.ts", "p1");
+        var second = Step("edit", "done", "a.ts", "p2");
+        second["editAction"] = "renamed";
+        var result = InvokeExtractFilesEdited(new List<object> { first, second });
+        var entry = Assert.Single(result);
+        var json = JsonSerializer.Serialize(entry);
+        using var doc = JsonDocument.Parse(json);
+        var action = doc.RootElement.TryGetProperty("action", out var act) ? act.GetString() : null;
+        Assert.Equal("renamed", action);
     }
 }

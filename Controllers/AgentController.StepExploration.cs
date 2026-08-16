@@ -799,16 +799,11 @@ partial class AgentController
             var finalTargetSymbol = !string.IsNullOrWhiteSpace(targetSymbol)
                 ? targetSymbol
                 : fallbackSymbol;
-            var hasValidSymbolInFile = !string.IsNullOrWhiteSpace(finalTargetSymbol) &&
-                (finalTargetSymbol.All(char.IsLetterOrDigit)
-                    ? Regex.IsMatch(fileContent, $@"\b{Regex.Escape(finalTargetSymbol)}\b", RegexOptions.IgnoreCase)
-                    : fileContent.Contains(finalTargetSymbol, StringComparison.OrdinalIgnoreCase));
+            var hasValidSymbolInFile = AgentMethodInventory.SymbolExistsInContent(finalTargetSymbol ?? "", fileContent);
             if (!hasValidSymbolInFile && !string.IsNullOrWhiteSpace(fallbackSymbol) && fallbackSymbol != targetSymbol)
             {
                 finalTargetSymbol = fallbackSymbol;
-                hasValidSymbolInFile = (fallbackSymbol.All(char.IsLetterOrDigit)
-                    ? Regex.IsMatch(fileContent, $@"\b{Regex.Escape(fallbackSymbol)}\b", RegexOptions.IgnoreCase)
-                    : fileContent.Contains(fallbackSymbol, StringComparison.OrdinalIgnoreCase));
+                hasValidSymbolInFile = AgentMethodInventory.SymbolExistsInContent(finalTargetSymbol, fileContent);
                 if (hasValidSymbolInFile)
                 {
                     await EmitLog(emitSse, "info",

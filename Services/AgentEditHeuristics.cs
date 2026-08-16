@@ -273,6 +273,29 @@ public static class AgentEditHeuristics
         "def", "class", "match", "case", "lambda", "yield", "async", "await"
     };
 
+    /// <summary>
+    /// Classifies a Python source block's declaration kind. The focused-replacement path uses
+    /// this to reject a SCOPE MISMATCH deterministically: when the AST-resolved oldString is a
+    /// whole <c>class</c> but the LLM returns a bare <c>def</c> method (the benchmark-4
+    /// "replaced the class with a method → IndentationError" failure), applying it is guaranteed
+    /// to break the file — so we reject BEFORE applying instead of burning verify rounds.
+    /// Returns "class", "function", "decorated" (leading @ decorator), or null for fragments.
+    /// </summary>
+    public static string? PythonDeclarationKind(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source)) return null;
+        var trimmed = source.TrimStart();
+        if (trimmed.StartsWith("class ", StringComparison.Ordinal) || trimmed.StartsWith("class\t", StringComparison.Ordinal))
+            return "class";
+        if (trimmed.StartsWith("async ", StringComparison.Ordinal) || trimmed.StartsWith("async\t", StringComparison.Ordinal))
+            trimmed = trimmed[5..].TrimStart();
+        if (trimmed.StartsWith("def ", StringComparison.Ordinal) || trimmed.StartsWith("def\t", StringComparison.Ordinal))
+            return "function";
+        if (trimmed.StartsWith('@'))
+            return "decorated";
+        return null;
+    }
+
     public static string? DetectDuplicatePropertyAddition(string oldStr, string newStr, string? relPath = null)
     {
         // Python has no brace-object `key: value` shape this guard understands — its `word:`

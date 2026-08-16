@@ -881,10 +881,29 @@ partial class AgentController
                 var enhancedSteering = (steeringContext ?? "") +
                     "\n\n## PRIOR FAILURES — avoid repeating these approaches ##\n" +
                     failureContextForReplan.ToString();
-                var replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                    enhancedSteering, projectRoot, emitSse, ct,
-                    attachedFiles: attachedFiles,
-                    qualityCheckReason: qualityCheckReason.ToString());
+                // LIVE-STATE DETERMINISTIC REPAIR: when the browser test read a canvas/animation
+                // state global whose live value differs from what the task requires
+                // (window.legCount = 4 vs 6), synthesize the edit server-side — no LLM round-trip
+                // — so the 4→6 edit actually LANDS instead of depending on the weak model to
+                // produce a correct edit for the benchmark's HTML/JS file (benchmark 23).
+                PlanStep? deterministicRepairStep = null;
+                if (verificationIssues is { Count: > 0 })
+                    deterministicRepairStep = AgentStateProbeVerifier.TryBuildStateRepairStep(
+                        projectRoot, verificationIssues[0], allSteps);
+                List<PlanStep>? replanSteps;
+                if (deterministicRepairStep != null)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"⚙️ Deterministic live-state repair synthesized (no LLM): {deterministicRepairStep.Change}", ct: ct);
+                    replanSteps = new List<PlanStep> { deterministicRepairStep };
+                }
+                else
+                {
+                    replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                        enhancedSteering, projectRoot, emitSse, ct,
+                        attachedFiles: attachedFiles,
+                        qualityCheckReason: qualityCheckReason.ToString());
+                }
                 if (replanSteps == null || replanSteps.Count == 0)
                 {
                     bool hasVerificationIssues = (verificationIssues != null && verificationIssues.Count > 0 && !string.IsNullOrEmpty(verificationIssues[0]));
@@ -1069,6 +1088,19 @@ partial class AgentController
                     await EmitLog(emitSse, "warn",
                         "Repair replanner proposed no further steps BUT the live web test is still failing — the server never " +
                         "started, so the run stays incomplete rather than falsely completing.", ct: ct);
+                }
+                else if (TestIntentClassifier.DemandsLiveBrowserTest(prompt) &&
+                         !allSteps.OfType<Dictionary<string, object?>>()
+                             .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"))
+                {
+                    // The task EXPLICITLY demands the live browser test, but the replanner ran
+                    // out of steps before one ever executed (benchmark 23: the plan-complete
+                    // classifier vetoed the injection, the verifier flagged it, and the
+                    // replanner returned nothing). A never-run browser test is the same
+                    // false-completion as a failed one — keep the run incomplete.
+                    await EmitLog(emitSse, "warn",
+                        "Repair replanner proposed no further steps BUT the task explicitly demands the live browser test and none ever ran — " +
+                        "keeping the task incomplete instead of falsely marking it complete.", ct: ct);
                 }
                 else
                 {
@@ -1785,6 +1817,24 @@ partial class AgentController
                 ?? "Live web test failed (server could not start)";
             deterministicIssues.Add("Live web test failed: " + TruncateForLlm(btOutput, 600));
         }
+        // A live web test that PASSED its heading/section checks but whose live state probe
+        // read a DIFFERENT value than the task requires (benchmark 23: window.legCount = 4 but
+        // the task demands 6) is also deterministic ground truth the run is not done — the
+        // browser read the REAL animated canvas state, so a mismatch is a broken contract, not
+        // a file-level nuance the LLM verifier might miss or hallucinate away. Only the most
+        // recent probe counts; a repair-pass re-run that reads the required value clears it.
+        else
+        {
+            var lastBrowserTest = allResults.OfType<Dictionary<string, object?>>()
+                .LastOrDefault(r => r.GetValueOrDefault("type")?.ToString() == "browser_test");
+            if (lastBrowserTest != null)
+            {
+                var stateMismatch = AgentStateProbeVerifier.CheckLiveStateMismatch(
+                    originalPrompt, lastBrowserTest.GetValueOrDefault("output")?.ToString() ?? "");
+                if (stateMismatch != null)
+                    deterministicIssues.Add(stateMismatch);
+            }
+        }
         if (deterministicIssues.Count > 0)
         {
             await EmitLog(emitSse, "warn",
@@ -2238,10 +2288,13 @@ partial class AgentController
     /// <see cref="TestIntentClassifier.HasVisualInspectionHint"/> already fired (a visual
     /// signal is present) but the deterministic test classifier found no strict test verb —
     /// so prompts like "check my game for visual bugs" or "verify visually" still reach the
-    /// live browser-test pipeline. Fails closed: any transport error or unparseable reply
-    /// means (false, "") and normal planning continues.
+    /// live browser-test pipeline. Returns a tri-state needsVisual: NULL when the
+    /// classifier is UNAVAILABLE (transport error or unparseable reply) — the visual
+    /// gates then fail OPEN (the deterministic hint already fired, so the live browser
+    /// test must still be injected); only a confident false produced by a working
+    /// classifier vetoes the injection.
     /// </summary>
-    private async Task<(bool NeedsVisual, string Target)> ClassifyVisualInspectionPromptAsync(string prompt, CancellationToken ct)
+    private async Task<(bool? NeedsVisual, string Target)> ClassifyVisualInspectionPromptAsync(string prompt, CancellationToken ct)
     {
         const string sys =
             "You classify a single user request. Answer ONLY with JSON: {\"needsVisual\": true|false, \"target\": \"...\"}.\n" +

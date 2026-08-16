@@ -34,6 +34,9 @@ public class ImprovementSuggestionsTests
         var field = typeof(AgentController).GetField("_boardData", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new InvalidOperationException("_boardData field not found");
         field.SetValue(controller, boardData);
+        var dbField = typeof(AgentController).GetField("_db", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("_db field not found");
+        dbField.SetValue(controller, db);
         return (controller, db, dbPath);
     }
 
@@ -386,6 +389,86 @@ public class ImprovementSuggestionsTests
         // An empty/unidentifiable card id while something executes is refused — the guard
         // cannot verify the executing card IS this one, so it errs on the side of blocking.
         Assert.False(AgentController.SuggestionAllowedWhileExecuting(true, true, ""));
+    }
+
+    private static async Task<bool> InvokeIsCardBenchmark(AgentController controller, string cardId)
+    {
+        var method = typeof(AgentController).GetMethod("IsCardBenchmarkAsync",
+            BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("IsCardBenchmarkAsync not found");
+        var task = (Task<bool>)method.Invoke(controller, new object?[] { cardId })!;
+        return await task;
+    }
+
+    private static void SeedBoardCard(DatabaseService db, string cardId, string column, bool benchmarkFlag, string filePath)
+    {
+        var board = new Dictionary<string, object?>
+        {
+            ["todo"] = new List<object>(),
+            ["doing"] = new List<object>(),
+            ["done"] = new List<object>(),
+            ["archived"] = new List<object>(),
+            ["selfImproving"] = new List<object>()
+        };
+        var card = new Dictionary<string, object?> { ["id"] = cardId, ["text"] = "task", ["filePath"] = filePath };
+        if (benchmarkFlag) card["_benchmark"] = true;
+        board[column] = new List<object> { card };
+        db.SetBoardData(System.Text.Json.JsonSerializer.Serialize(board));
+    }
+
+    [Fact]
+    public async Task IsCardBenchmark_FlaggedCard_True()
+    {
+        var (controller, db, dbPath) = BuildHarness();
+        try
+        {
+            SeedBoardCard(db, "bench-1", "done", benchmarkFlag: true, filePath: "C:/unrelated");
+            Assert.True(await InvokeIsCardBenchmark(controller, "bench-1"));
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { }
+            try { Directory.Delete(Path.GetDirectoryName(dbPath)!, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task IsCardBenchmark_CardInBenchmarkProject_WithoutFlag_True()
+    {
+        // A benchmark prompt pasted into a normal card in the "Weaver Benchmarks" project
+        // has no _benchmark flag — its filePath is the benchmark root, which must still
+        // mark it as a benchmark card so suggestions never attach.
+        var (controller, db, dbPath) = BuildHarness();
+        try
+        {
+            var benchRoot = AgentProjectUtilities.GetBenchmarkSandboxPath();
+            SeedBoardCard(db, "bench-2", "done", benchmarkFlag: false, filePath: benchRoot);
+            Assert.True(await InvokeIsCardBenchmark(controller, "bench-2"));
+            // Case / trailing-separator variants still match (path normalized).
+            SeedBoardCard(db, "bench-2b", "done", benchmarkFlag: false, filePath: benchRoot.ToUpperInvariant() + Path.DirectorySeparatorChar);
+            Assert.True(await InvokeIsCardBenchmark(controller, "bench-2b"));
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { }
+            try { Directory.Delete(Path.GetDirectoryName(dbPath)!, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task IsCardBenchmark_NormalProjectCard_False()
+    {
+        var (controller, db, dbPath) = BuildHarness();
+        try
+        {
+            SeedBoardCard(db, "normal-1", "done", benchmarkFlag: false, filePath: "C:/Users/someone/code/maxhanna");
+            Assert.False(await InvokeIsCardBenchmark(controller, "normal-1"));
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { }
+            try { Directory.Delete(Path.GetDirectoryName(dbPath)!, true); } catch { }
+        }
     }
 
     [Fact]

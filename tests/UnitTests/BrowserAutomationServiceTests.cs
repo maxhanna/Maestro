@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Weaver.Services;
 using Xunit;
 
@@ -444,5 +445,69 @@ public class BrowserAutomationServiceTests : IDisposable
     public void ResolveUrl_Variants(string baseUrl, string target, string expected)
     {
         Assert.Equal(expected, BrowserAutomationService.ResolveUrl(baseUrl, target));
+    }
+
+    // ── Live canvas/animation state probes (benchmark 23) ─────────────────────
+
+    [Fact]
+    public void ExtractWindowStateProbes_NamesUniqueGlobals()
+    {
+        // The benchmark contract "the page MUST expose window.legCount" — the live test
+        // reads that global back off the rendered page instead of guessing from a heading.
+        var names = BrowserAutomationService.ExtractWindowStateProbes(
+            "The page must expose the current leg count as window.legCount, kept in sync " +
+            "by the same code, so the test reads window.legCount. Also track window.score.");
+        Assert.Equal(new[] { "legCount", "score" }, names);
+    }
+
+    [Theory]
+    [InlineData("build a game and check the heading")]
+    [InlineData("window")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void ExtractWindowStateProbes_NoGlobal_ReturnsEmpty(string? prompt)
+    {
+        Assert.Empty(BrowserAutomationService.ExtractWindowStateProbes(prompt));
+    }
+
+    [Fact]
+    public async Task AppendLiveStateProbesAsync_ReportsLiveValue_AndFailsOnMissingGlobal()
+    {
+        // A readable global is reported with its LIVE value (the leg count, 4 vs 6); a
+        // global the prompt requires but the page does not expose is a hard failure — the
+        // benchmark promises window.legCount exists, so its absence must not pass silently.
+        var findings = new List<TestFinding>();
+        Func<string, CancellationToken, Task<JsonElement>> evaluate = (expr, _) =>
+            expr == "window.legCount"
+                ? Task.FromResult(JsonSerializer.SerializeToElement(4))
+                : throw new InvalidOperationException("window.missing is not defined");
+
+        await BrowserAutomationService.AppendLiveStateProbesAsync(
+            "expose window.legCount and window.missing", evaluate, findings, CancellationToken.None);
+
+        var leg = Assert.Single(findings, f => f.Message.Contains("window.legCount"));
+        Assert.Equal("info", leg.Kind);
+        Assert.Contains("= 4", leg.Message);
+        var missing = Assert.Single(findings, f => f.Message.Contains("window.missing"));
+        Assert.Equal("fail", missing.Kind);
+        Assert.Contains("not defined", missing.Message);
+    }
+
+    [Fact]
+    public async Task AppendLiveStateProbesAsync_NoProbeInPrompt_AddsNothing()
+    {
+        var findings = new List<TestFinding>();
+        var calls = 0;
+        Func<string, CancellationToken, Task<JsonElement>> evaluate = (_, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(JsonSerializer.SerializeToElement(true));
+        };
+
+        await BrowserAutomationService.AppendLiveStateProbesAsync(
+            "verify the heading renders", evaluate, findings, CancellationToken.None);
+
+        Assert.Empty(findings);
+        Assert.Equal(0, calls);
     }
 }

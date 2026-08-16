@@ -433,11 +433,20 @@ partial class AgentController
     {
         var last = allSteps.OfType<Dictionary<string, object?>>()
             .LastOrDefault(r => r.GetValueOrDefault("type")?.ToString() == "browser_test");
-        if (last == null || last.GetValueOrDefault("status")?.ToString() != "error") return;
+        if (last == null) return;
+        // Re-run on a hard failure (server never started) AND on a live-state mismatch
+        // (the browser read window.legCount = 4 but the task requires 6) — the latter is the
+        // only way to re-confirm the canvas state after the deterministic 4→6 repair landed,
+        // because a state-mismatch report still PASSES its heading check (status "done").
+        var failed = last.GetValueOrDefault("status")?.ToString() == "error";
+        var stateMismatch = AgentStateProbeVerifier.CheckLiveStateMismatch(
+            prompt, last.GetValueOrDefault("output")?.ToString() ?? "");
+        if (!failed && stateMismatch == null) return;
         var target = last.GetValueOrDefault("target")?.ToString();
         if (string.IsNullOrWhiteSpace(target)) return;
+        var reRunReason = failed ? "verifying the server fix" : "verifying the live canvas/animation state fix";
         await EmitLog(emitSse, "info",
-            $"_browser_test: re-running live web test \"{target}\" after the repair — verifying the server fix…", ct: ct);
+            $"_browser_test: re-running live web test \"{target}\" after the repair — {reRunReason}…", ct: ct);
         var testIntent = new TestClassifierTarget(target);
         BrowserTestReport report;
         _browserTestService.OnProgress = MakeWebtestProgressSink(emitSse);

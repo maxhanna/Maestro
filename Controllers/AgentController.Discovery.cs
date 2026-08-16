@@ -1557,7 +1557,7 @@ partial class AgentController
             if (!await connectivityTask)
                 throw new InvalidOperationException("LLM connectivity check failed.");
             var (needsVisual, target) = await ClassifyVisualInspectionPromptAsync(prompt, ct);
-            if (needsVisual)
+            if (needsVisual == true)
             {
                 var inspectTarget = string.IsNullOrWhiteSpace(target) ? "the page" : target;
                 await EmitLog(emitSse, "info",
@@ -1885,7 +1885,8 @@ partial class AgentController
             fileContents.ToString() + "\n\n## FAILED CODE SNIPPETS (do NOT reproduce)\n" + failedCodeSnippets.ToString(),
             _requirementChecklist);
         var (raw, _, llmError) = await CallLlmRaw(
-                "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1, \"line\": 42}]}. For every edit step include the 1-based line number. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan.",
+                "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1, \"line\": 42}]}. For every edit step include the 1-based line number. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan. " +
+                NbspHeadingRule,
                 replanPrompt, ct, requestTimeout: _infiniteTimeout, llmRoundLabel: "replan");
         if (string.IsNullOrWhiteSpace(raw)) return null;
         try

@@ -518,7 +518,10 @@ partial class AgentController
                     }
                 }
                 var newFileFullPath = Path.GetFullPath(Path.Combine(projectRoot, newFileRelPath.Replace('/', Path.DirectorySeparatorChar)));
-                var contentToWrite = item.NewString ?? "";
+                // NBSP → real space: the editor model writes a literal space inside a required
+                // heading as `&nbsp;` (benchmark 23's 'Benchmark 23' — it keeps dropping the
+                // space); restore the real space deterministically before writing the file.
+                var contentToWrite = AgentTextUtilities.NormalizeNbsp(item.NewString ?? "");
                 try
                 {
                     // Directory-target guard: never File.WriteAllText to an existing directory path

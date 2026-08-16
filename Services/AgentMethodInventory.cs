@@ -518,6 +518,25 @@ public static class AgentMethodInventory
         };
     }
 
+    /// <summary>
+    /// True when <paramref name="symbol"/> plausibly exists in <paramref name="content"/>.
+    /// Dotted `Class.method` symbols are valid when BOTH parts appear in the file (the class
+    /// declaration and the method declaration), since the literal dotted string never occurs.
+    /// </summary>
+    public static bool SymbolExistsInContent(string symbol, string content)
+    {
+        if (string.IsNullOrWhiteSpace(symbol)) return false;
+        var dotIdx = symbol.LastIndexOf('.');
+        if (dotIdx > 0 && dotIdx < symbol.Length - 1)
+        {
+            return Regex.IsMatch(content, $@"\b{Regex.Escape(symbol[..dotIdx])}\b", RegexOptions.IgnoreCase)
+                && Regex.IsMatch(content, $@"\b{Regex.Escape(symbol[(dotIdx + 1)..])}\b", RegexOptions.IgnoreCase);
+        }
+        return symbol.All(char.IsLetterOrDigit)
+            ? Regex.IsMatch(content, $@"\b{Regex.Escape(symbol)}\b", RegexOptions.IgnoreCase)
+            : content.Contains(symbol, StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static bool LooksLikeCodeIdentifier(string word)
     {
         if (string.IsNullOrWhiteSpace(word) || word.Length < 2) return false;
@@ -564,10 +583,30 @@ public static class AgentMethodInventory
         "current", "previous", "various", "different", "another", "example", "purpose", "result"
     };
 
+    // Common file extensions that a dotted token like "README.md" could be mistaken for.
+    // A dotted Class.method symbol must NOT be a filename pattern.
+    private static readonly HashSet<string> CommonFileExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "js", "ts", "tsx", "jsx", "mjs", "cjs", "py", "cs", "md", "txt", "html", "htm",
+        "css", "scss", "json", "xml", "yml", "yaml", "csv", "png", "jpg", "jpeg", "gif",
+        "svg", "ico", "exe", "dll", "cfg", "conf", "log", "bat", "sh", "ps1", "ini",
+        "toml", "pyc", "map", "sql", "env", "lock", "zip", "tar", "gz", "pdf", "docx"
+    };
+
     public static string? ExtractTargetSymbolFromChange(string change)
     {
         if (string.IsNullOrWhiteSpace(change)) return null;
-        var m = Regex.Match(change, @"\b([A-Za-z_]\w*)\s*\(", RegexOptions.IgnoreCase);
+        // Dotted `Class.method` reference ("In MyHTTPRequestHandler.do_GET method") — most
+        // specific signal; the AST resolver handles the dotted path and returns just the
+        // method, so a class-scoped step never rewrites the whole class with a method body.
+        var m = Regex.Match(change, @"\b([A-Z]\w*)\s*\.\s*([A-Za-z_]\w*)\b");
+        if (m.Success)
+        {
+            var methPart = m.Groups[2].Value;
+            if ((methPart.Length >= 3 || methPart.StartsWith('_')) && !CommonFileExtensions.Contains(methPart))
+                return $"{m.Groups[1].Value}.{methPart}";
+        }
+        m = Regex.Match(change, @"\b([A-Za-z_]\w*)\s*\(", RegexOptions.IgnoreCase);
         if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;
         m = Regex.Match(change, @"\b(?:class|struct|interface|record)\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
         if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;

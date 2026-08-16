@@ -185,6 +185,29 @@ public class TaskKindPersistenceTests
     }
 
     [Fact]
+    public void ClassifyTaskKind_BuildAndVerifyWebApp_NotDump()
+    {
+        // The benchmark-23 regression: a BUILD + browser-verify web-app task whose "write what
+        // you saw to legs_report.txt" line is a REPORTING artifact — the "current leg count"
+        // phrase trips the broad web-need hint and the legs_report.txt target trips the dump
+        // file-output pattern, so this used to classify as "dump" and the deterministic dump
+        // short-circuit completed the run the instant the report file existed (the 6-leg fix
+        // and the browser tests never ran). A build-and-verify task must NEVER be a dump.
+        var root = Path.Combine(Path.GetTempPath(), "weaver-taskkind-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var prompt =
+                "Create a folder called 'benchmark_test_23' at the project root. Inside it, build a small web app that draws an ANIMATED spider on a <canvas>, then FIX the animation and VISUALLY VERIFY the fix with the live browser test suite. " +
+                "Serve 'index.html' at / with a heading, a <canvas> that ANIMATES a spider using requestAnimationFrame, and expose the current leg count as window.legCount. " +
+                "Use the live browser test to confirm the spider has EXACTLY 4 legs and write what you saw to benchmark_test_23/legs_report.txt with a line in this exact format: LEGS: 4. " +
+                "Then edit the animation to add 2 more legs so window.legCount equals 6, reload the server, run the live browser test again, and append a line: LEGS: 6.";
+            Assert.NotEqual("dump", InvokeClassifyTaskKind(prompt, root));
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
+    [Fact]
     public void ClassifyTaskKind_OrdinaryEdit_Null()
     {
         Assert.Null(InvokeClassifyTaskKind("Add a method to the service.", Path.GetTempPath()));

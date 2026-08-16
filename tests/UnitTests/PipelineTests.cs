@@ -263,6 +263,50 @@ public class PipelineTests
     }
 
     [Fact]
+    public void ExtractTargetSymbolFromChange_DottedClassMethod_ReturnsDottedSymbol()
+    {
+        // The benchmark-4 case verbatim: the class name alone resolved the WHOLE class and the
+        // focused replacement returned just the method → IndentationError. A dotted symbol lets
+        // the AST resolver extract only the method inside the class.
+        var result = AgentMethodInventory.ExtractTargetSymbolFromChange(
+            "In MyHTTPRequestHandler.do_GET method (around line 23): replace `return super().do_get()` with `super().do_GET()`");
+        Assert.Equal("MyHTTPRequestHandler.do_GET", result);
+    }
+
+    [Fact]
+    public void ExtractTargetSymbolFromChange_DottedDunder_ReturnsDottedSymbol()
+    {
+        var result = AgentMethodInventory.ExtractTargetSymbolFromChange(
+            "Fix the Spider.__init__ method to accept legs");
+        Assert.Equal("Spider.__init__", result);
+    }
+
+    [Fact]
+    public void ExtractTargetSymbolFromChange_FilenameWithExtension_IsNotPromotedToDottedSymbol()
+    {
+        // "README.md" must never become a dotted `Class.method` symbol — the file-extension
+        // guard rejects it (and the generic fallbacks may still pick a bare word like "README",
+        // which is the pre-existing, harmless behavior — the point is no dotted symbol).
+        var result = AgentMethodInventory.ExtractTargetSymbolFromChange(
+            "Document the new endpoint in README.md");
+        Assert.NotEqual("README.md", result);
+        Assert.DoesNotContain(".md", result ?? "");
+    }
+
+    [Fact]
+    public void SymbolExistsInContent_DottedSymbol_RequiresBothParts()
+    {
+        var content = """
+        class MyHTTPRequestHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                pass
+        """;
+        Assert.True(AgentMethodInventory.SymbolExistsInContent("MyHTTPRequestHandler.do_GET", content));
+        Assert.False(AgentMethodInventory.SymbolExistsInContent("MyHTTPRequestHandler.do_POST", content));
+        Assert.True(AgentMethodInventory.SymbolExistsInContent("MyHTTPRequestHandler", content));
+    }
+
+    [Fact]
     public void ExtractMethodBodiesByKeywords_PreservesExactTargetSymbolInVagueTask()
     {
         // Arrange

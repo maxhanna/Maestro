@@ -50,6 +50,57 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
         return null;
       }
+      // A card is a benchmark card if it was created by the benchmark runner (_benchmark)
+      // OR it lives in the benchmark project — its filePath is the sandbox/custom
+      // benchmark root. Hand-created benchmark cards (a benchmark prompt pasted into a
+      // normal card in the "Weaver Benchmarks" project) carry no _benchmark flag, so the
+      // project-path check is what catches them. Suggestions must never attach to either
+      // kind. (tests/js/benchmark-suggestions.test.js extracts this from the live source.)
+      vm.isBenchmarkCard = function (card) {
+        if (!card) return false;
+        if (card._benchmark) return true;
+        var fp = card.filePath || '';
+        if (!fp) return false;
+        var norm = function (p) {
+          return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+        };
+        var target = norm(fp);
+        var roots = [];
+        if (vm._benchmarkProjectPath) roots.push(vm._benchmarkProjectPath);
+        if (vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) roots.push(vm.systemInfoCustom.benchmarkProjectRoot);
+        if (vm.defaultBenchmarkRoot) roots.push(vm.defaultBenchmarkRoot);
+        if (vm.benchmarkEffectiveRoot) roots.push(vm.benchmarkEffectiveRoot());
+        for (var i = 0; i < roots.length; i++) {
+          if (roots[i] && norm(roots[i]) === target) return true;
+        }
+        return false;
+      }
+      // Git-style "files changed" summary helpers. fileActionLetter maps the edit's
+      // action to the A/M/D/R status letter used by the summary rows; filesEditedTotals
+      // sums the +/- line counts across the whole file list for the header badge.
+      // Entries arrive with either `action` (server-side ExtractFilesEdited) or
+      // `editAction` (client-side live accumulation) — both are honored.
+      // (tests/js/files-changed-summary.test.js extracts these from the live source.)
+      vm.fileActionLetter = function (f) {
+        if (!f) return 'M';
+        var a = String(f.action || f.editAction || '').toLowerCase();
+        if (a.indexOf('creat') !== -1) return 'A';
+        if (a.indexOf('delet') !== -1) return 'D';
+        if (a.indexOf('renam') !== -1 || a.indexOf('→') !== -1) return 'R';
+        return 'M';
+      }
+      vm.filesEditedTotals = function (files) {
+        var t = { added: 0, removed: 0 };
+        if (Array.isArray(files)) {
+          for (var i = 0; i < files.length; i++) {
+            var f = files[i];
+            if (!f) continue;
+            t.added += (parseInt(f.linesAdded, 10) || 0);
+            t.removed += (parseInt(f.linesRemoved, 10) || 0);
+          }
+        }
+        return t;
+      }
       // Card click — selects the card and pre-fills the AI prompt. Restored after
       // being lost in the app.js decoupling refactor (kanban.html still binds it).
       vm.selectCard = function (card) {
@@ -470,6 +521,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           : null;
         if (!container) return;
         container.scrollTop = direction === 'top' ? 0 : container.scrollHeight;
+        // Keep the auto-follow state in sync with the buttons: ▼ pins to the bottom
+        // (follow on), ▲ scrolls up to read (follow off) so new entries don't yank
+        // the view back down while the user is reading.
+        container.__logFollow = direction !== 'top';
       };
 
       vm.openDeleteCardConfirm = function (id, col) {
@@ -1372,3 +1427,4 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
     }
   };
 });
+

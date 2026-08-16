@@ -157,6 +157,59 @@ public static class TestIntentClassifier
     }
 
     /// <summary>
+    /// True when the prompt EXPLICITLY names the live browser test as a requirement —
+    /// "use the live browser test to…", "…confirmed by the browser test", "check it for
+    /// visual bugs with the live browser test suite", or the literal `_browser_test` tool
+    /// name. This is a stronger signal than <see cref="HasVisualInspectionHint"/>: the hint
+    /// is INCLUSIVE (it merely says a rendered page might need to be looked at), but this
+    /// signal means the task itself mandates running the browser test. When it fires, the
+    /// visual gates must NOT consult the LLM classifier — a build-flavored prompt ("build a
+    /// web app … pass/fail only based on the number of legs confirmed by the browser test")
+    /// makes the classifier read the dominant build/implement language and answer
+    /// needsVisual=false, which vetoes the deterministically-required browser test (the
+    /// benchmark-23 "it never verified with the browser" failure).
+    /// </summary>
+    private static readonly Regex ExplicitBrowserTestRegex = new(
+        @"\b(_browser_test|live\s+browser\s+tests?|live\s+web\s+tests?|browser\s+tests?|web\s+tests?|browser\s+automation|puppeteer|playwright|selenium)\b",
+        RegexOptions.Compiled);
+
+    /// <summary>True when the prompt explicitly demands the live browser test run.</summary>
+    public static bool DemandsLiveBrowserTest(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return ExplicitBrowserTestRegex.IsMatch(Normalize(text));
+    }
+
+    /// <summary>A required value for a <c>window.&lt;name&gt;</c> state global named in the prompt
+    /// ("window.legCount must equal 6", "window.legCount === 6"). The benchmark contract exposes
+    /// the live canvas/animation state as a global and states its FINAL required value — this
+    /// is the expected half of the live-state-probe comparison.</summary>
+    public sealed record WindowStateExpectation(string Name, string ExpectedValue);
+
+    // "window.legCount must equal 6" / "window.legCount === 6" / "window.legCount = 6" /
+    // "window.legCount equals 6". The equality phrase must sit directly after the name so a
+    // bare "EXACTLY 4 legs" (no window.name nearby) never produces a false expectation.
+    private static readonly Regex WindowStateExpectationRegex = new(
+        @"\bwindow\.([A-Za-z_$][\w$]*)\s*(?:===|==|must\s+(?:equal|be)|should\s+(?:equal|be)|needs\s+to\s+(?:equal|be)|equals?|=)\s*(-?\d+(?:\.\d+)?|true|false|null)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Extracts the FINAL required value for a <c>window.&lt;name&gt;</c> state global the prompt
+    /// names (e.g. benchmark 23's "window.legCount must equal 6" → 6). The LAST match wins so a
+    /// multi-phase prompt that walks a value up ("4 legs, then 6 legs") resolves to the final
+    /// required state, which is what the post-run live probe must match. Returns null when the
+    /// prompt names no such requirement.
+    /// </summary>
+    public static WindowStateExpectation? ExtractWindowStateExpectation(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        WindowStateExpectation? last = null;
+        foreach (Match m in WindowStateExpectationRegex.Matches(text))
+            last = new WindowStateExpectation(m.Groups[1].Value, m.Groups[2].Value);
+        return last;
+    }
+
+    /// <summary>
     /// True when the prompt asks to BUILD/EDIT/CHANGE something ("build a game", "create a
     /// folder", "fix the button", "write a server") — the deterministic counterpart of the
     /// visual-inspection gate. A build task must go through normal planning (build FIRST,
@@ -176,28 +229,47 @@ public static class TestIntentClassifier
     }
 
     /// <summary>
-    /// Parses the LLM visual-inspection verdict JSON. Returns (needsVisual, target) with a
-    /// clean (false, "") on malformed input, empty responses, or missing properties — the
-    /// classifier must fail CLOSED (no visual inspection) when the model rambles or the
-    /// JSON is broken.
+    /// Parses the LLM visual-inspection verdict JSON. Returns (needsVisual, target) where
+    /// needsVisual is NULL when the classifier is UNAVAILABLE (empty response, malformed
+    /// JSON, unparseable model rambling, missing needsVisual property) — distinct from a
+    /// confident (false, "") verdict the model actually produced. The gate callers use
+    /// this to fail OPEN on an unavailable classifier: the deterministic
+    /// HasVisualInspectionHint has already fired at that point, and a flaky LLM must not
+    /// silently skip the required live browser test (the benchmark-23 halt: the step-5
+    /// planner response was cut off mid-JSON, the visual classifier then also failed
+    /// closed, and the run ended with _browser_test never executed).
     /// </summary>
-    public static (bool NeedsVisual, string Target) ParseVisualVerdict(string? raw)
+    public static (bool? NeedsVisual, string Target) ParseVisualVerdict(string? raw)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return (false, "");
+        if (string.IsNullOrWhiteSpace(raw)) return (null, "");
         try
         {
             var cleaned = AgentJsonUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
-            var needs = doc.RootElement.TryGetProperty("needsVisual", out var v) &&
-                        v.ValueKind == JsonValueKind.True;
+            if (!doc.RootElement.TryGetProperty("needsVisual", out var v))
+                return (null, ""); // no verdict produced — classifier unavailable, not a confident "no"
+            var needs = v.ValueKind == JsonValueKind.True;
             var target = "";
             if (doc.RootElement.TryGetProperty("target", out var t) &&
                 t.ValueKind == JsonValueKind.String)
                 target = t.GetString() ?? "";
             return (needs, target.Trim());
         }
-        catch { return (false, ""); }
+        catch { return (null, ""); }
     }
+
+    /// <summary>
+    /// The visual-gate injection decision, made AFTER the deterministic
+    /// HasVisualInspectionHint(prompt) already fired. A confident "no" verdict from a
+    /// WORKING classifier vetoes the injection (the LLM looked at the request and
+    /// decided it is not actually visual). An UNAVAILABLE classifier (null verdict —
+    /// transport error, empty reply, unparseable JSON) does NOT veto: the deterministic
+    /// hint already established that the task demands looking at a rendered page, so the
+    /// gate fails OPEN and injects the live browser test with the fallback target
+    /// instead of ending the run with _browser_test never executed.
+    /// </summary>
+    public static bool ShouldInjectVisualBrowserTest(bool? classifierNeedsVisual)
+        => classifierNeedsVisual != false;
 
     /// <summary>Lowercases, collapses whitespace, and strips punctuation so phrase
     /// matching is stable across prompt formatting.</summary>

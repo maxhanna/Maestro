@@ -796,11 +796,37 @@
               </div>
               <div class="analysis-files"
                 ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
-                <strong>Files changed:</strong>
-                <span class="file-edit-chip" ng-repeat="f in card.agentAnalysis.filesEdited">
-                  <span class="chip-path">{{f.path}}</span>
-                  <span class="chip-meta" ng-if="f.editAction">{{f.editAction}}</span>
-                </span>
+                <div class="diff-summary">
+                  <div class="diff-summary-head">
+                    <strong>Agent changed {{card.agentAnalysis.filesEdited.length}}
+                      file{{card.agentAnalysis.filesEdited.length === 1 ? '' : 's'}}</strong>
+                    <span class="diff-summary-totals" title="Total lines added / removed">
+                      <span class="diff-count add">+{{vm.filesEditedTotals(card.agentAnalysis.filesEdited).added}}</span>
+                      <span class="diff-count del">−{{vm.filesEditedTotals(card.agentAnalysis.filesEdited).removed}}</span>
+                    </span>
+                  </div>
+                  <div class="diff-file-row" ng-repeat="f in card.agentAnalysis.filesEdited track by f.path">
+                    <details class="diff-file-details" ng-if="f.preview">
+                      <summary class="diff-file-summary">
+                        <span class="diff-file-status">{{vm.fileActionLetter(f)}}</span>
+                        <span class="diff-file-path" title="{{f.path}}">{{f.path}}</span>
+                        <span class="diff-file-counts">
+                          <span class="diff-count add" ng-if="f.linesAdded">+{{f.linesAdded}}</span>
+                          <span class="diff-count del" ng-if="f.linesRemoved">−{{f.linesRemoved}}</span>
+                        </span>
+                      </summary>
+                      <pre class="diff-file-preview">{{f.preview}}</pre>
+                    </details>
+                    <div class="diff-file-summary no-expand" ng-if="!f.preview">
+                      <span class="diff-file-status">{{vm.fileActionLetter(f)}}</span>
+                      <span class="diff-file-path" title="{{f.path}}">{{f.path}}</span>
+                      <span class="diff-file-counts">
+                        <span class="diff-count add" ng-if="f.linesAdded">+{{f.linesAdded}}</span>
+                        <span class="diff-count del" ng-if="f.linesRemoved">−{{f.linesRemoved}}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
@@ -1242,13 +1268,15 @@
             </span>
           </div>
 
-          <!-- Suggestions (generated when the card finished; cap is per-project, 0-4) -->
-          <div class="suggest-generating" ng-if="card._suggestionsGenerating">
+          <!-- Suggestions (generated when the card finished; cap is per-project, 0-4).
+               Benchmark cards (runner-created or any card living in the benchmark project)
+               never display suggestions, even stale ones from before the guard. -->
+          <div class="suggest-generating" ng-if="card._suggestionsGenerating && !vm.isBenchmarkCard(card)">
             <span class="suggest-spinner"></span> 💡 Suggesting improvements…
           </div>
-          <div class="suggest-error" ng-if="card._suggestionsError">💡 {{card._suggestionsError}}</div>
+          <div class="suggest-error" ng-if="card._suggestionsError && !vm.isBenchmarkCard(card)">💡 {{card._suggestionsError}}</div>
           <div class="card-section card-section-suggestions"
-            ng-if="card._suggestions && (card._suggestions.length || card._suggestionsRequested)">
+            ng-if="card._suggestions && (card._suggestions.length || card._suggestionsRequested) && !vm.isBenchmarkCard(card)">
             <div class="section-suggest-title">💡 Suggestions ({{card._suggestions.length}})
               <a class="suggest-more"
                 ng-if="card._suggestions.length < vm.projectMaxSuggestions(card.filePath) && !card._suggestionsGenerating && !card._suggestionsNone"
@@ -1349,11 +1377,37 @@
               </div>
               <div class="analysis-files"
                 ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
-                <strong>Files changed:</strong>
-                <span class="file-edit-chip" ng-repeat="f in card.agentAnalysis.filesEdited">
-                  <span class="chip-path">{{f.path}}</span>
-                  <span class="chip-meta" ng-if="f.editAction">{{f.editAction}}</span>
-                </span>
+                <div class="diff-summary">
+                  <div class="diff-summary-head">
+                    <strong>Agent changed {{card.agentAnalysis.filesEdited.length}}
+                      file{{card.agentAnalysis.filesEdited.length === 1 ? '' : 's'}}</strong>
+                    <span class="diff-summary-totals" title="Total lines added / removed">
+                      <span class="diff-count add">+{{vm.filesEditedTotals(card.agentAnalysis.filesEdited).added}}</span>
+                      <span class="diff-count del">−{{vm.filesEditedTotals(card.agentAnalysis.filesEdited).removed}}</span>
+                    </span>
+                  </div>
+                  <div class="diff-file-row" ng-repeat="f in card.agentAnalysis.filesEdited track by f.path">
+                    <details class="diff-file-details" ng-if="f.preview">
+                      <summary class="diff-file-summary">
+                        <span class="diff-file-status">{{vm.fileActionLetter(f)}}</span>
+                        <span class="diff-file-path" title="{{f.path}}">{{f.path}}</span>
+                        <span class="diff-file-counts">
+                          <span class="diff-count add" ng-if="f.linesAdded">+{{f.linesAdded}}</span>
+                          <span class="diff-count del" ng-if="f.linesRemoved">−{{f.linesRemoved}}</span>
+                        </span>
+                      </summary>
+                      <pre class="diff-file-preview">{{f.preview}}</pre>
+                    </details>
+                    <div class="diff-file-summary no-expand" ng-if="!f.preview">
+                      <span class="diff-file-status">{{vm.fileActionLetter(f)}}</span>
+                      <span class="diff-file-path" title="{{f.path}}">{{f.path}}</span>
+                      <span class="diff-file-counts">
+                        <span class="diff-count add" ng-if="f.linesAdded">+{{f.linesAdded}}</span>
+                        <span class="diff-count del" ng-if="f.linesRemoved">−{{f.linesRemoved}}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">

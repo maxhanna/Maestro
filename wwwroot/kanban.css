@@ -1482,6 +1482,132 @@ body.dragging-active .card:hover {
     margin-left: 4px;
 }
 
+/* Git-style "files changed" summary — header totals + per-file rows with expandable diff */
+.diff-summary {
+    margin-top: 4px;
+}
+
+.diff-summary-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 2px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 11.5px;
+}
+
+.diff-summary-head strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.diff-summary-totals {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+
+.diff-count.add {
+    color: #4caf7d;
+}
+
+.diff-count.del {
+    color: #e06c75;
+}
+
+.diff-file-row {
+    margin-top: 2px;
+}
+
+.diff-file-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-size: 11.5px;
+    font-family: ui-monospace, monospace;
+    list-style: none;
+}
+
+.diff-file-details > .diff-file-summary {
+    cursor: pointer;
+}
+
+.diff-file-details > .diff-file-summary:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.diff-file-summary.no-expand {
+    cursor: default;
+}
+
+.diff-file-summary.no-expand:hover {
+    background: transparent;
+}
+
+.diff-file-details[open] > .diff-file-summary {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.diff-file-details > .diff-file-summary::after {
+    content: '▸';
+    margin-left: auto;
+    flex: 0 0 auto;
+    opacity: .55;
+    font-size: 10px;
+    transition: transform .15s ease;
+}
+
+.diff-file-details[open] > .diff-file-summary::after {
+    transform: rotate(90deg);
+}
+
+.diff-file-status {
+    flex: 0 0 auto;
+    width: 16px;
+    font-weight: 700;
+    color: #e5c07b;
+    text-align: center;
+}
+
+.diff-file-path {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #d4d4d4;
+}
+
+.diff-file-counts {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 10.5px;
+    opacity: .9;
+}
+
+.diff-file-counts .diff-count {
+    margin-left: 4px;
+}
+
+.diff-file-preview {
+    margin: 0 0 4px 26px;
+    max-height: 180px;
+    overflow: auto;
+    font-size: 10.5px;
+    line-height: 1.4;
+    font-family: ui-monospace, monospace;
+    color: #bbb;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 4px;
+    padding: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
 /* Logs */
 .analysis-log {
     margin-top: 2px;

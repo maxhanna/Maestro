@@ -2341,11 +2341,35 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// A script/program request ("write a python script that fetches…") is a BUILD task —
     /// those carry on with the normal planning/editing loop.
     /// </summary>
+    /// <summary>
+    /// A BUILD + VERIFY demand — the benchmark-23 shape: the prompt asks to BUILD a server /
+    /// web app / game / canvas page AND verify it with the live browser test suite
+    /// ("VISUALLY VERIFY the fix with the live browser test suite"), while a
+    /// "write what you saw to …/report.txt" line is only a REPORTING artifact. A dump task is
+    /// a pure fetch-web-data → write-file task; these build-first prompts must NOT be
+    /// short-circuited by the dump path, or the build/verification steps (the 6-leg fix, the
+    /// browser tests) would never run — the run would complete the instant the report file
+    /// exists, exactly what happened to benchmark 23 (classified "dump" because of its
+    /// "current leg count" web-hint and its legs_report.txt output target).
+    /// </summary>
+    private static readonly Regex[] BuildAndVerifyDemandRegexes =
+    {
+        new(@"\b(build|create|implement|make)\b[^.\n]{0,60}\b(web app|web application|website|game|canvas|server|web page|webpage|page)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"\b(live browser test|browser test|live web test|test suite|visually verify|visual confirmation|visual bugs)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)
+    };
+
+    private static bool TaskDemandsBuildAndVerify(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        return BuildAndVerifyDemandRegexes.Any(r => r.IsMatch(prompt));
+    }
+
     private static bool IsDumpTask(string? prompt, string projectRoot) =>
         TaskHintsWebNeed(prompt) &&
         prompt is { } nonNullPrompt &&
         AgentOsOutputVerifier.TryGetFileOutputTarget(nonNullPrompt, projectRoot, out _) &&
-        !TaskExplicitlyRequestsScript(prompt);
+        !TaskExplicitlyRequestsScript(prompt) &&
+        !TaskDemandsBuildAndVerify(prompt);
 
     /// <summary>
     /// True when the prompt demands post-fetch STRUCTURED edits to the demanded file
@@ -3369,13 +3393,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (TestIntentClassifier.HasVisualInspectionHint(prompt) &&
                     !planSoFar.Any(s => string.Equals(s.File, "_browser_test", StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (visualNeedVerified == 0)
+                    // A task that EXPLICITLY names the live browser test as a requirement
+                    // ("…pass/fail only based on the number of legs confirmed by the browser
+                    // test") bypasses the LLM classifier entirely: the classifier reads the
+                    // dominant build/implement language and answers needsVisual=false, which
+                    // vetoes the deterministically-required browser test (benchmark 23).
+                    if (TestIntentClassifier.DemandsLiveBrowserTest(prompt))
+                    {
+                        visualNeedVerified = 1;
+                    }
+                    else if (visualNeedVerified == 0)
                     {
                         await EmitLog(emitSse, "info",
                             "Task demands visual verification — checking whether a _browser_test step is required…", ct: ct);
                         var (needsVisual, target) = await ClassifyVisualInspectionPromptAsync(prompt, ct);
-                        visualNeedVerified = needsVisual ? 1 : -1;
-                        if (needsVisual) visualNeedTarget = target;
+                        // Fail OPEN on an unavailable classifier (null verdict): the
+                        // deterministic hint already fired, so a flaky LLM must not
+                        // silently skip the required live browser test — only a
+                        // confident "needsVisual:false" from a working classifier vetoes.
+                        visualNeedVerified = TestIntentClassifier.ShouldInjectVisualBrowserTest(needsVisual) ? 1 : -1;
+                        if (needsVisual == true) visualNeedTarget = target;
                     }
                     if (visualNeedVerified == 1)
                     {
@@ -4582,13 +4619,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             !allResults.OfType<Dictionary<string, object?>>()
                 .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"))
         {
-            if (visualNeedVerified == 0)
+            // A task that EXPLICITLY names the live browser test as a requirement
+            // bypasses the LLM classifier: the classifier reads the dominant build/implement
+            // language and answers needsVisual=false, vetoing the deterministically-required
+            // browser test (benchmark 23). Same bypass as the plan-complete gate above.
+            if (TestIntentClassifier.DemandsLiveBrowserTest(prompt))
+            {
+                visualNeedVerified = 1;
+            }
+            else if (visualNeedVerified == 0)
             {
                 await EmitLog(emitSse, "info",
                     "Task demands visual verification — checking whether a _browser_test step is required…", ct: ct);
                 var (needsVisual, target) = await ClassifyVisualInspectionPromptAsync(prompt, ct);
-                visualNeedVerified = needsVisual ? 1 : -1;
-                if (needsVisual) visualNeedTarget = target;
+                // Fail OPEN on an unavailable classifier (null verdict): the
+                // deterministic hint already fired, so a flaky LLM must not silently
+                // skip the required live browser test at loop halt — only a confident
+                // "needsVisual:false" from a working classifier vetoes.
+                visualNeedVerified = TestIntentClassifier.ShouldInjectVisualBrowserTest(needsVisual) ? 1 : -1;
+                if (needsVisual == true) visualNeedTarget = target;
             }
             if (visualNeedVerified == 1)
             {

@@ -209,7 +209,10 @@ partial class AgentController
             var (oldStr, _) = AstResolveEdit(fullPath, "method", targetSymbol);
             if (!string.IsNullOrWhiteSpace(oldStr))
             {
-                if (!oldStr.Contains(targetSymbol, StringComparison.Ordinal))
+                var symbolMatch = targetSymbol.Contains('.')
+                    ? oldStr.Contains(targetSymbol[(targetSymbol.LastIndexOf('.') + 1)..], StringComparison.Ordinal)
+                    : oldStr.Contains(targetSymbol, StringComparison.Ordinal);
+                if (!symbolMatch)
                 {
                     await EmitLog(emitSse, "warn",
                         $"  ⚠ AST-resolved body for '{targetSymbol}' does not contain the symbol name — likely wrong method",

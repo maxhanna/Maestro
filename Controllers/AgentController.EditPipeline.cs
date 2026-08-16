@@ -169,10 +169,16 @@ partial class AgentController
                     string logMsg1 = @$"AST is resolving '{targetSymbol}' in {relPath} for exact method source extraction. 
                     Detected file extension: {fileExt}.";
                     await EmitLog(emitSse, "info", logMsg1, ct: ct);
-                    var (astOldStr, astStartLine, astErr) = AstCodeEditorService.FindFunctionSource(preExtractContent, targetSymbol, fileExt);
+                    var (astOldStr, astStartLine, astErr) = AstCodeEditorService.FindFunctionSource(
+                        preExtractContent, targetSymbol, fileExt, step.Change);
                     if (astOldStr != null && astStartLine > 0)
                     {
-                        if (!astOldStr.Contains(targetSymbol, StringComparison.Ordinal))
+                        // Dotted `Class.method` symbols resolve to the method only — the class
+                        // name isn't part of the method source, so compare the last segment.
+                        var symbolMatch = targetSymbol.Contains('.')
+                            ? astOldStr.Contains(targetSymbol[(targetSymbol.LastIndexOf('.') + 1)..], StringComparison.Ordinal)
+                            : astOldStr.Contains(targetSymbol, StringComparison.Ordinal);
+                        if (!symbolMatch)
                         {
                             await EmitLog(emitSse, "warn",
                                 $"AST-resolved '{targetSymbol}' but body does not contain symbol name — rejecting to avoid wrong-context edit",

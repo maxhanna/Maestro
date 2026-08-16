@@ -314,6 +314,64 @@ public class ServerLaunchPlanTests : IDisposable
     }
 
     [Fact]
+    public void Detect_TwoSiblingBenchmarkFolders_NewestAppJsWins()
+    {
+        // The benchmark-23 failure shape: a sandbox root holding benchmark_test_22/app.js
+        // AND benchmark_test_23/app.js at the same depth. The alphabetical first (22)
+        // must NOT shadow the folder the agent just built (23) — the most recently
+        // written entry is the server under test.
+        var dir = NewProject();
+        Write(dir, "benchmark_test_22/index.html", "<html><body><h1>Benchmark 22</h1></body></html>");
+        Write(dir, "benchmark_test_22/app.js", "require('http')");
+        Write(dir, "benchmark_test_23/index.html", "<html><body><canvas id='c'></canvas></body></html>");
+        Write(dir, "benchmark_test_23/app.js", "require('http')");
+        File.SetLastWriteTimeUtc(Path.Combine(dir, "benchmark_test_22/app.js"), DateTime.UtcNow.AddDays(-1));
+        File.SetLastWriteTimeUtc(Path.Combine(dir, "benchmark_test_23/app.js"), DateTime.UtcNow);
+
+        var plan = ServerLauncherService.DetectLaunchPlan(dir);
+        Assert.NotNull(plan);
+        Assert.Equal("node", plan!.Kind);
+        Assert.Equal("app.js", plan.Arguments);
+        Assert.Equal(Path.Combine(dir, "benchmark_test_23"), plan.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Detect_TwoSiblingBenchmarkFolders_OlderNewestOrderSwapped()
+    {
+        // Recency — not folder name order — decides the tie. Flip the timestamps and the
+        // plan must switch to the OTHER sibling.
+        var dir = NewProject();
+        Write(dir, "benchmark_test_22/index.html", "<html><body><h1>Benchmark 22</h1></body></html>");
+        Write(dir, "benchmark_test_22/server.js", "require('http')");
+        Write(dir, "benchmark_test_23/index.html", "<html><body><canvas id='c'></canvas></body></html>");
+        Write(dir, "benchmark_test_23/server.js", "require('http')");
+        File.SetLastWriteTimeUtc(Path.Combine(dir, "benchmark_test_22/server.js"), DateTime.UtcNow);
+        File.SetLastWriteTimeUtc(Path.Combine(dir, "benchmark_test_23/server.js"), DateTime.UtcNow.AddDays(-1));
+
+        var plan = ServerLauncherService.DetectLaunchPlan(dir);
+        Assert.NotNull(plan);
+        Assert.Equal("node", plan!.Kind);
+        Assert.Equal(Path.Combine(dir, "benchmark_test_22"), plan.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Detect_TwoSiblingIndexHtml_NewestWinsStaticRoot()
+    {
+        // Same recency rule for the static fallback: two sibling folders each holding
+        // index.html at equal depth — the most recently written folder is served.
+        var dir = NewProject();
+        Write(dir, "benchmark_test_22/index.html", "<html><body>22</body></html>");
+        Write(dir, "benchmark_test_23/index.html", "<html><body>23</body></html>");
+        File.SetLastWriteTimeUtc(Path.Combine(dir, "benchmark_test_22/index.html"), DateTime.UtcNow.AddDays(-1));
+        File.SetLastWriteTimeUtc(Path.Combine(dir, "benchmark_test_23/index.html"), DateTime.UtcNow);
+
+        var plan = ServerLauncherService.DetectLaunchPlan(dir);
+        Assert.NotNull(plan);
+        Assert.Equal("static", plan!.Kind);
+        Assert.Equal(Path.Combine(dir, "benchmark_test_23"), plan.WorkingDirectory);
+    }
+
+    [Fact]
     public void Detect_IndexHtmlOnly_StaticKind()
     {
         var dir = NewProject();

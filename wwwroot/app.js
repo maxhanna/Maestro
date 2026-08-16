@@ -534,12 +534,38 @@ angular.module('kanbanApp', [])
         if (vm.saveSettings) vm.saveSettings(true);
       }
 
+      // Auto-follow for live logs: when a log is already pinned to the bottom, new
+      // entries keep it scrolled down; if the user scrolled UP (reading older entries),
+      // new arrivals must NOT yank the view away. Each scrollable container carries a
+      // __logFollow flag updated by the capture-phase scroll listener below (undefined =
+      // never scrolled up → follow). Throttled because streaming tokens arrive many
+      // times per second.
       vm.scrollToBottom = function () {
+        if (vm._scrollFollowPending) return;
+        vm._scrollFollowPending = true;
         $timeout(function () {
-          var logContainer = document.querySelector('.log-entries');
-          if (logContainer) logContainer.scrollTop = logContainer.scrollHeight;
+          vm._scrollFollowPending = false;
+          var els = document.querySelectorAll('.agent-activity-log .log-entries, .agent-streaming-tokens .streaming-tokens');
+          for (var i = 0; i < els.length; i++) {
+            if (els[i].__logFollow === false) continue;
+            els[i].scrollTop = els[i].scrollHeight;
+          }
         }, 10, false);
       };
+
+      // Track the user's scroll intent per log container: any scroll that leaves the
+      // bottom disables follow (they're reading older entries); returning to the bottom
+      // re-enables it. Capture phase is required — scroll events don't bubble.
+      if (!vm._logFollowListenerAttached) {
+        vm._logFollowListenerAttached = true;
+        document.addEventListener('scroll', function (e) {
+          var t = e.target;
+          if (!t || t.nodeType !== 1 || !t.classList) return;
+          if (t.classList.contains('log-entries') || t.classList.contains('streaming-tokens')) {
+            t.__logFollow = (t.scrollHeight - t.scrollTop - t.clientHeight) < 24;
+          }
+        }, true);
+      }
 
       vm.increaseLogFont = function () { vm.logFontSize = Math.min(vm.logFontSize + 2, 32); persistFontSizes(); };
       vm.decreaseLogFont = function () { vm.logFontSize = Math.max(vm.logFontSize - 2, 6); persistFontSizes(); };
@@ -665,6 +691,11 @@ angular.module('kanbanApp', [])
       });
       vm.countArchivedCards();
       vm.startCalendarProcessing();
+      // Benchmark root early: the suggestion gates identify benchmark cards by their
+      // project path, so vm.defaultBenchmarkRoot must be known before the Benchmarks
+      // panel is ever opened (a hand-created benchmark card's suggestions are generated
+      // right after its run finishes).
+      if (vm.refreshBenchmarkRoot) vm.refreshBenchmarkRoot();
 
       // Global Keybindings
       document.addEventListener('keydown', function (event) {

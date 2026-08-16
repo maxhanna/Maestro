@@ -189,6 +189,11 @@ partial class AgentController
     {
         var relPath = step.File.Replace('\\', '/').TrimStart('/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+        // The editor model is trained to write a literal space inside a required heading as
+        // `&nbsp;` (it keeps dropping the space — benchmark 23's 'Benchmark 23' → 'Benchmark23').
+        // Restore the REAL space deterministically on every edit payload BEFORE anything is
+        // written, so the saved file (and the applied-edit ground truth) carries the real space.
+        AgentTextUtilities.NormalizeNbspInStep(step);
         // DIRECTORY-TARGET GUARD: a replanner (repair loop) can re-emit "create directory X" as a
         // NORMAL edit step whose File is the directory path itself (not a _create_directory marker).
         // The edit pipeline would then treat the folder as a file target: exploration + LLM produce
@@ -391,6 +396,7 @@ partial class AgentController
                         replacePrompt.AppendLine();
                         replacePrompt.AppendLine("Output ONLY the replacement code. It MUST be a complete method/function declaration (signature + body).");
                         replacePrompt.AppendLine("Do NOT include markdown code fences or any other text — just the raw source code.");
+                        replacePrompt.AppendLine("HEADING/TITLE SPACES: if the code must contain a heading/title with a literal space (e.g. 'Benchmark 23'), write it as `Benchmark&nbsp;23` — never merge the words. The `&nbsp;` is converted to a real space automatically after the edit.");
                         var (rawReplacement, replaceError) = await CallLlmRawText(
                             "You are a precise code editor. Output ONLY the replacement source code with no formatting, no markdown, no explanation. " +
                             "Do NOT add comments (// or) to the code.",
@@ -421,12 +427,30 @@ partial class AgentController
                             }
                             else
                             {
-                                if (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
-                                    newStr = AgentCodeFormatting.AutoFixOperatorSpacing(newStr);
-                                newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
-                                fromFormatC = true;
-                                await EmitLog(emitSse, "info",
-                                    $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
+                                // Deterministic Python scope guard: if the AST-resolved oldString is a
+                                // whole CLASS but the LLM returned a bare method (or vice versa), the
+                                // apply would replace the class with a method and produce an immediate
+                                // IndentationError/SyntaxError. Reject BEFORE applying so the retry
+                                // regenerates a replacement that matches the oldString's scope.
+                                var pyOldKind = fmtExt == ".py" ? AgentEditHeuristics.PythonDeclarationKind(oldStr) : null;
+                                var pyNewKind = fmtExt == ".py" ? AgentEditHeuristics.PythonDeclarationKind(newStr) : null;
+                                var scopeMismatch = pyOldKind is "class" or "function"
+                                    && pyNewKind is "class" or "function"
+                                    && pyOldKind != pyNewKind;
+                                if (scopeMismatch)
+                                {
+                                    resolveError = $"Scope mismatch: oldString is a {pyOldKind} declaration but the replacement is a {pyNewKind} declaration — output a complete {pyOldKind} declaration matching the oldString's scope (keep the class/def header and its indentation level)";
+                                    await EmitLog(emitSse, "warn", $"  {resolveError} ({newStr.Length} chars)", ct: ct);
+                                }
+                                else
+                                {
+                                    if (fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                                        newStr = AgentCodeFormatting.AutoFixOperatorSpacing(newStr);
+                                    newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
+                                    fromFormatC = true;
+                                    await EmitLog(emitSse, "info",
+                                        $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
+                                }
                             }
                         }
                     }
@@ -559,6 +583,12 @@ partial class AgentController
                 }
                 continue;
             }
+            // NBSP → real space for LLM-resolved content (the plan-provided payload was already
+            // normalized at method start; the resolver's output needs the same deterministic pass).
+            if (!string.IsNullOrWhiteSpace(newStr))
+                newStr = AgentTextUtilities.NormalizeNbsp(newStr);
+            if (fullFile && !string.IsNullOrWhiteSpace(fullContent))
+                fullContent = AgentTextUtilities.NormalizeNbsp(fullContent);
             if (alreadyDone)
             {
                 await EmitLog(emitSse, "info", $"✓ Already done: {relPath}", ct: ct);

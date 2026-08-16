@@ -432,4 +432,33 @@ public class AgentTextUtilitiesTests
         var once = AgentTextUtilities.NormalizeParenSpacing(raw);
         Assert.Equal(once, AgentTextUtilities.NormalizeParenSpacing(once));
     }
+
+    [Fact]
+    public void NormalizeNbsp_RestoresRealSpacesFromEntities()
+    {
+        // The editor model writes a required heading's literal space as &nbsp; (benchmark 23's
+        // 'Benchmark 23' — it keeps dropping the raw space); this restores the REAL space.
+        Assert.Equal("<h1>Benchmark 23</h1>", AgentTextUtilities.NormalizeNbsp("<h1>Benchmark&nbsp;23</h1>"));
+        Assert.Equal("A B", AgentTextUtilities.NormalizeNbsp("A&#160;B"));
+        Assert.Equal("x y", AgentTextUtilities.NormalizeNbsp("x&#xA0;y"));
+        Assert.Equal("no entities here", AgentTextUtilities.NormalizeNbsp("no entities here"));
+        Assert.Equal("", AgentTextUtilities.NormalizeNbsp(""));
+    }
+
+    [Fact]
+    public void NormalizeNbspInStep_NormalizesEveryPayloadField()
+    {
+        var step = new PlanStep
+        {
+            NewString = "<h1>Benchmark&nbsp;23</h1>",
+            FullFile = "full Benchmark&nbsp;23",
+            NewCode = new List<string> { "<h1>Benchmark&nbsp;23</h1>" },
+            Edits = new List<EditPair> { new() { OldString = "old line", NewString = "Benchmark&nbsp;23" } }
+        };
+        AgentTextUtilities.NormalizeNbspInStep(step);
+        Assert.Equal("<h1>Benchmark 23</h1>", step.NewString);
+        Assert.Equal("full Benchmark 23", step.FullFile);
+        Assert.Equal("<h1>Benchmark 23</h1>", step.NewCode![0]);
+        Assert.Equal("Benchmark 23", step.Edits![0].NewString);
+    }
 }

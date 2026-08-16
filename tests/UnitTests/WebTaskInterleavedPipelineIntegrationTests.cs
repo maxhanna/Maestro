@@ -233,11 +233,13 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         var controller = BuildController();
         var prompt = "Create a folder called 'benchmark_test_22' at the project root. Inside it, build a small web game " +
                      "and then CHECK IT FOR VISUAL BUGS — you must LOOK at the rendered page to visually confirm " +
-                     "the heading renders on screen. Use the live browser test suite.";
+                     "the heading renders on screen.";
         Assert.True(TestIntentClassifier.HasVisualInspectionHint(prompt),
             "the test prompt must fire the visual-inspection hint");
         Assert.True(TestIntentClassifier.HasEditIntent(prompt),
             "the test prompt is a build task — must NOT short-circuit in discovery");
+        Assert.False(TestIntentClassifier.DemandsLiveBrowserTest(prompt),
+            "this prompt names no explicit browser test — the classifier is still consulted");
 
         var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
 
@@ -252,6 +254,42 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // The gate consulted the visual classifier, then INJECTED the browser test itself
         // (deterministic — no planner round is trusted to propose _browser_test).
         Assert.Contains(_clientFactory.Calls, c => c == "visual-classifier");
+    }
+
+    [Fact]
+    public async Task VisualVerifyTask_ExplicitBrowserTestDemand_BypassesClassifier()
+    {
+        // Regression for benchmark 23: the prompt EXPLICITLY names the live browser test as
+        // a requirement ("pass/fail only based on the number of legs confirmed by the browser
+        // test"), but the LLM classifier read the dominant build/implement language and
+        // answered needsVisual=false — vetoing the browser test so the run "completed" without
+        // ever verifying. An explicit browser-test demand must BYPASS the classifier and
+        // inject the browser test deterministically: the task itself names the requirement, so
+        // no model opinion can veto it.
+        _clientFactory.Mode = PlannerMode.VisualVerifyBuild;
+        var controller = BuildController();
+        var prompt = "Create a folder called 'benchmark_test_23' at the project root. Inside it, build a small web game " +
+                     "with a nice visual appearance, then use the live browser test to confirm the spider has 4 legs, " +
+                     "then add 2 more legs so it has 6. The benchmark passes only if the leg count confirmed by the " +
+                     "browser test goes from 4 to 6.";
+        Assert.True(TestIntentClassifier.HasVisualInspectionHint(prompt),
+            "the prompt must fire the visual-inspection hint (visual appearance)");
+        Assert.True(TestIntentClassifier.HasEditIntent(prompt),
+            "the prompt is a build task — must NOT short-circuit in discovery");
+        Assert.True(TestIntentClassifier.DemandsLiveBrowserTest(prompt),
+            "the prompt explicitly names the browser test — the gate must bypass the classifier");
+
+        var (allSteps, plan, complete) = await InvokeOrchestrate(controller, prompt);
+
+        Assert.True(complete, $"pipeline should complete — plan summary: {plan?.Summary}");
+        Assert.True(plan!.Plan.Any(s => string.Equals(s.File, "_browser_test", StringComparison.OrdinalIgnoreCase)),
+            "the final plan must include a _browser_test step");
+        Assert.True(allSteps.OfType<Dictionary<string, object?>>()
+                .Any(r => r.GetValueOrDefault("type")?.ToString() == "browser_test"),
+            "the run must have actually executed the browser test step");
+        // The classifier is NEVER consulted — the explicit demand overrides it (even though
+        // the scripted classifier would have answered needsVisual=false for this prompt).
+        Assert.DoesNotContain(_clientFactory.Calls, c => c == "visual-classifier");
     }
 
     [Fact]
@@ -384,8 +422,9 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
             .Where(r => r.GetValueOrDefault("type")?.ToString() == "browser_test").ToList();
         Assert.NotEmpty(browserTests);
         Assert.Equal("done", browserTests[^1].GetValueOrDefault("status")?.ToString());
-        // The halted-run injection went through the classifier (deterministic confirmation).
-        Assert.Contains(_clientFactory.Calls, c => c == "visual-classifier");
+        // The prompt explicitly names the live browser test, so the halted-run gate BYPASSES
+        // the classifier and injects the browser test deterministically (no LLM dependency).
+        Assert.DoesNotContain(_clientFactory.Calls, c => c == "visual-classifier");
     }
 
     [Fact]

@@ -693,8 +693,34 @@
           </div>
 
           <div class="files-edited-panel" ng-if="vm.agentPanelTabIs('activity') && vm.streamingFilesEdited.length">
-            <strong>Files changed</strong>
-            <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited track by f.path">{{f.path}}</div>
+            <div class="diff-summary-head">
+              <strong>Files changed ({{vm.streamingFilesEdited.length}})</strong>
+              <span class="diff-summary-totals" title="Total lines added / removed">
+                <span class="diff-count add">+{{vm.filesEditedTotals(vm.streamingFilesEdited).added}}</span>
+                <span class="diff-count del">−{{vm.filesEditedTotals(vm.streamingFilesEdited).removed}}</span>
+              </span>
+            </div>
+            <div class="diff-file-row" ng-repeat="f in vm.streamingFilesEdited track by f.path">
+              <details class="diff-file-details" ng-if="f.preview">
+                <summary class="diff-file-summary">
+                  <span class="diff-file-status">{{vm.fileActionLetter(f)}}</span>
+                  <span class="diff-file-path" title="{{f.path}}">{{f.path}}</span>
+                  <span class="diff-file-counts">
+                    <span class="diff-count add" ng-if="f.linesAdded">+{{f.linesAdded}}</span>
+                    <span class="diff-count del" ng-if="f.linesRemoved">−{{f.linesRemoved}}</span>
+                  </span>
+                </summary>
+                <pre class="diff-file-preview">{{f.preview}}</pre>
+              </details>
+              <div class="diff-file-summary no-expand" ng-if="!f.preview">
+                <span class="diff-file-status">{{vm.fileActionLetter(f)}}</span>
+                <span class="diff-file-path" title="{{f.path}}">{{f.path}}</span>
+                <span class="diff-file-counts">
+                  <span class="diff-count add" ng-if="f.linesAdded">+{{f.linesAdded}}</span>
+                  <span class="diff-count del" ng-if="f.linesRemoved">−{{f.linesRemoved}}</span>
+                </span>
+              </div>
+            </div>
           </div>
 
           <div ng-if="vm.agentPanelTabIs('activity')">

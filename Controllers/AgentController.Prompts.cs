@@ -14,6 +14,16 @@ internal enum FormatCVariant
 
 partial class AgentController
 {
+    // The editor/planner rule for literal spaces inside required headings/titles. The weak
+    // model keeps DROPPING the space (benchmark 23's 'Benchmark 23' → 'Benchmark23'), so it is
+    // trained to write the space as an HTML entity (`&nbsp;`), which the pipeline converts back
+    // to a REAL space deterministically once the edit lands (AgentTextUtilities.NormalizeNbsp).
+    private const string NbspHeadingRule =
+        "HEADING/TITLE SPACES: if the task requires a heading or title that contains a literal " +
+        "space (e.g. 'Benchmark 23'), write it as `Benchmark&nbsp;23` — NEVER merge the words " +
+        "and never drop the space. The `&nbsp;` (or `&#160;`) is automatically converted to a " +
+        "real space after your edit is applied, so the saved file contains the exact required text.\n";
+
     private static string BuildEditSystemPrompt(string editFormat)
     {
         var intro = "You are a surgical code editor. Output ONLY a JSON object.\n\n";
@@ -68,7 +78,8 @@ partial class AgentController
                 "so the user can apply it to their database manually from migrations/*.sql. " +
                 "The endpoint method itself only contains INSERT/UPDATE/SELECT against the table.\n" +
              "14. NEVER write `{{ex.Message}}` inside an interpolated string — use `{ex.Message}` with single braces.\n" +
-             "15. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form. Only add comments if the change description explicitly asks for them.\n";
+             "15. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form. Only add comments if the change description explicitly asks for them.\n" +
+             "16. " + NbspHeadingRule;
         return intro + formatSection + commonRules;
     }
 
@@ -163,7 +174,8 @@ partial class AgentController
             "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation).\n" +
             "2. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
             "3. NEVER INVENT type names or property names. Every type/property you reference MUST exist in the project.\n" +
-            "4. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form.\n";
+            "4. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form.\n" +
+            "5. " + NbspHeadingRule;
     }
     private static string BuildVerifyEditUserPrompt() =>
             "You are a meticulous code reviewer verifying a single edit step in a larger plan. " +
@@ -237,7 +249,14 @@ partial class AgentController
             "  Set needsExtraStep=true and KEEP the edit. The system will auto-generate the missing method. Only ABANDON if the edit deletes existing code or breaks syntax.\n" +
             " * PLACEHOLDER STUBS ARE FATAL: If the NEW code is a placeholder/stub implementation — a method body that is ONLY a console.log(...) call, contains a '// Placeholder implementation', '// TODO: implement', or '// stub' comment, an empty method body { }, or 'throw new NotImplementedException()' — ABANDON with reason 'placeholder stub — implement real logic'. The step asked for a real implementation.\n" +
             " * SYNTAX ERRORS ARE FATAL: If the edit has malformed HTML (e.g., `({ {x}}`), mismatched braces, or incorrect Angular syntax in the NEW code itself, ABANDON immediately. " +
-            "  Do not create a repair step for syntax errors; the system will automatically retry the edit with the failure context.\n";
+            "  Do not create a repair step for syntax errors; the system will automatically retry the edit with the failure context.\n" +
+            " * NBSP-HEADING CONVENTION (IMPORTANT): Some steps write a required literal space inside a " +
+            "heading/title as the HTML entity `&nbsp;` (e.g. 'Benchmark&nbsp;23') because the editing model " +
+            "tends to drop literal spaces. The pipeline DETERMINISTICALLY converts that `&nbsp;` to a REAL " +
+            "space after the edit is applied. So if the STEP DESCRIPTION mentions `&nbsp;` but the NEW CODE " +
+            "shows a real space ('Benchmark 23'), the edit is CORRECT — the conversion is expected. " +
+            "Do NOT abandon an edit because the applied code has a real space where the step description " +
+            "wrote `&nbsp;`; that is the intended end state.\n";
     private static string BuildStepExplorationSystemPrompt() =>
         "You are a senior codebase navigation agent. Before a code change is applied, " +
         "your job is to understand exactly what needs to change, which existing code owns it, " +
@@ -454,6 +473,7 @@ partial class AgentController
                 sb.Append("Only if the task itself explicitly asks for a Python/Node script may you write (and run) one.\n\n");
             }
         }
+        sb.Append(NbspHeadingRule);
         sb.Append("Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n");
         if (atomicStepEstimate is > 0)
         {
@@ -722,7 +742,8 @@ partial class AgentController
     "4. NEVER repeat a stage already listed in STAGES SO FAR.\n" +
     "5. If the whole task fits in ONE stage, propose that single stage, then declare metaPlanComplete=true next turn.\n" +
     "6. Only split into multiple stages when the task genuinely spans multiple files/layers — never manufacture " +
-    "   stages for a single-file change.\n";
+    "   stages for a single-file change.\n" +
+    "7. " + NbspHeadingRule;
     private static string BuildIncrementalSubPlanUserPrompt(
         string originalPrompt, string discoveryContext, List<MetaPlanSubPlan> subPlansSoFar, List<string> rejectionFeedback)
     {
@@ -860,6 +881,7 @@ partial class AgentController
         sb.Append("You are a senior autonomous coding agent. Plan the complete minimum set of steps needed to satisfy the user's request.\n");
         sb.Append("Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n");
         sb.Append("Output ONLY valid JSON — no markdown fences, no extra text.\n\n");
+        sb.Append(NbspHeadingRule);
         sb.Append("### STEP TYPES (the \"file\" field) ###\n");
         sb.Append("  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time. ");
         sb.Append("For every edit step, include a \"line\" field with the 1-based line number of the target location ");
@@ -1100,6 +1122,9 @@ partial class AgentController
         sb.AppendLine("IMPORTANT: Only plan steps that address specific failures below. Do NOT repeat existing steps.");
         sb.AppendLine("Only address concrete failures or work the user EXPLICITLY requested that is genuinely missing.");
         sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
+        // Repair passes can REWRITE a heading — the same nbsp-for-literal-space rule must apply
+        // so a repair step's newString can't re-merge 'Benchmark 23' into 'Benchmark23'.
+        sb.Append(NbspHeadingRule);
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
         if (!string.IsNullOrWhiteSpace(requirementChecklist)) { sb.AppendLine("## Requirements"); sb.AppendLine(requirementChecklist); sb.AppendLine(); }

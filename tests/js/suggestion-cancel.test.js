@@ -248,9 +248,11 @@ test('idle flags present but nothing executing → not blocked', function () {
 // ── _doneCardsNeedingSuggestions: benchmark cards are never eligible ──────
 
 test('benchmark card in Done → never counted as needing suggestions', function () {
+  // vm.isBenchmarkCard is provided by the real vm (KanbanMixin) — mirror its flag check.
   const vm = {
     state: { done: [{ id: 'b1', _benchmark: true, text: 'benchmark card' }] },
-    projectMaxSuggestions: function () { return 3; }
+    projectMaxSuggestions: function () { return 3; },
+    isBenchmarkCard: function (c) { return !!(c && c._benchmark); }
   };
   assert.deepStrictEqual(doneCardsNeedingSuggestions(vm), []);
 });
@@ -261,7 +263,8 @@ test('benchmark card mixed with regular Done cards → only the regular card is 
       { id: 'b1', _benchmark: true, text: 'benchmark card' },
       { id: 'c1', text: 'finished work', _suggestions: [] }
     ] },
-    projectMaxSuggestions: function () { return 3; }
+    projectMaxSuggestions: function () { return 3; },
+    isBenchmarkCard: function (c) { return !!(c && c._benchmark); }
   };
   const need = doneCardsNeedingSuggestions(vm);
   assert.strictEqual(need.length, 1);

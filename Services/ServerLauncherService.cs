@@ -515,12 +515,18 @@ public class ServerLauncherService
 
     private static string? FindShallowest(string root, string pattern)
     {
-        var best = (Depth: int.MaxValue, Path: (string?)null);
+        var best = (Depth: int.MaxValue, Path: (string?)null, Mtime: DateTime.MinValue);
         foreach (var file in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
         {
             if (IsIgnoredPath(root, file)) continue;
             var depth = file.Split(Path.DirectorySeparatorChar).Length;
-            if (depth < best.Depth) best = (depth, file);
+            var mtime = File.GetLastWriteTimeUtc(file);
+            // Equal depth → the most recently written project wins. This matters when a
+            // sandbox root holds several sibling benchmark folders (benchmark_test_22,
+            // benchmark_test_23, …): the one the agent JUST built must be the one that
+            // gets live-tested, never an older sibling that happens to sort first.
+            if (depth < best.Depth || (depth == best.Depth && mtime > best.Mtime))
+                best = (depth, file, mtime);
         }
         return best.Path;
     }
@@ -631,27 +637,38 @@ public class ServerLauncherService
     /// </summary>
     private static string? FindShallowestNodeEntry(string root)
     {
-        var best = (Depth: int.MaxValue, NameIndex: int.MaxValue, Path: (string?)null);
+        var best = (Depth: int.MaxValue, NameIndex: int.MaxValue, Mtime: DateTime.MinValue, Path: (string?)null);
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
             if (IsIgnoredPath(root, file)) continue;
             var nameIndex = Array.IndexOf(NodeEntryNames, Path.GetFileName(file));
             if (nameIndex < 0) continue;
             var depth = file.Split(Path.DirectorySeparatorChar).Length;
-            if (depth < best.Depth || (depth == best.Depth && nameIndex < best.NameIndex))
-                best = (depth, nameIndex, file);
+            var mtime = File.GetLastWriteTimeUtc(file);
+            // Equal depth AND equal name-priority → the most recently written entry wins.
+            // With several sibling benchmark folders the alphabetical first (22) must NOT
+            // shadow the folder the agent just built (23) — recency is the signal that
+            // this is the server under test.
+            if (depth < best.Depth ||
+                (depth == best.Depth && nameIndex < best.NameIndex) ||
+                (depth == best.Depth && nameIndex == best.NameIndex && mtime > best.Mtime))
+                best = (depth, nameIndex, mtime, file);
         }
         return best.Path;
     }
 
     private static string? FindIndexHtml(string root)
     {
-        var best = (Depth: int.MaxValue, Path: (string?)null);
+        var best = (Depth: int.MaxValue, Path: (string?)null, Mtime: DateTime.MinValue);
         foreach (var file in Directory.EnumerateFiles(root, "index.html", SearchOption.AllDirectories))
         {
             if (IsIgnoredPath(root, file)) continue;
             var depth = file.Split(Path.DirectorySeparatorChar).Length;
-            if (depth < best.Depth) best = (depth, file);
+            var mtime = File.GetLastWriteTimeUtc(file);
+            // Same recency rule as the other finders: sibling folders at equal depth pick
+            // the one that was written most recently (the folder under active work).
+            if (depth < best.Depth || (depth == best.Depth && mtime > best.Mtime))
+                best = (depth, file, mtime);
         }
         if (best.Path != null && best.Depth > 0)
             return Path.GetDirectoryName(best.Path) ?? root;
