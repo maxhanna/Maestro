@@ -712,9 +712,23 @@ public static class AgentEditHeuristics
                     break;
                 }
             }
-            if (score >= Math.Max(1, oldLines.Count / 2))
+            if (score >= Math.Max(1, (int)Math.Ceiling(oldLines.Count * 0.75)))
             {
-                candidates.Add((i, score));
+                // Reject candidates nested inside method/block bodies: class-level declarations
+                // sit at a shallower nesting depth. A candidate at depth > 1 is inside a
+                // method, loop, or conditional — not where a property should be inserted.
+                var depth = 0;
+                for (var d = 0; d < i; d++)
+                {
+                    var ch = fileLines[d];
+                    for (var c = 0; c < ch.Length; c++)
+                    {
+                        if (ch[c] == '{') depth++;
+                        else if (ch[c] == '}') depth--;
+                    }
+                }
+                if (depth <= 1)
+                    candidates.Add((i, score));
             }
         }
         if (candidates.Count == 0) return null;

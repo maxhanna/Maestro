@@ -120,7 +120,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (text) card._feedback.text = text;
         delete card._feedback.draft;
         vm.saveCards();
-        if (text) _postRatingToBughosted(card, '👎 ' + text);
+        var message = text ? '👎 ' + text : '👎 Thumbs down — this run needs work';
+        _postRatingToBughosted(card, message);
       }
       vm.cancelCardFeedback = function (card) {
         if (!card || !card._feedback) return;
@@ -1489,6 +1490,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
               }
               if (targetCol === 'todo' && vm.cancelCardSuggestions) {
                 vm.cancelCardSuggestions(cardObj);
+              }
+              if (targetCol === 'todo' && fromCol !== 'todo') {
+                delete cardObj._feedback;
+                delete cardObj._feedbackSent;
+                delete cardObj._verification;
+                delete cardObj._groundTruth;
+                delete cardObj.agentLog;
               }
               var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
               if (idx === -1) return;

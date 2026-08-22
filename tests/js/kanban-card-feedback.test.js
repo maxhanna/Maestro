@@ -159,20 +159,22 @@ test('submit stores trimmed text, clears the draft, and saves', () => {
   assert.deepStrictEqual(calls, ['save']);
 });
 
-test('submit with an empty draft stores no text and does not POST', () => {
+test('submit with an empty draft sends default thumbs-down message to bughosted', () => {
   const calls = [];
   const posts = [];
   const vm = makeVm(calls, {
     posts: posts,
     bughostedClientId: 'tok123',
-    bughostedStatus: 'connected'
+    bughostedStatus: 'connected',
+    findCardById: function (id) { return { id: id, _feedbackSent: [] }; }
   });
-  const card = { id: 'c1', text: 'x', _feedback: { rating: 'down', draft: '   ' } };
+  const card = { id: 'c1', text: 'x', _feedback: { rating: 'down', draft: '   ' }, agentAnalysis: { summary: 'run' } };
   vm.submitCardFeedback(card);
   assert.strictEqual('text' in card._feedback, false);
   assert.strictEqual('draft' in card._feedback, false);
-  assert.deepStrictEqual(calls, ['save']);
-  assert.strictEqual(posts.length, 0, 'empty text must not POST to bughosted');
+  assert.ok(calls.includes('save'), 'saveCards called');
+  assert.strictEqual(posts.length, 1, 'empty text still POSTs default thumbs-down message');
+  assert.strictEqual(posts[0].payload.message, '\u{1F44E} Thumbs down \u2014 this run needs work');
 });
 
 test('submit POSTs thumbs-down feedback to bughosted when connected', () => {
