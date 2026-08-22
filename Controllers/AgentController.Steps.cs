@@ -542,7 +542,7 @@ partial class AgentController
         result["oldStartLine"] = normOld[..diffIdx].Count(c => c == '\n');
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
         if (contentCache != null) contentCache[targetPath] = newContent;
-        PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
+        PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent, content);
         try { _fileHints.LearnFromAppliedEdit(projectRoot, targetPath, newString); }
         catch { }
     }
@@ -966,19 +966,37 @@ Respond with JSON only:
     }
     private void PopulateEditResult(
         Dictionary<string, object?> result, string action, string path,
-        string? oldStr, string? newStr, string writtenContent)
+        string? oldStr, string? newStr, string writtenContent, string? beforeContent = null)
     {
         result["type"] = "edit";
         result["status"] = "done";
         result["editAction"] = action;
         result["path"] = path;
-        result["linesRemoved"] = (oldStr ?? "").Split('\n').Length;
-        result["linesAdded"] = (newStr ?? "").Split('\n').Length;
         if (!string.IsNullOrEmpty(oldStr)) result["oldStringPreview"] = oldStr;
         if (!string.IsNullOrEmpty(newStr)) result["newStringPreview"] = newStr;
-        result["diffPreview"] = AgentDiffUtilities.BuildDiffPreview(oldStr, newStr);
-        result["oldLines"] = (oldStr ?? "").Split('\n');
-        result["newLines"] = (newStr ?? "").Split('\n');
+        if (beforeContent != null)
+        {
+            // Truthful diff from the REAL before/after file content. The LLM's oldStr/newStr
+            // can carry drifted indentation or phantom blank lines, so a diff computed from
+            // them shows UNCHANGED lines as removed+re-added (the live navigation
+            // component.ts run: one moviesTodoCount insert rendered as 2−/3+ because every
+            // line's indentation differed). LCS alignment pairs the unchanged lines up.
+            var diff = AgentDiffUtilities.BuildAlignedDiff(beforeContent, writtenContent);
+            result["linesAdded"] = diff.Added;
+            result["linesRemoved"] = diff.Removed;
+            result["oldLines"] = diff.OldLines;
+            result["newLines"] = diff.NewLines;
+            result["diffPreview"] = diff.Preview;
+            if (diff.OldLines.Length > 0) result["oldStartLine"] = diff.OldStartLine;
+        }
+        else
+        {
+            result["linesRemoved"] = (oldStr ?? "").Split('\n').Length;
+            result["linesAdded"] = (newStr ?? "").Split('\n').Length;
+            result["diffPreview"] = AgentDiffUtilities.BuildDiffPreview(oldStr, newStr);
+            result["oldLines"] = (oldStr ?? "").Split('\n');
+            result["newLines"] = (newStr ?? "").Split('\n');
+        }
         // Per-step LLM token spend (planning + verification rounds since the last emitted
         // step) so the panel shows what this step cost, not just the discovery context.
         var llmMetrics = TakeStepLlmMetrics();

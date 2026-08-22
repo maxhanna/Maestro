@@ -40,6 +40,73 @@ public static class AgentDiffUtilities
         return sb.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// Truthful line diff of REAL file content (before → after), LCS-aligned so unchanged
+    /// lines pair up instead of showing as removed+re-added. The files-changed preview and
+    /// +/− counts previously came from the LLM's oldString/newString, which can carry
+    /// drifted indentation/blank lines — a single inserted line (the live
+    /// navigation.component.ts moviesTodoCount insert) then rendered as 2−/3+ because every
+    /// line's indentation differed. Returns the aligned old/new line arrays (null on the
+    /// empty side of a pure add/remove), a focused +/- preview, the +/− counts, and the
+    /// 0-based OLD line index where the shown context window starts.
+    /// </summary>
+    public static (int Added, int Removed, object[] OldLines, object[] NewLines, string Preview, int OldStartLine) BuildAlignedDiff(
+        string beforeContent, string afterContent, int maxContextLines = 3)
+    {
+        var beforeLines = (beforeContent ?? "").Replace("\r\n", "\n").Split('\n');
+        var afterLines = (afterContent ?? "").Replace("\r\n", "\n").Split('\n');
+        var afterToBefore = LcsAlign(beforeLines, afterLines);
+
+        // Canonical LCS row sequence: paired (old, new) rows for aligned lines, old-only
+        // rows for pure removals, new-only rows for pure additions.
+        var rows = new List<(string? Old, string? New, int OldIdx, bool Changed)>();
+        var i = 0;
+        for (var j = 0; j < afterLines.Length; j++)
+        {
+            var bi = afterToBefore[j];
+            if (bi < 0)
+            {
+                rows.Add((null, afterLines[j], i, true)); // pure addition
+                continue;
+            }
+            while (i < bi) { rows.Add((beforeLines[i], null, i, true)); i++; } // pure removals
+            rows.Add((beforeLines[bi], afterLines[j], bi,
+                !string.Equals(beforeLines[bi], afterLines[j], StringComparison.Ordinal)));
+            i = bi + 1;
+        }
+        while (i < beforeLines.Length) { rows.Add((beforeLines[i], null, i, true)); i++; }
+
+        var added = 0;
+        var removed = 0;
+        var first = -1;
+        var last = -1;
+        for (var r = 0; r < rows.Count; r++)
+        {
+            if (rows[r].Old == null) added++;
+            if (rows[r].New == null) removed++;
+            if (rows[r].Changed) { if (first < 0) first = r; last = r; }
+        }
+        if (first < 0)
+            return (0, 0, Array.Empty<object>(), Array.Empty<object>(), "", 0);
+
+        // Window around the changed region (a few unchanged context lines on each side).
+        var start = Math.Max(0, first - maxContextLines);
+        var end = Math.Min(rows.Count - 1, last + maxContextLines);
+        var oldLines = new object[end - start + 1];
+        var newLines = new object[end - start + 1];
+        var sb = new StringBuilder();
+        for (var r = start; r <= end; r++)
+        {
+            oldLines[r - start] = rows[r].Old!;
+            newLines[r - start] = rows[r].New!;
+            if (rows[r].Old == null) sb.Append("+ ").AppendLine(rows[r].New);
+            else if (rows[r].New == null) sb.Append("- ").AppendLine(rows[r].Old);
+            else if (rows[r].Changed) { sb.Append("- ").AppendLine(rows[r].Old); sb.Append("+ ").AppendLine(rows[r].New); }
+            else sb.Append("  ").AppendLine(rows[r].Old);
+        }
+        return (added, removed, oldLines, newLines, sb.ToString().TrimEnd(), rows[start].OldIdx);
+    }
+
     public static string BuildUnifiedDiff(string oldStr, string newStr, string filePath)
     {
         var oldLines = (oldStr ?? "").Replace("\r\n", "\n").Split('\n');

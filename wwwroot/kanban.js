@@ -862,10 +862,11 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
           // When moving back to To Do from done/doing/archived, clear feedback,
           // verification, and agent logs — but preserve the plan (agentAnalysis).
-          if (to.toLowerCase() === 'todo' && (from === 'done' || from === 'doing' || from === 'archived')) {
+          if (to.toLowerCase() === 'todo') {
             delete card._feedback;
             delete card._feedbackSent;
             delete card._verification;
+            delete card._groundTruth;
             delete card.agentLog;
           }
 

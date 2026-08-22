@@ -331,7 +331,7 @@ partial class AgentController
         string relPath, string fullPath, AgentPlan? plan, int planItemIndex,
         bool stepNeedsExtraStep, string? stepExtraStepReason, string? stepExtraStepFile,
         bool emitSse, CancellationToken ct, List<object> allResults, int stepIndex,
-        string? cardId, string fileExt)
+        string? cardId, string fileExt, string? beforeContent = null, string? afterContent = null)
     {
         var successReason = "";
             if (attempt > 0 && history.Count > 0)
@@ -385,7 +385,8 @@ partial class AgentController
                 }
             }
             var result = new Dictionary<string, object?>();
-            PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
+            PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "",
+                afterContent ?? "", beforeContent);
             // Deterministic multi-match batches: surface the applied/total counts plus the
             // per-edit lines so the board step card can render "5/5 occurrences updated"
             // with each sub-edit expanded — instead of the confusing first-edit diff.
@@ -531,9 +532,21 @@ partial class AgentController
             await EmitLog(emitSse, "info", $"Replan cycle {replanAttempts} generated {replanSteps.Count} new step(s): " +
                 string.Join(" | ", replanSteps.Select(s => s.Change)), ct: ct);
             replanSteps = await PruneIrrelevantPlanStepsAsync(replanSteps, projectRoot, ct);
-            var isRepetitive = replanSteps.Any(s => s.File == relPath &&
-                s.Change != null &&
-                TokenOverlap(s.Change, step.Change ?? "") > 0.5);
+            // File-truth guard: a replan step is only "too similar to the failed step" when
+            // its named target ACTUALLY exists in the file — a description that promised a
+            // method but only partially landed (e.g. deterministic member synthesis added the
+            // property, not the method) is the remaining work, not a repetitive re-proposal.
+            var isRepetitive = false;
+            foreach (var s in replanSteps)
+            {
+                if (s.File == relPath && s.Change != null &&
+                    TokenOverlap(s.Change, step.Change ?? "") > 0.5 &&
+                    await StepTargetExistsInFileAsync(s, projectRoot, ct))
+                {
+                    isRepetitive = true;
+                    break;
+                }
+            }
             if (isRepetitive)
             {
                 await EmitLog(emitSse, "warn",

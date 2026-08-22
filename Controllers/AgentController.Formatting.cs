@@ -1372,6 +1372,67 @@ partial class AgentController
         var intersection = tokensA.Intersect(tokensB).Count();
         return (double)intersection / Math.Min(tokensA.Count, tokensB.Count);
     }
+
+    /// <summary>
+    /// File-truth check for the description-overlap duplicate guards. The token-overlap
+    /// proxy compares step DESCRIPTIONS, which can over-promise: an earlier step may have
+    /// been only PARTIALLY applied — e.g. the deterministic member synthesis added just a
+    /// property while the description also promised a method (the live navigation
+    /// component.ts moviesTodoCount/getMoviesInfo run) — so the proxy wrongly rejects the
+    /// missing work as a duplicate and the method never lands. Returns true only when there
+    /// is positive evidence the target actually exists in the file: the step's own new code
+    /// is present, the method it names is declared, or the identifier it names appears in
+    /// the file. Returns false (→ the step is NOT a duplicate) when the named target is
+    /// entirely absent.
+    /// </summary>
+    private static async Task<bool> StepTargetExistsInFileAsync(
+        PlanStep step, string projectRoot, CancellationToken ct)
+    {
+        if (step == null || string.IsNullOrWhiteSpace(step.File) ||
+            AgentProjectUtilities.IsSpecialMarker(step.File)) return false;
+        string? current = null;
+        try
+        {
+            var fp = Path.GetFullPath(Path.Combine(projectRoot,
+                step.File.Replace('/', Path.DirectorySeparatorChar)));
+            if (System.IO.File.Exists(fp))
+                current = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+        }
+        catch { }
+        if (current == null) return false;
+        // The step's own new code (when the planner emitted it) is the strongest evidence.
+        if (!string.IsNullOrWhiteSpace(step.NewString))
+        {
+            if (current.Contains(step.NewString, StringComparison.Ordinal)) return true;
+            if (CheckMethodExistsInFile(current, step.NewString) != null) return true;
+        }
+        var change = step.Change ?? "";
+        // A declared method/function is the strongest positive evidence — but the extractor
+        // also surfaces property-like names ("Add moviesTodoCount property"), so a failed
+        // method-style check falls through to the loose identifier check below instead of
+        // returning false (a present property must count as implemented).
+        var methodName = AgentMethodInventory.ExtractJsMethodNameFromChange(change);
+        if (!string.IsNullOrWhiteSpace(methodName) && methodName.Length > 2 &&
+            MethodNameExistsInFile(current, methodName))
+            return true;
+        // Fallback: the identifier the change names (property, variable, etc.).
+        var m = Regex.Match(change,
+            @"\b(?:add|create|insert|implement|define)\s+(?:a\s+|an\s+|the\s+|new\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\b",
+            RegexOptions.IgnoreCase);
+        if (m.Success)
+        {
+            var candidate = m.Groups[1].Value;
+            var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "the", "a", "an", "new", "code", "logic", "feature", "support",
+                "method", "function", "handler", "property", "file", "class", "service",
+                "button", "icon", "item", "nav", "count", "tracking", "saved", "user"
+            };
+            if (!stopwords.Contains(candidate) && candidate.Length > 2)
+                return Regex.IsMatch(current, $@"\b{Regex.Escape(candidate)}\b");
+        }
+        return false;
+    }
     private async Task<string?> DetectMissingCreateTableAsync(
         string oldStr, string newStr, string fileContent, string relPath, string projectRoot, bool emitSse, CancellationToken ct)
     {

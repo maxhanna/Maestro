@@ -1562,6 +1562,27 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var fileSection = AgentDiscovery.ExtractFileSectionFromContext(validatorDiscovery, step.File);
         sb.AppendLine(string.IsNullOrWhiteSpace(fileSection) ? validatorDiscovery : fileSection);
         sb.AppendLine();
+        // The discovery context can be a STALE snapshot (captured before earlier committed
+        // steps applied). A validator judging against it rejects valid follow-up steps that
+        // reference symbols earlier steps already added — the live navigation
+        // component.ts run: the validator claimed "no existing moviesTodoCount property"
+        // right after step 1 had just added it. Read the CURRENT file from disk so the
+        // judgment is grounded in the real state, not the snapshot.
+        string? currentOnDisk = null;
+        try
+        {
+            var vfp = Path.GetFullPath(Path.Combine(projectRoot,
+                step.File.Replace('/', Path.DirectorySeparatorChar)));
+            if (System.IO.File.Exists(vfp))
+                currentOnDisk = await System.IO.File.ReadAllTextAsync(vfp, Encoding.UTF8, ct);
+        }
+        catch { }
+        if (!string.IsNullOrWhiteSpace(currentOnDisk))
+        {
+            sb.AppendLine("### CURRENT FILE ON DISK (authoritative — read just now, AFTER all committed steps) ###");
+            sb.AppendLine(currentOnDisk.Length > 6000 ? currentOnDisk[..6000] + "\n… (truncated)" : currentOnDisk);
+            sb.AppendLine();
+        }
         if (!string.IsNullOrWhiteSpace(lastStepCompletionNote))
         {
             sb.AppendLine("### PREVIOUS STEP COMPLETED ###");
@@ -1569,8 +1590,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.AppendLine();
         }
         sb.AppendLine("Judge the PROPOSED NEXT STEP ONLY. Answer:");
-        sb.AppendLine("1. Does it reference any method/property/symbol that does NOT exist in the discovery context " +
-                      "AND is NOT introduced by an earlier committed step? (if so: invalid)");
+        sb.AppendLine("1. Does it reference any method/property/symbol that does NOT exist in the CURRENT FILE ON DISK " +
+                      "(or the discovery context when no file was shown) " +
+                      "AND is not introduced by an earlier committed step? (if so: invalid)");
+        sb.AppendLine("   The CURRENT FILE ON DISK is the source of truth for what exists — prefer it over the discovery context.");
         sb.AppendLine("2. Does it contradict or redo anything already committed? (if so: invalid)");
         sb.AppendLine("3. Does it require a prerequisite step not yet committed (e.g. an endpoint before its DTO)? (if so: invalid)");
         sb.AppendLine("4. Is it a genuinely necessary, atomic step toward the ORIGINAL TASK (not scope creep)? (if not: invalid)");
@@ -1592,6 +1615,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             using var doc = JsonDocument.Parse(cleaned);
             var valid = !doc.RootElement.TryGetProperty("valid", out var v) || v.ValueKind != JsonValueKind.False;
             var reason = doc.RootElement.TryGetProperty("reason", out var r) ? r.GetString() : null;
+            if (!valid && reason != null &&
+                await FileTruthOverrideForRejectionAsync(reason, step, projectRoot, ct))
+            {
+                // The LLM rejected claiming a symbol is MISSING from the code, but the real
+                // file on disk actually contains it (stale discovery-context judgment — the
+                // live navigation.component.ts run: "no existing moviesTodoCount property"
+                // right after step 1 added it). A rejection built on a false premise must
+                // not starve the step.
+                await EmitLog(emitSse, "info",
+                    $"✓ Coherence validator rejection overridden (file-truth): [{step.File}] {step.Change} — " +
+                    $"the reason claims a symbol is missing that the CURRENT FILE actually contains. Reason: {TruncateForLlm(reason, 140)}", ct: ct);
+                return (true, null);
+            }
             return (valid, valid ? null : (reason ?? "Rejected by coherence validator."));
         }
         catch
@@ -1599,6 +1635,48 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             return (true, null);
         }
     }
+
+    /// <summary>
+    /// File-truth override for coherence-validator rejections. When the LLM rejects a step
+    /// with a reason claiming a symbol is MISSING from the code ("no existing X", "X does
+    /// not exist", "X is missing", "not implemented"…) but that symbol is actually present
+    /// in the CURRENT file on disk, the rejection is built on a stale/false premise. Returns
+    /// true only when the reason BOTH uses missing-phrasing AND names a real identifier the
+    /// file contains — a genuinely-absent symbol never triggers the override.
+    /// </summary>
+    private static async Task<bool> FileTruthOverrideForRejectionAsync(
+        string reason, PlanStep step, string projectRoot, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(reason) || step == null || string.IsNullOrWhiteSpace(step.File) ||
+            AgentProjectUtilities.IsSpecialMarker(step.File)) return false;
+        if (!Regex.IsMatch(reason,
+                @"\b(?:no existing|does not exist|doesn'?t exist|not exist|is missing|\bmissing\b|absent|not implemented|undefined|never added|not found|not present)\b",
+                RegexOptions.IgnoreCase))
+            return false;
+        string? current = null;
+        try
+        {
+            var fp = Path.GetFullPath(Path.Combine(projectRoot,
+                step.File.Replace('/', Path.DirectorySeparatorChar)));
+            if (System.IO.File.Exists(fp))
+                current = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+        }
+        catch { }
+        if (current == null) return false;
+        // A camelCase identifier the reason names (moviesTodoCount, getMoviesInfo, …) that the
+        // file actually contains disproves the "missing" claim.
+        foreach (Match m in Regex.Matches(reason, @"[A-Za-z_$][A-Za-z0-9_$]*"))
+        {
+            var id = m.Value;
+            if (id.Length < 4) continue;
+            if (!(id.Any(char.IsLower) && id.Any(char.IsUpper))) continue; // camelCase-ish only
+            if (Regex.IsMatch(current, $@"\b{Regex.Escape(id)}\b"))
+                return true;
+        }
+        return false;
+    }
+
+
     private async Task<(AgentPlan plan, string discoveryContext)> RunIncrementalPlanningLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
@@ -3705,6 +3783,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         duplicateOf = planSoFar.FirstOrDefault(s =>
                             string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
                             TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35);
+                        // FILE-TRUTH guard: the token-overlap proxy compares step DESCRIPTIONS,
+                        // which can over-promise — an earlier step may have been only PARTIALLY
+                        // applied (e.g. deterministic member synthesis added just a property while
+                        // the description also promised a method: the live navigation
+                        // component.ts moviesTodoCount/getMoviesInfo run). If the named target is
+                        // NOT actually in the file, the work was never done — this is legitimate
+                        // follow-up, not a duplicate.
+                        if (duplicateOf != null &&
+                            !await StepTargetExistsInFileAsync(proposal.Step, projectRoot, ct))
+                            duplicateOf = null;
                     }
                 }
                 if (duplicateOf != null)
@@ -4032,8 +4120,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                         continue;
                     }
-                    if (!planSoFar.Any(s => string.Equals(s.File, extraStep.File, StringComparison.OrdinalIgnoreCase) &&
-                                            TokenOverlap(s.Change ?? "", extraStep.Change ?? "") > 0.35))
+                    // Same file-truth guard as the main duplicate check: an overlapping step
+                    // description is only a duplicate when its named target actually exists in
+                    // the file — a partially-applied earlier step must not starve the follow-up.
+                    var extraIsDup = false;
+                    foreach (var s in planSoFar)
+                    {
+                        if (string.Equals(s.File, extraStep.File, StringComparison.OrdinalIgnoreCase) &&
+                            TokenOverlap(s.Change ?? "", extraStep.Change ?? "") > 0.35 &&
+                            (AgentProjectUtilities.IsSpecialMarker(extraStep.File) ||
+                             await StepTargetExistsInFileAsync(extraStep, projectRoot, ct)))
+                        {
+                            extraIsDup = true;
+                            break;
+                        }
+                    }
+                    if (!extraIsDup)
                     {
                         pendingSteps.Enqueue(extraStep);
                         await EmitLog(emitSse, "info",

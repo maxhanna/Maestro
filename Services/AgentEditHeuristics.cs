@@ -1759,4 +1759,28 @@ public static class AgentEditHeuristics
         var first = FirstNonBlankLine(s);
         return first is "}" or "})" or "};";
     }
+
+    /// <summary>
+    /// Whether an oldString must be bounced before any apply attempt.
+    /// For LLM-authored edits this is exactly the union of the two shape guards:
+    /// bare-punctuation anchors ("}", "};") and any anchor whose first line is a lone
+    /// closing brace (the classic garbage shape where the model grabs the previous block's
+    /// close brace before the real declaration).
+    /// For deterministic server-authored edits, multi-line anchors are NEVER bounced:
+    /// the generator only emits exact, contiguous slices of the file — e.g. the last
+    /// method's close brace immediately followed by the class's close brace ("  }\n}"),
+    /// which is a legitimate, unique, correctly-placed anchor for an end-of-class insert
+    /// and happens to be punctuation-only. Only single-line bare punctuation (a lone "}" —
+    /// which matches the first close brace anywhere in the file) stays bounced for both.
+    /// </summary>
+    public static bool ShouldBounceGarbageAnchor(string? oldStr, bool isDeterministic)
+    {
+        if (string.IsNullOrWhiteSpace(oldStr)) return false;
+        if (isDeterministic)
+            return !HasLineBreak(oldStr) && IsBarePunctuationAnchor(oldStr);
+        return IsBarePunctuationAnchor(oldStr) || IsLoneClosingBraceFirstLine(oldStr);
+    }
+
+    private static bool HasLineBreak(string? s)
+        => s != null && (s.Contains('\n') || s.Contains('\r'));
 }

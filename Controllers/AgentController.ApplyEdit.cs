@@ -318,7 +318,7 @@ partial class AgentController
         // round-trip is wasted resolving replacement code against it; the resolver then
         // re-anchors against the real file content from scratch.
         if (!string.IsNullOrWhiteSpace(planOldStr) &&
-            (IsBarePunctuationAnchor(planOldStr) || IsLoneClosingBraceFirstLine(planOldStr)))
+            ShouldBounceGarbageAnchor(planOldStr, isDeterministicEdit))
         {
             await EmitLog(emitSse, "warn",
                 $"✗ Plan-provided oldString for {relPath} is bare punctuation ('{OneLinePreview(planOldStr)}') — not a usable anchor. " +
@@ -550,7 +550,7 @@ partial class AgentController
             // the resolver produced — the same "}" class — without any apply attempt or verify
             // call, feeding the model clear feedback on why the anchor is unusable.
             if (resolveError == null && !string.IsNullOrWhiteSpace(oldStr) &&
-                (IsBarePunctuationAnchor(oldStr) || IsLoneClosingBraceFirstLine(oldStr)))
+                ShouldBounceGarbageAnchor(oldStr, isDeterministicEdit))
             {
                 var err = "ANCHOR SANITY: oldString is bare punctuation (e.g. a lone '}'), which would match dozens of places " +
                           "or destroy structural code. Output a real, unique code line (with surrounding context) as your oldString.";
@@ -1973,15 +1973,27 @@ partial class AgentController
                         }
                         if (llmGateDecision == "abandon" && !deterministicPlaceholderReject && !pythonGateHardReject)
                         {
-                            llmGateDecision = "keep";
-                            llmGateScore = Math.Max(llmGateScore, 70);
+                            // Only keep when the edit is structurally sound (score 50+) —
+                            // a broken edit should retry, not be kept with a synthetic step.
+                            if (llmGateScore >= 50)
+                            {
+                                llmGateDecision = "keep";
+                                llmGateScore = Math.Max(llmGateScore, 70);
+                            }
                         }
                     }
                 }
                 if (llmGateDecision == "abandon" && oldStr != null && !deterministicPlaceholderReject && !pythonGateHardReject)
                 {
+                    // The needsExtraStep override ONLY applies when the edit is structurally
+                    // sound (score 50+) but references a method that needs integration. If the
+                    // verifier flagged syntax errors, undefined variables, or broken code (score
+                    // below 50), the override must NOT keep a broken edit — the retry loop
+                    // needs to regenerate a correct version.
                     var methodDecls = CountNewMethodsInNewCode(newStr ?? "", oldStr);
-                    if (methodDecls > 0)
+                    var isSyntacticallyBroken = llmGateScore < 50 ||
+                        Regex.IsMatch(llmGateReason ?? "", @"syntax.error|incomplete.comment|undefined.variable|missing.method|undecl", RegexOptions.IgnoreCase);
+                    if (methodDecls > 0 && !isSyntacticallyBroken)
                     {
                         await EmitLog(emitSse, "info",
                             $"  🔄 Verifier abandoned but edit adds at least {methodDecls} new method(s) — " +
@@ -2131,7 +2143,7 @@ partial class AgentController
             return await CompleteSuccessfulEditAsync(
                 attempt, history, oldStr, newStr, step, prompt, projectRoot, relPath, fullPath,
                 plan, planItemIndex, stepNeedsExtraStep, stepExtraStepReason, stepExtraStepFile,
-                emitSse, ct, allResults, stepIndex, cardId, fileExt);
+                emitSse, ct, allResults, stepIndex, cardId, fileExt, preEditContent, newContent);
         }
     RecordFailure:
         return await HandleStepFailureAsync(history, attemptScores, bestScore, bestAttempt, relPath,

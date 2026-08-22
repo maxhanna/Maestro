@@ -132,4 +132,62 @@ public class AnchorSanityTests
         Assert.Null(FirstNonBlankLine("   "));
         Assert.Null(FirstNonBlankLine(null));
     }
+
+    // ── ShouldBounceGarbageAnchor ───────────────────────────────────────────
+
+    [Fact]
+    public void BarePunctuation_AlwaysBounced_EvenForDeterministic()
+    {
+        // A lone "}" matches the FIRST close brace anywhere in the file — never a safe
+        // anchor, even when server-authored. The deterministic exemption covers only the
+        // multi-line lone-brace-FIRST shape, never this one.
+        Assert.True(ShouldBounceGarbageAnchor("}", isDeterministic: true));
+        Assert.True(ShouldBounceGarbageAnchor("}", isDeterministic: false));
+        Assert.True(ShouldBounceGarbageAnchor("  }  ", isDeterministic: true));
+        Assert.True(ShouldBounceGarbageAnchor(";", isDeterministic: true));
+    }
+
+    [Fact]
+    public void LoneBraceFirst_MultiLine_BouncedForLlm_AllowedForDeterministic()
+    {
+        // The exact live shape: the last method's close brace immediately followed by the
+        // class's close brace. LLM-authored → bounce (classic garbage shape).
+        // Deterministic → the generator synthesized this as a contiguous unique slice of
+        // the real file, so it is a legitimate end-of-class insert anchor.
+        const string anchor = "  }\n}";
+        Assert.True(ShouldBounceGarbageAnchor(anchor, isDeterministic: false));
+        Assert.False(ShouldBounceGarbageAnchor(anchor, isDeterministic: true));
+    }
+
+    [Theory]
+    [InlineData("\n}")]
+    [InlineData("\n\n  }\n}")]
+    [InlineData("  }\n}\n")]
+    public void LoneBraceFirst_MultiLine_Variants_AllowedForDeterministic(string anchor)
+    {
+        // Leading/trailing blanks don't change the shape: still a contiguous end-of-class
+        // anchor when server-authored, still garbage when LLM-authored. (A bare "}" with
+        // NO line break is single-line punctuation and stays bounced for both — see
+        // BarePunctuation_AlwaysBounced_EvenForDeterministic.)
+        Assert.True(ShouldBounceGarbageAnchor(anchor, isDeterministic: false));
+        Assert.False(ShouldBounceGarbageAnchor(anchor, isDeterministic: true));
+    }
+
+    [Theory]
+    [InlineData("    musicTodoCount: number | null = null;\n}")]
+    [InlineData("    return Ok();\n}")]
+    [InlineData("public class Foo\n{\n}")]
+    public void RealCodeFirst_NotBounced(string anchor)
+    {
+        Assert.False(ShouldBounceGarbageAnchor(anchor, isDeterministic: false));
+        Assert.False(ShouldBounceGarbageAnchor(anchor, isDeterministic: true));
+    }
+
+    [Fact]
+    public void NullOrBlank_NotBounced()
+    {
+        Assert.False(ShouldBounceGarbageAnchor(null, isDeterministic: false));
+        Assert.False(ShouldBounceGarbageAnchor("", isDeterministic: false));
+        Assert.False(ShouldBounceGarbageAnchor("   ", isDeterministic: true));
+    }
 }
