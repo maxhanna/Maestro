@@ -168,19 +168,22 @@ public class DeleteCorpusTests
     [Fact]
     public void DeleteChain_FuzzyFallback_RemovesExactTargetBlockNotSibling()
     {
-        // oldStr has a leading blank line, so the verbatim scan finds zero matches and
-        // the line-based fuzzy fallback kicks in. It must remove EXACTLY the target
-        // block's bytes from the line start — never touching the sibling block below.
+        // oldStr has a leading blank line (a phantom the model emitted), so the verbatim
+        // scan finds zero matches and the blank-line tolerant fuzzy fallback kicks in. The
+        // phantom blank is NOT part of the anchor: it must remove EXACTLY the target
+        // block's real bytes from the line start — never touching the sibling block below
+        // and never consuming the inter-block blank line.
         const string content =
             "function alpha() {\n  return 1;\n}\n\n" +
             "function alpha() {\n  return 2;\n}";
-        const string oldStr = "\nfunction alpha() {\n  return 1;\n}";
+        const string block = "function alpha() {\n  return 1;\n}";
+        const string oldStr = "\n" + block;
         var (replaced, applied, error) = RunDeleteChain(content, oldStr, "remove the first block", 0, ".js", "gen/del.js");
 
         Assert.True(replaced, $"fuzzy fallback deletion must succeed: {error}");
-        Assert.Equal(content.Length - oldStr.Length, applied.Length);
-        // Sibling (second block, return 2) fully intact.
-        Assert.Contains("function alpha() {\n  return 2;\n}", applied);
+        Assert.Equal(content.Length - block.Length, applied.Length);
+        // Sibling (second block, return 2) fully intact — with its leading blank preserved.
+        Assert.Equal("\n\n" + "function alpha() {\n  return 2;\n}", applied);
         Assert.DoesNotContain("return 1;", applied);
     }
 

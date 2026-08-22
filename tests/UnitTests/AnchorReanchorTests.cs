@@ -4,15 +4,20 @@ using Xunit;
 namespace Weaver.UnitTests;
 
 /// <summary>
-/// Locks the identifier-grounded re-anchor (AgentEditHeuristics.TryIdentifierAnchoredReanchor
-/// + FindIdentifierGroundedLines). The benchmark-22-shaped failure it fixes: the LLM (or plan)
-/// supplies an oldString like `musicTodoCount: number | null = null;` that fails the verbatim
-/// ordinal match because of whitespace/line drift, the tolerant fallbacks can select a WRONG
-/// nearby block (e.g. a `tradeNotifsCount = 0;` line), and the LLM resolver then re-emits the
-/// same drifted anchor 3× before aborting. The re-anchor instead finds where the oldString's
-/// OWN identifier actually lives in the file and rebuilds the block from the real text — real
-/// indentation, real surrounding lines — so the edit applies deterministically and can never
-/// land on an unrelated block.
+/// Locks the drift-recovery behavior of the edit matcher (AgentEditHeuristics.TryReplaceSafe's
+/// blank-line tolerant fuzzy fallback) and the identifier-grounded re-anchor
+/// (TryIdentifierAnchoredReanchor + FindIdentifierGroundedLines) that covers the harder drift
+/// it cannot absorb. The benchmark-22/live navigation.component.ts-shaped failure: the LLM (or
+/// plan) supplies an oldString like `musicTodoCount: number | null = null;` that fails the
+/// verbatim ordinal match because of whitespace/line drift — dropped indentation, an omitted
+/// blank line, or a phantom EMPTY line the model inserted between two real lines. The fuzzy
+/// fallback absorbs BLANK-line drift directly (phantom blanks skipped on both sides, real
+/// lines compared exactly), while INDENTATION drift is deliberately left to the re-anchor
+/// chain — the deterministic-batch G1 contract requires a drifted anchor to fail at apply
+/// time so it re-anchors against the CURRENT file text. TryIdentifierAnchoredReanchor finds
+/// where the oldString's OWN identifier actually lives in the file and rebuilds the block
+/// from the real text (real indentation, real surrounding lines), so an edit can never land
+/// on an unrelated block like `tradeNotifsCount`.
 /// </summary>
 public class AnchorReanchorTests
 {
@@ -31,7 +36,9 @@ public class AnchorReanchorTests
     public void IndentDrift_TwoLineAnchor_ReanchorsByIdentifier()
     {
         // The model dropped the indentation AND omitted the blank line between the two
-        // declarations (the file has one). The verbatim multi-line block therefore fails.
+        // declarations (the file has one). The verbatim ordinal match fails, and the fuzzy
+        // fallback (exact per-line, blank-line only) correctly refuses indentation drift —
+        // the re-anchor chain's job.
         var oldStr = "musicTodoCount: number | null = null;\narrayActivePlayers: number | null = null;";
         var newStr = "    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;\n\n    arrayActivePlayers: number | null = null;";
 
@@ -64,8 +71,10 @@ public class AnchorReanchorTests
         var oldStr = "musicTodoCount: number | null = null;\n\narrayActivePlayers: number | null = null;";
         var newStr = "    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;\n\n    arrayActivePlayers: number | null = null;";
 
+        // The phantom blank alone would be absorbed by the fuzzy fallback, but the
+        // INDENTATION drift refuses it — the re-anchor chain rebuilds from the real text.
         var (replaced, _, _, _) = AgentEditHeuristics.TryReplaceSafe(ComponentFile, oldStr, newStr);
-        Assert.False(replaced, "the drifted oldString must not match verbatim");
+        Assert.False(replaced, "indentation-drifted oldString must not match the fuzzy fallback");
 
         var reanchor = AgentEditHeuristics.TryIdentifierAnchoredReanchor(ComponentFile, oldStr);
         Assert.NotNull(reanchor);
@@ -79,6 +88,59 @@ public class AnchorReanchorTests
         // movieTodoCount inserted between the two real lines; arrayActivePlayers appears EXACTLY once.
         Assert.Contains("    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;", newContent);
         Assert.Single(RegexMatches(newContent, @"arrayActivePlayers"));
+    }
+
+    [Fact]
+    public void PhantomBlankLine_FuzzyMatcherRecoversDirectly()
+    {
+        // The live log shape: the LLM emitted oldString as a 3-line array with a phantom
+        // EMPTY line between the two declarations — ["musicTodoCount: number | null = null;",
+        // "", "arrayActivePlayers: number | null = null;"] — which failed "oldString not
+        // found verbatim in file" on every retry. With matching indentation, the fuzzy
+        // matcher skips the phantom blank and recovers deterministically.
+        var oldStr = "    musicTodoCount: number | null = null;\n\n    arrayActivePlayers: number | null = null;";
+        var newStr = "    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;\n\n    arrayActivePlayers: number | null = null;";
+
+        var (replaced, newContent, matchError, _) = AgentEditHeuristics.TryReplaceSafe(ComponentFile, oldStr, newStr);
+        Assert.True(replaced, $"phantom-blank anchor must be recovered by the fuzzy matcher: {matchError}");
+        // movieTodoCount inserted right after musicTodoCount (never after tradeNotifsCount),
+        // and arrayActivePlayers appears EXACTLY once.
+        Assert.Contains("    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;", newContent);
+        Assert.Single(RegexMatches(newContent, @"arrayActivePlayers"));
+    }
+
+    [Fact]
+    public void PhantomLeadingBlankLine_FuzzyMatcherRecoversDirectly()
+    {
+        // The LLM emitted oldString with a phantom EMPTY line at the START — ["",
+        // "    musicTodoCount: number | null = null;", "    arrayActivePlayers: number | null = null;"]
+        // — which failed verbatim. The fuzzy fallback drops the leading blank and recovers.
+        var oldStr = "\n    musicTodoCount: number | null = null;\n    arrayActivePlayers: number | null = null;";
+        var newStr = "    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;\n\n    arrayActivePlayers: number | null = null;";
+
+        var (replaced, newContent, matchError, _) = AgentEditHeuristics.TryReplaceSafe(ComponentFile, oldStr, newStr);
+        Assert.True(replaced, $"leading-phantom-blank anchor must be recovered by the fuzzy matcher: {matchError}");
+        Assert.Contains("    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;", newContent);
+        Assert.Single(RegexMatches(newContent, @"arrayActivePlayers"));
+        Assert.StartsWith("export class NavigationComponent {", newContent);
+    }
+
+    [Fact]
+    public void PhantomTrailingBlankLine_FuzzyMatcherRecoversDirectly()
+    {
+        // The LLM emitted oldString with a phantom EMPTY line at the END — ["    musicTodoCount:
+        // number | null = null;", "    arrayActivePlayers: number | null = null;", ""] — which
+        // failed verbatim. The fuzzy fallback drops the trailing blank, skips the file's
+        // interior blank, and recovers.
+        var oldStr = "    musicTodoCount: number | null = null;\n    arrayActivePlayers: number | null = null;\n";
+        var newStr = "    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;\n\n    arrayActivePlayers: number | null = null;";
+
+        var (replaced, newContent, matchError, _) = AgentEditHeuristics.TryReplaceSafe(ComponentFile, oldStr, newStr);
+        Assert.True(replaced, $"trailing-phantom-blank anchor must be recovered by the fuzzy matcher: {matchError}");
+        Assert.Contains("    musicTodoCount: number | null = null;\n    movieTodoCount: number | null = null;", newContent);
+        Assert.Single(RegexMatches(newContent, @"arrayActivePlayers"));
+        // The content AFTER the anchor (ngOnInit + closing brace) is preserved untouched.
+        Assert.Contains("\n\n    ngOnInit() { }\n}\n", newContent);
     }
 
     [Fact]

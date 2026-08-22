@@ -363,8 +363,21 @@ public static class AgentProjectUtilities
         return _whitespaceSignificantExts.Contains(ext) || _endKeywordLanguages.Contains(ext);
     }
 
-    public static bool IsAngularTemplate(string content)
+    public static bool IsAngularTemplate(string content, string? filePath = null)
     {
+        // A known file path decides FIRST: only an actual Angular template file — a .html
+        // file (navigation.component.html, the root index.html, etc.) — is a template. A .ts
+        // component is NEVER one: its logic legitimately uses Math.min/parseInt/JSON.parse
+        // and its template literals contain {{ }} interpolation markers, so the content
+        // heuristic below must not fire on it (the live navigation.component.ts movie-count
+        // run was blocked by exactly this false positive).
+        if (!string.IsNullOrWhiteSpace(filePath))
+        {
+            var name = Path.GetFileName(filePath);
+            return name.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+                   name.Contains("component.html", StringComparison.OrdinalIgnoreCase);
+        }
+        // No path known — content heuristic (legacy fallback).
         if (string.IsNullOrWhiteSpace(content) || content.Length < 20)
             return false;
         return Regex.IsMatch(content, @"\*ng(If|For|Switch)") ||

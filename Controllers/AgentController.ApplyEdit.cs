@@ -1261,8 +1261,15 @@ partial class AgentController
                             $"↔ Surrounding-line re-anchor for {relPath}: matched {surroundingReanchor.Value.score} of {oldStr!.Split('\n').Length} anchor line(s) at file line {surroundingReanchor.Value.startLineIdx + 1} — applying file-exact block instead of escalating", ct: ct);
                     }
                     var relevanceKeywords = AgentDiscovery.ExtractDisambiguationKeywords(step.Change);
+                    // The description keywords usually name the thing being ADDED (e.g. "Add
+                    // moviesTodoCount property") — which lives in newString, not in the
+                    // oldString-anchored correctedBlock. Check BOTH, or a perfectly good re-
+                    // anchor of adjacent context is rejected as "unrelated" (the live
+                    // navigation.component.ts movie-count failure).
                     var isRelevant = relevanceKeywords.Count == 0 ||
-                        relevanceKeywords.Any(k => correctedBlock.Contains(k, StringComparison.OrdinalIgnoreCase));
+                        relevanceKeywords.Any(k =>
+                            correctedBlock.Contains(k, StringComparison.OrdinalIgnoreCase) ||
+                            (newStr != null && newStr.Contains(k, StringComparison.OrdinalIgnoreCase)));
                     if (!isRelevant)
                     {
                         await EmitLog(emitSse, "warn",
@@ -1297,7 +1304,7 @@ partial class AgentController
                         if (replaced2)
                         {
                             var (approved2, _, _) =
-                                VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2, fromFormatC);
+                                VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2, fromFormatC, relPath);
                             if (approved2)
                             {
                                 await System.IO.File.WriteAllTextAsync(
@@ -1478,7 +1485,7 @@ partial class AgentController
                         : "Bypassed verify for successful append/insertion", 100) :
                 (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent))
                 ? (true, "Bypassed verify for empty file insertion", 100)
-                : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
+                : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC, relPath);
             if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
             {
                 var correctedContent = AgentCodeFormatting.AutoFixSqlWhitespace(newContent);
@@ -1486,7 +1493,7 @@ partial class AgentController
                 {
                     var correctedNewStr = AgentCodeFormatting.AutoFixSqlWhitespace(newStr ?? "");
                     (approved, verifyReason, _) =
-                        VerifyEdit(oldStr!, correctedNewStr, fileContent, correctedContent, fromFormatC);
+                        VerifyEdit(oldStr!, correctedNewStr, fileContent, correctedContent, fromFormatC, relPath);
                     if (approved)
                     {
                         newContent = correctedContent;

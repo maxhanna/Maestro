@@ -568,19 +568,103 @@ public static class AgentEditHeuristics
                 err += $" OR use ONLY this unique line as your entire oldString: `{uniqueLine.Trim()}`";
             return (false, fileContent, err, firstLine);
         }
-        var firstRealLine = normOld.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-        if (firstRealLine != null)
+        // FUZZY FALLBACK — blank-line tolerant. LLMs routinely emit oldStrings with stray
+        // blank lines (a phantom EMPTY line inserted between two real lines, or a leading/
+        // trailing one), so the verbatim ordinal match above can fail even though every REAL
+        // line is present in order. Match line-by-line: blank lines are skipped on BOTH sides
+        // (the phantom blank the model inserted, or a blank the file has that the model
+        // dropped), and every real line must compare EXACTLY (Ordinal). Indentation drift is
+        // deliberately NOT absorbed here: the deterministic-batch G1 contract requires a
+        // drifted anchor to fail so it re-anchors against the CURRENT file text, and the
+        // re-anchor chain (TryIdentifierAnchoredReanchor / TrySurroundingLineReanchor /
+        // BuildExactMatchBlock) rebuilds the block from the file's REAL indentation — never
+        // leaking the model's own. An ambiguous sequence (the same lines in two places) is
+        // disambiguated by the change keywords / line hint and otherwise falls through to
+        // that re-anchor machinery instead of guessing. The replacement span is the file's
+        // REAL text from the first matched line through the last (trailing newline NOT
+        // consumed), so real indentation and interior blank lines are preserved.
+        var oldRealLines = normOld.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        if (oldRealLines.Count > 0)
         {
-            var fuzzyIdx = normFile.IndexOf(firstRealLine, StringComparison.Ordinal);
-            if (fuzzyIdx >= 0)
+            var fileLines = normFile.Split('\n');
+            var lineOffsets = new int[fileLines.Length];
+            var off = 0;
+            for (var li = 0; li < fileLines.Length; li++)
             {
-                var lineStart = normFile.LastIndexOf('\n', fuzzyIdx) + 1;
-                var fileSegment = normFile[lineStart..];
-                if (fileSegment.StartsWith(normOld.TrimStart()))
+                lineOffsets[li] = off;
+                off += fileLines[li].Length + 1;
+            }
+            var fuzzyCandidates = new List<(int start, int last)>();
+            for (var startLine = 0; startLine < fileLines.Length; startLine++)
+            {
+                if (!string.Equals(fileLines[startLine], oldRealLines[0], StringComparison.Ordinal)) continue;
+                var fIdx = startLine;
+                var oIdx = 0;
+                var lastMatchLine = -1;
+                while (fIdx < fileLines.Length && oIdx < oldRealLines.Count)
                 {
-                    var normNew = NormalizeLineEndings(newStr);
-                    return (true, normFile[..lineStart] + normNew + normFile[(lineStart + normOld.Length)..], null, null);
+                    if (string.IsNullOrWhiteSpace(fileLines[fIdx])) { fIdx++; continue; }
+                    if (!string.Equals(fileLines[fIdx], oldRealLines[oIdx], StringComparison.Ordinal)) break;
+                    lastMatchLine = fIdx;
+                    fIdx++;
+                    oIdx++;
                 }
+                if (oIdx == oldRealLines.Count && lastMatchLine >= 0)
+                    fuzzyCandidates.Add((startLine, lastMatchLine));
+            }
+            var chosenFuzzy = -1;
+            if (fuzzyCandidates.Count == 1)
+            {
+                chosenFuzzy = 0;
+            }
+            else if (fuzzyCandidates.Count > 1)
+            {
+                // Ambiguous fuzzy sequence — disambiguate like the verbatim multi-match path
+                // (change keywords in the preceding context, then the line hint). No confident
+                // winner → fall through to the caller's re-anchor machinery.
+                var keywords = ExtractDisambiguationKeywords(changeDesc);
+                if (keywords.Count > 0)
+                {
+                    int bestContextScore = -1;
+                    for (var i = 0; i < fuzzyCandidates.Count; i++)
+                    {
+                        var candOffset = lineOffsets[fuzzyCandidates[i].start];
+                        var lookbackStart = Math.Max(0, candOffset - 2000);
+                        var context = normFile.Substring(lookbackStart, candOffset - lookbackStart).ToLowerInvariant();
+                        var score = keywords.Count(k => context.Contains(k));
+                        if (score > bestContextScore)
+                        {
+                            bestContextScore = score;
+                            chosenFuzzy = i;
+                        }
+                    }
+                }
+                if (chosenFuzzy == -1 && targetLine > 0)
+                {
+                    var bestDist = int.MaxValue;
+                    for (var i = 0; i < fuzzyCandidates.Count; i++)
+                    {
+                        var dist = Math.Abs((fuzzyCandidates[i].start + 1) - targetLine);
+                        if (dist < bestDist)
+                        {
+                            bestDist = dist;
+                            chosenFuzzy = i;
+                        }
+                    }
+                    if (bestDist > 50) chosenFuzzy = -1;
+                }
+            }
+            if (chosenFuzzy >= 0)
+            {
+                var (fs, fl) = fuzzyCandidates[chosenFuzzy];
+                var startOffset = lineOffsets[fs];
+                // Span ends exactly at the last matched line — the trailing newline stays in
+                // the file, so the blank-line structure AFTER the anchor is preserved (parity
+                // with the verbatim path, where an oldString without a trailing newline does
+                // not consume the next newline either).
+                var endOffset = lineOffsets[fl] + fileLines[fl].Length;
+                var normNew = NormalizeLineEndings(newStr);
+                return (true, normFile[..startOffset] + normNew + normFile[endOffset..], null, null);
             }
         }
         return (false, fileContent, "oldString not found verbatim in file", null);

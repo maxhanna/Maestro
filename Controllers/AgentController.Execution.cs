@@ -1608,7 +1608,7 @@ partial class AgentController
     }
 
     private static (bool approved, string reason, int score) VerifyEdit(
-        string oldString, string newString, string oldContent, string newContent, bool fromFormatC = false)
+        string oldString, string newString, string oldContent, string newContent, bool fromFormatC = false, string? relPath = null)
     {
         if (oldContent == newContent) return (false, "Edit produced no change", 3);
         if (!string.IsNullOrWhiteSpace(oldContent) && string.IsNullOrWhiteSpace(newContent))
@@ -1750,7 +1750,7 @@ partial class AgentController
                     "Preserve the original query structure; only add the required logic." + anchorHint, 1);
             }
         }
-        if (AgentProjectUtilities.IsAngularTemplate(newContent))
+        if (AgentProjectUtilities.IsAngularTemplate(newContent, relPath))
         {
             var bannedInAngular = new[] { "Math.min(", "Math.max(", "Math.floor(", "Math.ceil(",
                 "Math.round(", "Math.random(", "parseInt(", "parseFloat(", "JSON.parse", "JSON.stringify" };

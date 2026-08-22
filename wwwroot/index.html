@@ -315,7 +315,7 @@
                 <span class="agent-run-duration">{{ vm.msToDigitalTime(run.elapsed) }}</span>
                 <button ng-if="run.active" ng-click="vm.stopRun(run)" class="small ghost" title="Stop this agent">⏹</button>
               </div>
-              <details class="agent-run-log">
+              <details class="agent-run-log" open>
                 <summary>📋 Log ({{run.log.length}})</summary>
                 <div class="log-entries" style="margin-top:6px;max-height:180px;overflow-y:auto;">
                   <div class="log-entry" ng-repeat="e in run.log track by $index" ng-class="e.level">
@@ -422,7 +422,7 @@
           </div>
 
           <div class="agent-latest-log agent-activity-log" ng-if="vm.agentPanelTabIs('activity') && vm.agentActivityLog.length">
-            <details>
+            <details open>
               <summary>
                 <span>📋 Log ({{vm.agentActivityLogLength}})</span>
                 <span class="log-font-controls">
