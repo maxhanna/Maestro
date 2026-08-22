@@ -191,7 +191,7 @@ public class AiServerDiscoveryService
         //    the "pinned" flag in /api/v1/models is a recipe config, not runtime state.
         try
         {
-            var unloadBody = """{"model":null}""";
+            var unloadBody = JsonSerializer.Serialize(new { model = (string?)null });
             var unloadContent = new StringContent(unloadBody, System.Text.Encoding.UTF8, "application/json");
             using var unloadResp = await loadClient.PostAsync(url + "/api/v1/unload", unloadContent, ct);
             // 404 "Model not loaded" is fine — nothing was loaded to begin with.
@@ -207,7 +207,7 @@ public class AiServerDiscoveryService
         // 2. Load the requested model.
         try
         {
-            var loadBody = $$"""{"model_name":"{{modelId}}"}""";
+            var loadBody = JsonSerializer.Serialize(new { model_name = modelId });
             var loadContent = new StringContent(loadBody, System.Text.Encoding.UTF8, "application/json");
             using var loadResp = await loadClient.PostAsync(url + "/api/v1/load", loadContent, ct);
             var respBody = await loadResp.Content.ReadAsStringAsync(ct);
@@ -243,7 +243,13 @@ public class AiServerDiscoveryService
         try
         {
             var client = MakeClient(TimeSpan.FromSeconds(30));
-            var body = $$"""{"model":"{{modelId}}","messages":[{"role":"user","content":"ping"}],"stream":false,"max_tokens":1}""";
+            var body = JsonSerializer.Serialize(new
+            {
+                model = modelId,
+                messages = new[] { new { role = "user", content = "ping" } },
+                stream = false,
+                max_tokens = 1
+            });
             var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
             using var resp = await client.PostAsync(url + "/v1/chat/completions", content, ct);
             return resp.IsSuccessStatusCode;

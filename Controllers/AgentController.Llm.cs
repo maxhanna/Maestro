@@ -633,11 +633,22 @@ partial class AgentController
         string? llmRoundLabel = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
+        var model = await GetLlamaModel();
         var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, linkedCts.Token, maxTokens, appendTruncationMarker);
         EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        // AUTO-SWAP: same 409 slots_pinned_error handling as the JSON paths — swap the pinned
+        // model and retry once before attempting transport-failure recovery. Must run first
+        // because a 409 is a model-not-loaded error, not a recoverable stream failure.
+        if (IsSlotsPinnedError(first.raw) && await TryAutoSwapModelAsync(baseUrl, model, emitSse, ct))
+        {
+            using var swapTimeoutCts = new CancellationTokenSource(timeout);
+            using var swapLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, swapTimeoutCts.Token);
+            first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, swapLinkedCts.Token, maxTokens, appendTruncationMarker);
+            EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        }
         // Same recovery as CallLlmRawStreaming: a dropped connection or max-token cut must
         // not discard a good partial response — retry once with the partial as a hint.
         // Editor:DisableLLMRetries skips this — the partial + error return as-is.

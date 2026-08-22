@@ -284,4 +284,42 @@ public class AiServerDiscoveryServiceTests
         Assert.True(result.Success);
         Assert.True(loadCalled, "Load must be called even when unload returns 404.");
     }
+
+    [Fact]
+    public async Task SwapModel_ModelIdWithSpecialCharacters_ProducesValidJson()
+    {
+        // Model IDs with quotes/backslashes must be JSON-escaped, not raw-interpolated.
+        // Without proper serialization, a " in the model name would produce invalid JSON
+        // and the load request would fail with a 400 from the server.
+        var receivedLoadBody = "";
+        var handler = new ScriptedHandler
+        {
+            PostResponder = (path, body) =>
+            {
+                if (path.EndsWith("/api/v1/load", StringComparison.OrdinalIgnoreCase))
+                {
+                    receivedLoadBody = body;
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("""{"status":"success"}""", Encoding.UTF8, "application/json")
+                    };
+                }
+                if (path.EndsWith("/api/v1/unload", StringComparison.OrdinalIgnoreCase))
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("""{"status":"success"}""", Encoding.UTF8, "application/json")
+                    };
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+        };
+
+        var trickyModel = """model"with\"quotes""";
+        var result = await Service(handler).SwapModelAsync("http://localhost:8080", trickyModel);
+
+        Assert.True(result.Success);
+        // The body must be valid JSON with the model name properly escaped.
+        Assert.Contains("model_name", receivedLoadBody);
+        using var doc = System.Text.Json.JsonDocument.Parse(receivedLoadBody);
+        Assert.Equal(trickyModel, doc.RootElement.GetProperty("model_name").GetString());
+    }
 }
