@@ -132,4 +132,58 @@ public class BenchmarkProjectTests
         Assert.Single(projects);
         Assert.Equal("Weaver Benchmarks", proj.Name);
     }
+
+    // ── Regression comparison (acceptance-check deltas) ─────────────────────
+
+    private static BenchmarkScore ScoreWithChecks(string id, double pct, double correctness, params (string name, bool passed)[] checks)
+    {
+        var s = new BenchmarkScore { Id = id, ScorePercent = pct, CorrectnessPercent = correctness };
+        foreach (var (name, passed) in checks)
+            s.Checks.Add(new BenchmarkCheckResult { Name = name, Passed = passed });
+        return s;
+    }
+
+    [Fact]
+    public void Compare_RealScores_CheckDeltasFlagRegressedAndFixed()
+    {
+        var baseline = ScoreWithChecks("base", 80, 80,
+            ("A", true), ("B", false), ("C", true));
+        var current = ScoreWithChecks("cur", 85, 90,
+            ("A", false),  // regressed: passed before, fails now
+            ("B", true),   // fixed: failed before, passes now
+            ("C", true));  // stable
+
+        var cmp = BenchmarkService.Compare(current, baseline);
+
+        Assert.Equal("base", cmp.BaselineScoreId);
+        Assert.Equal("cur", cmp.CurrentScoreId);
+        Assert.Equal(5, cmp.ScoreDelta);        // 85 - 80
+        Assert.Equal(10, cmp.CorrectnessDelta); // 90 - 80
+        Assert.Equal(3, cmp.CheckDeltas.Count);
+        Assert.Equal(1, cmp.RegressedChecks);   // A
+        Assert.Equal(1, cmp.FixedChecks);      // B
+        // The overall score ROSE but a check still regressed — HasRegression must catch it
+        // (a recovered edit-success rate would otherwise mask the lost acceptance check).
+        Assert.True(cmp.HasRegression);
+        Assert.Contains(cmp.CheckDeltas, d => d.Name == "A" && d.Regressed);
+        Assert.Contains(cmp.CheckDeltas, d => d.Name == "B" && d.Fixed);
+    }
+
+    [Fact]
+    public void Compare_OldScoreHasNoChecks_DeltasAreNull_CheckDeltasEmpty()
+    {
+        // Scores saved before acceptance checks were wired into scoring carry no Checks and
+        // 0 correctness — comparing one to a real run must NOT fabricate a correctness gain.
+        var baseline = new BenchmarkScore { Id = "old", ScorePercent = 70, CorrectnessPercent = 0 };
+        var current = ScoreWithChecks("new", 72, 95, ("A", true));
+
+        var cmp = BenchmarkService.Compare(current, baseline);
+
+        Assert.Equal(2, cmp.ScoreDelta);      // still computed from stored score numbers
+        Assert.Null(cmp.CorrectnessDelta);     // no baseline checks → not comparable
+        Assert.Null(cmp.EditSuccessDelta);
+        Assert.Empty(cmp.CheckDeltas);
+        Assert.Equal(0, cmp.RegressedChecks);
+        Assert.False(cmp.HasRegression);       // score rose, no check regressions
+    }
 }

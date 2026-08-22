@@ -6357,6 +6357,55 @@ h3 .small.ghost:hover {
 	margin-right: 6px;
 }
 
+.bench-checks {
+	margin-bottom: 10px;
+	font-size: 12px;
+}
+
+.bench-checks-head {
+	font-weight: 600;
+	margin-bottom: 6px;
+	opacity: 0.85;
+}
+
+.bench-check {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	padding: 3px 0;
+	border-bottom: 1px dashed var(--border);
+}
+
+.bench-check:last-child {
+	border-bottom: none;
+}
+
+.bench-check-mark {
+	font-weight: 700;
+	flex: 0 0 auto;
+}
+
+.bench-check.pass .bench-check-mark {
+	color: var(--good, #16a34a);
+}
+
+.bench-check.fail .bench-check-mark {
+	color: var(--bad, #dc2626);
+}
+
+.bench-check-name {
+	flex: 0 1 auto;
+}
+
+.bench-check-msg {
+	flex: 1 1 auto;
+	opacity: 0.7;
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .bench-score-actions {
 	display: flex;
 	gap: 6px;
@@ -6453,6 +6502,11 @@ h3 .small.ghost:hover {
 	color: #4ade80;
 }
 
+.bench-compare-summary.bad {
+	background: rgba(239, 68, 68, 0.1);
+	color: #f87171;
+}
+
 .bench-compare-rows {
 	margin-top: 10px;
 	border: 1px solid var(--border);
@@ -6480,6 +6534,22 @@ h3 .small.ghost:hover {
 
 .bench-compare-row.a-ok-b-fail .bench-compare-path,
 .bench-compare-row.a-fail-b-ok .bench-compare-path {
+	font-weight: 700;
+}
+
+.bench-compare-row.regressed {
+	background: rgba(239, 68, 68, 0.12);
+}
+
+.bench-compare-row.regressed .bench-compare-path {
+	font-weight: 700;
+}
+
+.bench-compare-row.fixed {
+	background: rgba(34, 197, 94, 0.1);
+}
+
+.bench-compare-row.fixed .bench-compare-path {
 	font-weight: 700;
 }
 

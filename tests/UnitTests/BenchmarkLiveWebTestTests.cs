@@ -360,4 +360,89 @@ public class BenchmarkLiveWebTestTests : IDisposable
 
         Assert.Equal(freePort, ServerLauncherService.FindFreePort(freePort));
     }
+
+    // ── Wildcard-listener port conflict (the CivicSight-on-port-3000 field report) ──
+
+    [Fact]
+    public void FindFreePort_WildcardListenerHeld_FallsBackToDifferentPort()
+    {
+        // A dev server bound to ALL interfaces (0.0.0.0:port — the default for
+        // Next/Vite/Express on 3000) must NOT be handed to a freshly spawned server. A
+        // bind-only loopback probe misses this on Windows (the loopback bind succeeds
+        // even though 0.0.0.0 is held), so the launcher would pick the occupied port,
+        // the spawned server would fail EADDRINUSE, and the readiness poll would get a
+        // 200 from the WRONG server. The connect probe must detect it.
+        var listener = new TcpListener(IPAddress.Any, 0);
+        listener.Start();
+        var busyPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        try
+        {
+            var chosen = ServerLauncherService.FindFreePort(busyPort);
+            Assert.NotEqual(busyPort, chosen);
+        }
+        finally { listener.Stop(); }
+    }
+
+    [Fact]
+    public void IsAddressInUseFailure_DetectsNodeAndPythonMessages()
+    {
+        Assert.True(ServerLauncherService.IsAddressInUseFailure(
+            "Error: listen EADDRINUSE: address already in use :::3000"));
+        Assert.True(ServerLauncherService.IsAddressInUseFailure(
+            "OSError: [Errno 98] Address already in use"));
+        Assert.True(ServerLauncherService.IsAddressInUseFailure(
+            "AddressAlreadyInUse: Failed to bind to address http://127.0.0.1:3000"));
+        Assert.False(ServerLauncherService.IsAddressInUseFailure("Cannot find module 'express'"));
+        Assert.False(ServerLauncherService.IsAddressInUseFailure(""));
+        Assert.False(ServerLauncherService.IsAddressInUseFailure(null));
+    }
+
+    // ── EvaluateAsync wires acceptance checks into the score (the split-brained fix) ──
+
+    [Fact]
+    public async Task EvaluateAsync_PopulatesChecks_And_StatusReflectsAcceptanceChecks()
+    {
+        // The score saved by EvaluateAsync must carry the per-check results + correctness —
+        // previously the Checks list was discarded (only FailedSteps names survived) and the
+        // method was never called from production. A fully-correct benchmark-1 workspace
+        // scores 100% correctness with every check represented in the persisted Checks list.
+        var root = Path.Combine(_tmp, Guid.NewGuid().ToString("N"));
+        var bench = Path.Combine(root, "benchmark_test_1");
+        Directory.CreateDirectory(bench);
+        File.WriteAllText(Path.Combine(bench, "test.md"), "Hello world\nThe capital of France is Paris");
+
+        var service = new BenchmarkService(SubstituteDb());
+        var score = await service.EvaluateAsync(1, root, successfulEdits: 2, failedEdits: 0,
+            stepCount: 2, durationMs: 0, modelUsed: "test-model");
+
+        Assert.NotEmpty(score.Checks);
+        Assert.All(score.Checks, c => Assert.True(c.Passed, c.Name + ": " + c.Message));
+        Assert.Equal(100, score.CorrectnessPercent);
+        Assert.Equal("completed", score.Status);
+        Assert.Empty(score.FailedSteps);
+        var plan = BenchmarkService.GetBenchmarkPlans().First(p => p.Level == 1);
+        Assert.Equal(plan.AcceptanceChecks.Count, score.Checks.Count);
+    }
+
+    [Fact]
+    public async Task EvaluateAsync_WrongContent_StatusNotCompleted_AndFailingChecksCarryMessages()
+    {
+        // When the agent's output is wrong, the score must NOT be "completed" — the
+        // acceptance checks drive the status, not the edit-success count. The failing
+        // checks carry diagnostic messages so the UI can show exactly what failed.
+        var root = Path.Combine(_tmp, Guid.NewGuid().ToString("N"));
+        var bench = Path.Combine(root, "benchmark_test_1");
+        Directory.CreateDirectory(bench);
+        File.WriteAllText(Path.Combine(bench, "test.md"), "wrong content entirely");
+
+        var service = new BenchmarkService(SubstituteDb());
+        var score = await service.EvaluateAsync(1, root, successfulEdits: 1, failedEdits: 0,
+            stepCount: 1, durationMs: 0, modelUsed: "test-model");
+
+        Assert.NotEmpty(score.Checks);
+        Assert.True(score.CorrectnessPercent < 100);
+        Assert.NotEqual("completed", score.Status);
+        Assert.NotEmpty(score.FailedSteps);
+        Assert.Contains(score.Checks, c => !c.Passed && !string.IsNullOrEmpty(c.Message));
+    }
 }

@@ -1227,24 +1227,57 @@ angular.module('kanbanApp')
                                                                     var failed = editCounts.failed;
                                                                     var totalAttempts = successful + failed;
                                                                     var points = successful + (totalAttempts > 0 && failed === 0 ? successful : 0);
-                                                                    var scorePercent = totalAttempts > 0 ? Math.round((successful / totalAttempts) * 1000) / 10 : 0;
-                                                                    var status = totalAttempts === 0 ? 'failed' : failed === 0 ? 'completed' : successful > 0 ? 'partial' : 'failed';
+                                                                    var editScorePercent = totalAttempts > 0 ? Math.round((successful / totalAttempts) * 1000) / 10 : 0;
+                                                                    var editStatus = totalAttempts === 0 ? 'failed' : failed === 0 ? 'completed' : successful > 0 ? 'partial' : 'failed';
+                                                                    var level = card._benchmarkLevel != null ? card._benchmarkLevel : 1;
                                                                     var bmElapsed = run.elapsed || (vm._agentStartTime ? Date.now() - vm._agentStartTime : 0);
-                                                                    $http.post('/api/benchmark/save-score',
+                                                                    var errReason = errorReason !== undefined ? errorReason : (vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || '');
+                                                                    var editsPayload = collectBenchmarkEdits(stepsForScoring);
+                                                                    var stepCount = stepsForScoring ? stepsForScoring.length : 0;
+                                                                    var modelUsed = (vm.systemInfoCustom && vm.systemInfoCustom.model) || '';
+                                                                    var advanceWith = function (st, pts, pct) {
+                                                                        vm._advanceBenchmarkAll(level, successful, failed, totalAttempts, st, pts, pct);
+                                                                    };
+                                                                    // verify-and-score: the server runs the benchmark's acceptance checks (filesystem +
+                                                                    // live web test) and returns the REAL score, so a saved score reflects whether the
+                                                                    // benchmark actually passed — not just whether the agent's edit operations reported
+                                                                    // success. The next Run-All benchmark waits for this so each result is genuine.
+                                                                    $http.post('/api/benchmark/verify-and-score',
                                                                         {
-                                                                            level: card._benchmarkLevel != null ? card._benchmarkLevel : 1,
+                                                                            level: level,
                                                                             successfulEdits: successful,
                                                                             failedEdits: failed,
-                                                                            points: points,
-                                                                            scorePercent: scorePercent,
-                                                                            status: status,
-                                                                            modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                                                                            stepCount: stepCount,
                                                                             durationMs: bmElapsed,
-                                                                            errorReason: errorReason !== undefined ? errorReason : (vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || ''),
-                                                                            edits: collectBenchmarkEdits(stepsForScoring)
+                                                                            modelUsed: modelUsed,
+                                                                            errorReason: errReason,
+                                                                            edits: editsPayload
+                                                                        },
+                                                                        { timeout: 240000 }
+                                                                    ).then(function (resp) {
+                                                                        var score = resp && resp.data;
+                                                                        if (score && vm.benchmarkScores) {
+                                                                            vm.benchmarkScores.unshift(score);
+                                                                            vm.benchmarkScores.sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
                                                                         }
-                                                                    );
-                                                                    vm._advanceBenchmarkAll(card._benchmarkLevel != null ? card._benchmarkLevel : 1, successful, failed, totalAttempts, status, points, scorePercent);
+                                                                        advanceWith(
+                                                                            (score && score.status) ? score.status : editStatus,
+                                                                            (score && score.points != null) ? score.points : points,
+                                                                            (score && score.scorePercent != null) ? score.scorePercent : editScorePercent);
+                                                                    }).catch(function () {
+                                                                        // Safety net: verification failed (endpoint error/timeout) — record the edit-only
+                                                                        // score via the legacy endpoint so the run is never blocked, then advance.
+                                                                        pushAgentLog(vm, 'warn', '⚠ Benchmark ' + level + ' verification unavailable (timeout or error) — saved edit-only score without acceptance checks.');
+                                                                        $http.post('/api/benchmark/save-score',
+                                                                            {
+                                                                                level: level, successfulEdits: successful, failedEdits: failed,
+                                                                                points: points, scorePercent: editScorePercent, status: editStatus,
+                                                                                modelUsed: modelUsed, durationMs: bmElapsed,
+                                                                                errorReason: errReason, edits: editsPayload
+                                                                            }
+                                                                        );
+                                                                        advanceWith(editStatus, points, editScorePercent);
+                                                                    });
                                                                     var bIdx = vm.state.todo.indexOf(card);
                                                                     if (bIdx < 0) { bIdx = vm.state.doing.indexOf(card); }
                                                                     if (bIdx < 0) { bIdx = vm.state.done.indexOf(card); }
@@ -2634,7 +2667,7 @@ angular.module('kanbanApp')
                 };
                 vm._summarizeBenchmarkAll = function (results) {
                     var r = results || [];
-                    var failed = r.find(function (x) { return x.failed > 0 || x.status === 'failed' || x.status === 'error'; });
+                    var failed = r.find(function (x) { return x.status === 'failed' || x.status === 'error'; });
                     return {
                         completedLevels: r.length,
                         failedLevel: failed ? failed.level : null,
@@ -2727,7 +2760,7 @@ angular.module('kanbanApp')
                     vm._persistBenchmarkRun();
                     var failed = vm.benchmarkAllResult.failedLevel;
                     pushAgentLog(vm, 'info', '📊 Benchmark All finished — completed ' + vm.benchmarkAllResult.completedLevels + ' benchmark(s), ' +
-                        (failed != null ? 'stopped at ' + vm.benchmarkLevelName(failed) + ' due to error steps' : 'all benchmarks passed') +
+                        (failed != null ? 'stopped at ' + vm.benchmarkLevelName(failed) + ' — a benchmark failed its acceptance checks' : 'all benchmarks passed') +
                         ' (' + vm.benchmarkAllResult.totalPoints + ' pts)');
                     // The gold skulltula marks the end of the whole batch — win or lose.
                     // (Same Windows gate as sendSystemToast so the sound behaves
@@ -2785,7 +2818,7 @@ angular.module('kanbanApp')
                     if (!vm.benchmarkAllActive) return;
                     vm.benchmarkAllResults.push({ level: level, successful: successful, failed: failed, status: status, points: points, scorePercent: scorePercent });
                     vm._persistBenchmarkRun();
-                    if (failed > 0 || totalAttempts === 0 || status === 'error' || status === 'failed') { vm._finishBenchmarkAll(); }
+                    if (status === 'error' || status === 'failed') { vm._finishBenchmarkAll(); }
                     else { vm._runNextBenchmarkFromQueue(); }
                 };
                 function countEditsFromSteps(steps) {
@@ -2855,6 +2888,11 @@ angular.module('kanbanApp')
                     if (scorePercent === null || scorePercent === undefined) return 0;
                     var n = Number(scorePercent);
                     return isNaN(n) ? 0 : n;
+                };
+                vm.benchChecksPassed = function (s) {
+                    var checks = s && s.checks;
+                    if (!checks || !checks.length) return 0;
+                    return checks.filter(function (c) { return c.passed; }).length;
                 };
                 vm.benchmarkStatusInfo = function (status) {
                     var s = String(status || '').toLowerCase();
@@ -2991,7 +3029,31 @@ angular.module('kanbanApp')
                         return { path: label, a: ea, b: eb, okA: okA, okB: okB, failA: failA, failB: failB, state: state };
                     }).sort(function (x, y) { return x.path.localeCompare(y.path); });
                     var differs = rows.filter(function (r) { return r.state === 'a-ok-b-fail' || r.state === 'a-fail-b-ok'; });
-                    return { a: a, b: b, rows: rows, differs: differs.length };
+                    // Acceptance-check regression view: match checks by name across the two
+                    // runs and flag which ones regressed (passed before, fail now) or were fixed.
+                    // Only meaningful when BOTH runs carry real check data (Fix #1 populates
+                    // checks on new scores; legacy scores have none).
+                    var aChecks = (a.checks && a.checks.length) ? a.checks : null;
+                    var bChecks = (b.checks && b.checks.length) ? b.checks : null;
+                    var checkRows = [];
+                    var regressed = 0, fixed = 0;
+                    if (aChecks && bChecks) {
+                        var byName = {};
+                        bChecks.forEach(function (c) { byName[c.name] = c.passed; });
+                        aChecks.forEach(function (c) {
+                            var pB = (c.name in byName) ? byName[c.name] : false;
+                            checkRows.push({ name: c.name, aPass: c.passed, bPass: pB,
+                                regressed: !!(pB && !c.passed), fixed: !!(!pB && c.passed) });
+                        });
+                        regressed = checkRows.filter(function (r) { return r.regressed; }).length;
+                        fixed = checkRows.filter(function (r) { return r.fixed; }).length;
+                    }
+                    var corrA = (a.correctnessPercent != null) ? a.correctnessPercent : null;
+                    var corrB = (b.correctnessPercent != null) ? b.correctnessPercent : null;
+                    var corrDelta = (corrA != null && corrB != null) ? Math.round((corrA - corrB) * 10) / 10 : null;
+                    return { a: a, b: b, rows: rows, differs: differs.length,
+                        correctnessA: corrA, correctnessB: corrB, correctnessDelta: corrDelta,
+                        checkRows: checkRows, regressedChecks: regressed, fixedChecks: fixed };
                 };
                 vm.sendBenchmarkToServer = function (s) {
                     if (!s || !s.id || vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]) return;
