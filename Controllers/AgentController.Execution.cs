@@ -352,6 +352,17 @@ partial class AgentController
             if (planFile.Equals("_create_directory", StringComparison.OrdinalIgnoreCase))
             {
                 var dirRelPath = changeDesc.Replace('\\', '/');
+                // Interleaved mirror of the ValidatePlanAsync cleanup: a _create_directory step
+                // whose path is a FILE placeholder (e.g. 'benchmark_test_23/placeholder.txt') is
+                // rewritten to the clean directory it implies, so the junk file path never
+                // becomes a directory on disk (this route skips plan validation entirely).
+                var cleanDir = CleanDirectoryPathFromFilePlaceholder(dirRelPath);
+                if (cleanDir != null)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Converted _create_directory step '{dirRelPath}' (a file placeholder path) to create directory '{cleanDir}'.", ct: ct);
+                    dirRelPath = cleanDir;
+                }
                 var dirFullPath = Path.GetFullPath(Path.Combine(projectRoot, dirRelPath.Replace('/', Path.DirectorySeparatorChar)));
                 await EmitLog(emitSse, "info", $"Creating directory: {dirRelPath}", ct: ct);
                 if (emitSse)
@@ -402,9 +413,8 @@ partial class AgentController
             }
             if (planFile.Equals("_sql_migration", StringComparison.OrdinalIgnoreCase))
             {
-                // New SQL table → write a migrations/*.sql file the user applies manually.
-                // The CREATE TABLE statement comes from newString; the table name is parsed
-                // out of it (falling back to a name token in the change description).
+                // New SQL table/column → append the DDL to migrations/schema_changes.md as
+                // CREATE TABLE and ALTER TABLE sections the user reads/applies manually.
                 await EmitLog(emitSse, "info", $"SQL migration: {changeDesc}", ct: ct);
                 if (emitSse)
                     await SendSse(Response, "step", new
@@ -412,15 +422,17 @@ partial class AgentController
                         index = stepIndex,
                         type = "sql_migration",
                         status = "running",
-                        path = "migrations/",
+                        path = SqlMigrationService.SchemaChangesRelPath,
                         description = item.Change,
                         planItemIndex = itemIdx
                     }, ct);
-                var statements = SqlMigrationService.ExtractCreateTableStatements(item.NewString ?? "");
+                var createStatements = SqlMigrationService.ExtractCreateTableStatements(item.NewString ?? "");
+                var alterStatements = SqlMigrationService.ExtractAlterTableStatements(item.NewString ?? "");
                 var written = new List<string>();
-                if (statements.Count == 0)
+                if (createStatements.Count == 0 && alterStatements.Count == 0)
                 {
-                    // No DDL supplied — draft one from the description so the user still gets a usable file.
+                    // No DDL supplied — draft a CREATE TABLE from the description so the user
+                    // still gets a usable section (ALTER needs an explicit statement).
                     var tableName = Regex.Match(changeDesc, @"\b(?:create\s+)?(?:table\s+)?([\w_]+)\b", RegexOptions.IgnoreCase).Groups[1].Value;
                     if (string.IsNullOrWhiteSpace(tableName) || tableName.Length < 2) tableName = "new_table";
                     var draft = await DraftCreateTableAsync(tableName, changeDesc, ct);
@@ -429,24 +441,30 @@ partial class AgentController
                 }
                 else
                 {
-                    foreach (var (table, sql) in statements)
+                    foreach (var (table, sql) in createStatements)
                     {
                         var rel = SqlMigrationService.WriteMigration(projectRoot, table, sql);
                         if (rel != null) written.Add(rel);
                     }
+                    foreach (var (table, column, sql) in alterStatements)
+                    {
+                        var rel = SqlMigrationService.WriteAlterMigration(projectRoot, table, column, sql);
+                        if (rel != null) written.Add(rel);
+                    }
                 }
-                if (written.Count == 0)
+                var writtenRel = written.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                if (writtenRel.Count == 0)
                 {
-                    await EmitLog(emitSse, "warn", $"SQL migration skipped — table already covered by an existing migrations/*.sql file: {changeDesc}", ct: ct);
+                    await EmitLog(emitSse, "warn", $"SQL migration skipped — table/column already documented in {SqlMigrationService.SchemaChangesRelPath}: {changeDesc}", ct: ct);
                 }
-                foreach (var rel in written)
-                    await EmitLog(emitSse, "success", $"📦 SQL migration written: {rel} — apply it to your database manually, then delete the file", ct: ct);
+                foreach (var rel in writtenRel)
+                    await EmitLog(emitSse, "success", $"📦 Schema change documented: {rel} — apply it to your database manually", ct: ct);
                 var migResult = new Dictionary<string, object?>
                 {
                     ["index"] = stepIndex,
                     ["type"] = "sql_migration",
                     ["status"] = "done",
-                    ["path"] = written.Count > 0 ? string.Join(", ", written) : "(already migrated)",
+                    ["path"] = writtenRel.Count > 0 ? string.Join(", ", writtenRel) : "(already documented)",
                     ["description"] = item.Change,
                     ["planItemIndex"] = itemIdx
                 };
@@ -518,6 +536,19 @@ partial class AgentController
                     }
                 }
                 var newFileFullPath = Path.GetFullPath(Path.Combine(projectRoot, newFileRelPath.Replace('/', Path.DirectorySeparatorChar)));
+                // DUMMY-FILE-FOR-FOLDER GUARD: a weak planner that can't create a directory
+                // directly (its mkdir/_create_directory attempt failed or was rejected) often
+                // emits a placeholder file ("benchmark_test_23/placeholder.txt" → "Placeholder
+                // file for directory creation") whose ONLY purpose is to materialize the folder.
+                // Skip the dummy file and create the directory the step implies instead — the
+                // task asked for a folder, not a junk file.
+                if (await IsDummyFolderCreateStepAsync(newFileRelPath, item.NewString, ct))
+                {
+                    stepIndex = await ExecuteDummyFileAsDirectoryCreateAsync(
+                        newFileRelPath, item.Change, projectRoot, emitSse, ct,
+                        allResults, stepIndex, itemIdx, cardId, plan);
+                    continue;
+                }
                 // NBSP → real space: the editor model writes a literal space inside a required
                 // heading as `&nbsp;` (benchmark 23's 'Benchmark 23' — it keeps dropping the
                 // space); restore the real space deterministically before writing the file.

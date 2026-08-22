@@ -1,22 +1,34 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Weaver.Services;
 
 /// <summary>
-/// Writes SQL migration files (CREATE TABLE statements) into the repo's migrations/
-/// folder. When an agent edit introduces a new SQL table, the DDL is extracted from the
-/// code and written to a timestamped .sql file so the user can apply it to their database
-/// MANUALLY — instead of the agent inlining CREATE TABLE inside the method body. Once the
-/// user has applied the migration they delete the .sql file; edits that reference a table
-/// covered by a migration file are accepted by the SQL guard.
+/// Writes schema-change documentation (CREATE TABLE and ALTER TABLE statements) into a single
+/// <c>migrations/schema_changes.md</c> markdown file. When an agent edit introduces a NEW SQL
+/// table or a NEW COLUMN, the DDL is extracted from the code and appended to the markdown file so
+/// the user can read (and apply) the changes MANUALLY — instead of the agent inlining DDL inside
+/// the method body. Each change becomes a markdown section with a fenced <c>sql</c> block; the
+/// file is append-only and de-duplicated (a table or column already documented is not re-added).
+/// The SQL guard treats tables/columns covered by the file as existing.
 /// </summary>
 public static class SqlMigrationService
 {
     public const string MigrationsFolder = "migrations";
+    public const string SchemaChangesFile = "schema_changes.md";
+
+    private const string HeaderLine = "# Schema Changes";
 
     private static readonly Regex CreateTableHeaderRegex = new(
         @"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex AlterTableHeaderRegex = new(
+        @"\bALTER\s+TABLE\s+`?(\w+)`?\s+ADD\s+(?:COLUMN\s+)?`?(\w+)`?",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Repo-relative path of the schema-changes markdown file.</summary>
+    public static string SchemaChangesRelPath => $"{MigrationsFolder}/{SchemaChangesFile}";
 
     /// <summary>
     /// Extract complete CREATE TABLE statements (table name + full SQL including the
@@ -66,63 +78,86 @@ public static class SqlMigrationService
     }
 
     /// <summary>
-    /// Write a timestamped migration file (<c>migrations/&lt;ts&gt;_create_&lt;table&gt;.sql</c>)
-    /// containing the CREATE TABLE statement with an instructional header. Skips writing when a
-    /// migration file already covers the table. Returns the repo-relative path written, or null.
+    /// Extract complete ALTER TABLE ... ADD [COLUMN] ... statements (table name, column name,
+    /// and full SQL through the trailing ';') from arbitrary text. A statement runs from the
+    /// <c>ALTER TABLE</c> keyword to the next ';' — the shape generated for new-column changes.
     /// </summary>
-    public static string? WriteMigration(string projectRoot, string tableName, string createTableSql, DateTime? timestamp = null)
+    public static List<(string Table, string Column, string Sql)> ExtractAlterTableStatements(string text)
     {
-        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(createTableSql)) return null;
-        var folder = Path.Combine(projectRoot, MigrationsFolder);
-        Directory.CreateDirectory(folder);
-        if (TableHasMigration(projectRoot, tableName)) return null;
-        var safeTable = Regex.Replace(tableName, @"[^\w]", "_");
-        var ts = (timestamp ?? DateTime.UtcNow).ToString("yyyyMMdd-HHmmss");
-        var rel = $"{MigrationsFolder}/{ts}_create_{safeTable}.sql";
-        var full = Path.Combine(projectRoot, rel);
-        var header =
-            $"-- Migration for table `{tableName}` — apply this to your database manually, then delete this file.\n" +
-            $"-- Generated: {ts} (UTC)\n\n";
-        File.WriteAllText(full, header + createTableSql.TrimEnd() + "\n");
-        return rel;
+        var result = new List<(string, string, string)>();
+        if (string.IsNullOrWhiteSpace(text)) return result;
+        foreach (Match m in AlterTableHeaderRegex.Matches(text))
+        {
+            var table = m.Groups[1].Value;
+            var column = m.Groups[2].Value;
+            var start = m.Index;
+            var end = text.IndexOf(';', start);
+            if (end < 0) end = text.Length - 1;
+            else end++; // include the trailing ';'
+            var sql = text[start..end].Trim();
+            result.Add((table, column, sql));
+        }
+        return result;
     }
 
-    /// <summary>True when any <c>migrations/*.sql</c> file already contains a CREATE TABLE for the table.</summary>
+    /// <summary>
+    /// Append a CREATE TABLE section to <c>migrations/schema_changes.md</c>. Skips writing when
+    /// the table is already documented. Returns the repo-relative path written, or null.
+    /// </summary>
+    public static string? WriteMigration(string projectRoot, string tableName, string createTableSql)
+    {
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(createTableSql)) return null;
+        if (TableHasMigration(projectRoot, tableName)) return null;
+        AppendSection(projectRoot, $"Table `{tableName}`", createTableSql);
+        return SchemaChangesRelPath;
+    }
+
+    /// <summary>
+    /// Append an ALTER TABLE ADD COLUMN section to <c>migrations/schema_changes.md</c>. Skips
+    /// writing when that column is already documented for the table. Returns the path or null.
+    /// </summary>
+    public static string? WriteAlterMigration(string projectRoot, string tableName, string columnName, string alterSql)
+    {
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(columnName) ||
+            string.IsNullOrWhiteSpace(alterSql)) return null;
+        if (ColumnHasMigration(projectRoot, tableName, columnName)) return null;
+        AppendSection(projectRoot, $"Alter `{tableName}` — add column `{columnName}`", alterSql);
+        return SchemaChangesRelPath;
+    }
+
+    /// <summary>True when the schema-changes file already documents a CREATE TABLE for the table.</summary>
     public static bool TableHasMigration(string projectRoot, string tableName)
     {
         if (string.IsNullOrWhiteSpace(tableName)) return false;
-        var folder = Path.Combine(projectRoot, MigrationsFolder);
-        if (!Directory.Exists(folder)) return false;
-        foreach (var file in Directory.GetFiles(folder, "*.sql"))
-        {
-            try
-            {
-                var content = File.ReadAllText(file);
-                foreach (Match m in CreateTableHeaderRegex.Matches(content))
-                    if (string.Equals(m.Groups[1].Value, tableName, StringComparison.OrdinalIgnoreCase))
-                        return true;
-            }
-            catch { }
-        }
+        var content = ReadSchemaChanges(projectRoot);
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        foreach (Match m in CreateTableHeaderRegex.Matches(content))
+            if (string.Equals(m.Groups[1].Value, tableName, StringComparison.OrdinalIgnoreCase))
+                return true;
         return false;
     }
 
-    /// <summary>All table names covered by existing <c>migrations/*.sql</c> files.</summary>
+    /// <summary>True when the schema-changes file already documents an ALTER TABLE ADD for the column.</summary>
+    public static bool ColumnHasMigration(string projectRoot, string tableName, string columnName)
+    {
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(columnName)) return false;
+        var content = ReadSchemaChanges(projectRoot);
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        foreach (var (t, c, _) in ExtractAlterTableStatements(content))
+            if (string.Equals(t, tableName, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(c, columnName, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
+    }
+
+    /// <summary>All table names documented by a CREATE TABLE section in the schema-changes file.</summary>
     public static List<string> FindMigratedTables(string projectRoot)
     {
         var tables = new List<string>();
-        var folder = Path.Combine(projectRoot, MigrationsFolder);
-        if (!Directory.Exists(folder)) return tables;
-        foreach (var file in Directory.GetFiles(folder, "*.sql"))
-        {
-            try
-            {
-                var content = File.ReadAllText(file);
-                foreach (Match m in CreateTableHeaderRegex.Matches(content))
-                    tables.Add(m.Groups[1].Value);
-            }
-            catch { }
-        }
+        var content = ReadSchemaChanges(projectRoot);
+        if (string.IsNullOrWhiteSpace(content)) return tables;
+        foreach (Match m in CreateTableHeaderRegex.Matches(content))
+            tables.Add(m.Groups[1].Value);
         return tables;
     }
 
@@ -132,6 +167,13 @@ public static class SqlMigrationService
     /// surrounding string fragments, which stays valid C#.
     /// </summary>
     public static string StripCreateTableStatements(string code, IReadOnlyCollection<string> statements)
+        => StripStatements(code, statements);
+
+    /// <summary>Remove the given ALTER TABLE statements from code (returns the cleaned text).</summary>
+    public static string StripAlterTableStatements(string code, IReadOnlyCollection<string> statements)
+        => StripStatements(code, statements);
+
+    private static string StripStatements(string code, IReadOnlyCollection<string> statements)
     {
         if (statements.Count == 0) return code;
         var stripped = code;
@@ -144,5 +186,46 @@ public static class SqlMigrationService
             stripped = stripped[..idx] + stripped[end..];
         }
         return stripped;
+    }
+
+    private static string? ReadSchemaChanges(string projectRoot)
+    {
+        var full = Path.Combine(projectRoot, SchemaChangesRelPath.Replace('/', Path.DirectorySeparatorChar));
+        return File.Exists(full) ? File.ReadAllText(full) : null;
+    }
+
+    private static void AppendSection(string projectRoot, string heading, string sql)
+    {
+        var folder = Path.Combine(projectRoot, MigrationsFolder);
+        Directory.CreateDirectory(folder);
+        var full = Path.Combine(folder, SchemaChangesFile);
+
+        var body = new StringBuilder();
+        var existing = File.Exists(full) ? File.ReadAllText(full).TrimEnd() : null;
+        if (string.IsNullOrWhiteSpace(existing))
+        {
+            body.AppendLine(HeaderLine);
+            body.AppendLine();
+        }
+        else
+        {
+            body.Append(existing);
+            body.AppendLine();
+            body.AppendLine();
+        }
+        body.AppendLine($"## {heading}");
+        body.AppendLine();
+        body.AppendLine("```sql");
+        body.AppendLine(NormalizeSql(sql));
+        body.AppendLine("```");
+        body.AppendLine();
+        File.WriteAllText(full, body.ToString());
+    }
+
+    private static string NormalizeSql(string sql)
+    {
+        var s = sql.Trim();
+        if (s.Length > 0 && !s.EndsWith(';')) s += ";";
+        return s;
     }
 }

@@ -50,6 +50,83 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
         return null;
       }
+      // True when a card has produced a run result worth rating (a previous analysis, an
+      // agent log, or a verification verdict) — gates the 👍/👎 feedback section.
+      vm.cardHasRun = function (card) {
+        return !!(card && (card.agentAnalysis || (card.agentLog && card.agentLog.length) || card._verification));
+      }
+      // 👍/👎 rating. Thumbs-up records immediately; thumbs-down reveals the feedback prompt
+      // so the user can explain what went wrong (persisted on the card, then saved).
+      // ── Bughosted feedback POST (shared helper) ──────────────────────────────
+      // Routes 👍/👎 rating and feedback text into the existing POST api/bughosted/feedback
+      // endpoint so negative feedback is reported upstream (weaver admins review these).
+      // Silently skips when not connected — the local rating is still saved.
+      function _postRatingToBughosted(card, message) {
+        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+        if (!card || !message) return;
+        var analysis = card.agentAnalysis || {};
+        var filesEdited = [];
+        if (Array.isArray(analysis.filesEdited)) {
+          filesEdited = analysis.filesEdited.map(function (f) {
+            return typeof f === 'string' ? f : (f && f.path) || '';
+          }).filter(function (p) { return !!p; });
+        }
+        var steps = [];
+        if (Array.isArray(analysis.steps)) {
+          steps = analysis.steps.map(function (s) {
+            return {
+              type: (s && s.type) || '',
+              change: (s && (s.description || s.path || s.command || s.url)) || '',
+              status: (s && s.status) || ''
+            };
+          }).filter(function (s) { return s.type || s.change; });
+        }
+        $http.post('/api/bughosted/feedback', {
+          clientId: vm.bughostedClientId,
+          cardId: card.id,
+          cardText: card.text,
+          message: message,
+          planSummary: analysis.summary || '',
+          filesEdited: filesEdited,
+          steps: steps
+        }).then(function () {
+          var sentCard = vm.findCardById ? vm.findCardById(card.id) : null;
+          if (sentCard) {
+            var sentEntries = Array.isArray(sentCard._feedbackSent)
+              ? sentCard._feedbackSent
+              : (sentCard._feedbackSent ? [sentCard._feedbackSent] : []);
+            sentEntries.push({ at: new Date().toISOString(), message: message.slice(0, 120) });
+            sentCard._feedbackSent = sentEntries;
+            vm.saveCards();
+          }
+          if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '💬 Rating feedback sent for card #' + card.id });
+        });
+      }
+
+      // 👍/👎 rating. Thumbs-up records immediately and POSTs a positive message to
+      // bughosted (when connected). Thumbs-down reveals the feedback prompt; the user's
+      // text is POSTed on submit.
+      vm.rateCard = function (card, rating) {
+        if (!card) return;
+        card._feedback = card._feedback || {};
+        card._feedback.rating = rating;
+        if (rating === 'up') delete card._feedback.draft;
+        vm.saveCards();
+        if (rating === 'up') _postRatingToBughosted(card, '👍 Thumbs up — this run was helpful');
+      }
+      vm.submitCardFeedback = function (card) {
+        if (!card || !card._feedback) return;
+        var text = (card._feedback.draft || '').trim();
+        if (text) card._feedback.text = text;
+        delete card._feedback.draft;
+        vm.saveCards();
+        if (text) _postRatingToBughosted(card, '👎 ' + text);
+      }
+      vm.cancelCardFeedback = function (card) {
+        if (!card || !card._feedback) return;
+        delete card._feedback.draft;
+        vm.saveCards();
+      }
       // A card is a benchmark card if it was created by the benchmark runner (_benchmark)
       // OR it lives in the benchmark project — its filePath is the sandbox/custom
       // benchmark root. Hand-created benchmark cards (a benchmark prompt pasted into a

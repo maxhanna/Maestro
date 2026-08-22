@@ -157,6 +157,109 @@ public static class AgentTextUtilities
     }
 
     /// <summary>
+    /// True when a <c>_create_file</c> step is a DUMMY placeholder emitted only to materialize
+    /// its parent folder. A weak planner that cannot create a directory directly (its
+    /// mkdir/_create_directory attempt failed or was rejected) falls back to planning a
+    /// placeholder file — the benchmark-23 run wrote <c>benchmark_test_23/placeholder.txt</c>
+    /// containing "Placeholder file for directory creation" just to get the folder on disk.
+    /// The executor should skip the dummy file and create the directory it implies instead.
+    /// Deterministic fast-path: a classic placeholder/keep filename (placeholder.txt, .gitkeep,
+    /// dummy, …) or short content that explicitly announces itself as folder scaffolding.
+    /// </summary>
+    public static bool IsDirectoryScaffoldPlaceholder(string fileName, string? content)
+    {
+        if (!string.IsNullOrWhiteSpace(fileName))
+        {
+            var norm = fileName.Replace('\\', '/');
+            var last = norm[(norm.LastIndexOf('/') + 1)..];
+            if (IsPlaceholderStem(last)) return true;
+        }
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        var trimmed = content.Trim();
+        if (trimmed.Length > 120) return false; // real files carry real content
+        return PlaceholderFolderContentRegex.IsMatch(trimmed);
+    }
+
+    /// <summary>
+    /// True when the LAST path segment is a placeholder/keep/scaffold FILE name — the stem
+    /// (before any extension) is a classic placeholder word (placeholder, dummy, keep,
+    /// gitkeep, scaffold, temp, …) or a dotfile keep-name (.keep, .gitkeep, …). Shared by
+    /// the <c>_create_file</c> dummy-file guard and the <c>_create_directory</c> file-path
+    /// guard so both agree on what a "placeholder" name is.
+    /// </summary>
+    private static bool IsPlaceholderStem(string fileName)
+    {
+        var dot = fileName.LastIndexOf('.');
+        var stem = (dot > 0 ? fileName[..dot] : fileName).Trim().ToLowerInvariant();
+        return stem.Length > 0 && stem.Length <= 20 &&
+               (stem is "placeholder" or "dummy" or "keep" or "gitkeep" or "keepme" or
+                "scaffold" or "scaffolding" or "empty" or "temp" or "tmp" or "tempfile" or
+                ".keep" or ".gitkeep" or ".placeholder" or ".keepme" or ".dummy");
+    }
+
+    /// <summary>
+    /// When a <c>_create_directory</c> step's path is actually a FILE placeholder — e.g.
+    /// <c>benchmark_test_23/placeholder.txt</c> planned as a directory — returns the clean
+    /// PARENT directory the placeholder file was meant to materialize (<c>benchmark_test_23</c>),
+    /// or null when the path is a genuine directory. Only unmistakably-file paths convert:
+    /// a last segment WITH an extension whose stem is a placeholder word (placeholder.txt,
+    /// dummy.file, keep.md, …), or a dotfile keep-name (<c>.gitkeep</c>, <c>.keep</c>). A
+    /// plain extensionless directory name (<c>keep</c>, <c>temp</c>, <c>dummy</c>) and a path
+    /// with no parent segment are left alone — those are real folder names, not file paths.
+    /// A weak planner that cannot create a folder directly reaches for <c>_create_directory</c>
+    /// with a file path; plan validation rewrites the step so the junk file path never
+    /// becomes a directory on disk.
+    /// </summary>
+    public static string? CleanDirectoryPathFromFilePlaceholder(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        var norm = path.Replace('\\', '/').Trim().Trim('/');
+        if (norm.Length == 0) return null;
+        var idx = norm.LastIndexOf('/');
+        if (idx <= 0) return null; // no parent segment — nothing to clean the path to
+        var parent = norm[..idx];
+        var fileName = norm[(idx + 1)..];
+        if (string.IsNullOrWhiteSpace(fileName)) return null;
+        var dot = fileName.LastIndexOf('.');
+        var isDotfileKeep = fileName.StartsWith('.') && dot <= 0 && IsPlaceholderStem(fileName);
+        if (dot <= 0 && !isDotfileKeep) return null; // plain directory name — leave alone
+        return IsPlaceholderStem(fileName) ? parent : null;
+    }
+
+    private static readonly Regex PlaceholderFolderContentRegex = new(
+        @"\b(placeholder|dummy|keep|gitkeep|scaffold|scaffolding|empty|temp(?:orary)?|tmp)\b|" +
+        @"(?:just\s+to\s+create|to\s+create\s+the\s+(?:folder|directory)|create\s+(?:the\s+)?(?:folder|directory)|directory\s+creation|folder\s+creation|establish(?:ing)?\s+(?:the\s+)?(?:folder|directory)|for\s+(?:directory|folder)\s+creation|to\s+establish\s+(?:the\s+)?(?:folder|directory))",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Weak pre-signal that GATES the LLM fallback of the dummy-file-for-folder guard: true
+    /// when the filename or short content merely HINTS at a placeholder/keep/scaffold file
+    /// (placeholder, dummy, keep, temp, "just to create", …). The LLM is only consulted when
+    /// this fires but <see cref="IsDirectoryScaffoldPlaceholder"/> didn't — genuinely
+    /// ambiguous, plausibly-a-placeholder steps. Without this gate, EVERY short _create_file
+    /// would cost an LLM round-trip (and break the no-LLM-round invariants of the eval and
+    /// integration suites for ordinary short files like a README or a one-line helper).
+    /// </summary>
+    public static bool HasPlaceholderHint(string fileName, string? content)
+    {
+        if (!string.IsNullOrWhiteSpace(fileName))
+        {
+            var norm = fileName.Replace('\\', '/');
+            var last = norm[(norm.LastIndexOf('/') + 1)..];
+            if (PlaceholderHintRegex.IsMatch(last)) return true;
+        }
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        var trimmed = content.Trim();
+        if (trimmed.Length > 150) return false;
+        return PlaceholderHintRegex.IsMatch(trimmed);
+    }
+
+    private static readonly Regex PlaceholderHintRegex = new(
+        @"\b(placeholder|dummy|keep|gitkeep|keepme|scaffold|scaffolding|empty|temp(?:orary)?|tmp)\b|" +
+        @"(?:just\s+to\s+create|to\s+establish|establish(?:ing)?\s+the)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
     /// Locates an anchor (typically the newString of an applied edit) inside normalized file
     /// content. Matches verbatim first; when that fails (an edit later reformatted or merged),
     /// falls back to the anchor's longest distinctive line (selector/method-signature lines

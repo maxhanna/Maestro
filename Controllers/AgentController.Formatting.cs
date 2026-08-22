@@ -1409,8 +1409,8 @@ partial class AgentController
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
         foreach (Match m in tableMentionRegex.Matches(fileContent))
             existingTables.Add(m.Groups[1].Value);
-        // Tables covered by a migrations/*.sql file count as existing — the user applies
-        // the migration manually, then deletes the file, so the code never inlines DDL.
+        // Tables covered by migrations/schema_changes.md count as existing — the user applies
+        // the change manually, so the code never inlines DDL.
         foreach (var t in SqlMigrationService.FindMigratedTables(projectRoot))
             existingTables.Add(t);
         var missingTables = referencedTables
@@ -1444,11 +1444,12 @@ partial class AgentController
         catch { }
         var preview = string.Join(", ", missingTables.Take(5));
         return $"MISSING SQL TABLE — newString contains INSERT/UPDATE statements referencing table(s) [{preview}] " +
-               "that do NOT exist in the file and are NOT covered by a migrations/*.sql file. " +
+               "that do NOT exist in the file and are NOT documented in migrations/schema_changes.md. " +
                "Add a _sql_migration step (file=\"_sql_migration\") whose newString is the CREATE TABLE IF NOT EXISTS statement " +
-               "for EACH missing table — the system writes migrations/<timestamp>_create_<table>.sql so the user can apply it " +
-               "to their database manually. Do NOT inline CREATE TABLE inside the method body — the endpoint only does " +
-               "INSERT/UPDATE/SELECT. Do NOT emit INSERT/UPDATE for a table that has not been created yet.";
+               "for EACH missing table — the system appends it to migrations/schema_changes.md so the user can apply it " +
+               "to their database manually. (A NEW COLUMN on an existing table goes in the same _sql_migration step as an " +
+               "ALTER TABLE ... ADD COLUMN statement.) Do NOT inline CREATE TABLE or ALTER TABLE inside the method body — " +
+               "the endpoint only does INSERT/UPDATE/SELECT. Do NOT emit INSERT/UPDATE for a table that has not been created yet.";
     }
 
     /// <summary>

@@ -241,6 +241,36 @@
             </div>
           </details>
 
+          <!-- Feedback — rate this run -->
+          <details class="card-section" ng-if="vm.cardHasRun(card)">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">💬 Feedback</span>
+              <span class="section-badge" ng-if="card._feedback && card._feedback.rating">{{card._feedback.rating === 'up' ? '👍' : '👎'}}</span>
+            </summary>
+            <div class="section-body">
+              <div class="feedback-row">
+                <button type="button" class="feedback-btn"
+                  ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'up'}"
+                  ng-click="vm.rateCard(card, 'up'); $event.stopPropagation()" title="This run was helpful">👍</button>
+                <button type="button" class="feedback-btn"
+                  ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'down'}"
+                  ng-click="vm.rateCard(card, 'down'); $event.stopPropagation()" title="This run needs work">👎</button>
+                <span class="feedback-hint" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">What went wrong?</span>
+              </div>
+              <div class="feedback-form" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">
+                <textarea ng-model="card._feedback.draft" rows="2" placeholder="Tell us what went wrong…" ng-click="$event.stopPropagation()"></textarea>
+                <div class="feedback-actions">
+                  <button type="button" class="primary small" ng-click="vm.submitCardFeedback(card); $event.stopPropagation()">Submit</button>
+                  <button type="button" class="small ghost" ng-click="vm.cancelCardFeedback(card); $event.stopPropagation()">Cancel</button>
+                </div>
+              </div>
+              <div class="feedback-submitted" ng-if="card._feedback && card._feedback.text">
+                <strong>Feedback:</strong> {{card._feedback.text}}
+              </div>
+            </div>
+          </details>
+
           <!-- Delivered steers — the live-steer transcript: what was injected, at which turn -->
           <details class="card-section" ng-if="card._steers && card._steers.length">
             <summary>
@@ -687,6 +717,36 @@
                 ng-class="{'verification-reason-ok': card._verification.complete, 'verification-reason-fail': !card._verification.complete}"
                 title="Final post-execution verification reason">{{card._verification.reason}}</div>
               <div class="verification-at" ng-if="card._verification.at">at {{card._verification.at}}</div>
+            </div>
+          </details>
+
+          <!-- Feedback — rate this run -->
+          <details class="card-section" ng-if="vm.cardHasRun(card)">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">💬 Feedback</span>
+              <span class="section-badge" ng-if="card._feedback && card._feedback.rating">{{card._feedback.rating === 'up' ? '👍' : '👎'}}</span>
+            </summary>
+            <div class="section-body">
+              <div class="feedback-row">
+                <button type="button" class="feedback-btn"
+                  ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'up'}"
+                  ng-click="vm.rateCard(card, 'up'); $event.stopPropagation()" title="This run was helpful">👍</button>
+                <button type="button" class="feedback-btn"
+                  ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'down'}"
+                  ng-click="vm.rateCard(card, 'down'); $event.stopPropagation()" title="This run needs work">👎</button>
+                <span class="feedback-hint" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">What went wrong?</span>
+              </div>
+              <div class="feedback-form" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">
+                <textarea ng-model="card._feedback.draft" rows="2" placeholder="Tell us what went wrong…" ng-click="$event.stopPropagation()"></textarea>
+                <div class="feedback-actions">
+                  <button type="button" class="primary small" ng-click="vm.submitCardFeedback(card); $event.stopPropagation()">Submit</button>
+                  <button type="button" class="small ghost" ng-click="vm.cancelCardFeedback(card); $event.stopPropagation()">Cancel</button>
+                </div>
+              </div>
+              <div class="feedback-submitted" ng-if="card._feedback && card._feedback.text">
+                <strong>Feedback:</strong> {{card._feedback.text}}
+              </div>
             </div>
           </details>
 
@@ -1192,6 +1252,36 @@
                 ng-class="{'verification-reason-ok': card._verification.complete, 'verification-reason-fail': !card._verification.complete}"
                 title="Final post-execution verification reason">{{card._verification.reason}}</div>
               <div class="verification-at" ng-if="card._verification.at">at {{card._verification.at}}</div>
+            </div>
+          </details>
+
+          <!-- Feedback — rate this run -->
+          <details class="card-section" ng-if="vm.cardHasRun(card)">
+            <summary>
+              <span class="section-caret">▶</span>
+              <span class="section-title">💬 Feedback</span>
+              <span class="section-badge" ng-if="card._feedback && card._feedback.rating">{{card._feedback.rating === 'up' ? '👍' : '👎'}}</span>
+            </summary>
+            <div class="section-body">
+              <div class="feedback-row">
+                <button type="button" class="feedback-btn"
+                  ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'up'}"
+                  ng-click="vm.rateCard(card, 'up'); $event.stopPropagation()" title="This run was helpful">👍</button>
+                <button type="button" class="feedback-btn"
+                  ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'down'}"
+                  ng-click="vm.rateCard(card, 'down'); $event.stopPropagation()" title="This run needs work">👎</button>
+                <span class="feedback-hint" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">What went wrong?</span>
+              </div>
+              <div class="feedback-form" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">
+                <textarea ng-model="card._feedback.draft" rows="2" placeholder="Tell us what went wrong…" ng-click="$event.stopPropagation()"></textarea>
+                <div class="feedback-actions">
+                  <button type="button" class="primary small" ng-click="vm.submitCardFeedback(card); $event.stopPropagation()">Submit</button>
+                  <button type="button" class="small ghost" ng-click="vm.cancelCardFeedback(card); $event.stopPropagation()">Cancel</button>
+                </div>
+              </div>
+              <div class="feedback-submitted" ng-if="card._feedback && card._feedback.text">
+                <strong>Feedback:</strong> {{card._feedback.text}}
+              </div>
             </div>
           </details>
 

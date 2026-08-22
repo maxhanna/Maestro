@@ -166,6 +166,17 @@ partial class AgentController
                 if (string.Equals(step.File, "_create_directory", StringComparison.OrdinalIgnoreCase) &&
                     !string.IsNullOrWhiteSpace(step.Change))
                 {
+                    // The planner sometimes reaches for _create_directory with a FILE placeholder
+                    // path (e.g. 'benchmark_test_23/placeholder.txt') when it cannot create the
+                    // folder directly — rewrite it to the clean directory it implies so the junk
+                    // file path never becomes a directory on disk.
+                    var cleanDir = CleanDirectoryPathFromFilePlaceholder(step.Change);
+                    if (cleanDir != null)
+                    {
+                        await EmitLog(true, "warn",
+                            $"Converted _create_directory step '{step.Change}' (a file placeholder path) to create directory '{cleanDir}'.", ct: ct);
+                        step.Change = cleanDir;
+                    }
                     lastImpliedDir = step.Change.Trim('/', '\\', '"', '\'');
                 }
                 if (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase) && lastImpliedDir != null)
@@ -240,7 +251,7 @@ partial class AgentController
                            $"({string.Join(", ", words1.Intersect(words2, StringComparer.OrdinalIgnoreCase).Take(5))}). " +
                            "They describe the same endpoint/feature and should be one step. " +
                            "If one step is a setup/prerequisite, keep it as its own _sql_migration step for schema " +
-                           "(CREATE TABLE goes in a migrations/*.sql file) instead of making it a separate endpoint.";
+                           "(CREATE TABLE / ALTER TABLE go in migrations/schema_changes.md) instead of making it a separate endpoint.";
                 }
             }
         }

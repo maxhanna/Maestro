@@ -1137,13 +1137,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // Reject _create_file steps with no actual content (hallucinated file creation)
         if (string.Equals(step.File, "_sql_migration", StringComparison.OrdinalIgnoreCase))
         {
-            if (string.IsNullOrWhiteSpace(step.NewString) ||
-                !step.NewString.Contains("CREATE TABLE", StringComparison.OrdinalIgnoreCase))
-                return (false, "_sql_migration step must carry the CREATE TABLE IF NOT EXISTS statement in newString — " +
-                                "provide the full DDL (e.g. \"CREATE TABLE IF NOT EXISTS benchmark_scores (...);\") or edit an existing file instead.");
+            if (string.IsNullOrWhiteSpace(step.NewString))
+                return (false, "_sql_migration step must carry the DDL in newString — " +
+                                "provide the full CREATE TABLE or ALTER TABLE statement (e.g. \"CREATE TABLE IF NOT EXISTS benchmark_scores (...);\" " +
+                                "or \"ALTER TABLE benchmark_scores ADD COLUMN metric_type TEXT;\") or edit an existing file instead.");
             var tables = SqlMigrationService.ExtractCreateTableStatements(step.NewString);
-            if (tables.Count == 0)
-                return (false, "_sql_migration step's newString does not contain a parseable CREATE TABLE statement — " +
+            var alters = SqlMigrationService.ExtractAlterTableStatements(step.NewString);
+            if (tables.Count == 0 && alters.Count == 0)
+                return (false, "_sql_migration step's newString does not contain a parseable CREATE TABLE or ALTER TABLE statement — " +
                                 "include the complete DDL with column definitions and a trailing ';'.");
         }
         if (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase))

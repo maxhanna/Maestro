@@ -107,11 +107,12 @@ partial class AgentController
         sb.AppendLine("   ([HttpGet], @app.get, @RequestMapping, etc.) ARE part of the method declaration at the same");
         sb.AppendLine("   location — they are NOT a separate 'endpoint registration'. 'Add GetBenchmarks method with [HttpGet]'");
         sb.AppendLine("   is ONE step, not two.");
-        sb.AppendLine("   i) NEW SQL TABLES GO IN A _sql_migration STEP: If a step mentions adding a method/endpoint that");
+        sb.AppendLine("   i) NEW SQL TABLES/COLUMNS GO IN A _sql_migration STEP: If a step mentions adding a method/endpoint that");
         sb.AppendLine("      inserts/updates data AND the table does not exist yet, add a separate _sql_migration step");
-        sb.AppendLine("      FIRST (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...). The DDL is written");
-        sb.AppendLine("      to migrations/*.sql for the user to apply manually — do NOT inline CREATE TABLE inside the");
-        sb.AppendLine("      method body. The endpoint method only contains INSERT/UPDATE/SELECT.");
+        sb.AppendLine("      FIRST (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...). A new COLUMN on an");
+        sb.AppendLine("      existing table is the SAME step with newString=ALTER TABLE ... ADD COLUMN .... The DDL is written");
+        sb.AppendLine("      to migrations/schema_changes.md for the user to apply manually — do NOT inline CREATE TABLE /");
+        sb.AppendLine("      ALTER TABLE inside the method body. The endpoint method only contains INSERT/UPDATE/SELECT.");
         sb.AppendLine("      GOOD: Step 1: \"_sql_migration: benchmark_scores table\", Step 2: \"Add PostBenchmarks method with INSERT\"");
         sb.AppendLine();
         sb.AppendLine("SPECIAL RULE FOR REMOVAL/DELETE STEPS:");

@@ -24,6 +24,20 @@ partial class AgentController
         "and never drop the space. The `&nbsp;` (or `&#160;`) is automatically converted to a " +
         "real space after your edit is applied, so the saved file contains the exact required text.\n";
 
+    // The weak planner sometimes plans a PLACEHOLDER FILE instead of a _create_directory step
+    // when it needs a folder — the benchmark-23 run planned "benchmark_test_23/placeholder.txt"
+    // (content "Placeholder file for directory creation") just to materialize the folder, and
+    // separately planned _create_directory with a placeholder FILE path. The executor converts
+    // both to the directory automatically, but planning _create_directory directly is always
+    // correct — train every planner that emits file/folder steps to do that up front.
+    private const string FolderCreationRule =
+        "FOLDER CREATION: when the task needs a folder, plan a `_create_directory` step with the " +
+        "RELATIVE folder path in \"change\" (e.g. \"benchmark_test_23\") and nothing else — NEVER " +
+        "plan a placeholder/dummy file (placeholder.txt, .gitkeep, keep.txt, temp, …) just to " +
+        "materialize the folder. A placeholder file used only to create a folder is skipped and " +
+        "converted to the directory automatically, but planning `_create_directory` directly is " +
+        "always the correct step.\n";
+
     private static string BuildEditSystemPrompt(string editFormat)
     {
         var intro = "You are a surgical code editor. Output ONLY a JSON object.\n\n";
@@ -73,9 +87,10 @@ partial class AgentController
             "10. NEVER INVENT type names or property names. Every type/property you reference MUST exist in the project.\n" +
             "11. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. Verify EVERY token boundary.\n" +
             "12. ATOMIC STEPS: Execute EXACTLY what the CHANGE REQUIRED asks for — no more, no less.\n" +
-            "13. If your change introduces a NEW SQL table, do NOT inline CREATE TABLE in the method body. " +
-                "Add a _sql_migration step (file=\"_sql_migration\", change describes the table, newString = the CREATE TABLE IF NOT EXISTS statement) " +
-                "so the user can apply it to their database manually from migrations/*.sql. " +
+            "13. If your change introduces a NEW SQL table or a NEW COLUMN, do NOT inline CREATE TABLE / ALTER TABLE in the method body. " +
+                "Add a _sql_migration step (file=\"_sql_migration\", change describes the change, newString = the CREATE TABLE IF NOT EXISTS statement " +
+                "for a new table, or the ALTER TABLE ... ADD COLUMN statement for a new column) " +
+                "so the user can apply it to their database manually from migrations/schema_changes.md. " +
                 "The endpoint method itself only contains INSERT/UPDATE/SELECT against the table.\n" +
              "14. NEVER write `{{ex.Message}}` inside an interpolated string — use `{ex.Message}` with single braces.\n" +
              "15. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form. Only add comments if the change description explicitly asks for them.\n" +
@@ -560,8 +575,8 @@ partial class AgentController
         {
             sb.Append("6. Respect dependency order: DTOs/models before endpoints that use them, backend before frontend, ");
             sb.Append("   services before UI code that calls them.\n");
-            sb.Append("7. NEW SQL tables are added via a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) " +
-                "that writes a migrations/*.sql file — never an inline CREATE TABLE inside the method body, and never a separate edit step on a code file.\n");
+            sb.Append("7. NEW SQL tables and columns are added via a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ... " +
+                "or ALTER TABLE ... ADD COLUMN ...) that appends them to migrations/schema_changes.md — never an inline CREATE TABLE/ALTER TABLE inside the method body, and never a separate edit step on a code file.\n");
         }
         else
         {
@@ -583,7 +598,8 @@ partial class AgentController
             sb.Append("   Put just the RELATIVE folder path in \"change\" (e.g. \"benchmark_test_1\"), not a description. ");
             sb.Append("   _create_file creates files (path in change, content in newString). ");
             sb.Append("   _create_directory creates folders (path in change, no newString). ");
-            sb.Append("   Use _create_directory for folder-only tasks. Do NOT use _git or _command for folder creation.\n");
+            sb.Append("   Use _create_directory for folder-only tasks. Do NOT use _git or _command for folder creation. ");
+            sb.Append("   NEVER plan a placeholder file (placeholder.txt, .gitkeep, keep.txt) just to create the folder — plan _create_directory directly.\n");
             sb.Append("13. _create_file steps: put the RELATIVE file path in \"change\" (e.g. \"benchmark_test_1/test.md\"), ");
             sb.Append("   and the FULL file content in \"newString\". ");
             sb.Append("   Do NOT put a description like 'Create test.md file...' in change — use just the path. ");
@@ -743,7 +759,8 @@ partial class AgentController
     "5. If the whole task fits in ONE stage, propose that single stage, then declare metaPlanComplete=true next turn.\n" +
     "6. Only split into multiple stages when the task genuinely spans multiple files/layers — never manufacture " +
     "   stages for a single-file change.\n" +
-    "7. " + NbspHeadingRule;
+    "7. " + NbspHeadingRule +
+    "8. " + FolderCreationRule;
     private static string BuildIncrementalSubPlanUserPrompt(
         string originalPrompt, string discoveryContext, List<MetaPlanSubPlan> subPlansSoFar, List<string> rejectionFeedback)
     {
@@ -801,7 +818,7 @@ partial class AgentController
         sb.AppendLine("2. Use the EXACT symbol names, property names, and file paths from the context above");
         sb.AppendLine("3. If context says a prior sub-plan added 'OS, CPU, RAM, GPU properties to BenchmarkDataDTO',");
         sb.AppendLine("   your INSERT statement MUST reference those exact property names (benchmark.OS, benchmark.CPU, etc.)");
-        sb.AppendLine("4. NEW SQL tables go in a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) writing migrations/*.sql — do NOT inline CREATE TABLE in the method body");
+        sb.AppendLine("4. NEW SQL tables and columns go in a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ... or ALTER TABLE ... ADD COLUMN ...) writing migrations/schema_changes.md — do NOT inline CREATE TABLE / ALTER TABLE in the method body");
         sb.AppendLine("5. Do NOT re-describe or re-implement work from prior sub-plans");
         sb.AppendLine("6. Each step must be atomic: one coherent edit at one location in one file");
         return sb.ToString();
@@ -811,9 +828,9 @@ partial class AgentController
         ["_explore"] = "\"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.",
         ["_discover"] = "\"_discover\"          — Project-wide context search: use ONLY when the DISCOVERY CONTEXT lacks what you need and you do NOT know which file to read. Scans the whole project (lexical BM25 ranking + AI relevance selection) and reads the most relevant files into context. Do NOT use _discover for files you can name — use _explore instead. Do NOT use it when the attached/user-supplied files in DISCOVERY CONTEXT already cover the task.",
         ["_command"] = "\"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_directory or _create_file instead.",
-        ["_create_directory"] = "\"_create_directory\"   — Create a folder/directory. Put the RELATIVE folder path in \"change\" (e.g. \"benchmark_test_1\"), not a description. Leave everything else empty. Deep/nested paths are created automatically. Do NOT use mkdir.",
-        ["_create_file"] = "\"_create_file\"        — Create a new file: put the RELATIVE file path in \"change\", put the FULL file content in \"newString\", leave \"oldString\" empty. The file path should be just the path (e.g. \"benchmark_test_1/test.md\"), not a description. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.",
-        ["_sql_migration"] = "\"_sql_migration\"      — Write a SQL migration file for a NEW database table: put a short description in \"change\" (e.g. \"benchmark_scores table\"), put the full CREATE TABLE IF NOT EXISTS statement in \"newString\". The system writes migrations/<timestamp>_create_<table>.sql so the user can apply the table to their database manually, then delete the file. Do NOT inline CREATE TABLE in method bodies.",
+        ["_create_directory"] = "\"_create_directory\"   — Create a folder/directory. Put the RELATIVE folder path in \"change\" (e.g. \"benchmark_test_1\"), not a description. Leave everything else empty. Deep/nested paths are created automatically. Do NOT use mkdir. When the task needs a folder, plan this step directly — NEVER plan a placeholder file (placeholder.txt, .gitkeep, keep.txt) just to materialize the folder.",
+        ["_create_file"] = "\"_create_file\"        — Create a new file: put the RELATIVE file path in \"change\", put the FULL file content in \"newString\", leave \"oldString\" empty. The file path should be just the path (e.g. \"benchmark_test_1/test.md\"), not a description. If the directory does not exist, the system will create it automatically. Do NOT use mkdir. NEVER plan a placeholder/dummy file merely to create its folder — plan a _create_directory step instead.",
+        ["_sql_migration"] = "\"_sql_migration\"      — Write a schema change for a NEW database table or NEW column: put a short description in \"change\" (e.g. \"benchmark_scores table\" or \"add metric_type column\"), put the full CREATE TABLE IF NOT EXISTS (new table) or ALTER TABLE ... ADD COLUMN (new column) statement in \"newString\". The system appends them to migrations/schema_changes.md so the user can read and apply them manually. Do NOT inline CREATE TABLE or ALTER TABLE in method bodies.",
         ["_web_search"] = "\"_web_search\"         — Search the web; put the query in \"change\"",
         ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
         ["_scraper"] = "\"_scraper\"           — FALLBACK fetch when _web_fetch keeps failing: put the URL in \"change\"; the system probes your OS/interpreter/installed packages and builds+runs a working scraper, writing the demanded file. Never write scraper code yourself.",
@@ -882,6 +899,7 @@ partial class AgentController
         sb.Append("Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n");
         sb.Append("Output ONLY valid JSON — no markdown fences, no extra text.\n\n");
         sb.Append(NbspHeadingRule);
+        sb.Append(FolderCreationRule);
         sb.Append("### STEP TYPES (the \"file\" field) ###\n");
         sb.Append("  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time. ");
         sb.Append("For every edit step, include a \"line\" field with the 1-based line number of the target location ");
@@ -955,9 +973,9 @@ partial class AgentController
         sb.Append("GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" ");
         sb.Append("(describes only the missing logic). ");
         sb.Append("Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n");
-        sb.Append("18. NEW SQL TABLES GO IN A MIGRATION FILE (CRITICAL): If the task involves creating a new database table and inserting/updating data into it, ");
-        sb.Append("the CREATE TABLE IF NOT EXISTS statement goes in a _sql_migration step (file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) ");
-        sb.Append("that writes a migrations/*.sql file the user applies manually. Do NOT inline CREATE TABLE inside the method body — the method body only has the INSERT/UPDATE. ");
+        sb.Append("18. NEW SQL TABLES AND COLUMNS GO IN A SCHEMA-CHANGES FILE (CRITICAL): If the task involves creating a new database table (or adding a new column) and inserting/updating data, ");
+        sb.Append("the CREATE TABLE IF NOT EXISTS statement (new table) or ALTER TABLE ... ADD COLUMN statement (new column) goes in a _sql_migration step (file=\"_sql_migration\", newString=<DDL>) ");
+        sb.Append("that appends it to migrations/schema_changes.md the user applies manually. Do NOT inline CREATE TABLE / ALTER TABLE inside the method body — the method body only has the INSERT/UPDATE. ");
         sb.Append("BAD: Step 1: 'Add PostBenchmarks endpoint with inline CREATE TABLE inside the method body' — WRONG, inline DDL pollutes the code. ");
         sb.Append("GOOD: Step 1: '_sql_migration creating benchmark_scores table', Step 2: 'Add PostBenchmarks endpoint with INSERT statement'.\n\n");
         sb.Append("### OUTPUT FORMAT ###\n");
@@ -1027,13 +1045,13 @@ partial class AgentController
         sb.Append("29. METHOD CREATION IS ONE STEP (CRITICAL): Creating a new method includes its signature, parameters, and body — ");
         sb.Append("all in ONE step. Do NOT split into \"Create method signature\" and \"Implement method body\". ");
         sb.Append("A method is ONE coherent block at ONE location. ");
-        sb.Append("If the method body needs a NEW SQL table, add a SEPARATE _sql_migration step BEFORE the method step ");
-        sb.Append("(file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ...) — the table DDL lives in a migrations/*.sql file, ");
+        sb.Append("If the method body needs a NEW SQL table or column, add a SEPARATE _sql_migration step BEFORE the method step ");
+        sb.Append("(file=\"_sql_migration\", newString=CREATE TABLE IF NOT EXISTS ... or ALTER TABLE ... ADD COLUMN ...) — the DDL lives in migrations/schema_changes.md, ");
         sb.Append("not inside the method body. ");
         sb.Append("BAD: Step 1: \"Add PostBenchmarks method with inline CREATE TABLE inside the body\" — WRONG, inline DDL.\n");
         sb.Append("GOOD: Step 1: \"_sql_migration: benchmark_scores table\", Step 2: \"Add PostBenchmarks method with parameterized INSERT\"\n");
-        sb.Append("RATIONALE: Migrations/*.sql files let the user apply the CREATE TABLE to their database manually and delete the file ");
-        sb.Append("once applied — the endpoint method stays clean and only does INSERT/UPDATE/SELECT.\n");
+        sb.Append("RATIONALE: migrations/schema_changes.md lets the user read and apply the CREATE TABLE / ALTER TABLE to their database manually ");
+        sb.Append("— the endpoint method stays clean and only does INSERT/UPDATE/SELECT.\n");
         sb.Append("30. DO NOT CREATE SEPARATE SETUP ENDPOINTS: When a single new endpoint needs both ");
         sb.Append("infrastructure setup (connection check) and business logic (INSERT/UPDATE/SELECT), ");
         sb.Append("put the setup INSIDE the endpoint method as inline code at the top. ");
@@ -1041,7 +1059,7 @@ partial class AgentController
         sb.Append("BAD: Step 1: \"Add PostBenchmarksTable endpoint (creates table)\", Step 2: \"Add AddBenchmark endpoint (inserts data)\"\n");
         sb.Append("GOOD: \"Add AddBenchmark endpoint with a connection check at the top and parameterized INSERT below\"\n");
         sb.Append("RATIONALE: A separate setup endpoint creates unnecessary public API surface. ");
-        sb.Append("Schema for NEW tables goes in a _sql_migration step; the endpoint only handles data.\n");
+        sb.Append("Schema for NEW tables and columns goes in a _sql_migration step; the endpoint only handles data.\n");
         return sb.ToString();
     }
     private static string BuildFailedEditHistory(List<object> allSteps)
@@ -1123,8 +1141,10 @@ partial class AgentController
         sb.AppendLine("Only address concrete failures or work the user EXPLICITLY requested that is genuinely missing.");
         sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         // Repair passes can REWRITE a heading — the same nbsp-for-literal-space rule must apply
-        // so a repair step's newString can't re-merge 'Benchmark 23' into 'Benchmark23'.
+        // so a repair step's newString can't re-merge 'Benchmark 23' into 'Benchmark23'. A repair
+        // that needs a folder must also plan _create_directory, not a placeholder file.
         sb.Append(NbspHeadingRule);
+        sb.Append(FolderCreationRule);
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
         if (!string.IsNullOrWhiteSpace(requirementChecklist)) { sb.AppendLine("## Requirements"); sb.AppendLine(requirementChecklist); sb.AppendLine(); }

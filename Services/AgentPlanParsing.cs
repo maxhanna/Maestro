@@ -333,10 +333,11 @@ public static class AgentPlanParsing
             if (isTableCreationStep)
             {
                 // Table creation is no longer merged into the endpoint edit. Instead it
-                // becomes its own _sql_migration step: the executor writes a migrations/*.sql
-                // file the user applies to their database manually, keeping CREATE TABLE out
-                // of the method body. If the step already carries the DDL in NewString, keep
-                // it; otherwise the executor drafts the CREATE TABLE from the description.
+                // becomes its own _sql_migration step: the executor appends the DDL to
+                // migrations/schema_changes.md for the user to apply manually, keeping
+                // CREATE TABLE out of the method body. If the step already carries the DDL
+                // in NewString, keep it; otherwise the executor drafts the CREATE TABLE
+                // from the description.
                 var migrationStep = new PlanStep
                 {
                     File = "_sql_migration",

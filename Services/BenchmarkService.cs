@@ -601,6 +601,23 @@ public class BenchmarkService
                     Check.Contains("Final 6 legs recorded", "benchmark_test_23/legs_report.txt", "LEGS: 6"),
                     Check.LiveJsTest("Canvas confirms 6 legs on screen", "benchmark_test_23", "window.legCount === 6")
                 ]
+            },
+            new()
+            {
+                Level = 24, Name = "SQL Schema 1: document CREATE TABLE + ALTER TABLE in a .md file",
+                Description = "Create a folder called 'benchmark_test_24' at the project root. Inside it create a C# file 'BenchmarkRepository.cs' containing a class BenchmarkRepository with a method SaveScore(string player, int score) that INSERTs a row into a NEW SQL table named 'benchmark_metrics'. Then, in a SEPARATE step, add a NEW column 'metric_type' (TEXT) to an existing table 'benchmark_scores' using ALTER TABLE. Do NOT inline the CREATE TABLE or ALTER TABLE statements inside the C# code. Instead, write the schema changes to a single markdown file 'migrations/schema_changes.md' at the project root: a fenced CREATE TABLE block for benchmark_metrics, and a fenced ALTER TABLE ... ADD COLUMN metric_type block.",
+                AcceptanceChecks =
+                [
+                    Check.Dir("Benchmark directory exists", "benchmark_test_24"),
+                    Check.File("Repository file exists", "benchmark_test_24/BenchmarkRepository.cs"),
+                    Check.File("Schema changes markdown exists", "migrations/schema_changes.md"),
+                    Check.ContainsIc("Create table documented", "migrations/schema_changes.md", "CREATE TABLE"),
+                    Check.ContainsIc("New table name documented", "migrations/schema_changes.md", "benchmark_metrics"),
+                    Check.ContainsIc("Alter table documented", "migrations/schema_changes.md", "ALTER TABLE"),
+                    Check.ContainsIc("New column documented", "migrations/schema_changes.md", "metric_type"),
+                    Check.NotContains("No inline create table", "benchmark_test_24/BenchmarkRepository.cs", "CREATE TABLE"),
+                    Check.NotContains("No inline alter table", "benchmark_test_24/BenchmarkRepository.cs", "ALTER TABLE")
+                ]
             }
         };
     }

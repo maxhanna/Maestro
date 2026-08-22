@@ -648,18 +648,19 @@ partial class AgentController
             int oldLines = oldStr?.Split('\n').Length ?? 0;
             int newLines = newStr?.Split('\n').Length ?? 0;
             string? sqlMigrationNote = null;
-            // NEW TABLE ENFORCEMENT: if the LLM still inlined a CREATE TABLE statement (old
-            // behavior), move it into a migrations/*.sql file and strip it from the applied
-            // code — the user applies the migration manually, the endpoint stays clean, and
-            // the SQL guard sees the table as covered by the migration file. NOTE: batch
-            // steps (step.Edits) compose newContent independently below and bypass this
-            // hook — inline DDL there is an accepted edge case since the planner is trained
-            // to emit _sql_migration steps for new tables anyway.
+            // NEW TABLE/COLUMN ENFORCEMENT: if the LLM still inlined CREATE TABLE or ALTER
+            // TABLE statements (old behavior), move them into migrations/schema_changes.md and
+            // strip them from the applied code — the user applies the changes manually, the
+            // endpoint stays clean, and the SQL guard sees the table/column as covered. NOTE:
+            // batch steps (step.Edits) compose newContent independently below and bypass this
+            // hook — inline DDL there is an accepted edge case since the planner is trained to
+            // emit _sql_migration steps for new tables/columns anyway.
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 !string.Equals(Path.GetExtension(relPath), ".sql", StringComparison.OrdinalIgnoreCase))
             {
                 var inlineTables = SqlMigrationService.ExtractCreateTableStatements(newStr);
-                if (inlineTables.Count > 0)
+                var inlineAlters = SqlMigrationService.ExtractAlterTableStatements(newStr);
+                if (inlineTables.Count > 0 || inlineAlters.Count > 0)
                 {
                     var writtenMigrations = new List<string>();
                     foreach (var (table, sql) in inlineTables)
@@ -667,28 +668,35 @@ partial class AgentController
                         var rel = SqlMigrationService.WriteMigration(projectRoot, table, sql);
                         if (rel != null) writtenMigrations.Add(rel);
                     }
+                    foreach (var (table, column, sql) in inlineAlters)
+                    {
+                        var rel = SqlMigrationService.WriteAlterMigration(projectRoot, table, column, sql);
+                        if (rel != null) writtenMigrations.Add(rel);
+                    }
                     var strippedNewStr = SqlMigrationService.StripCreateTableStatements(
                         newStr, inlineTables.Select(t => t.Sql).ToList());
+                    strippedNewStr = SqlMigrationService.StripAlterTableStatements(
+                        strippedNewStr, inlineAlters.Select(a => a.Sql).ToList());
                     if (strippedNewStr != newStr)
                     {
                         await EmitLog(emitSse, "info",
-                            $"Auto-migrated {inlineTables.Count} inline CREATE TABLE statement(s) out of {relPath} " +
-                            $"into migrations/ — the method body now only references the table", ct: ct);
+                            $"Auto-documented {inlineTables.Count} inline CREATE TABLE and {inlineAlters.Count} inline ALTER TABLE " +
+                            $"statement(s) out of {relPath} into {SqlMigrationService.SchemaChangesRelPath} — the method body now only references the schema", ct: ct);
                         newStr = strippedNewStr;
                         newLines = newStr.Split('\n').Length;
-                        // Tell the verifier WHY the CREATE TABLE is gone so it doesn't
-                        // reject the edit as missing schema: the DDL moved to migrations/*.sql
-                        // and the user applies it manually.
+                        // Tell the verifier WHY the DDL is gone so it doesn't reject the edit
+                        // as missing schema: the statements moved to migrations/schema_changes.md
+                        // and the user applies them manually.
                         sqlMigrationNote =
-                            "NOTE: The edit's inline CREATE TABLE statement(s) were automatically moved to " +
-                            $"migrations/*.sql files (e.g. {string.Join(", ", writtenMigrations.Take(3))}). " +
-                            "The user applies the migration to their database manually, then deletes the file. " +
+                            "NOTE: The edit's inline CREATE TABLE / ALTER TABLE statement(s) were automatically moved to " +
+                            $"{SqlMigrationService.SchemaChangesRelPath} (e.g. {string.Join(", ", writtenMigrations.Take(3))}). " +
+                            "The user applies the schema changes to their database manually. " +
                             "The method body intentionally contains ONLY INSERT/UPDATE/SELECT. " +
-                            "Do NOT reject this edit for a missing CREATE TABLE — the schema lives in the migration file.";
+                            "Do NOT reject this edit for a missing CREATE TABLE or ALTER TABLE — the schema lives in the schema-changes file.";
                     }
-                    foreach (var rel in writtenMigrations)
+                    foreach (var rel in writtenMigrations.Distinct(StringComparer.OrdinalIgnoreCase))
                         await EmitLog(emitSse, "success",
-                            $"📦 SQL migration written: {rel} — apply it to your database manually, then delete the file", ct: ct);
+                            $"📦 Schema change documented: {rel} — apply it to your database manually", ct: ct);
                 }
             }
             if (step.Edits is { Count: > 0 } && !replaced)

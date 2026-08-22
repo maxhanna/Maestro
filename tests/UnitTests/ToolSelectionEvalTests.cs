@@ -251,11 +251,9 @@ public class ToolSelectionEvalTests : IDisposable
             }
             case "_sql_migration":
             {
-                var migDir = Rel("migrations");
-                Assert.True(Directory.Exists(migDir), $"[{name}] _sql_migration must write a migrations/ folder");
-                var files = Directory.GetFiles(migDir, "*.sql");
-                Assert.NotEmpty(files);
-                var content = File.ReadAllText(files[0]);
+                var migFile = Rel("migrations/schema_changes.md");
+                Assert.True(File.Exists(migFile), $"[{name}] _sql_migration must write migrations/schema_changes.md");
+                var content = File.ReadAllText(migFile);
                 Assert.Contains("CREATE TABLE IF NOT EXISTS user_preferences", content);
                 break;
             }
