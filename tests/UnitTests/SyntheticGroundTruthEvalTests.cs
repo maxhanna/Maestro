@@ -1971,10 +1971,11 @@ public class SyntheticGroundTruthEvalTests : IDisposable
     {
         // A delete-style edit legitimately reduces the object count — the change is not a
         // grouping, so the drop guard must stay out of its way.
-        var afterDelete = BenchmarkDataFixture.Replace("  { name: 'bm_c', metric: 9 },\n", "");
-        Assert.NotEqual(BenchmarkDataFixture, afterDelete);
+        var fixture = BenchmarkDataFixture.Replace("\r\n", "\n");
+        var afterDelete = fixture.Replace("  { name: 'bm_c', metric: 9 },\n", "");
+        Assert.NotEqual(fixture, afterDelete);
         Assert.Null(AgentEditHeuristics.DetectDroppedEntriesInGroupedOutput(
-            BenchmarkDataFixture, afterDelete, "Remove the bm_c:9 entry"));
+            fixture, afterDelete, "Remove the bm_c:9 entry"));
     }
 
     [Fact]

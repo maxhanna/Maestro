@@ -56,7 +56,7 @@ public class Calculator
     public void BraceLanguage_CrlfInput_NormalizesLineEndings()
     {
         var region = AgentDiscovery.ExtractIdentifierRegions(
-            CsFile.Replace("\n", "\r\n"), new List<string> { "result" }, ".cs");
+            CsFile.Replace("\r\n", "\n").Replace("\n", "\r\n"), new List<string> { "result" }, ".cs");
 
         Assert.Contains("public int Add(int a, int b)", region);
         Assert.Contains("// ▼ 'result' — lines 5–9", region);
