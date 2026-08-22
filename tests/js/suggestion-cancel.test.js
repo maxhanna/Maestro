@@ -28,7 +28,7 @@ function test(name, fn) {
 
 // ── Extract the helpers from the live source ────────────────────────────────
 const src = fs.readFileSync(path.join(__dirname, '../../wwwroot/agent.js'), 'utf8');
-const startMatch = /function shouldStartSuggestions\(card, maxSuggestions, topup\) \{[\s\S]*?\n        \}/.exec(src);
+const startMatch = /function shouldStartSuggestions\(card, maxSuggestions, topup, refresh\) \{[\s\S]*?\n        \}/.exec(src);
 const abortMatch = /function abortSuggestionGeneration\(card\) \{[\s\S]*?\n        \}/.exec(src);
 const staleMatch = /function clearStaleSuggestions\(card\) \{[\s\S]*?\n        \}/.exec(src);
 const busyMatch = /function suggestionSystemBlocked\(state\) \{[\s\S]*?\n        \}/.exec(src);
@@ -38,8 +38,8 @@ assert(staleMatch, 'clearStaleSuggestions not found in wwwroot/agent.js — mark
 assert(busyMatch, 'suggestionSystemBlocked not found in wwwroot/agent.js — marker format may have drifted');
 assert(doneMatch, '_doneCardsNeedingSuggestions not found in wwwroot/agent.js — marker format may have drifted');
 
-const shouldStartSuggestions = eval('(function shouldStartSuggestions(card, maxSuggestions, topup) {' +
-  startMatch[0].replace(/^function shouldStartSuggestions\(card, maxSuggestions, topup\) \{/, '').replace(/\n        \}$/, '') + '})');
+const shouldStartSuggestions = eval('(function shouldStartSuggestions(card, maxSuggestions, topup, refresh) {' +
+  startMatch[0].replace(/^function shouldStartSuggestions\(card, maxSuggestions, topup, refresh\) \{/, '').replace(/\n        \}$/, '') + '})');
 const abortSuggestionGeneration = eval('(function abortSuggestionGeneration(card) {' +
   abortMatch[0].replace(/^function abortSuggestionGeneration\(card\) \{/, '').replace(/\n        \}$/, '') + '})');
 const clearStaleSuggestions = eval('(function clearStaleSuggestions(card) {' +
@@ -103,6 +103,31 @@ test('topup with no suggestions array → does not start', function () {
 
 test('topup while already generating → does not start', function () {
   assert.strictEqual(shouldStartSuggestions({ _suggestions: [{ text: 'a' }], _suggestionsGenerating: true }, 3, true), false);
+});
+
+// ── shouldStartSuggestions: refresh (↻ Refresh) guard ──────────────────────
+test('refresh with existing suggestions → starts (regenerates from scratch)', function () {
+  assert.strictEqual(shouldStartSuggestions({ _suggestions: [{ text: 'a' }, { text: 'b' }] }, 3, false, true), true);
+});
+
+test('refresh at cap → still starts (cap applies to the new set, not the old)', function () {
+  assert.strictEqual(shouldStartSuggestions({ _suggestions: [{ text: 'a' }, { text: 'b' }, { text: 'c' }] }, 3, false, true), true);
+});
+
+test('refresh with no suggestions → starts', function () {
+  assert.strictEqual(shouldStartSuggestions({}, 3, false, true), true);
+});
+
+test('refresh while already generating → does not start', function () {
+  assert.strictEqual(shouldStartSuggestions({ _suggestions: [{ text: 'a' }], _suggestionsGenerating: true }, 3, false, true), false);
+});
+
+test('refresh on benchmark card → does not start', function () {
+  assert.strictEqual(shouldStartSuggestions({ _benchmark: true, _suggestions: [{ text: 'a' }] }, 3, false, true), false);
+});
+
+test('refresh with cap 0 → does not start', function () {
+  assert.strictEqual(shouldStartSuggestions({ _suggestions: [{ text: 'a' }] }, 0, false, true), false);
 });
 
 // ── abortSuggestionGeneration: cancel-state transition ─────────────────────

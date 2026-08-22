@@ -580,6 +580,24 @@ body.dragging-active .card:hover {
     color: #c4b5fd;
 }
 
+.card .suggest-refresh {
+    float: right;
+    margin-right: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #a78bfa;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    opacity: 0.85;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.card .suggest-refresh:hover {
+    opacity: 1;
+    color: #c4b5fd;
+}
+
 .card .suggestion-context {
     border-top: 1px dashed rgba(192, 132, 252, 0.3);
     padding: 8px 10px;

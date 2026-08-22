@@ -1370,6 +1370,11 @@
                 href="javascript:void(0)" ng-click="vm.moreLikeThis(card); $event.stopPropagation()"
                 title="Generate more suggestions in the same vein — topped up to the project's suggestion cap">More like
                 this…</a>
+              <a class="suggest-refresh"
+                ng-if="!card._suggestionsGenerating"
+                ng-click="vm.refreshSuggestions(card); $event.stopPropagation()"
+                title="Regenerate suggestions from scratch — discards the current set and re-asks the model">↻
+                Refresh</a>
               <a class="suggest-why" ng-if="vm.suggestionContext(card)"
                 ng-click="vm.toggleSuggestionContext(card); $event.stopPropagation()"
                 title="Why were these proposed?">ℹ</a>

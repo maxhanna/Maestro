@@ -6,10 +6,15 @@ angular.module('kanbanApp')
         // Pure guard: should a suggestion generation start for this card? Mirrors the
         // entry checks of vm.suggestImprovements (tests/js/suggestion-cancel.test.js
         // extracts these helpers from the live source).
-        function shouldStartSuggestions(card, maxSuggestions, topup) {
+        function shouldStartSuggestions(card, maxSuggestions, topup, refresh) {
             if (!card || maxSuggestions <= 0) return false;
             // Benchmark cards are sandbox noise — never generate suggestions for them.
             if (card._benchmark) return false;
+            // A refresh always regenerates from scratch — the existing set (if any)
+            // must not block the start.
+            if (refresh) {
+                return !card._suggestionsGenerating;
+            }
             if (topup) {
                 return Array.isArray(card._suggestions) && card._suggestions.length < maxSuggestions && !card._suggestionsGenerating;
             }
@@ -1508,7 +1513,8 @@ angular.module('kanbanApp')
                     }
                     var maxSuggestions = vm.projectMaxSuggestions(proj);
                     var topup = !!(opts && opts.topup);
-                    if (!shouldStartSuggestions(card, maxSuggestions, topup)) return false;
+                    var refresh = !!(opts && opts.refresh);
+                    if (!shouldStartSuggestions(card, maxSuggestions, topup, refresh)) return false;
                     // A fresh generation clears any earlier cancellation so the request can
                     // complete normally; _suggestionCancel aborts the in-flight $http call
                     // when the card is moved back to To Do or another card starts.
@@ -1518,7 +1524,7 @@ angular.module('kanbanApp')
                     card._suggestionsGenerating = true;
                     card._suggestionsError = null;
                     vm.saveCards();
-                    pushAgentLog(vm, 'info', topup ? '💡 Topping up suggestions (More like this)…' : '💡 Suggesting improvements for completed card…');
+                    pushAgentLog(vm, 'info', refresh ? '💡 Refreshing suggestions for this card…' : topup ? '💡 Topping up suggestions (More like this)…' : '💡 Suggesting improvements for completed card…');
                     var analysis = card.agentAnalysis || {};
                     var filesEdited = ((analysis.filesEdited && analysis.filesEdited.length)
                         ? analysis.filesEdited
@@ -1550,6 +1556,7 @@ angular.module('kanbanApp')
                     };
                     payload.maxSuggestions = maxSuggestions;
                     if (topup) { payload.topup = true; payload.existing = card._suggestions; }
+                    if (refresh) { payload.refresh = true; }
                     $http.post('/api/agent/suggest-improvements', payload, { timeout: card._suggestionCancel.promise }).then(function (resp) {
                         if (card._suggestionsCancelled) { delete card._suggestionCancel; return; }
                         if (resp && resp.data && resp.data.cancelled) {
@@ -1571,10 +1578,10 @@ angular.module('kanbanApp')
                         card._suggestions = suggestions;
                         vm.saveCards();
                         if (suggestions.length) {
-                            pushAgentLog(vm, 'success', topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card.' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card.');
+                            pushAgentLog(vm, 'success', refresh ? '💡 Refreshed to ' + suggestions.length + ' suggestion(s) on the card.' : topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card.' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card.');
                             // Background (idle-loop) runs skip the toast — they'd spam
                             // the screen while filling a whole board of Done cards.
-                            if (!(opts && opts.idle) && vm.showSideToast) vm.showSideToast(topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card');
+                            if (!(opts && opts.idle) && vm.showSideToast) vm.showSideToast(refresh ? '💡 Refreshed to ' + suggestions.length + ' suggestion(s) on the card' : topup ? '💡 Topped up to ' + suggestions.length + ' suggestion(s) on the card' : '💡 ' + suggestions.length + ' improvement suggestion(s) added to the card');
                         } else {
                             pushAgentLog(vm, 'info', '💡 No improvement suggestions generated for this card.');
                         }
@@ -1626,6 +1633,12 @@ angular.module('kanbanApp')
                 vm.moreLikeThis = function (card) {
                     if (!card) return;
                     vm.suggestImprovements(card, null, card.filePath || vm.selectedProject, { topup: true });
+                };
+                // Regenerates a card's suggestions from scratch, discarding the current
+                // set. Used by the ↻ Refresh button next to "Why were these proposed?".
+                vm.refreshSuggestions = function (card) {
+                    if (!card) return;
+                    vm.suggestImprovements(card, null, card.filePath || vm.selectedProject, { refresh: true });
                 };
                 // ── Idle suggestion loop ──────────────────────────────────────
                 // When the agent is completely free (no run active, no benchmark,

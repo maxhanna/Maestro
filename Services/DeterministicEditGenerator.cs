@@ -755,11 +755,27 @@ public static class DeterministicEditGenerator
 
         if (ext == ".cs")
         {
-            var anchor = FindCsClassBody(fileContent, req.ClassName);
+            var anchor = FindCsClassBody(fileContent, req.ClassName, req.Name);
             if (anchor == null) return null;
-            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface) = anchor.Value;
+            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface, sibling) = anchor.Value;
 
             var t = req.Type ?? InferCsType(req.Name);
+
+            // Sibling-aware placement: when an existing member shares a name stem with
+            // the new one (movieTodoCount → musicTodoCount), anchor right after it so the
+            // member lands next to its peers instead of at the end of the class body.
+            if (sibling != null)
+            {
+                var (sibLine, sibNext, sibLineNumber, sibName) = sibling.Value;
+                var sibSnippet = BuildCsMemberSnippet(req, t,
+                    Regex.Match(sibLine, @"^\s*").Value, isInterface);
+                var sibOldStr = sibLine + "\n" + sibNext;
+                var sibNewStr = sibLine + "\n" + sibSnippet + "\n" + sibNext;
+                return new DeterministicEdit(
+                    EditStrategy.FillClassBody, "class", req.ClassName ?? req.Name, sibOldStr, sibNewStr, sibLineNumber,
+                    $"Synthesized property '{t} {req.Name}' next to '{sibName}' in {(req.ClassName ?? "last class")} — no LLM");
+            }
+
             var snippet = BuildCsMemberSnippet(req, t,
                 MemberIndentFor(anchorPrefix != null && anchorPrefix != closeBraceLine ? anchorPrefix : null, braceIndent, isTs: false),
                 isInterface);
@@ -782,12 +798,32 @@ public static class DeterministicEditGenerator
         {
             var anchor = FindTsClassBody(fileContent, req.ClassName);
             if (anchor == null) return null;
-            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface, _) = anchor.Value;
+            var (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface, _, bodyStart, bodyEnd) = anchor.Value;
 
             var t = req.Type ?? InferJsType(req.Name);
+            var isJs = ext is ".js" or ".jsx" or ".mjs" or ".cjs";
+            var memberName = GetTsMemberName(req.Name);
+
+            // Sibling-aware placement: when an existing class-level member shares a name
+            // stem with the new one (movieTodoCount → musicTodoCount), anchor right after
+            // it so the member lands next to its peers instead of at the end of the class
+            // body (where the last method — e.g. hexWithAlpha — would otherwise win).
+            var sibling = FindSiblingMemberLine(fileContent, bodyStart, bodyEnd, memberName);
+            if (sibling != null)
+            {
+                var (sibLine, sibNext, sibLineNumber, sibName) = sibling.Value;
+                var sibSnippet = BuildTsMemberSnippet(req, t,
+                    Regex.Match(sibLine, @"^\s*").Value, isInterface, isJs);
+                var sibOldStr = sibLine + "\n" + sibNext;
+                var sibNewStr = sibLine + "\n" + sibSnippet + "\n" + sibNext;
+                return new DeterministicEdit(
+                    EditStrategy.FillClassBody, "class", req.ClassName ?? req.Name, sibOldStr, sibNewStr, sibLineNumber,
+                    $"Synthesized member '{memberName}: {t}' next to '{sibName}' in {(req.ClassName ?? "last class")} — no LLM");
+            }
+
             var snippet = BuildTsMemberSnippet(req, t,
                 MemberIndentFor(anchorPrefix != null && anchorPrefix != closeBraceLine ? anchorPrefix : null, braceIndent, isTs: true),
-                isInterface, ext is ".js" or ".jsx" or ".mjs" or ".cjs");
+                isInterface, isJs);
 
             // Widen the anchor beyond a lone '}' (G2): prefixing the class close brace
             // with the contiguous body slice (last member line — or class-open line when
@@ -804,7 +840,7 @@ public static class DeterministicEditGenerator
 
             return new DeterministicEdit(
                 EditStrategy.FillClassBody, "class", req.ClassName ?? req.Name, oldStr, newStr, lineNumber,
-                $"Synthesized member '{GetTsMemberName(req.Name)}: {t}' in {(req.ClassName ?? "last class")} — no LLM");
+                $"Synthesized member '{memberName}: {t}' in {(req.ClassName ?? "last class")} — no LLM");
         }
 
         return null;
@@ -917,8 +953,9 @@ public static class DeterministicEditGenerator
 
     // ── C# class-body anchor via Roslyn ──────────────────────────────────────
 
-    private static (string? anchorPrefix, string closeBraceLine, int lineNumber, string braceIndent, bool isInterface)?
-        FindCsClassBody(string source, string? className)
+    private static (string? anchorPrefix, string closeBraceLine, int lineNumber, string braceIndent, bool isInterface,
+        (string Line, string NextLine, int LineNumber, string Name)? sibling)?
+        FindCsClassBody(string source, string? className, string? memberName)
     {
         SyntaxTree tree;
         try { tree = CSharpSyntaxTree.ParseText(source); }
@@ -974,7 +1011,62 @@ public static class DeterministicEditGenerator
                 anchorPrefix = memberLine;
         }
 
-        return (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface);
+        var sibling = FindCsSiblingMember(source, target, memberName);
+        return (anchorPrefix, closeBraceLine, lineNumber, braceIndent, isInterface, sibling);
+    }
+
+    /// <summary>Finds the C# member whose name most overlaps <paramref name="memberName"/>
+    /// (shared camelCase words — MovieTodoCount ↔ MusicTodoCount share todo+count) and
+    /// returns its full source line, the line that follows it (the next member, a blank
+    /// line, or the class close brace), its 1-based line number, and its name. Only
+    /// single-line members qualify — a multi-line method body can't be a clean anchor.
+    /// Returns null when no member shares a meaningful stem, so the caller falls back to
+    /// the end-of-class anchor.</summary>
+    private static (string Line, string NextLine, int LineNumber, string Name)?
+        FindCsSiblingMember(string source, TypeDeclarationSyntax target, string? memberName)
+    {
+        if (string.IsNullOrWhiteSpace(memberName)) return null;
+        var newWords = SplitWords(memberName!);
+        if (newWords.Count == 0) return null;
+
+        var bestScore = 0;
+        (string line, string next, int number, string name)? best = null;
+        foreach (var member in target.Members)
+        {
+            var name = CsMemberName(member);
+            if (name == null) continue;
+            var score = WordOverlapScore(name, memberName!);
+            if (score <= bestScore) continue;
+
+            var span = member.GetLocation().GetLineSpan();
+            if (span.StartLinePosition.Line != span.EndLinePosition.Line) continue;
+
+            var pos = member.GetLocation().SourceSpan.Start;
+            var line = ExtractLine(source, pos, out var lineNumber);
+            if (line.Length == 0) continue;
+            var nl = source.IndexOf('\n', pos);
+            var nextStart = nl < 0 ? source.Length : nl + 1;
+            var nextNl = source.IndexOf('\n', nextStart);
+            var nextEnd = nextNl < 0 ? source.Length : nextNl;
+            var nextLine = source.Substring(nextStart, nextEnd - nextStart);
+            if (nextLine.Length == 0) continue;
+
+            bestScore = score;
+            best = (line, nextLine, lineNumber, name);
+        }
+        return best;
+    }
+
+    private static string? CsMemberName(MemberDeclarationSyntax member)
+    {
+        return member switch
+        {
+            PropertyDeclarationSyntax p => p.Identifier.Text,
+            FieldDeclarationSyntax f => f.Declaration.Variables.FirstOrDefault()?.Identifier.Text,
+            MethodDeclarationSyntax m => m.Identifier.Text,
+            EventDeclarationSyntax e => e.Identifier.Text,
+            _ => null
+        };
     }
 
     /// <summary>One anchorable class body for the multi-member batch path. CloseBraceLine
@@ -1041,7 +1133,7 @@ public static class DeterministicEditGenerator
 
     // ── TS/JS class-body anchor via brace matching ───────────────────────────
 
-    private static (string? anchorPrefix, string closeBraceLine, int lineNumber, string braceIndent, bool isInterface, bool isTs)?
+    private static (string? anchorPrefix, string closeBraceLine, int lineNumber, string braceIndent, bool isInterface, bool isTs, int bodyStart, int bodyEnd)?
         FindTsClassBody(string source, string? className)
     {
         var isCode = BuildIsCodeMask(source);
@@ -1062,7 +1154,8 @@ public static class DeterministicEditGenerator
         var anchor = TryAnchorTsBody(source, chosen);
         if (anchor == null) return null;
         return (anchor.Value.AnchorPrefix, anchor.Value.CloseBraceLine, anchor.Value.LineNumber,
-            anchor.Value.BraceIndent, anchor.Value.IsInterface, anchor.Value.Kind == "class");
+            anchor.Value.BraceIndent, anchor.Value.IsInterface, anchor.Value.Kind == "class",
+            anchor.Value.BodyStart, anchor.Value.BodyEnd);
     }
 
     /// <summary>Finds every class/interface declaration in a TS/JS file whose name matches
@@ -1135,7 +1228,7 @@ public static class DeterministicEditGenerator
     /// <summary>Builds the anchor for one chosen TS/JS declaration: the close-brace line
     /// plus the contiguous G2 anchor prefix. Returns null when the body can't be safely
     /// anchored (no brace, close brace not alone on its line, or indentation mismatch).</summary>
-    private static (string? AnchorPrefix, string CloseBraceLine, int LineNumber, string BraceIndent, bool IsInterface, string Kind)?
+    private static (string? AnchorPrefix, string CloseBraceLine, int LineNumber, string BraceIndent, bool IsInterface, string Kind, int BodyStart, int BodyEnd)?
         TryAnchorTsBody(string source, Match chosen)
     {
         var open = source.IndexOf('{', chosen.Index + chosen.Length);
@@ -1200,10 +1293,124 @@ public static class DeterministicEditGenerator
         }
 
         return (anchorPrefix, closeBraceLine, lineNumber, braceIndent,
-            chosen.Groups[1].Value == "interface", chosen.Groups[1].Value);
+            chosen.Groups[1].Value == "interface", chosen.Groups[1].Value, open + 1, close.Value);
     }
 
-    /// <summary>Finds the brace matching <paramref name="openBraceIndex"/>, skipping strings,
+    /// <summary>The identifier of a class-level member declaration — the word immediately
+    /// followed by ':' or '=' (public musicTodoCount: … → musicTodoCount).</summary>
+    private static readonly Regex MemberNameRegex = new(
+        @"\b([A-Za-z_$][\w$]*)\s*(?::[^=]|=(?!\s*>))");
+
+    /// <summary>Finds the class-level member whose name most overlaps <paramref name="newName"/>
+    /// (shared camelCase words — movieTodoCount ↔ musicTodoCount share todo+count) and returns
+    /// its full source line, the line that follows it (the next member, a blank/comment line,
+    /// or the class close brace), its 1-based line number, and its name. The returned pair is a
+    /// contiguous slice of the file, so oldStr always matches. Returns null when no class-level
+    /// sibling shares a meaningful stem — the caller then falls back to the end-of-class anchor
+    /// (which would otherwise land the member after the LAST member, e.g. hexWithAlpha). Method
+    /// bodies and nested blocks are skipped via brace depth, so an assignment like
+    /// `this.movieTodoCount = 0` inside a method can never be mistaken for a sibling.</summary>
+    private static (string Line, string NextLine, int LineNumber, string Name)?
+        FindSiblingMemberLine(string source, int bodyStart, int bodyEnd, string newName)
+    {
+        var newWords = SplitWords(newName);
+        if (newWords.Count == 0) return null;
+
+        var depth = 0;
+        var bestScore = 0;
+        var bestStart = -1;
+        var bestEnd = -1;
+        var bestName = "";
+        var pos = bodyStart;
+        while (pos < bodyEnd)
+        {
+            var lineStart = pos;
+            var nl = source.IndexOf('\n', pos);
+            var lineEnd = nl < 0 || nl > bodyEnd ? bodyEnd : nl;
+            var raw = source.Substring(lineStart, lineEnd - lineStart);
+            pos = lineEnd + 1;
+            var t = raw.Trim();
+
+            // Class-level (depth 0) declaration lines only — skip blanks, comments, the close
+            // brace, and anything with '(' (method/constructor/decorator lines).
+            if (depth <= 0 && t.Length > 0 && !t.StartsWith("}") && !t.StartsWith("//")
+                && !t.StartsWith("*") && !t.StartsWith("/*") && !t.Contains('('))
+            {
+                var m = MemberNameRegex.Match(t);
+                if (m.Success && !IsModifierWord(m.Groups[1].Value))
+                {
+                    var score = WordOverlapScore(m.Groups[1].Value, newName);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestStart = lineStart;
+                        bestEnd = lineEnd;
+                        bestName = m.Groups[1].Value;
+                    }
+                }
+            }
+
+            foreach (var ch in t)
+            {
+                if (ch == '{') depth++;
+                else if (ch == '}') depth--;
+            }
+        }
+
+        if (bestStart < 0) return null;
+
+        var line = source.Substring(bestStart, bestEnd - bestStart);
+        var nextStart = bestEnd + 1;
+        var nextNl = source.IndexOf('\n', nextStart);
+        var nextEnd = nextNl < 0 || nextNl > bodyEnd ? bodyEnd : nextNl;
+        var nextLine = source.Substring(nextStart, nextEnd - nextStart);
+        if (line.Length == 0 || nextLine.Length == 0) return null;
+
+        var lineNumber = 1;
+        for (var i = 0; i < bestStart; i++)
+            if (source[i] == '\n') lineNumber++;
+
+        return (line, nextLine, lineNumber, bestName);
+    }
+
+    /// <summary>Splits a camelCase/PascalCase identifier into its lowercase words
+    /// (MovieTodoCount → [movie, todo, count]); underscores and digits act as separators.</summary>
+    private static List<string> SplitWords(string name)
+    {
+        var words = new List<string>();
+        var cur = new System.Text.StringBuilder();
+        foreach (var c in name)
+        {
+            if (!char.IsLetterOrDigit(c))
+            {
+                if (cur.Length > 0) { words.Add(cur.ToString().ToLowerInvariant()); cur.Clear(); }
+                continue;
+            }
+            if (cur.Length > 0 && char.IsUpper(c) && char.IsLower(cur[^1]))
+            {
+                words.Add(cur.ToString().ToLowerInvariant());
+                cur.Clear();
+            }
+            cur.Append(c);
+        }
+        if (cur.Length > 0) words.Add(cur.ToString().ToLowerInvariant());
+        return words;
+    }
+
+    /// <summary>How many meaningful (≥3 char) words <paramref name="existingName"/> shares with
+    /// <paramref name="newName"/> — the sibling-similarity score. 0 means unrelated.</summary>
+    private static int WordOverlapScore(string existingName, string newName)
+    {
+        var a = SplitWords(existingName);
+        var b = SplitWords(newName);
+        if (a.Count == 0 || b.Count == 0) return 0;
+        var shared = 0;
+        foreach (var w in b)
+            if (w.Length >= 3 && a.Contains(w)) shared++;
+        return shared;
+    }
+
+    /// <summary>Finds the brace matching <paramref name="openBraceIndex"/>, skipping strings,</summary>
     /// comments and template literals (including `${...}` interpolations).</summary>
     private static int? FindMatchingBrace(string source, int openBraceIndex)
     {

@@ -905,8 +905,14 @@ public partial class AgentController : ControllerBase
         // is the front-end's live copy of the current suggestions, used as
         // context so the LLM EXTENDS the set instead of repeating it.
         bool topup = false;
+        // "Refresh" — the user explicitly asked to REGENERATE the suggestion set
+        // from scratch, discarding the current one. It must bypass the "existing
+        // set means the LLM already ran" short-circuit below so the model re-asks
+        // with fresh eyes instead of returning the stored suggestions.
+        bool refresh = false;
         var existingDescs = new List<string>();
         if (payload.TryGetProperty("topup", out var topEl)) topup = topEl.ValueKind == JsonValueKind.True;
+        if (payload.TryGetProperty("refresh", out var refEl)) refresh = refEl.ValueKind == JsonValueKind.True;
         // Per-project cap on how many suggestions a card can get (0-4, default 3).
         // Sent by the front end; 0 means "no suggestions" for this project.
         int maxSuggestions = 3;
@@ -986,8 +992,9 @@ public partial class AgentController : ControllerBase
                 }
             }
             // Initial generation: an existing stored set (even an empty one) means
-            // the LLM already ran — return it without re-running.
-            else if (existing != null)
+            // the LLM already ran — return it without re-running. A refresh
+            // explicitly bypasses this so the model re-generates from scratch.
+            else if (existing != null && !refresh)
             {
                 return Ok(new { suggestions = existing });
             }

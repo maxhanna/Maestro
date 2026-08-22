@@ -589,6 +589,148 @@ public class DeterministicEditGeneratorTests
         Assert.Equal(6, edit.LineNumber); // Profile's close brace
     }
 
+    // ── Sibling-aware placement: a new member lands next to its name-similar peers ──
+
+    [Fact]
+    public void Property_Ts_SiblingAware_PlacesNextToSimilarMember()
+    {
+        // The exact failure from the movie-count task: without sibling awareness the
+        // generator anchored after the LAST member (hexWithAlpha at the end of the class),
+        // not next to musicTodoCount where the member belongs.
+        const string file =
+            "export class Navigation {\n" +
+            "  musicTodoCount: number | null = null;\n" +
+            "  arrayActivePlayers: number | null = null;\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/navigation.ts", true, file, "add a movieTodoCount property");
+
+        Assert.NotNull(edit);
+        Assert.Equal("  musicTodoCount: number | null = null;\n  arrayActivePlayers: number | null = null;", edit!.OldStr);
+        Assert.Equal(
+            "  musicTodoCount: number | null = null;\n" +
+            "  public movieTodoCount: number = 0;\n" +
+            "  arrayActivePlayers: number | null = null;", edit.NewStr);
+        Assert.Equal(2, edit.LineNumber); // the sibling's line, not the class close brace
+        Assert.Contains("next to 'musicTodoCount'", edit.Reason);
+
+        var (replaced, content, _, _) = TryReplaceSafe(file, edit.OldStr!, edit.NewStr!, edit.LineNumber);
+        Assert.True(replaced);
+        Assert.Contains("musicTodoCount: number | null = null;\n  public movieTodoCount: number = 0;", content);
+    }
+
+    [Fact]
+    public void Property_Ts_SiblingAware_LastMemberBeforeClose_AnchorsOnSiblingAndBrace()
+    {
+        const string file =
+            "export class Navigation {\n" +
+            "  musicTodoCount: number | null = null;\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/navigation.ts", true, file, "add a movieTodoCount property");
+
+        Assert.NotNull(edit);
+        Assert.Equal("  musicTodoCount: number | null = null;\n}", edit!.OldStr);
+        Assert.Equal(
+            "  musicTodoCount: number | null = null;\n" +
+            "  public movieTodoCount: number = 0;\n}", edit.NewStr);
+        var (replaced, content, _, _) = TryReplaceSafe(file, edit.OldStr!, edit.NewStr!, edit.LineNumber);
+        Assert.True(replaced);
+        Assert.Contains("musicTodoCount: number | null = null;\n  public movieTodoCount: number = 0;\n}", content);
+    }
+
+    [Fact]
+    public void Property_Ts_SiblingAware_MethodBodyAssignment_NotTreatedAsSibling()
+    {
+        // An assignment `this.movieTodoCount = 0` inside a method body shares the new
+        // member's name verbatim — the depth-aware scan must skip it and still land on
+        // the class-level declaration, not the method body line.
+        const string file =
+            "export class Navigation {\n" +
+            "  load() {\n" +
+            "    this.movieTodoCount = 0;\n" +
+            "  }\n" +
+            "  musicTodoCount: number | null = null;\n" +
+            "  arrayActivePlayers: number | null = null;\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/navigation.ts", true, file, "add a movieTodoCount property");
+
+        Assert.NotNull(edit);
+        Assert.Equal("  musicTodoCount: number | null = null;\n  arrayActivePlayers: number | null = null;", edit!.OldStr);
+        Assert.DoesNotContain("this.movieTodoCount", edit.OldStr);
+        var (replaced, content, _, _) = TryReplaceSafe(file, edit.OldStr!, edit.NewStr!, edit.LineNumber);
+        Assert.True(replaced);
+        Assert.Contains("public movieTodoCount: number = 0;", content);
+    }
+
+    [Fact]
+    public void Property_Ts_SiblingAware_NoSimilarMember_FallsBackToEndOfClass()
+    {
+        const string file = "export class User {\n  name = '';\n  bio = '';\n}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "app/user.ts", true, file, "add an Age property to the User class");
+
+        Assert.NotNull(edit);
+        // 'age' shares no word with 'name'/'bio' → the end-of-class anchor is preserved.
+        Assert.Equal("  bio = '';\n}", edit!.OldStr);
+        Assert.Contains("  bio = '';\n  public age: number = 0;\n}", edit.NewStr);
+        var (replaced, content, _, _) = TryReplaceSafe(file, edit.OldStr!, edit.NewStr!, edit.LineNumber);
+        Assert.True(replaced);
+        Assert.Contains("public age: number = 0;", content);
+    }
+
+    [Fact]
+    public void Property_CSharp_SiblingAware_PlacesNextToSimilarMember()
+    {
+        const string file =
+            "public class Navigation\n" +
+            "{\n" +
+            "    public int MusicTodoCount { get; set; }\n" +
+            "    public int ArrayActivePlayers { get; set; }\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Navigation.cs", true, file, "add an int MovieTodoCount property");
+
+        Assert.NotNull(edit);
+        Assert.Equal("    public int MusicTodoCount { get; set; }\n    public int ArrayActivePlayers { get; set; }", edit!.OldStr);
+        Assert.Equal(
+            "    public int MusicTodoCount { get; set; }\n" +
+            "    public int MovieTodoCount { get; set; }\n" +
+            "    public int ArrayActivePlayers { get; set; }", edit.NewStr);
+        Assert.Equal(3, edit.LineNumber); // the sibling's line
+        Assert.Contains("next to 'MusicTodoCount'", edit.Reason);
+
+        var (replaced, content, _, _) = TryReplaceSafe(file, edit.OldStr!, edit.NewStr!, edit.LineNumber);
+        Assert.True(replaced);
+        Assert.Contains("public int MusicTodoCount { get; set; }\n    public int MovieTodoCount { get; set; }", content);
+    }
+
+    [Fact]
+    public void Property_CSharp_SiblingAware_MultiLineMethod_NotAnAnchor()
+    {
+        const string file =
+            "public class Navigation\n" +
+            "{\n" +
+            "    public void Load()\n" +
+            "    {\n" +
+            "        MovieTodoCount = 0;\n" +
+            "    }\n" +
+            "    public int MusicTodoCount { get; set; }\n" +
+            "    public int ArrayActivePlayers { get; set; }\n" +
+            "}\n";
+        var edit = DeterministicEditGenerator.TryGenerate(
+            "Models/Navigation.cs", true, file, "add an int MovieTodoCount property");
+
+        Assert.NotNull(edit);
+        // The multi-line Load() method can't anchor, and its body assignment must not
+        // count — the single-line MusicTodoCount declaration is the sibling.
+        Assert.Equal("    public int MusicTodoCount { get; set; }\n    public int ArrayActivePlayers { get; set; }", edit!.OldStr);
+        var (replaced, content, _, _) = TryReplaceSafe(file, edit.OldStr!, edit.NewStr!, edit.LineNumber);
+        Assert.True(replaced);
+        Assert.Contains("public int MovieTodoCount { get; set; }", content);
+    }
+
     [Fact]
     public void Property_CSharp_MultiClass_Unnamed_Declines()
     {

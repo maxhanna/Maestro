@@ -40,7 +40,20 @@ partial class AgentController
         // Synthesizes oldStr → newStr pairs for mechanically-describable changes
         // (literal swaps, property/field additions, getter/setter pairs) BEFORE any
         // exploration, intent classification or strategy resolution runs.
-        if (!skipLlmPreResolution && fe)
+        //
+        // HOWEVER: if the planner already provided a good anchor (oldString exists
+        // verbatim in the file), skip the generator — the planner's anchor is
+        // location-aware (e.g. near sibling properties) while the generator always
+        // anchors at the end of the class body, which inserts members in the wrong spot.
+        var planAlreadyHasGoodAnchor = !string.IsNullOrWhiteSpace(step.OldString)
+            && !string.IsNullOrWhiteSpace(step.NewString)
+            && fe && fc.Contains(step.OldString!);
+        if (planAlreadyHasGoodAnchor)
+        {
+            await EmitLog(emitSse, "info",
+                $"📌 Plan-provided anchor found verbatim in file — skipping deterministic generator to preserve planned location", ct: ct);
+        }
+        if (!skipLlmPreResolution && fe && !planAlreadyHasGoodAnchor)
         {
             var det = DeterministicEditGenerator.TryGenerate(relPath, fe, fc, step.Change ?? "");
             if (det != null)
