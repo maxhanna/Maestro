@@ -667,8 +667,20 @@ partial class AgentController
         if (serviceCallMatch.Success)
         {
             var serviceName = serviceCallMatch.Groups[1].Value;
-            var serviceFiles = Directory.GetFiles(projectRoot, $"{serviceName}.ts", SearchOption.AllDirectories)
-                .Where(f => !f.Contains("node_modules") && !f.Contains("dist"))
+            var serviceFiles = Directory.EnumerateFiles(projectRoot, "*.ts", SearchOption.AllDirectories)
+                .Where(f => !f.Contains("node_modules", StringComparison.OrdinalIgnoreCase) &&
+                            !f.Contains("dist", StringComparison.OrdinalIgnoreCase))
+                .Where(f =>
+                {
+                    try
+                    {
+                        var content = System.IO.File.ReadAllText(f, Encoding.UTF8);
+                        return Regex.IsMatch(content,
+                            $@"\b(?:export\s+)?(?:abstract\s+)?class\s+{Regex.Escape(serviceName)}\b",
+                            RegexOptions.IgnoreCase);
+                    }
+                    catch { return false; }
+                })
                 .Take(1)
                 .ToList();
             foreach (var sf in serviceFiles)

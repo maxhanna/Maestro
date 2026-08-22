@@ -1471,6 +1471,8 @@ partial class AgentController
                     }
                 }
             }
+            var serviceContractError = ValidateIntroducedServiceCalls(
+                fileExt, fileContent, newContent, projectRoot);
             bool bypassVerifyForAppend = !string.IsNullOrWhiteSpace(newStr) &&
                 AgentTextUtilities.NormalizeLineEndings(newContent).Contains(AgentTextUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal);
             // Deterministic batches synthesize a marker newStr ("(deterministic batch: N edits)") —
@@ -1479,7 +1481,9 @@ partial class AgentController
             // marker semantics untouched.)
             var isDeterministicBatch = newStr?.StartsWith("(deterministic batch:", StringComparison.Ordinal) == true;
             var (approved, verifyReason, _) =
-                bypassVerify || bypassVerifyForAppend || isDeterministicBatch
+                serviceContractError != null
+                    ? (false, serviceContractError, 2)
+                    : bypassVerify || bypassVerifyForAppend || isDeterministicBatch
                     ? (true, isDeterministicBatch
                         ? "Bypassed verify for deterministic batch — each sub-edit matched exactly"
                         : "Bypassed verify for successful append/insertion", 100) :
@@ -2150,6 +2154,160 @@ partial class AgentController
             step, stepIndex, planItemIndex, cardId, allResults, emitSse, ct, replanDepth,
             plan, prompt, attachedFiles, projectRoot, onActivity);
     }
+
+    /// <summary>
+    /// Rejects newly introduced calls to service methods that are not present in the referenced
+    /// TypeScript service or that pass a provably invalid number of arguments. LLM verification
+    /// is intentionally not used for this contract check: it must not approve invented APIs.
+    /// </summary>
+    public static string? ValidateIntroducedServiceCalls(
+        string fileExtension, string oldContent, string newContent, string projectRoot)
+    {
+        if (fileExtension is not (".ts" or ".tsx" or ".js" or ".jsx")) return null;
+        if (string.IsNullOrWhiteSpace(newContent)) return null;
+
+        var callRegex = new Regex(@"\bthis\.(?<service>\w*Service)\.(?<method>\w+)\s*\(",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        var oldCalls = callRegex.Matches(oldContent ?? "")
+            .Cast<Match>()
+            .Select(m => $"{m.Groups["service"].Value}.{m.Groups["method"].Value}")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (Match call in callRegex.Matches(newContent))
+        {
+            var serviceProperty = call.Groups["service"].Value;
+            var methodName = call.Groups["method"].Value;
+            var callKey = $"{serviceProperty}.{methodName}";
+            if (oldCalls.Contains(callKey)) continue;
+
+            var className = char.ToUpperInvariant(serviceProperty[0]) + serviceProperty[1..];
+            var servicePath = Directory.EnumerateFiles(projectRoot, "*.ts", SearchOption.AllDirectories)
+                .Where(f => !f.Contains(Path.DirectorySeparatorChar + "node_modules" + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase) &&
+                    !f.Contains(Path.DirectorySeparatorChar + "dist" + Path.DirectorySeparatorChar,
+                        StringComparison.OrdinalIgnoreCase))
+                .FirstOrDefault(f =>
+                {
+                    try
+                    {
+                        var text = System.IO.File.ReadAllText(f, Encoding.UTF8);
+                        return Regex.IsMatch(text,
+                            $@"\b(?:export\s+)?(?:abstract\s+)?class\s+{Regex.Escape(className)}\b",
+                            RegexOptions.IgnoreCase);
+                    }
+                    catch { return false; }
+                });
+            if (servicePath == null)
+                return $"Introduced call this.{serviceProperty}.{methodName}(...), but the local service class '{className}' could not be found. Do not invent service APIs; resolve the imported service before editing.";
+
+            string serviceContent;
+            try { serviceContent = System.IO.File.ReadAllText(servicePath, Encoding.UTF8); }
+            catch { continue; }
+
+            var methodRegex = new Regex(
+                $@"(?:^|[;{{}}\n])\s*(?:(?:public|private|protected|static|async|readonly|override)\s+)*" +
+                $@"{Regex.Escape(methodName)}\s*(?:<[^>]*>)?\s*\((?<params>[^)]*)\)",
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            var declaration = methodRegex.Match(serviceContent);
+            if (!declaration.Success)
+            {
+                var propertyMethodRegex = new Regex(
+                    $@"\b{Regex.Escape(methodName)}\s*=\s*(?:async\s*)?\((?<params>[^)]*)\)\s*=>",
+                    RegexOptions.IgnoreCase);
+                declaration = propertyMethodRegex.Match(serviceContent);
+            }
+            if (!declaration.Success)
+                return $"Introduced call this.{serviceProperty}.{methodName}(...), but {className}.ts has no method named '{methodName}'. Re-read the service API and use an existing method/signature.";
+
+            var args = ExtractCallArguments(newContent, call.Index + call.Length);
+            if (args == null) continue;
+            var argumentCount = args.Count;
+            var parameterCount = CountParameterParts(declaration.Groups["params"].Value);
+            var requiredParameterCount = CountRequiredParameterParts(declaration.Groups["params"].Value);
+            if (argumentCount < requiredParameterCount || argumentCount > parameterCount)
+            {
+                return $"Introduced call this.{serviceProperty}.{methodName} with {argumentCount} argument(s), but {className}.ts declares {requiredParameterCount}-{parameterCount} parameter(s). Use the exact existing service signature.";
+            }
+        }
+        return null;
+    }
+
+    private static List<string>? ExtractCallArguments(string content, int start)
+    {
+        var depth = 1;
+        var begin = start;
+        var quote = '\0';
+        var escaped = false;
+        for (var i = start; i < content.Length; i++)
+        {
+            var c = content[i];
+            if (quote != '\0')
+            {
+                if (escaped) { escaped = false; continue; }
+                if (c == '\\') { escaped = true; continue; }
+                if (c == quote) quote = (char)0;
+                continue;
+            }
+            if (c == '\'' || c == '"' || c == '`') { quote = c; continue; }
+            if (c == '(') depth++;
+            else if (c == ')' && --depth == 0)
+            {
+                var raw = content[begin..i].Trim();
+                if (raw.Length == 0) return new List<string>();
+                return SplitTopLevelArguments(raw);
+            }
+        }
+        return null;
+    }
+
+    private static List<string> SplitTopLevelArguments(string raw)
+    {
+        var result = new List<string>();
+        var start = 0;
+        var parens = 0;
+        var brackets = 0;
+        var braces = 0;
+        var quote = '\0';
+        var escaped = false;
+        for (var i = 0; i < raw.Length; i++)
+        {
+            var c = raw[i];
+            if (quote != '\0')
+            {
+                if (escaped) { escaped = false; continue; }
+                if (c == '\\') { escaped = true; continue; }
+                if (c == quote) quote = (char)0;
+                continue;
+            }
+            if (c == '\'' || c == '"' || c == '`') { quote = c; continue; }
+            if (c == '(') parens++; else if (c == ')') parens--;
+            else if (c == '[') brackets++; else if (c == ']') brackets--;
+            else if (c == '{') braces++; else if (c == '}') braces--;
+            else if (c == ',' && parens == 0 && brackets == 0 && braces == 0)
+            {
+                result.Add(raw[start..i].Trim());
+                start = i + 1;
+            }
+        }
+        result.Add(raw[start..].Trim());
+        return result;
+    }
+
+    private static int CountParameterParts(string raw) =>
+        string.IsNullOrWhiteSpace(raw) ? 0 : SplitTopLevelArguments(raw).Count;
+
+    private static int CountRequiredParameterParts(string raw) =>
+        string.IsNullOrWhiteSpace(raw)
+            ? 0
+            : SplitTopLevelArguments(raw).Count(p =>
+            {
+                var parameter = p.Trim();
+                if (parameter.StartsWith("...", StringComparison.Ordinal) || parameter.Contains("=", StringComparison.Ordinal))
+                    return false;
+                var colon = parameter.IndexOf(':');
+                var name = colon >= 0 ? parameter[..colon].Trim() : parameter;
+                return !name.EndsWith("?", StringComparison.Ordinal);
+            });
 
     // ── Deterministic Python syntax gate ─────────────────────────────────────────────
     /// <summary>
