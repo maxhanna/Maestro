@@ -538,7 +538,7 @@
 
           <div class="agent-streaming-thinking"
             ng-if="vm.agentPanelTabIs('activity') && (vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length || vm.planMarker)">
-            <details ng-attr-open="{{(vm.streamingSteps.length || vm.planItems.length || vm.planMarker) ? 'open' : undefined}}">
+            <details open>
               <summary>
                 <span>🧠 Plan</span>
                 <span class="plan-count" ng-if="vm.planItems.length || vm.streamingSteps.length">({{(vm.streamingSteps |

@@ -577,9 +577,9 @@ angular.module('kanbanApp', [])
       vm.decreaseMetaPlanFont = function () { vm.metaPlanFontSize = Math.max(vm.metaPlanFontSize - 2, 6); persistFontSizes(); };
 
       vm.addLogEntry = function (entry) {
-        if (vm.agentActivityLogLength > 0) {
-          var lastEntry = vm.agentActivityLog[vm.agentActivityLogLength - 1];
-          if ((lastEntry.type === entry.type && lastEntry.message === entry.message) || lastEntry.timestamp === entry.timestamp) return;
+        if (vm.agentActivityLog.length > 0) {
+          var lastEntry = vm.agentActivityLog[vm.agentActivityLog.length - 1];
+          if (lastEntry && ((lastEntry.type === entry.type && lastEntry.message === entry.message) || lastEntry.timestamp === entry.timestamp)) return;
         }
         vm.agentActivityLog.push(entry);
         vm.agentActivityLogLength = vm.agentActivityLog.length;

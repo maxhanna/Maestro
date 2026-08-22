@@ -860,6 +860,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             vm.cancelCardSuggestions(card);
           }
 
+          // When moving back to To Do from done/doing/archived, clear feedback,
+          // verification, and agent logs — but preserve the plan (agentAnalysis).
+          if (to.toLowerCase() === 'todo' && (from === 'done' || from === 'doing' || from === 'archived')) {
+            delete card._feedback;
+            delete card._feedbackSent;
+            delete card._verification;
+            delete card.agentLog;
+          }
+
           if (from.toLowerCase() === "doing" && to.toLowerCase() === "todo" && vm.streamingActive && vm.activeCardId === card.id) {
             console.log("Back pressed on active card; Stopping agent.");
             vm.stopAgent(card);
@@ -953,7 +962,11 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
       vm.reopenCard = function (card) {
         card.ready = false;
-        // Preserve agentAnalysis/agentLog for previous-analysis display
+        // Clear feedback, verification, and logs when reopening to To Do (keep plan).
+        delete card._feedback;
+        delete card._feedbackSent;
+        delete card._verification;
+        delete card.agentLog;
         // A card reopened into To Do is no longer completed — cancel its suggestions.
         if (vm.cancelCardSuggestions) vm.cancelCardSuggestions(card);
         var idx = vm.state.done.findIndex(function (c) { return c.id === card.id; });
