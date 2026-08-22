@@ -1382,7 +1382,7 @@ partial class AgentController
                     goto continueResolveLoop;
                 }
             }
-            if (IsLoneClosingBraceFirstLine(oldStr))
+            if (ShouldBounceGarbageAnchor(oldStr, isDeterministicEdit))
             {
                 var err = $"oldString starts with a standalone '}}' (just a closing brace) — it includes the previous method's closing brace. " +
                     "Set oldString to start AT the target method declaration, not before it.";

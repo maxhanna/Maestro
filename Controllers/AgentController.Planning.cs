@@ -1650,7 +1650,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.IsNullOrWhiteSpace(reason) || step == null || string.IsNullOrWhiteSpace(step.File) ||
             AgentProjectUtilities.IsSpecialMarker(step.File)) return false;
         if (!Regex.IsMatch(reason,
-                @"\b(?:no existing|does not exist|doesn'?t exist|not exist|is missing|\bmissing\b|absent|not implemented|undefined|never added|not found|not present)\b",
+                @"\b(?:no existing|does not exist|doesn'?t exist|not exist|is missing|\bmissing\b|does not have|doesnt have|absent|not implemented|undefined|never added|not found|not present)\b",
                 RegexOptions.IgnoreCase))
             return false;
         string? current = null;

@@ -505,9 +505,9 @@ public class DeterministicEditGeneratorTests
             "app/foo.ts", true, file, "add a string Label property to the Foo class");
 
         Assert.NotNull(edit);
-        // The last real body line is the method's own close brace — still a wider,
-        // context-carrying anchor than a lone '}' at class indent.
-        Assert.Equal("  }\n}", edit!.OldStr);
+        // With brace-depth awareness, the scan skips lines inside the method body
+        // (depth > 0) and anchors on the method declaration — a class-level line.
+        Assert.Equal("  method() {\n    return 1;\n  }\n}", edit!.OldStr);
         Assert.Contains("public label: string = '';", edit.NewStr);
         var (replaced, content, _, _) = TryReplaceSafe(file, edit.OldStr!, edit.NewStr!, edit.LineNumber);
         Assert.True(replaced);

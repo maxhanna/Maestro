@@ -200,6 +200,23 @@ public class StepTargetFileTruthTests
     }
 
     [Fact]
+    public void Override_DoesNotHave_Phrasing_OverrideTriggers()
+    {
+        // The "does not have" phrasing: moviesTodoCount does not have a getter —
+        // the step is trying to ADD it. The file contains moviesTodoCount, so the
+        // "does not have" claim about it is about a property that EXISTS. The override
+        // should fire because the file-truth disproves the rejection premise.
+        var root = WriteTempFile(FileContent);
+        try
+        {
+            Assert.True(InvokeOverride(
+                "moviesTodoCount does not have number pipe formatting applied to it.",
+                Step("Format moviesTodoCount using number pipe"), root));
+        }
+        finally { System.IO.Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void Override_SpecialMarker_ReturnsFalse()
     {
         var root = WriteTempFile(FileContent);

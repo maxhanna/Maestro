@@ -1550,7 +1550,16 @@ partial class AgentController
         var testIntent = TestIntentClassifier.Classify(prompt);
         if (testIntent.Intent != TestIntentClassifier.Kind.None)
         {
-            return await RunLiveWebTestPipeline(prompt, projectRoot, emitSse, testIntent, ct);
+            // LLM CONFIRMATION GATE: the deterministic classifier is conservative but
+            // can still false-positive on garbled context-tag text ("is a"/"is the" inside
+            // a bracketed tag). A single cheap LLM round confirms the intent before we
+            // spin up the server and burn time on a live test that would fail.
+            var confirmed = await ConfirmTestIntentAsync(prompt, testIntent, emitSse, ct);
+            if (confirmed)
+                return await RunLiveWebTestPipeline(prompt, projectRoot, emitSse, testIntent, ct);
+            // LLM says this is NOT a test — fall through to normal planning.
+            await EmitLog(emitSse, "info",
+                $"🧪 LLM confirmed this is NOT a test task (classified as {testIntent.Intent}) — routing to normal planning.", ct: ct);
         }
 
         // VISUAL-INSPECTION DETECTION: prompts like "check my game for visual bugs" or
@@ -1897,6 +1906,10 @@ partial class AgentController
             _requirementChecklist);
         var (raw, _, llmError) = await CallLlmRaw(
                 "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1, \"line\": 42}]}. For every edit step include the 1-based line number. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan. " +
+                "WHOLE-METHOD ADD/REPLACE STEPS USE FORMAT C: When the step ADDS a brand-new method/function or REPLACES an ENTIRE existing method, " +
+                "include FORMAT C fields: {\"targetType\": \"method\", \"targetName\": \"existingMethodName\", \"insertAfter\": true for ADD (or false for REPLACE), \"newCode\": [\"line1\", \"line2\", ...]}. " +
+                "newCode carries only the new method code, one line per array element. Do NOT use oldString/newString for whole-method changes — FORMAT C saves tokens and prevents mid-method truncation. " +
+                "Reserve oldString/newString for small targeted edits inside a method. " +
                 NbspHeadingRule,
                 replanPrompt, ct, requestTimeout: _infiniteTimeout, llmRoundLabel: "replan");
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -1922,11 +1935,24 @@ partial class AgentController
                 // edit-resolution LLM round-trip.
                 var oldString = item.TryGetProperty("oldString", out var os) ? os.GetString() : null;
                 var newString = item.TryGetProperty("newString", out var ns) ? ns.GetString() : null;
+                // FORMAT C/D fields — the planner may emit these for whole-method add/replace.
+                var targetType = item.TryGetProperty("targetType", out var tt) ? tt.GetString() : null;
+                var targetName = item.TryGetProperty("targetName", out var tn) ? tn.GetString() : null;
+                var insertAfter = item.TryGetProperty("insertAfter", out var ia) && ia.GetBoolean();
+                List<string>? newCode = null;
+                if (item.TryGetProperty("newCode", out var nc) && nc.ValueKind == JsonValueKind.Array)
+                {
+                    newCode = new List<string>();
+                    foreach (var lineEl in nc.EnumerateArray())
+                        newCode.Add(lineEl.GetString() ?? "");
+                }
                 if (!string.IsNullOrWhiteSpace(file) && !string.IsNullOrWhiteSpace(change))
                     steps.Add(new PlanStep
                     {
                         File = file, Change = change, Priority = priority, LineNumber = line,
-                        OldString = oldString, NewString = newString
+                        OldString = oldString, NewString = newString,
+                        TargetType = targetType, TargetName = targetName,
+                        InsertAfter = insertAfter ? true : null, NewCode = newCode
                     });
             }
             return steps.Count > 0 ? steps : null;

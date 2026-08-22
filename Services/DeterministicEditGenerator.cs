@@ -1165,12 +1165,25 @@ public static class DeterministicEditGenerator
             var bodyStart = open + 1;
             var pos = closeLineStart;
             var lastRealStart = -1;
+            var depth = 0;
             while (pos > bodyStart)
             {
                 var lineStart = source.LastIndexOf('\n', pos - 1) + 1;
                 if (lineStart == pos) { pos--; continue; } // empty line — keep scanning
                 var t = source.Substring(lineStart, pos - lineStart).Trim();
-                if (t.Length > 0 && !t.StartsWith("//") && !t.StartsWith("*") && !t.StartsWith("/*"))
+                if (t.Length == 0 || t.StartsWith("//") || t.StartsWith("*") || t.StartsWith("/*"))
+                {
+                    pos = lineStart;
+                    continue;
+                }
+                // Track brace nesting — lines at depth > 0 are inside methods/blocks,
+                // not class-level declarations. We need a class-level member to anchor on.
+                foreach (var ch in t)
+                {
+                    if (ch == '{') depth--;
+                    else if (ch == '}') depth++;
+                }
+                if (depth <= 0)
                 {
                     lastRealStart = lineStart;
                     break;

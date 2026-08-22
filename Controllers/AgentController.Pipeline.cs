@@ -2304,6 +2304,40 @@ partial class AgentController
         var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, _infiniteTimeout, maxTokens: 96);
         return TestIntentClassifier.ParseVisualVerdict(raw);
     }
+    /// <summary>
+    /// LLM CONFIRMATION GATE for the deterministic test-intent classifier. The classifier
+    /// is conservative but can false-positive on garbled context-tag text ("is a"/"is the"
+    /// inside a bracketed tag, edit verbs buried in noise). A single cheap LLM round
+    /// confirms whether the prompt is TRULY a live-test task before we spin up the server.
+    /// Returns true when the LLM agrees this is a test, false when it says the prompt is
+    /// actually an edit/build/search task.
+    /// </summary>
+    private async Task<bool> ConfirmTestIntentAsync(string prompt, TestIntentClassifier.TestIntent intent, bool emitSse, CancellationToken ct)
+    {
+        var kind = intent.Intent == TestIntentClassifier.Kind.Api ? "API" : "UI";
+        const string sys =
+            "You confirm whether a user prompt is TRULY a live web-app test task or actually an edit/build/search task that was misclassified. " +
+            "Answer ONLY with JSON: {\"isTest\": true|false}.\n" +
+            "isTest = true ONLY when the user's PRIMARY intent is to TEST/VERIFY a feature of a running web application (spin up server, check browser, probe endpoint). " +
+            "isTest = false when the prompt contains edit verbs (apply, add, fix, format, create, implement, update, remove, etc.), describes code changes, " +
+            "or the test-like words are inside context tags / garbled text rather than being the actual request. " +
+            "Err on the side of false — a false-positive wastes time spinning up a server for nothing.";
+        var userMsg = $"Prompt: {prompt}\nDeterministic classifier says: {kind} test, target: \"{intent.Target}\"\n" +
+            "Is this TRULY a live test task, or is the classifier wrong?";
+        var (raw, _, _) = await CallLlmRaw(sys, userMsg, ct, requestTimeout: TimeSpan.FromSeconds(15), maxTokens: 48);
+        if (string.IsNullOrWhiteSpace(raw)) return true; // LLM unavailable — fail open (original behavior)
+        try
+        {
+            var cleaned = raw.Trim();
+            var s = cleaned.IndexOf('{'); var e = cleaned.LastIndexOf('}');
+            if (s >= 0 && e > s) cleaned = cleaned[s..(e + 1)];
+            using var doc = JsonDocument.Parse(cleaned);
+            if (doc.RootElement.TryGetProperty("isTest", out var v))
+                return v.ValueKind == JsonValueKind.True;
+        }
+        catch { /* unparseable — fail open */ }
+        return true;
+    }
     private async Task<AgentPlan?> RecoverPlanFromRamblingAsync(
         bool emitSse, CancellationToken ct, string ramblingRaw)
     {

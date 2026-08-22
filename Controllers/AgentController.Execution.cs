@@ -1779,7 +1779,7 @@ partial class AgentController
             var safeName = relPath.Replace('/', '_').Replace('\\', '_');
             var files = Directory.GetFiles(undoDir, $"{safeName}*.diff")
                 .OrderByDescending(f => f)
-                .Take(10)
+                .Take(1)
                 .ToList();
             Console.WriteLine($"[CollectDiffs] {relPath}: found {files.Count} diff(s) in {undoDir}");
             foreach (var f in files)
