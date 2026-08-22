@@ -147,6 +147,7 @@ builder.Services.AddHttpClient("llama", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(30);
 });
+builder.Services.AddSingleton<AiServerDiscoveryService>();
 builder.Services.AddControllers();
 builder.Services.AddSingleton<BoardDataService>(sp =>
 {

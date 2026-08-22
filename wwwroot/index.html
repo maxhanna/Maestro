@@ -1460,10 +1460,49 @@
             <summary class="settings-header">Default LLM Endpoint</summary>
             <div style="padding:8px 0;">
               <label for="settings-llama" style="font-size:0.85em;color:var(--muted);">URL</label>
-              <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width:100%;margin-top:2px;" />
+              <div style="display:flex;gap:4px;margin-top:2px;">
+                <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="flex:1;" ng-change="vm.onLlmUrlChange()" />
+                <button ng-click="vm.detectServers()" class="small ghost" ng-disabled="vm.detectingServers" title="Scan common ports for a running AI model server" style="white-space:nowrap;">
+                  {{vm.detectingServers ? 'Scanning…' : '🔍 Detect'}}
+                </button>
+              </div>
+              <div ng-if="vm.detectedServers && vm.detectedServers.length" style="margin-top:4px;display:flex;flex-direction:column;gap:3px;">
+                <div ng-repeat="s in vm.detectedServers" ng-click="vm.selectDetectedServer(s)"
+                  style="cursor:pointer;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:12px;display:flex;justify-content:space-between;align-items:center;"
+                  ng-class="{'detected-server-active': s.url === vm.llamaUrl}"
+                  title="Click to use this server">
+                  <span>{{s.url}} <span class="muted" style="font-size:10px;">{{s.serverType}} · {{s.models.length}} model(s)</span></span>
+                  <span ng-if="s.url === vm.llamaUrl">✓</span>
+                </div>
+              </div>
+              <div ng-if="vm.detectedServers && vm.detectedServers.length === 0 && !vm.detectingServers" style="margin-top:4px;font-size:11px;color:var(--muted);">
+                No AI servers found on common ports (8080, 11434, 1234, 13305, 8000, 7860, 5000, 9997). Start a model server and try again.
+              </div>
               <div style="margin-top:6px;">
-                <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model Name</label>
-                <input id="settings-llama-model" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" />
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                  <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model</label>
+                  <button ng-click="vm.refreshModels()" class="small ghost" ng-disabled="vm.refreshingModels" style="font-size:11px;padding:1px 8px;" title="Fetch available models from the server">
+                    {{vm.refreshingModels ? '…' : '↻ Refresh'}}
+                  </button>
+                </div>
+                <select id="settings-llama-model" ng-model="vm.llamaModel" ng-if="vm.availableModels && vm.availableModels.length"
+                  style="width:100%;margin-top:2px;" ng-change="vm.onModelSelect()">
+                  <option value="" ng-if="!vm.modelIsInList()">{{vm.llamaModel}} (not found on server)</option>
+                  <option ng-repeat="m in vm.availableModels" value="{{m.id}}">{{m.id}} <span class="muted">({{m.format}})</span></option>
+                </select>
+                <input id="settings-llama-model-fallback" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" ng-if="!vm.availableModels || !vm.availableModels.length" />
+                <div ng-if="vm.availableModels && vm.availableModels.length === 0 && !vm.refreshingModels" style="font-size:11px;color:var(--muted);margin-top:2px;">
+                  No models found — check the URL or click Refresh.
+                </div>
+                <div ng-if="vm.swappingModel" style="font-size:11px;color:var(--accent);margin-top:2px;">
+                  ⏳ Loading model into VRAM (this can take 10-30s)…
+                </div>
+                <div ng-if="!vm.swappingModel && vm.modelActive === true && vm.availableModels && vm.availableModels.length" style="font-size:11px;color:#4ade80;margin-top:2px;">
+                  ✓ Model loaded and ready.
+                </div>
+                <div ng-if="!vm.swappingModel && vm.modelActive === false && vm.availableModels && vm.availableModels.length" style="font-size:11px;color:#f87171;margin-top:2px;">
+                  ⚠ Model swap failed — the selected model may not be loaded. Run an agent to auto-swap, or load it manually in your model server.
+                </div>
               </div>
             </div>
           </details>

@@ -396,6 +396,11 @@ header h1 {
 	color: var(--accent);
 }
 
+.detected-server-active {
+	border-color: var(--accent) !important;
+	background: rgba(6, 182, 212, 0.08);
+}
+
 .theme-picker {
 	display: flex;
 	flex-direction: column;
