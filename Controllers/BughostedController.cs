@@ -250,7 +250,8 @@ public class BughostedController : ControllerBase
                 status = "online",
                 kanbanData = GzipCompress(req.KanbanData ?? ""),
                 settings = GzipCompress(req.Settings ?? ""),
-                weaverAddress
+                weaverAddress,
+                skeleton = await CollectSkeletonForShareAsync(req)
             });
             var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/heartbeat")
             {
@@ -265,6 +266,45 @@ public class BughostedController : ControllerBase
         {
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Attaches the project skeleton to the forwarded heartbeat when the user
+    /// opted in. Served from the shared 10-minute AgentSkeleton cache (the same
+    /// one the agent's suggestion context uses), so the dashboard gets the real
+    /// filesystem layout without an extra directory walk per heartbeat. Returns
+    /// null when sharing is off or the project can't be resolved, so the remote
+    /// simply stores a heartbeat without skeleton data.
+    /// </summary>
+    private async Task<object?> CollectSkeletonForShareAsync(BughostedHeartbeatRequest req)
+    {
+        try
+        {
+            if (!req.ShareSkeleton || string.IsNullOrWhiteSpace(req.ProjectPath)) return null;
+            var root = ResolveProjectRoot(req.ProjectPath);
+            if (root == null || !Directory.Exists(root)) return null;
+            var skeleton = await AgentSkeleton.GetCachedSkeletonAsync(root, 10);
+            if (skeleton == null) return null;
+            var tree = skeleton.Tree ?? "";
+            if (tree.Length > 20000) tree = tree[..20000] + "\n... (skeleton truncated)";
+            var paths = skeleton.Paths ?? new List<string>();
+            if (paths.Count > 2000) paths = paths.Take(2000).ToList();
+            return new { tree, paths };
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[HEARTBEAT] skeleton share skipped: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Resolves a client-supplied project path against the workspace root.</summary>
+    private string? ResolveProjectRoot(string projectPath)
+    {
+        var p = projectPath.Trim().TrimEnd('/', '\\');
+        if (string.IsNullOrWhiteSpace(p)) return null;
+        if (Path.IsPathRooted(p)) return p;
+        return Path.GetFullPath(Path.Combine(ResolveWorkspaceRoot(), p));
     }
 
     [HttpPost("settings")]
@@ -1129,6 +1169,11 @@ public class BughostedHeartbeatRequest
     public string ClientId { get; set; } = "";
     public string? KanbanData { get; set; }
     public string? Settings { get; set; }
+    // Opt-in project sharing: when true, the bridge attaches the project skeleton
+    // (file layout) to the forwarded heartbeat so the remote dashboard's IDE and
+    // attach-file picker can use the real filesystem layout.
+    public bool ShareSkeleton { get; set; }
+    public string? ProjectPath { get; set; }
 }
 
 public class BughostedAckRequest

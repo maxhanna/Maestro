@@ -527,6 +527,7 @@ angular.module('kanbanApp')
                             vm.bughostedPassword = cfg.bughostedPassword || '';
                             vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
                             vm.bughostedShareRank = cfg.bughostedShareRank === true;
+                            vm.bughostedShareSkeleton = cfg.bughostedShareSkeleton === true;
                             vm.themeColors = mergeTheme(cfg.themeColors);
                             vm.savedThemes = (cfg.savedThemes || []).map(function (t) { return { name: t.name || 'Untitled', colors: mergeTheme(t.colors), _editing: false, _editName: '' }; });
                             applyTheme(null, vm.themeColors);
@@ -584,6 +585,7 @@ angular.module('kanbanApp')
                         cfg.bughostedPassword = vm.bughostedPassword || '';
                         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
                         cfg.bughostedShareRank = vm.bughostedShareRank === true;
+                        cfg.bughostedShareSkeleton = vm.bughostedShareSkeleton === true;
                         // The user edited the credential fields to empty this session — empty is
                         // authoritative, so tell the server not to restore the old credentials.
                         cfg.clearBughostedCredentials = !!(vm._bughostedCredsEdited && !vm.bughostedUsername && !vm.bughostedPassword);
@@ -888,6 +890,20 @@ angular.module('kanbanApp')
                 vm.closeDiscordPanel = function () { vm.showDiscordPanel = false; vm.showChangelog = false; };
                 vm.showChangelog = false;
                 vm.changelogContent = '';
+                vm.changelogHtml = function () {
+                    var text = vm.changelogContent || '';
+                    var esc = String(text)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;');
+                    return esc.replace(/(^|[\s([{])@([A-Za-z0-9][A-Za-z0-9_-]*)/g,
+                        function (m, lead, user) {
+                            return lead + '<a class="changelog-mention" href="https://github.com/' + encodeURIComponent(user) +
+                                '" target="_blank" rel="noopener noreferrer" data-mention="' +
+                                encodeURIComponent(user) + '">@' + user + '</a>';
+                        });
+                };
                 vm.changelogSyncLabel = '';
                 vm.changelogFontSize = parseInt(localStorage.getItem('weaverChangelogFontSize'), 10) || 78;
                 vm.changelogFontSizeUp = function () { vm.changelogFontSize = Math.min(vm.changelogFontSize + 12, 160); localStorage.setItem('weaverChangelogFontSize', vm.changelogFontSize); };
@@ -1367,3 +1383,178 @@ angular.module('kanbanApp')
             }
         };
     }]);
+
+// The app doesn't load ngSanitize, so ng-bind-html is unavailable. This tiny
+// directive renders an already-escaped-and-linked HTML string into an element
+// instead (used by the "What's new" changelog to turn @usernames into links).
+// It also wires up a room-wide hover preview for those @mentions (GitHub avatar
+// + repo info) so the tooltip can appear anywhere on screen, even past the
+// changelog panel's scroll overflow.
+angular.module('kanbanApp').directive('appSafeHtml', function () {
+    return {
+        restrict: 'A',
+        link: function (scope, element, attrs) {
+            var el = element[0];
+            var tip = null;
+            var tipInfo = null;
+            var tipUser = null;
+            var hoverTimer = null;
+            var repoCache = {};
+
+            function ensureTip() {
+                if (tip) return;
+                tip = document.createElement('div');
+                tip.className = 'mention-tooltip';
+                tipInfo = document.createElement('div');
+                tipInfo.className = 'mention-tooltip-info';
+                tip.appendChild(tipInfo);
+                document.body.appendChild(tip);
+            }
+
+            function positionTip(anchor) {
+                var r = anchor.getBoundingClientRect();
+                var tw = tip.offsetWidth || 260;
+                var th = tip.offsetHeight || 90;
+                var left = r.left + r.width / 2 - tw / 2;
+                left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
+                var top = r.top - th - 12;
+                if (top < 8) top = r.bottom + 12; // flip below if no room above
+                tip.style.left = left + 'px';
+                tip.style.top = top + 'px';
+                tip.setAttribute('data-edge', top >= r.bottom ? 'bottom' : 'top');
+            }
+
+            function avatarUrl(user) {
+                return 'https://github.com/' + encodeURIComponent(user) + '.png?size=160';
+            }
+
+            function showTip(anchor, user) {
+                ensureTip();
+                tipUser = user;
+                tipInfo.innerHTML =
+                    '<div class="mention-tooltip-row">' +
+                        '<img class="mention-tooltip-avatar" src="' + avatarUrl(user) +
+                        '" alt="" onerror="this.style.visibility=\'hidden\'">' +
+                        '<div class="mention-tooltip-id">' +
+                            '<span class="mention-tooltip-name">@' + user + '</span>' +
+                            '<span class="mention-tooltip-sub">Loading GitHub info…</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="mention-tooltip-repos"></div>';
+                tip.style.display = 'block';
+                positionTip(anchor);
+
+                var doLoad = function () {
+                    if (repoCache[user]) {
+                        tipInfo.querySelector('.mention-tooltip-sub').textContent =
+                            repoCache[user][1];
+                        if (repoCache[user][2]) {
+                            tipInfo.querySelector('.mention-tooltip-name').textContent =
+                                repoCache[user][2] + ' (@' + user + ')';
+                        }
+                        return;
+                    }
+                    // Unauthenticated GitHub api is CORS-open; cache per user in-session.
+                    var repos = fetch('https://api.github.com/users/' + encodeURIComponent(user) +
+                        '/repos?sort=updated&per_page=3').then(function (r) { return r.json(); });
+                    var profile = fetch('https://api.github.com/users/' + encodeURIComponent(user))
+                        .then(function (r) { return r.json(); });
+                    Promise.allSettled([repos, profile]).then(function (results) {
+                        var name = '';
+                        var list = [];
+                        var meta = '';
+                        if (results[1].status === 'fulfilled') {
+                            var p = results[1].value;
+                            name = p.name || '';
+                            meta = (p.public_repos != null ? p.public_repos + ' public repo' +
+                                (p.public_repos === 1 ? '' : 's') : '') +
+                                (p.followers != null ? ' · ' + p.followers + ' followers' : '');
+                        }
+                        if (results[0].status === 'fulfilled' && Array.isArray(results[0].value)) {
+                            list = results[0].value.slice(0, 3).map(function (r) {
+                                return { name: r.name, desc: r.description || '', lang: r.language || '' };
+                            });
+                        }
+                        var sub;
+                        if (list.length) {
+                            sub = 'Repos: ' + list.map(function (r) { return r.name; }).join(', ');
+                        } else {
+                            sub = meta || 'On GitHub @' + user;
+                        }
+                        repoCache[user] = [list, sub, name];
+                        if (tipUser === user) {
+                            var nameEl = tipInfo.querySelector('.mention-tooltip-name');
+                            if (name && nameEl) nameEl.textContent = name + ' (@' + user + ')';
+                            var subEl = tipInfo.querySelector('.mention-tooltip-sub');
+                            if (subEl) subEl.textContent = sub;
+                            var listEl = tipInfo.querySelector('.mention-tooltip-repos');
+                            if (listEl && list.length) {
+                                listEl.innerHTML = '';
+                                list.forEach(function (r) {
+                                    var li = document.createElement('div');
+                                    li.className = 'mention-tooltip-repo';
+                                    li.innerHTML = '<span class="mention-tooltip-repo-name">' +
+                                        escapeHtml(r.name) + '</span>' +
+                                        (r.lang ? ' <span class="mention-tooltip-lang">' + escapeHtml(r.lang) + '</span>' : '') +
+                                        (r.desc ? '<div class="mention-tooltip-repo-desc">' + escapeHtml(r.desc) + '</div>' : '');
+                                    listEl.appendChild(li);
+                                });
+                            }
+                        }
+                    }).catch(function () {
+                        repoCache[user] = [[], 'On GitHub @' + user, ''];
+                    });
+                };
+                doLoad();
+            }
+
+            function escapeHtml(s) {
+                return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            }
+
+            function hideTip() {
+                clearTimeout(hoverTimer);
+                if (tip) tip.style.display = 'none';
+                tipUser = null;
+            }
+
+            function onMouseOver(e) {
+                var t = e.target;
+                var anchor = (t.closest && t.closest('.changelog-mention')) ||
+                    (t.parentNode && t.parentNode.closest && t.parentNode.closest('.changelog-mention'));
+                if (!anchor) return;
+                var user = (anchor.getAttribute('data-mention') || '').replace(/@/g, '');
+                if (!user) return;
+                clearTimeout(hoverTimer);
+                hoverTimer = setTimeout(function () {
+                    showTip(anchor, user);
+                }, 120);
+            }
+
+            function onMouseOut(e) {
+                var t = e.target;
+                var anchor = (t.closest && t.closest('.changelog-mention')) ||
+                    (t.parentNode && t.parentNode.closest && t.parentNode.closest('.changelog-mention'));
+                if (!anchor) return;
+                var related = e.relatedTarget || (e.toElement !== null ? e.toElement : null);
+                if (tip && related && tip.contains(related)) return; // staying inside tooltip
+                hideTip();
+            }
+
+            function onScroll() { hideTip(); }
+
+            el.addEventListener('mouseover', onMouseOver);
+            el.addEventListener('mouseout', onMouseOut);
+            window.addEventListener('scroll', onScroll, true);
+            element.on('$destroy', function () {
+                window.removeEventListener('scroll', onScroll, true);
+                if (tip && tip.parentNode) tip.parentNode.removeChild(tip);
+            });
+
+            scope.$watch(attrs.appSafeHtml, function (html) {
+                el.innerHTML = html || '';
+            });
+        }
+    };
+});

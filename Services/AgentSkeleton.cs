@@ -18,6 +18,34 @@ using static Weaver.Services.AgentJsonUtilities;
 /// <summary>Part of the split of the former AgentUtilities monolith.</summary>
 public static class AgentSkeleton
 {
+    // Shared per-project skeleton cache: both the agent's suggestion context and
+    // the BugHosted heartbeat reuse the same entry, so a directory walk (and the
+    // .gitignore parse) only happens once per TTL window instead of per call.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime at, SkeletonResult result)> Cache =
+        new();
+
+    /// <summary>
+    /// Returns the project skeleton, serving from the shared cache when it's
+    /// fresher than <paramref name="ttlMinutes"/> (default 10 minutes — a
+    /// project layout changes rarely, so a full walk every call is wasted work).
+    /// </summary>
+    public static async Task<SkeletonResult> GetCachedSkeletonAsync(string projectRoot, int ttlMinutes = 10)
+    {
+        if (string.IsNullOrWhiteSpace(projectRoot)) return new SkeletonResult();
+        if (Cache.TryGetValue(projectRoot, out var c) && (DateTime.UtcNow - c.at).TotalMinutes < ttlMinutes)
+            return c.result;
+        var result = await GenerateSkeletonAsync(projectRoot);
+        Cache[projectRoot] = (DateTime.UtcNow, result);
+        return result;
+    }
+
+    /// <summary>Drops cached skeletons (optionally just one project).</summary>
+    public static void ClearSkeletonCache(string? projectRoot = null)
+    {
+        if (projectRoot == null) Cache.Clear();
+        else Cache.TryRemove(projectRoot, out _);
+    }
+
     public static async Task<SkeletonResult> GenerateSkeletonAsync(string projectRoot)
     {
         var sb = new StringBuilder();

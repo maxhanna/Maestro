@@ -1079,7 +1079,7 @@
             <button ng-click="vm.changelogFontSizeUp()" style="width:20px;height:20px;font-size:11px;line-height:1;background:rgba(255,255,255,0.06);color:#888;border:1px solid rgba(255,255,255,0.1);border-radius:3px;cursor:pointer;padding:0;">+</button>
           </div>
           <div ng-style="{'font-size': vm.changelogFontSize + '%'}" style="max-height:70vh;overflow-y:auto;overflow-wrap:anywhere;word-break:break-word;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.06);border-radius:4px;padding:10px;font-family:monospace;color:#abb2bf;white-space:pre-wrap;line-height:1.45;text-align:left;">
-            <span ng-if="vm.changelogContent">{{vm.changelogContent}}</span>
+            <span ng-if="vm.changelogContent" app-safe-html="vm.changelogHtml()"></span>
             <span ng-if="vm.changelogLoading && !vm.changelogContent" style="color:#888;">Loading…</span>
             <span ng-if="!vm.changelogContent && !vm.changelogLoading" style="color:#555;">Could not load changelog.</span>
           </div>
@@ -1219,7 +1219,7 @@
                 <button ng-click="vm.changelogFontSizeUp()" style="width:20px;height:20px;font-size:11px;line-height:1;background:rgba(255,255,255,0.06);color:#888;border:1px solid rgba(255,255,255,0.1);border-radius:3px;cursor:pointer;padding:0;">+</button>
               </div>
               <div ng-style="{'font-size': vm.changelogFontSize + '%'}" style="max-height:120px;max-width:300px;overflow-y:auto;overflow-wrap:anywhere;word-break:break-word;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.06);border-radius:4px;padding:8px 10px;font-family:monospace;color:#abb2bf;white-space:pre-wrap;line-height:1.45;">
-                <span ng-if="vm.changelogContent">{{vm.changelogContent}}</span>
+                <span ng-if="vm.changelogContent" app-safe-html="vm.changelogHtml()"></span>
                 <span ng-if="vm.changelogLoading && !vm.changelogContent" style="color:#888;">Loading…</span>
                 <span ng-if="!vm.changelogContent && !vm.changelogLoading" style="color:#555;">Could not load changelog.</span>
               </div>
@@ -1843,6 +1843,10 @@
               <label style="font-size:12px;display:flex;align-items:center;gap:8px;">
                 <input type="checkbox" ng-model="vm.bughostedShareRank" />
                 Share my rank publicly on BugHosted servers
+              </label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" ng-model="vm.bughostedShareSkeleton" />
+                Share my project skeleton (file layout) — lets the hosted IDE and file picker suggest real files
               </label>
               <span class="settings-help">
                 When enabled, Weaver will send heartbeats and kanban data to bughosted.com.

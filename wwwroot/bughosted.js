@@ -54,6 +54,7 @@ angular.module('kanbanApp')
             init: function (vm, $scope) {
                 vm.bughostedUsername = ''; vm.bughostedPassword = ''; vm.bughostedHeartbeatEnabled = false;
                 vm.bughostedShareRank = false;
+                vm.bughostedShareSkeleton = false;
                 vm.bughostedClientId = ''; vm.bughostedStatus = 'disconnected'; vm.bughostedTesting = false;
                 vm.bughostedTestResult = ''; vm.bughostedTestError = ''; vm.remoteCommands = [];
                 vm.bughostedAutoLogin = readAutoLoginFlag();
@@ -121,33 +122,121 @@ angular.module('kanbanApp')
                     });
                     return out;
                 }
+                // Cap a handful of named string fields on an object in place.
+                function capFields(o, limits) {
+                    if (!o || typeof o !== 'object') return o;
+                    for (var k in limits) {
+                        if (Object.prototype.hasOwnProperty.call(o, k)) o[k] = capRemoteString(o[k], limits[k]);
+                    }
+                    return o;
+                }
+                // Deep-cap every string nested in an object/array tree (in place).
+                function capAllStrings(o, n) {
+                    if (!o || typeof o !== 'object') return;
+                    for (var k in o) {
+                        if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+                        var v = o[k];
+                        if (typeof v === 'string') o[k] = capRemoteString(v, n);
+                        else if (Array.isArray(v)) { for (var i = 0; i < v.length; i++) capAllStrings(v[i], n); }
+                        else if (v && typeof v === 'object') capAllStrings(v, n);
+                    }
+                }
+                // Run a callback over every card in the state columns.
+                function walkStateColumns(kanban, fn) {
+                    var st = kanban && kanban.state;
+                    if (!st || typeof st !== 'object') return;
+                    ['todo', 'doing', 'done', 'archived', 'selfImproving'].forEach(function (col) {
+                        if (Array.isArray(st[col])) st[col].forEach(fn);
+                    });
+                }
+                // Keep the kanban payload under the server's storage budget by
+                // trimming progressively — the cheapest cuts first. Normal boards
+                // (under budget) are sent exactly as slimStateForRemote produced
+                // them; only oversized ones get the deeper passes.
+                function capKanbanToBudget(kanban, budget) {
+                    if (!kanban || typeof kanban !== 'object') return kanban;
+                    var len = function () { return JSON.stringify(kanban).length; };
+                    if (len() <= budget) return kanban;
+
+                    // Pass 1: transient streaming blobs + calendar cards (the
+                    // remote dashboard never renders these in full).
+                    kanban.agentThinking = capRemoteString(kanban.agentThinking, 5000);
+                    kanban.agentSummary = capRemoteString(kanban.agentSummary, 5000);
+                    kanban.activeCardText = capRemoteString(kanban.activeCardText, 5000);
+                    if (Array.isArray(kanban.calendarCards)) {
+                        kanban.calendarCards = kanban.calendarCards.slice(0, 100).map(function (cc) {
+                            if (!cc || typeof cc !== 'object') return cc;
+                            var o = {};
+                            for (var k in cc) { if (Object.prototype.hasOwnProperty.call(cc, k)) o[k] = capRemoteString(cc[k], 500); }
+                            return o;
+                        });
+                    }
+                    if (len() <= budget) return kanban;
+
+                    // Pass 2: shrink per-card agent ephemera harder than the
+                    // base slim already did.
+                    walkStateColumns(kanban, function (card) {
+                        if (!card || typeof card !== 'object') return;
+                        if (Array.isArray(card.agentLog)) {
+                            card.agentLog = card.agentLog.slice(-8).map(function (e) {
+                                return e && typeof e === 'object' ? capFields(e, { detail: 1000, message: 1000 }) : e;
+                            });
+                        }
+                        if (card.agentAnalysis && typeof card.agentAnalysis === 'object') {
+                            card.agentAnalysis = capFields(card.agentAnalysis, { thinking: 4000, summary: 4000, question: 4000 });
+                            if (Array.isArray(card.agentAnalysis.steps)) {
+                                card.agentAnalysis.steps = card.agentAnalysis.steps.slice(-10).map(function (s) {
+                                    return s && typeof s === 'object' ? capFields(s, { output: 1000 }) : s;
+                                });
+                            }
+                        }
+                    });
+                    if (len() <= budget) return kanban;
+
+                    // Pass 3 (last resort): cap every remaining card string so
+                    // the dashboard still renders (truncated) instead of the
+                    // heartbeat being flagged oversized.
+                    walkStateColumns(kanban, function (card) { capAllStrings(card, 2000); });
+                    if (len() <= budget) return kanban;
+
+                    // Pass 4: drop the bulkiest ephemeral lists outright.
+                    walkStateColumns(kanban, function (card) { if (card && typeof card === 'object') { delete card.agentLog; delete card.agentAnalysis; } });
+                    return kanban;
+                }
                 function buildHeartbeatPayload() {
                     var rank = collectRankPayload();
+                    // Trim the kanban payload client-side so it stays under the
+                    // server's storage budget (1,000,000 chars) — the server only
+                    // slims as a safety net and never has to flag an oversized
+                    // heartbeat.
+                    var kanban = capKanbanToBudget({
+                        projects: (vm.projects || []).map(function (p) {
+                            return {
+                                Name: p.Name,
+                                Path: p.Path,
+                                Description: p.Description,
+                                BuildCommands: p.BuildCommands
+                            };
+                        }),
+                        state: slimStateForRemote(vm.state),
+                        agentActive: vm.streamingActive || false,
+                        agentPhase: vm.streamingPhase || '',
+                        agentThinking: vm.streamingThinking || '',
+                        agentSummary: vm.streamingSummary || '',
+                        activeCardId: vm.activeCardId || null,
+                        activeCardText: vm.activeCardText || '',
+                        calendarCards: vm.calCards || [],
+                        userScore: rank.userScore,
+                        rankTitle: rank.rankTitle
+                    }, 950000);
                     return {
                         clientId: vm.bughostedClientId,
-                        kanbanData: JSON.stringify(
-                            { 
-                                projects: (vm.projects || []).map(function (p) { 
-                                    return { 
-                                        Name: p.Name, 
-                                        Path: p.Path, 
-                                        Description: p.Description, 
-                                        BuildCommands: p.BuildCommands 
-                                    }; 
-                                }), 
-                                state: slimStateForRemote(vm.state), 
-                                agentActive: vm.streamingActive || false, 
-                                agentPhase: vm.streamingPhase || '',
-                                agentThinking: vm.streamingThinking || '', 
-                                agentSummary: vm.streamingSummary || '', 
-                                activeCardId: vm.activeCardId || null, 
-                                activeCardText: vm.activeCardText || '', 
-                                calendarCards: vm.calCards || [],
-                                userScore: rank.userScore,
-                                rankTitle: rank.rankTitle
-                            }
-                        ),
-                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedShareRank: vm.bughostedShareRank, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, compactThinkingContext: vm.compactThinkingContext, summarizeDiffContext: vm.summarizeDiffContext, diffContextSummaryChars: vm.diffContextSummaryChars, llmTimeoutMinutes: vm.llmInfiniteTimeout ? 0 : (vm.llmTimeoutMinutes || 0), approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
+                        kanbanData: JSON.stringify(kanban),
+                        // Opt-in project skeleton sharing: the local bridge attaches the
+                        // cached skeleton to the forwarded heartbeat when this is on.
+                        shareSkeleton: vm.bughostedShareSkeleton === true,
+                        projectPath: vm.selectedProject || vm.defaultProject || '',
+                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar,                        bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedShareRank: vm.bughostedShareRank, bughostedShareSkeleton: vm.bughostedShareSkeleton, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword, autoQueue: vm.autoQueue, prByDefault: vm.prByDefault, maxFileContextChars: vm.maxFileContextChars, maxFullFileTokens: vm.maxFullFileTokens, maxContextChars: vm.maxContextChars, fileBodyTruncationChars: vm.fileBodyTruncationChars, buildOutputTailChars: vm.buildOutputTailChars, defaultMaxTokens: vm.defaultMaxTokens, includeProjectSkeleton: vm.includeProjectSkeleton, includeEditKnowledge: vm.includeEditKnowledge, compactThinkingContext: vm.compactThinkingContext, summarizeDiffContext: vm.summarizeDiffContext, diffContextSummaryChars: vm.diffContextSummaryChars, llmTimeoutMinutes: vm.llmInfiniteTimeout ? 0 : (vm.llmTimeoutMinutes || 0), approvedTerminalRoots: vm.approvedTerminalRoots, disallowedTerminalRoots: vm.disallowedTerminalRoots, buildCommands: vm.buildCommands })
                     };
                 }
 
@@ -296,6 +385,7 @@ angular.module('kanbanApp')
                         if (cmd.params.showCalendar !== undefined) vm.showCalendar = cmd.params.showCalendar;
                         if (cmd.params.autoQueue !== undefined) vm.autoQueue = cmd.params.autoQueue;
                         if (cmd.params.bughostedShareRank !== undefined) vm.bughostedShareRank = cmd.params.bughostedShareRank;
+                        if (cmd.params.bughostedShareSkeleton !== undefined) vm.bughostedShareSkeleton = cmd.params.bughostedShareSkeleton;
                         if (cmd.params.prByDefault !== undefined) vm.prByDefault = cmd.params.prByDefault;
                         if (cmd.params.maxFileContextChars !== undefined) vm.maxFileContextChars = cmd.params.maxFileContextChars;
                         if (cmd.params.maxFullFileTokens !== undefined) vm.maxFullFileTokens = cmd.params.maxFullFileTokens;
