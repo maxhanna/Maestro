@@ -65,6 +65,10 @@ public class PlanStep
     public string File { get; set; } = string.Empty;
     public string Change { get; set; } = string.Empty;
 
+    /// <summary>Transient planning state; never persisted to board data or sent to the client.</summary>
+    [JsonIgnore]
+    public bool SkipDuplicateCheck { get; set; }
+
     /// <summary>
     /// Frontend-side plan-item state persisted on the card (e.g. "rejected" for a step the
     /// interleaved validator vetoed). Round-trips through boarddata so a restarted run can

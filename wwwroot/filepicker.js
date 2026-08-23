@@ -23,7 +23,7 @@ angular.module('kanbanApp')
                 vm.pickerEntries = [];
                 vm.pickerSelected = [];
                 vm.isSearchResult = false;
-                vm.searchFilter = '';
+                vm.filePickerSearchFilter = '';
                 vm.existingFilesCount = 0;
 
                 // === Methods ===
@@ -78,7 +78,7 @@ angular.module('kanbanApp')
                     vm.pickerEntries = [];
                     vm.pickerSelected = [];
                     vm.isSearchResult = false;
-                    vm.searchFilter = '';
+                    vm.filePickerSearchFilter = '';
                 };
 
                 vm.openFilePicker = function (cardId, path) {
@@ -88,7 +88,7 @@ angular.module('kanbanApp')
                     vm.pickerEntries = [];
                     vm.pickerSelected = [];
                     vm.isSearchResult = false;
-                    vm.searchFilter = '';
+                    vm.filePickerSearchFilter = '';
                     vm.existingFilesCount = 0;
 
                     // Pre-populate selected state for files already attached to the card
@@ -130,8 +130,8 @@ angular.module('kanbanApp')
                 vm.loadPickerEntries = function (cardId) {
                     var params = { project: vm.selectedProject };
 
-                    if (vm.searchFilter && vm.searchFilter.trim()) {
-                        params.search = vm.searchFilter.trim();
+                    if (vm.filePickerSearchFilter && vm.filePickerSearchFilter.trim()) {
+                        params.search = vm.filePickerSearchFilter.trim();
                         // Preserve the current path for search operations to ensure they stay within the current directory
                         if (vm.pickerPath) {
                             params.path = vm.pickerPath;
@@ -150,7 +150,7 @@ angular.module('kanbanApp')
 
                 vm.pickerEnterDir = function (path) {
                     vm.pickerPath = path;
-                    vm.searchFilter = '';
+                    vm.filePickerSearchFilter = '';
                     vm.isSearchResult = false;
                     vm.loadPickerEntries();
                 };
@@ -173,7 +173,7 @@ angular.module('kanbanApp')
                 };
 
                 vm.clearSearch = function () {
-                    vm.searchFilter = '';
+                    vm.filePickerSearchFilter = '';
                     vm.loadPickerEntries();
                 };
             }

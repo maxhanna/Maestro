@@ -1109,6 +1109,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // The generic edit-step dedup below (0.82 Jaccard) lets reworded queries slip through.
         if (RepeatedWebStepReason(step, planSoFar, discoveryContext) is string webDupReason)
             return (false, webDupReason);
+        // A duplicate heuristic already ran for this proposal and was explicitly overruled
+        // by the LLM adjudicator. Keep every other validation gate active, but do not run the
+        // same similarity check again and undo that adjudication.
+        if (step.SkipDuplicateCheck)
+            goto SkipDuplicateChecks;
+
         // TABULAR-FILE EXEMPTION: structured CSV/TSV/XLSX edits are sequential ops whose change
         // descriptions share vocabulary ("add a type column" → "add a row with id=1026…" →
         // "replace all 'unknown' with 'normal' in column type"). The 0.82-Jaccard / exact-match
@@ -1134,6 +1140,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
             }
         }
+
+    SkipDuplicateChecks:
         // Reject _create_file steps with no actual content (hallucinated file creation)
         if (string.Equals(step.File, "_sql_migration", StringComparison.OrdinalIgnoreCase))
         {
@@ -3076,6 +3084,140 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return false;
     }
 
+    private async Task<DuplicateStepAdjudication> AdjudicateDuplicateStepAsync(
+        string originalPrompt, PlanStep completedStep, PlanStep proposedStep,
+        string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            var currentFile = "(file unavailable)";
+            if (!string.IsNullOrWhiteSpace(proposedStep.File) && !AgentProjectUtilities.IsSpecialMarker(proposedStep.File))
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(
+                    projectRoot, proposedStep.File.Replace('/', Path.DirectorySeparatorChar)));
+                if (System.IO.File.Exists(fullPath))
+                {
+                    var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                    currentFile = content.Length > 12000 ? content[..12000] + "\n… (truncated)" : content;
+                }
+            }
+
+            var promptText = new StringBuilder();
+            promptText.AppendLine("ORIGINAL TASK:");
+            promptText.AppendLine(TruncateForLlm(originalPrompt ?? "", 1800));
+            promptText.AppendLine();
+            promptText.AppendLine("COMPLETED STEP (already executed; do not repeat it):");
+            promptText.AppendLine($"File: {completedStep.File}");
+            promptText.AppendLine($"Change: {completedStep.Change}");
+            promptText.AppendLine();
+            promptText.AppendLine("CURRENT FILE ON DISK (authoritative after the completed step):");
+            promptText.AppendLine(currentFile);
+            promptText.AppendLine();
+            promptText.AppendLine("PROPOSED NEXT STEP:");
+            promptText.AppendLine($"File: {proposedStep.File}");
+            promptText.AppendLine($"Change: {proposedStep.Change}");
+            promptText.AppendLine($"OldString: {proposedStep.OldString ?? "(none)"}");
+            promptText.AppendLine($"NewString: {proposedStep.NewString ?? "(none)"}");
+            promptText.AppendLine();
+            promptText.AppendLine("The deterministic duplicate check is only a heuristic. Decide whether the proposed step is genuinely distinct work toward the original task.");
+            promptText.AppendLine("If it is distinct, return DISTINCT and preserve the proposed step.");
+            promptText.AppendLine("If it is a duplicate but another requirement remains, return REPLACEMENT with one complete deduped step that should be executed next. The replacement must target a real repository file or a valid special marker and include file, change, and any required edit fields.");
+            promptText.AppendLine("If it is a true duplicate and no replacement is needed, return DUPLICATE.");
+            promptText.AppendLine("Output ONLY JSON in exactly one of these forms:");
+            promptText.AppendLine("{\"decision\":\"DISTINCT\"}");
+            promptText.AppendLine("{\"decision\":\"DUPLICATE\"}");
+            promptText.AppendLine("{\"decision\":\"REPLACEMENT\",\"step\":{\"file\":\"...\",\"change\":\"...\",\"oldString\":\"...\",\"newString\":\"...\"}}");
+
+            var (raw, _, err) = await CallLlmRaw(
+                "You are a strict duplicate-step adjudicator. Never repeat completed work. Output ONLY the requested JSON.",
+                promptText.ToString(), ct, _infiniteTimeout, maxTokens: 1000);
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn", $"Duplicate adjudication failed ({err}); keeping the duplicate rejection.", ct: ct);
+                return DuplicateStepAdjudication.Duplicate;
+            }
+
+            using var doc = JsonDocument.Parse(ExtractFirstJsonObject(raw), new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("decision", out var decisionEl) || decisionEl.ValueKind != JsonValueKind.String)
+                return DuplicateStepAdjudication.Duplicate;
+            var decision = decisionEl.GetString()?.Trim().ToUpperInvariant();
+            if (decision == "DISTINCT") return DuplicateStepAdjudication.Distinct;
+            if (decision != "REPLACEMENT" || !root.TryGetProperty("step", out var stepEl) || stepEl.ValueKind != JsonValueKind.Object)
+                return DuplicateStepAdjudication.Duplicate;
+
+            var replacement = ParseAdjudicatedStep(stepEl);
+            return replacement == null
+                ? DuplicateStepAdjudication.Duplicate
+                : new DuplicateStepAdjudication(DuplicateStepDecision.Replacement, replacement);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await EmitLog(emitSse, "warn", $"Duplicate adjudication returned unusable output ({ex.Message}); keeping the duplicate rejection.", ct: ct);
+            return DuplicateStepAdjudication.Duplicate;
+        }
+    }
+
+    private static PlanStep? ParseAdjudicatedStep(JsonElement stepEl)
+    {
+        static string? ReadString(JsonElement parent, string name)
+        {
+            if (!parent.TryGetProperty(name, out var value)) return null;
+            if (value.ValueKind == JsonValueKind.String)
+                return AgentTextUtilities.UnescapeString(value.GetString() ?? "");
+            if (value.ValueKind == JsonValueKind.Array)
+            {
+                var lines = value.EnumerateArray()
+                    .Where(v => v.ValueKind == JsonValueKind.String)
+                    .Select(v => AgentTextUtilities.UnescapeString(v.GetString() ?? ""));
+                return string.Join("\n", lines);
+            }
+            return null;
+        }
+
+        var file = ReadString(stepEl, "file")?.Trim();
+        var change = ReadString(stepEl, "change")?.Trim();
+        if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change)) return null;
+        var targetSymbol = ReadString(stepEl, "targetSymbol");
+        var targetType = ReadString(stepEl, "targetType");
+        var targetName = ReadString(stepEl, "targetName");
+        var oldString = ReadString(stepEl, "oldString");
+        var newString = ReadString(stepEl, "newString");
+        var fullFile = ReadString(stepEl, "fullFile");
+        var line = stepEl.TryGetProperty("line", out var lineEl) && lineEl.ValueKind == JsonValueKind.Number
+            ? lineEl.GetInt32() : 0;
+        var insertAfter = stepEl.TryGetProperty("insertAfter", out var insertEl) && insertEl.ValueKind == JsonValueKind.True;
+        var newCode = new List<string>();
+        if (stepEl.TryGetProperty("newCode", out var newCodeEl) && newCodeEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in newCodeEl.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String)
+                    newCode.Add(AgentTextUtilities.UnescapeString(item.GetString() ?? ""));
+        }
+        var refFiles = new List<string>();
+        if (stepEl.TryGetProperty("referenceFiles", out var refEl) && refEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in refEl.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                    refFiles.Add(item.GetString()!);
+        }
+        var edits = new List<EditPair>();
+        if (stepEl.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in editsEl.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object) continue;
+                var oldEdit = ReadString(item, "oldString");
+                var newEdit = ReadString(item, "newString");
+                if (!string.IsNullOrWhiteSpace(oldEdit) || newEdit != null)
+                    edits.Add(new EditPair { OldString = oldEdit ?? "", NewString = newEdit ?? "" });
+            }
+        }
+        return ParseStepFromJson(file, change, targetSymbol, line, oldString, newString,
+            refFiles, edits, targetType, targetName, insertAfter,
+            newCode.Count > 0 ? newCode : null, fullFile);
+    }
+
     /// <summary>
     /// LLM adjudication for a repo file edit proposed while the task targets the OS
     /// filesystem: decides whether editing this specific repo file is genuinely part
@@ -3797,19 +3939,41 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 if (duplicateOf != null)
                 {
-                    var dupFb =
-                        $"STEP ALREADY DONE (IMMUTABLE) — [{proposal.Step.File}] {proposal.Step.Change}\n" +
-                        $"is too similar to the COMPLETED step:\n" +
-                        $"  [{duplicateOf.File}] {duplicateOf.Change}\n" +
-                        $"Completed steps CANNOT be revised, edited, or repeated. " +
-                        $"Look at the EDIT LOG — this work is DONE. " +
-                        $"If the task needs something ELSE, propose a DIFFERENT step. " +
-                        $"If the task is fully satisfied, return planComplete=true.";
-                    await EmitRejectedLog(emitSse,
-                        $"Interleaved execution: rejected duplicate step — [{proposal.Step.File}] {proposal.Step.Change} repeats completed step [{duplicateOf.File}] {duplicateOf.Change}", dupFb, ct);
-                    rejectionFeedback.Add(dupFb);
-                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
-                    continue;
+                    // Description-token overlap is only a heuristic. Before rejecting the
+                    // proposal, ask the LLM to adjudicate the completed step against the
+                    // proposed step and current file truth. This is important for sequential
+                    // edits in one method: "add save_note handler" and "add downloaded_painting
+                    // handler" share the same file/method vocabulary but are distinct work.
+                    var adjudication = await AdjudicateDuplicateStepAsync(
+                        prompt, duplicateOf, proposal.Step, projectRoot, emitSse, ct);
+                    if (adjudication.Decision == DuplicateStepDecision.Distinct)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"Duplicate heuristic overruled by LLM — allowing distinct step [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
+                        duplicateOf = null;
+                        proposal.Step.SkipDuplicateCheck = true;
+                    }
+                    else if (adjudication.Decision == DuplicateStepDecision.Replacement && adjudication.Step != null)
+                    {
+                        proposal.Step = adjudication.Step;
+                        proposal.Step.SkipDuplicateCheck = true;
+                        await EmitLog(emitSse, "info",
+                            $"LLM supplied a deduped replacement step: [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
+                        duplicateOf = null;
+                    }
+                    else
+                    {
+                        var dupFb =
+                            $"STEP ALREADY DONE — [{proposal.Step.File}] {proposal.Step.Change}\n" +
+                            $"The duplicate heuristic and LLM adjudication both found it equivalent to the completed step:\n" +
+                            $"  [{duplicateOf.File}] {duplicateOf.Change}\n" +
+                            $"Do not repeat completed work. If another requirement remains, return one concrete, distinct step; otherwise return planComplete=true.";
+                        await EmitRejectedLog(emitSse,
+                            $"Interleaved execution: rejected duplicate step — [{proposal.Step.File}] {proposal.Step.Change} repeats completed step [{duplicateOf.File}] {duplicateOf.Change}", dupFb, ct);
+                        rejectionFeedback.Add(dupFb);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                        continue;
+                    }
                 }
             }
             // Web-step gate (mirror of the incremental loop): a _web_search/_web_fetch
@@ -5207,6 +5371,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return (null, null, false, null);
     }
+    private enum DuplicateStepDecision
+    {
+        Duplicate,
+        Distinct,
+        Replacement
+    }
+
+    private sealed class DuplicateStepAdjudication
+    {
+        public DuplicateStepDecision Decision { get; }
+        public PlanStep? Step { get; }
+
+        public static DuplicateStepAdjudication Duplicate { get; } = new(DuplicateStepDecision.Duplicate, null);
+        public static DuplicateStepAdjudication Distinct { get; } = new(DuplicateStepDecision.Distinct, null);
+
+        public DuplicateStepAdjudication(DuplicateStepDecision decision, PlanStep? step)
+        {
+            Decision = decision;
+            Step = step;
+        }
+    }
+
     private sealed class IncrementalStepProposal
     {
         public bool PlanComplete { get; set; }

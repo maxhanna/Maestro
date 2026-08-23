@@ -77,6 +77,60 @@ public class TsJsIndentationTests
     }
 
     /// <summary>
+    /// Direct FORMAT C/D replacements use a raw string splice instead of the normal
+    /// line-based oldString/newString matcher. The replacement must still be rebuilt
+    /// from braces before that splice, otherwise a flat payload flattens the method.
+    /// </summary>
+    [Fact]
+    public void DirectReplacement_FlatViewEventChain_ReindentsBeforeSplice()
+    {
+        var file = new[]
+        {
+            "export class UserEvents {",
+            "  viewEvent(e: UserEvent) {",
+            "    if (e.referenceId == null) return;",
+            "  }",
+            "}"
+        };
+        var oldBlock = new[]
+        {
+            "  viewEvent(e: UserEvent) {",
+            "    if (e.referenceId == null) return;",
+            "  }"
+        };
+        var flatReplacement = string.Join("\n", new[]
+        {
+            "viewEvent(e: UserEvent) {",
+            "if (e.referenceId == null) return;",
+            "if (e.eventType.includes('digcraft')) {",
+            "this.parentRef?.createComponent('DigCraft');",
+            "}",
+            "if (e.eventType.toLowerCase().includes('grandtheft')) {",
+            "this.parentRef?.createComponent('GrandTheft');",
+            "}",
+            "else if (e.eventType.includes('save_note')) {",
+            "this.parentRef?.createComponent('Notepad', { 'noteId': e.referenceId });",
+            "}",
+            "}"
+        });
+
+        var reindented = AgentCodeFormatting.AutoIndentFromFile(
+            flatReplacement, "  ", oldBlock, 0);
+        var lines = reindented.Split('\n');
+
+        Assert.Equal("  viewEvent(e: UserEvent) {", lines[0]);
+        Assert.Equal("    if (e.referenceId == null) return;", lines[1]);
+        Assert.Equal("    if (e.eventType.includes('digcraft')) {", lines[2]);
+        Assert.Equal("      this.parentRef?.createComponent('DigCraft');", lines[3]);
+        Assert.Equal("    }", lines[4]);
+        Assert.Equal("    if (e.eventType.toLowerCase().includes('grandtheft')) {", lines[5]);
+        Assert.Equal("      this.parentRef?.createComponent('GrandTheft');", lines[6]);
+        Assert.Equal("    }", lines[7]);
+        Assert.Equal("      this.parentRef?.createComponent('Notepad', { 'noteId': e.referenceId });", lines[9]);
+        Assert.Equal("  }", lines[11]);
+    }
+
+    /// <summary>
     /// A method inserted AFTER an existing method (insertAfter semantics): the new
     /// method must land at the same 2-space class-member level, not nested inside
     /// the previous method.

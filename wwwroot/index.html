@@ -987,10 +987,10 @@
           <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath || vm.isSearchResult">⬆
             Up</button>
           <span>{{vm.isSearchResult ? '🔍 Search results' : (vm.pickerPath || '/')}}</span>
-          <button class="small" ng-click="vm.clearSearch()" ng-if="vm.searchFilter" style="margin-left:auto;">✕
+          <button class="small" ng-click="vm.clearSearch()" ng-if="vm.filePickerSearchFilter" style="margin-left:auto;">✕
             Clear</button>
         </div>
-        <input type="text" ng-model="vm.searchFilter" id="attachFilePickerSearchInput" placeholder="Search files..."
+        <input type="search" name="file-picker-search" autocomplete="off" ng-model="vm.filePickerSearchFilter" id="attachFilePickerSearchInput" placeholder="Search files..."
           class="search-input" ng-change="vm.onSearchChange()" />
         <div class="file-picker-list">
           <div class="entry dir" ng-repeat="e in vm.pickerEntries" ng-if="e.isDirectory"
@@ -1065,9 +1065,33 @@
 
   <!-- DISCORD MODAL -->
   <div class="popup-overlay" ng-if="vm.showDiscordPanel" ng-click="vm.closeDiscordPanel()">
-    <div class="popup-panel" style="max-width:420px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel" style="max-width:420px;display:flex;flex-direction:column;" ng-click="$event.stopPropagation()">
+      <!-- Focused changelog view replaces the rest of this panel while open. -->
+      <div ng-if="vm.showChangelog" style="padding:16px;order:0;">
+        <div style="cursor:pointer;display:flex;align-items:center;gap:6px;font-size:1em;color:#d4af37;font-weight:bold;" ng-click="vm.toggleChangelog()">
+          📋 What's new
+          <span style="font-size:0.8em;font-weight:normal;color:#888;">▲</span>
+        </div>
+        <div style="margin-top:10px;">
+          <div style="display:flex;align-items:center;justify-content:flex-end;gap:2px;margin-bottom:6px;">
+            <button ng-click="vm.changelogFontSizeDown()" style="width:20px;height:20px;font-size:11px;line-height:1;background:rgba(255,255,255,0.06);color:#888;border:1px solid rgba(255,255,255,0.1);border-radius:3px;cursor:pointer;padding:0;">−</button>
+            <span style="font-size:0.68em;color:#555;min-width:28px;text-align:center;">{{vm.changelogFontSize | number:0}}%</span>
+            <button ng-click="vm.changelogFontSizeUp()" style="width:20px;height:20px;font-size:11px;line-height:1;background:rgba(255,255,255,0.06);color:#888;border:1px solid rgba(255,255,255,0.1);border-radius:3px;cursor:pointer;padding:0;">+</button>
+          </div>
+          <div ng-style="{'font-size': vm.changelogFontSize + '%'}" style="max-height:70vh;overflow-y:auto;overflow-wrap:anywhere;word-break:break-word;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.06);border-radius:4px;padding:10px;font-family:monospace;color:#abb2bf;white-space:pre-wrap;line-height:1.45;text-align:left;">
+            <span ng-if="vm.changelogContent">{{vm.changelogContent}}</span>
+            <span ng-if="vm.changelogLoading && !vm.changelogContent" style="color:#888;">Loading…</span>
+            <span ng-if="!vm.changelogContent && !vm.changelogLoading" style="color:#555;">Could not load changelog.</span>
+          </div>
+          <div ng-if="vm.changelogSyncLabel" style="font-size:0.72em;color:#666;margin-top:5px;">{{vm.changelogSyncLabel}}</div>
+        </div>
+        <div class="popup-footer" style="margin-top:12px;">
+          <button ng-click="vm.closeDiscordPanel()">Close</button>
+        </div>
+      </div>
+
       <!-- Brand header: big gold skulltula logo + the WEAVER ASCII art from README.md -->
-      <div class="discord-brand">
+      <div class="discord-brand" ng-if="!vm.showChangelog" style="order:2;">
         <svg class="discord-brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <!-- Gold Skulltula (Zelda 64) &times; weaver spider — web rings -->
           <circle class="brand-ring" cx="12" cy="12" r="8" fill="none" stroke="#d4af37" stroke-width="0.5" stroke-dasharray="2,2" opacity="0.45" />
@@ -1125,7 +1149,7 @@
 ░█▄█░█▀▀░█▀█░▀▄▀░█▀▀░█▀▄
 ░▀░▀░▀▀▀░▀░▀░░▀░░▀▀▀░▀░▀</pre>
       </div> 
-      <div class="popup-body" style="text-align:center;">
+      <div class="popup-body" style="text-align:center;order:3;" ng-if="!vm.showChangelog">
         <p style="font-size:1.1em; margin-bottom:16px;">Connect with the Weaver community!</p>
         <a href="https://discord.gg/YQWkD6ZQDx" target="_blank" rel="noopener noreferrer"
           style="display:inline-block; padding:12px 32px; background:#5865F2; color:#fff; border-radius:6px; text-decoration:none; font-weight:bold; font-size:1.1em;">
@@ -1133,7 +1157,7 @@
         </a>
         <p style="margin-top:16px; color:#888; font-size:0.9em;">Get help, share feedback, and stay updated.</p>
       </div>
-      <div class="popup-header"> 
+      <div class="popup-header" ng-if="!vm.showChangelog" style="order:1;">
         <div class="popup-body" style="padding:8px 16px; font-size:0.9em;">
           <div ng-if="vm.appVersion">
             <span>Current Version: <strong>{{vm.appVersion.local}}</strong></span>
@@ -1194,7 +1218,7 @@
                 <span style="font-size:0.68em;color:#555;min-width:28px;text-align:center;">{{vm.changelogFontSize | number:0}}%</span>
                 <button ng-click="vm.changelogFontSizeUp()" style="width:20px;height:20px;font-size:11px;line-height:1;background:rgba(255,255,255,0.06);color:#888;border:1px solid rgba(255,255,255,0.1);border-radius:3px;cursor:pointer;padding:0;">+</button>
               </div>
-              <div ng-style="{'font-size': vm.changelogFontSize + '%'}" style="max-height:120px;max-width:300px;overflow-y:auto;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.06);border-radius:4px;padding:8px 10px;font-family:monospace;color:#abb2bf;white-space:pre-wrap;line-height:1.45;">
+              <div ng-style="{'font-size': vm.changelogFontSize + '%'}" style="max-height:120px;max-width:300px;overflow-y:auto;overflow-wrap:anywhere;word-break:break-word;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.06);border-radius:4px;padding:8px 10px;font-family:monospace;color:#abb2bf;white-space:pre-wrap;line-height:1.45;">
                 <span ng-if="vm.changelogContent">{{vm.changelogContent}}</span>
                 <span ng-if="vm.changelogLoading && !vm.changelogContent" style="color:#888;">Loading…</span>
                 <span ng-if="!vm.changelogContent && !vm.changelogLoading" style="color:#555;">Could not load changelog.</span>
@@ -1204,7 +1228,7 @@
           </div>
         </div>
       </div>
-      <div class="popup-header">
+      <div class="popup-header" ng-if="!vm.showChangelog" style="order:4;">
         <strong>GitHub</strong>
         <div class="popup-body">
           <div class="link-item github-link">
@@ -1213,7 +1237,7 @@
           </div>
         </div>
       </div>
-      <div class="popup-body">
+      <div class="popup-body" ng-if="!vm.showChangelog" style="order:5;">
         <a href="https://maxhanna.github.io/" target="_blank" rel="noopener noreferrer"
           style="display:block; text-align:center; padding:13px 16px; background:rgba(212,175,55,0.12); color:#fbbf24; border:1px solid rgba(212,175,55,0.4); border-radius:8px; text-decoration:none; font-weight:bold; font-size:1.05em; transition:all 0.15s ease;"
           onmouseover="this.style.background='rgba(212,175,55,0.22)'" onmouseout="this.style.background='rgba(212,175,55,0.12)'">
@@ -1223,7 +1247,7 @@
           cron, benchmarks &amp; more.</p>
       </div>
 
-      <div class="popup-footer">
+      <div class="popup-footer" ng-if="!vm.showChangelog" style="order:6;">
         <button ng-click="vm.closeDiscordPanel()">Close</button>
       </div>
     </div>
@@ -1779,8 +1803,8 @@
                   <input ng-model="acct.imapPort" type="number" placeholder="993" style="width:80px;" />
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                  <input ng-model="acct.username" placeholder="Email username" style="flex:1;" />
-                  <input ng-model="acct.password" type="password" placeholder="Password" style="flex:1;" />
+                  <input type="email" name="email-username-{{$index}}" autocomplete="username" ng-model="acct.username" placeholder="Email username" style="flex:1;" />
+                  <input type="password" name="email-password-{{$index}}" autocomplete="current-password" ng-model="acct.password" placeholder="Password" style="flex:1;" />
                 </div>
                 <div style="display:flex;align-items:center;gap:12px;">
                   <label style="font-size:12px;"><input type="checkbox" ng-model="acct.useSsl" /> Use SSL</label>
@@ -1809,8 +1833,8 @@
             <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
             <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;">
-                <input ng-model="vm.bughostedUsername" ng-change="vm.markBughostedCredsEdited()" placeholder="Username" style="flex:1;" />
-                <input ng-model="vm.bughostedPassword" type="password" ng-change="vm.markBughostedCredsEdited()" placeholder="Password" style="flex:1;" />
+                <input type="text" name="bughosted-username" autocomplete="username" ng-model="vm.bughostedUsername" ng-change="vm.markBughostedCredsEdited()" placeholder="Username" style="flex:1;" />
+                <input type="password" name="bughosted-password" autocomplete="current-password" ng-model="vm.bughostedPassword" ng-change="vm.markBughostedCredsEdited()" placeholder="Password" style="flex:1;" />
               </div>
               <label style="font-size:12px;display:flex;align-items:center;gap:8px;">
                 <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" />

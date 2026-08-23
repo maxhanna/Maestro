@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace Weaver.Services;
 
@@ -74,7 +75,7 @@ public class ChangelogService
             var body = (r.Body ?? "").Trim();
 
             // Compact release header
-            sb.AppendLine($"v{version.TrimStart('v')}  ({date})");
+            sb.AppendLine($"{version}  ({date})");
 
             if (!string.IsNullOrWhiteSpace(body))
                 FormatReleaseBody(sb, body);
@@ -90,8 +91,11 @@ public class ChangelogService
 
     private static string NormalizeVersion(string tag)
     {
-        tag = tag.Trim();
-        return tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? tag : "v" + tag;
+        var suffix = tag.Trim();
+        suffix = Regex.Replace(suffix, @"^v?version[\s._-]*", "", RegexOptions.IgnoreCase);
+        suffix = Regex.Replace(suffix, @"^v[\s._-]*", "", RegexOptions.IgnoreCase);
+        if (string.Equals(suffix, "main", StringComparison.OrdinalIgnoreCase)) return "Main";
+        return $"Version {suffix}";
     }
 
     private static void FormatReleaseBody(System.Text.StringBuilder sb, string body)

@@ -2299,6 +2299,24 @@ body.dragging-active .card:hover {
     font-size: 12px;
     color: var(--muted);
 }
+.feedback-delivery-status {
+    margin: -2px 0 8px;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--muted);
+}
+.feedback-delivery-sending,
+.feedback-delivery-pending {
+    color: var(--warning);
+}
+.feedback-delivery-sent {
+    color: var(--brand-success, #22c55e);
+    font-weight: 700;
+}
+.feedback-delivery-unavailable,
+.feedback-delivery-failed {
+    color: var(--error, #f87171);
+}
 .feedback-form textarea {
     width: 100%;
     box-sizing: border-box;

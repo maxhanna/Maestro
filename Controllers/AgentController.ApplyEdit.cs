@@ -345,6 +345,7 @@ partial class AgentController
             bool fullFile = false, alreadyDone = false;
             string? fullContent = null;
             bool fromFormatC = false;
+            bool replacementAlreadyFormatted = false;
             if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
             {
                 if (decidedEditStrategy?.Strategy == EditStrategy.InsertMethod || step.InsertAfter == true)
@@ -448,6 +449,7 @@ partial class AgentController
                                         newStr = AgentCodeFormatting.AutoFixOperatorSpacing(newStr);
                                     newStr = await FormatSnippetAsync(planOldStr, newStr, relPath);
                                     fromFormatC = true;
+                                    replacementAlreadyFormatted = true;
                                     await EmitLog(emitSse, "info",
                                         $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
                                 }
@@ -851,35 +853,25 @@ partial class AgentController
                 await EmitLog(emitSse, "info",
                     $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                     ct: ct);
-                // Skip Prettier for snippet formatting — it strips indentation and destroys nesting
-                var skipSnippetFormat = true;
-                if (!skipSnippetFormat && !string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 && CodeFormatterService.CanFormat(relPath))
+                // Format only the replacement snippet. FormatSnippetAsync keeps the
+                // formatter's structural cleanup while restoring the snippet relative to
+                // the original anchor, so a flat TypeScript payload cannot flatten the
+                // surrounding method or conditional chain.
+                if (!string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 &&
+                    !string.IsNullOrWhiteSpace(oldStr) && CodeFormatterService.CanFormat(relPath) &&
+                    !replacementAlreadyFormatted)
                 {
                     var before = newStr;
-                    newStr = (await CodeFormatterService.FormatAsync(relPath, newStr, ct)).TrimEnd('\n', '\r');
-                    if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
-                    {
-                        var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-                        if (oldFirstLine != null)
-                        {
-                            var baseIndent = Regex.Match(oldFirstLine, @"^(\s*)").Value;
-                            if (baseIndent.Length > 0)
-                            {
-                                var fmtLines = newStr.Split('\n');
-                                for (var i = 0; i < fmtLines.Length; i++)
-                                {
-                                    if (!string.IsNullOrWhiteSpace(fmtLines[i]))
-                                        fmtLines[i] = baseIndent + fmtLines[i];
-                                }
-                                newStr = string.Join("\n", fmtLines);
-                            }
-                        }
-                    }
+                    newStr = await FormatSnippetAsync(oldStr, newStr, relPath);
                     if (newStr != before)
                         await EmitLog(emitSse, "info", $"Formatted replacement snippet in {relPath} via CodeFormatterService", ct: ct);
                 }
                 if (!string.IsNullOrWhiteSpace(newStr) && Path.GetExtension(relPath) is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                {
                     newStr = AgentCodeFormatting.AutoFixOperatorSpacing(newStr);
+                    // The replacement was already formatted above through the same
+                    // anchor-aware path used by FORMAT C/D and oldString/newString edits.
+                }
                 if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
                 {
                     newContent = newStr;

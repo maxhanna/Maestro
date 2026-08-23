@@ -38,6 +38,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
   return {
     init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
+      vm.kanbanSearchFilter = '';
       vm.isCardActive = function (cardId) { return vm.streamingActive && vm.activeCardId === cardId }
       // Done-button verdict color — the Done / Done & Delete buttons mirror the color of the
       // verification header above them (green = Verified complete, yellow = Verified
@@ -62,8 +63,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       // endpoint so negative feedback is reported upstream (weaver admins review these).
       // Silently skips when not connected — the local rating is still saved.
       function _postRatingToBughosted(card, message) {
-        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
         if (!card || !message) return;
+        card._feedback = card._feedback || {};
+        card._feedback.delivery = 'sending';
+        card._feedback.deliveryError = '';
+        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') {
+          card._feedback.delivery = 'unavailable';
+          card._feedback.deliveryError = 'Connect Bughosted under Settings to send this rating.';
+          return;
+        }
         var analysis = card.agentAnalysis || {};
         var filesEdited = [];
         if (Array.isArray(analysis.filesEdited)) {
@@ -90,8 +98,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           filesEdited: filesEdited,
           steps: steps
         }).then(function () {
-          var sentCard = vm.findCardById ? vm.findCardById(card.id) : null;
+          var sentCard = vm.findCardById ? vm.findCardById(card.id) : card;
           if (sentCard) {
+            sentCard._feedback = sentCard._feedback || {};
+            sentCard._feedback.delivery = 'sent';
+            sentCard._feedback.deliveryError = '';
+            if (sentCard !== card) {
+              card._feedback.delivery = 'sent';
+              card._feedback.deliveryError = '';
+            }
             var sentEntries = Array.isArray(sentCard._feedbackSent)
               ? sentCard._feedbackSent
               : (sentCard._feedbackSent ? [sentCard._feedbackSent] : []);
@@ -100,6 +115,18 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             vm.saveCards();
           }
           if (vm.addLogEntry) vm.addLogEntry({ type: 'info', message: '💬 Rating feedback sent for card #' + card.id });
+        }, function (resp) {
+          var failedCard = vm.findCardById ? vm.findCardById(card.id) : card;
+          if (failedCard) {
+            failedCard._feedback = failedCard._feedback || {};
+            failedCard._feedback.delivery = 'failed';
+            failedCard._feedback.deliveryError = (resp && resp.data && resp.data.error) || 'The rating could not be sent.';
+            if (failedCard !== card) {
+              card._feedback.delivery = 'failed';
+              card._feedback.deliveryError = failedCard._feedback.deliveryError;
+            }
+          }
+          if (vm.addLogEntry) vm.addLogEntry({ type: 'warn', message: 'Rating feedback failed for card #' + card.id });
         });
       }
 
@@ -111,6 +138,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         card._feedback = card._feedback || {};
         card._feedback.rating = rating;
         if (rating === 'up') delete card._feedback.draft;
+        if (rating === 'down') {
+          card._feedback.delivery = 'pending';
+          card._feedback.deliveryError = '';
+        }
         vm.saveCards();
         if (rating === 'up') _postRatingToBughosted(card, '👍 Thumbs up — this run was helpful');
       }
@@ -391,8 +422,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       };
 
       vm.filterCards = function (cards) {
-        if (!vm.searchFilter) return cards;
-        var filter = vm.searchFilter.toLowerCase();
+        if (!vm.kanbanSearchFilter) return cards;
+        var filter = vm.kanbanSearchFilter.toLowerCase();
         return cards.filter(function (card) {
           return card.id.toLowerCase().includes(filter) || card.text.toLowerCase().includes(filter);
         });
@@ -401,7 +432,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.cardsForProject = function (col) {
         var all = vm.state[col] || [];
         if (!vm.selectedProject) return all;
-        var key = col + '|' + vm.selectedProject + '|' + (vm.searchFilter || '');
+        var key = col + '|' + vm.selectedProject + '|' + (vm.kanbanSearchFilter || '');
         var cached = _cardsCache[key];
         if (cached && cached._version === _cardsVersion && cached._length === all.length) return cached;
         var filtered = all.filter(function (c) { return c.filePath === vm.selectedProject; });

@@ -1,7 +1,7 @@
 ﻿<div style="display: flex; flex-direction: column; min-height: 0;">
   <div class="search-container">
-    <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
-    <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕ Clear</button>
+    <input type="search" name="kanban-search" autocomplete="off" ng-model="vm.kanbanSearchFilter" placeholder="Search cards..." class="search-input" />
+    <button ng-click="vm.kanbanSearchFilter = ''" class="clear-button" ng-if="vm.kanbanSearchFilter">✕ Clear</button>
     <button ng-click="vm.toggleColumn('todo')" class="{{vm.showTodo ? 'active' : 'ghost'}}" title="Toggle To Do column">
       📋 To Do ({{vm.cardsForProject('todo').length}})
     </button>
@@ -256,6 +256,14 @@
                 <button type="button" class="feedback-btn"
                   ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'down'}"
                   ng-click="vm.rateCard(card, 'down'); $event.stopPropagation()" title="This run needs work">👎</button>
+              </div>
+              <div class="feedback-delivery-status" ng-if="card._feedback && card._feedback.delivery"
+                ng-class="'feedback-delivery-' + card._feedback.delivery">
+                <span ng-if="card._feedback.delivery === 'pending'">Ready to send</span>
+                <span ng-if="card._feedback.delivery === 'sending'">Sending…</span>
+                <span ng-if="card._feedback.delivery === 'sent'">✓ Feedback sent</span>
+                <span ng-if="card._feedback.delivery === 'unavailable'">Not sent — {{card._feedback.deliveryError}}</span>
+                <span ng-if="card._feedback.delivery === 'failed'">Not sent — {{card._feedback.deliveryError}}</span>
               </div>
               <div class="feedback-form" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">
                 <textarea ng-model="card._feedback.draft" rows="2" placeholder="Optional: tell us what went wrong…" ng-click="$event.stopPropagation()"></textarea>
@@ -734,6 +742,14 @@
                 <button type="button" class="feedback-btn"
                   ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'down'}"
                   ng-click="vm.rateCard(card, 'down'); $event.stopPropagation()" title="This run needs work">👎</button>
+              </div>
+              <div class="feedback-delivery-status" ng-if="card._feedback && card._feedback.delivery"
+                ng-class="'feedback-delivery-' + card._feedback.delivery">
+                <span ng-if="card._feedback.delivery === 'pending'">Ready to send</span>
+                <span ng-if="card._feedback.delivery === 'sending'">Sending…</span>
+                <span ng-if="card._feedback.delivery === 'sent'">✓ Feedback sent</span>
+                <span ng-if="card._feedback.delivery === 'unavailable'">Not sent — {{card._feedback.deliveryError}}</span>
+                <span ng-if="card._feedback.delivery === 'failed'">Not sent — {{card._feedback.deliveryError}}</span>
               </div>
               <div class="feedback-form" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">
                 <textarea ng-model="card._feedback.draft" rows="2" placeholder="Optional: tell us what went wrong…" ng-click="$event.stopPropagation()"></textarea>
@@ -1268,6 +1284,14 @@
                 <button type="button" class="feedback-btn"
                   ng-class="{'feedback-selected': card._feedback && card._feedback.rating === 'down'}"
                   ng-click="vm.rateCard(card, 'down'); $event.stopPropagation()" title="This run needs work">👎</button>
+              </div>
+              <div class="feedback-delivery-status" ng-if="card._feedback && card._feedback.delivery"
+                ng-class="'feedback-delivery-' + card._feedback.delivery">
+                <span ng-if="card._feedback.delivery === 'pending'">Ready to send</span>
+                <span ng-if="card._feedback.delivery === 'sending'">Sending…</span>
+                <span ng-if="card._feedback.delivery === 'sent'">✓ Feedback sent</span>
+                <span ng-if="card._feedback.delivery === 'unavailable'">Not sent — {{card._feedback.deliveryError}}</span>
+                <span ng-if="card._feedback.delivery === 'failed'">Not sent — {{card._feedback.deliveryError}}</span>
               </div>
               <div class="feedback-form" ng-if="card._feedback && card._feedback.rating === 'down' && !card._feedback.text">
                 <textarea ng-model="card._feedback.draft" rows="2" placeholder="Optional: tell us what went wrong…" ng-click="$event.stopPropagation()"></textarea>

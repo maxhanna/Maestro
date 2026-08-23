@@ -398,6 +398,23 @@ partial class AgentController
             return AgentCodeFormatting.ReindentPythonBlock(formatted, baseIndent);
         }
 
+        // Prettier can return the raw LLM snippet when the replacement is a fragment or
+        // the local formatter is unavailable. For TypeScript/JavaScript that raw snippet
+        // is often syntactically valid but flat, so min-indent normalization alone would
+        // preserve the flattening. Rebuild only the replacement block from its braces,
+        // using the original anchor as the indentation-style reference.
+        if (filePath != null &&
+            Path.GetExtension(filePath) is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+        {
+            var sourceLines = oldSource.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+            if (formatted.Split('\n').Count(l => !string.IsNullOrWhiteSpace(l)) > 2 &&
+                (formatted.Contains('{') || formatted.Contains('}')))
+            {
+                formatted = AgentCodeFormatting.AutoIndentFromFile(
+                    formatted, baseIndent, sourceLines, 0);
+            }
+        }
+
         var lines = formatted.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
         var minIndent = int.MaxValue;
         foreach (var line in lines)
