@@ -612,7 +612,10 @@ partial class AgentController
             {
                 var fileAlreadyExists = System.IO.File.Exists(fullPath);
                 var fullFileExt = Path.GetExtension(relPath).ToLowerInvariant();
-                var isSmallFile = fileAlreadyExists && fullContent.Length < 500;
+                var existingFileLength = fileAlreadyExists
+                    ? new FileInfo(fullPath).Length
+                    : 0;
+                var isSmallFile = IsFullFileAllowed(fileAlreadyExists, (int)Math.Min(existingFileLength, int.MaxValue));
                 if (fileAlreadyExists && !isSmallFile)
                 {
                     var e = "This file already exists and is not small — use a targeted oldString/newString edit instead. " +

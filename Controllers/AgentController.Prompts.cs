@@ -1419,24 +1419,14 @@ public static class EscalationStateMachine
                 }
                 else
                 {
-                    if (fileContent.Length > maxFullFileChars)
-                    {
-                        sb.AppendLine("  STRATEGY: PRECISE_ANCHOR — fullFile is BLOCKED because this file is too large.");
-                        sb.AppendLine("  • The file is " + fileContent.Length + " chars (max " + maxFullFileChars + ") — fullFile would exceed the token limit.");
-                        sb.AppendLine("  • Pick a SINGLE unique line (≥20 chars, appears once in the file) as oldString.");
-                        sb.AppendLine("  • Use that one line VERBATIM as your entire oldString, and include it unchanged");
-                        sb.AppendLine("    at the start of newString with your changes added around it.");
-                        sb.AppendLine("  • Do NOT reproduce large blocks — the system cannot accept them.");
-                    }
-                    else
-                    {
-                        sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
-                        sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
-                        sb.AppendLine("  • Output a JSON object with this exact shape:");
-                        sb.AppendLine("    { \"fullFile\": [\"...entire file content with your changes applied...\"] }");
-                        sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
-                        sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
-                    }
+                    // Existing files are never escalated to fullFile. A failed targeted
+                    // edit must become a more precise targeted edit, not a whole-file
+                    // rewrite that the apply stage will reject for non-trivial files.
+                    sb.AppendLine("  STRATEGY: PRECISE_TARGETED_EDIT — fullFile is BLOCKED for existing files at this retry stage.");
+                    sb.AppendLine("  • Pick a SINGLE unique line (≥20 chars, appears once in the file) inside the target section as oldString.");
+                    sb.AppendLine("  • Copy that line VERBATIM, including indentation, and include it unchanged at the start of newString with the requested lines added around it.");
+                    sb.AppendLine("  • For a whole existing method replacement only, use FORMAT C with targetType/targetName/newCode.");
+                    sb.AppendLine("  • Do NOT output fullFile. It is reserved for new files and genuinely small existing files only.");
                 }
                 break;
         }

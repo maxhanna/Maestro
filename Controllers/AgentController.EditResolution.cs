@@ -435,6 +435,9 @@ partial class AgentController
         }
         return string.Join("\n", lines);
     }
+    internal static bool IsFullFileAllowed(bool fileExists, int contentLength)
+        => !fileExists || contentLength < 500;
+
     private async Task<(string? oldStr, string? newStr, bool fullFile,
       string? fullContent, bool alreadyDone, string? error, bool fromFormatC)>
       ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse,
@@ -1311,6 +1314,12 @@ partial class AgentController
                     body = AgentTextUtilities.StripFullFileFence(body);
                     body = AgentCodeFormatting.AutoFixPythonStatements(body, relPath);
                     body = AgentTextUtilities.CleanVerbatimStringEscapes(body);
+                    if (!IsFullFileAllowed(fileExists, fileContent.Length))
+                    {
+                        return (null, null, false, null, false,
+                            "FULL_FILE_REJECTED: this existing file is not small enough for a full-file replacement. " +
+                            "Use a targeted oldString/newString edit for the specific lines being changed, or FORMAT C with targetType/targetName/newCode only when replacing an entire method.", false);
+                    }
                     return (null, null, true, body, false, null, false);
                 }
             }
