@@ -162,6 +162,16 @@ partial class AgentController
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var first = await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens);
         EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        // AUTO-SWAP: when the server returns 409 slots_pinned_error (Lemonade Server with a
+        // different model pinned in VRAM), unload the pinned model, load the requested one,
+        // and retry once. The swap takes 10-30s for large models — the user sees a log line.
+        if (IsSlotsPinnedError(first.raw) && await TryAutoSwapModelAsync(baseUrl, model, false, ct))
+        {
+            using var swapTimeoutCts = new CancellationTokenSource(timeout);
+            using var swapLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, swapTimeoutCts.Token);
+            first = await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, swapLinkedCts.Token, maxTokens);
+            EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        }
         // Non-streaming calls can't reuse partial output, but a one-shot retry still
         // recovers a transient transport blip (network drop, connection reset, premature
         // close, timeout) — the prompt is intact and the second attempt often lands.
@@ -198,6 +208,16 @@ partial class AgentController
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens, emitSse);
         EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        // AUTO-SWAP: same 409 slots_pinned_error handling as the non-streaming path — swap
+        // the pinned model and retry once. Must run BEFORE the truncation/transport recovery
+        // because a 409 is not a recoverable stream failure — it's a model-not-loaded error.
+        if (IsSlotsPinnedError(first.raw) && await TryAutoSwapModelAsync(baseUrl, model, emitSse, ct))
+        {
+            using var swapTimeoutCts = new CancellationTokenSource(timeout);
+            using var swapLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, swapTimeoutCts.Token);
+            first = await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, swapLinkedCts.Token, maxTokens, emitSse);
+            EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        }
         // A stream read error / truncated response can kill an otherwise-good response mid-run
         // (e.g. the planner had already produced the correct edit before the connection dropped).
         // Two distinct recoveries, chosen by WHY it failed:
@@ -613,11 +633,22 @@ partial class AgentController
         string? llmRoundLabel = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
+        var model = await GetLlamaModel();
         var timeout = requestTimeout ?? _infiniteTimeout;
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, linkedCts.Token, maxTokens, appendTruncationMarker);
         EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        // AUTO-SWAP: same 409 slots_pinned_error handling as the JSON paths — swap the pinned
+        // model and retry once before attempting transport-failure recovery. Must run first
+        // because a 409 is a model-not-loaded error, not a recoverable stream failure.
+        if (IsSlotsPinnedError(first.raw) && await TryAutoSwapModelAsync(baseUrl, model, emitSse, ct))
+        {
+            using var swapTimeoutCts = new CancellationTokenSource(timeout);
+            using var swapLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, swapTimeoutCts.Token);
+            first = await CallLlmRawTextOnce(systemPrompt, userMessage, emitSse, swapLinkedCts.Token, maxTokens, appendTruncationMarker);
+            EndpointHealthService.RecordCall(baseUrl, first.raw, first.error);
+        }
         // Same recovery as CallLlmRawStreaming: a dropped connection or max-token cut must
         // not discard a good partial response — retry once with the partial as a hint.
         // Editor:DisableLLMRetries skips this — the partial + error return as-is.
@@ -973,5 +1004,42 @@ partial class AgentController
         }
         catch { }
         return null;
+    }
+
+    /// <summary>Detects the Lemonade-specific "slots_pinned_error" in an LLM response body.
+    /// The server returns HTTP 409 with <c>{"error":{"code":"slots_pinned_error",...}}</c>
+    /// when the requested model is not loaded in VRAM. The raw body is in
+    /// <c>first.raw</c> (non-streaming) or <c>first.raw</c> (streaming) — both paths return
+    /// the error JSON body even though the error string differs ("Empty LLM response" vs
+    /// "HTTP Conflict").</summary>
+    private static bool IsSlotsPinnedError(string raw) =>
+        !string.IsNullOrEmpty(raw) && raw.Contains("slots_pinned_error", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Attempts to swap the loaded model on the server when a 409
+    /// slots_pinned_error is detected. Unloads all pinned models and loads the requested
+    /// one via the server's /api/v1/load + /api/v1/unload API (Lemonade Server). Returns
+    /// true when the swap succeeded and the caller should retry the LLM call. Emits a log
+    /// line so the user sees what happened. Called once per LLM round — never retries the
+    /// swap itself.</summary>
+    private async Task<bool> TryAutoSwapModelAsync(string baseUrl, string model, bool emitSse, CancellationToken ct)
+    {
+        if (_aiDiscovery == null) return false;
+        await EmitLog(emitSse, "warn",
+            $"⚠ Model '{model}' not loaded — swapping (unloading pinned model, loading '{model}')…", ct: ct);
+        try
+        {
+            var result = await _aiDiscovery.SwapModelAsync(baseUrl, model, ct);
+            if (result.Success)
+            {
+                await EmitLog(emitSse, "info", $"✓ Model '{model}' loaded successfully.", ct: ct);
+                return true;
+            }
+            await EmitLog(emitSse, "error", $"✗ Model swap failed: {result.Error}", ct: ct);
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "error", $"✗ Model swap error: {ex.Message}", ct: ct);
+        }
+        return false;
     }
 }

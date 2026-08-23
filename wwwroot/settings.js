@@ -488,6 +488,10 @@ angular.module('kanbanApp')
                             vm.llamaModel = cfg.llamaModel || "medgemma:4b";
                             vm.llamaEndpoints = (cfg.llamaEndpoints || []).map(function (e) { return { id: e.id || ('ep-' + Math.random().toString(36).slice(2, 9)), name: e.name || '', url: e.url || '', model: e.model || '' }; });
                             vm.loadEndpointHealth();
+                            // Auto-populate the model dropdown from the configured server so
+                            // the user sees their actual models when they open Settings (not a
+                            // stale free-text default). Fails silently when the server is down.
+                            vm.refreshModels();
                             vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
                             vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
                             vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
@@ -622,6 +626,75 @@ angular.module('kanbanApp')
                 vm.removeEmailAccount = function (index) { vm.emailAccounts.splice(index, 1); };
                 vm.addLlamaEndpoint = function () { vm.llamaEndpoints.push({ id: 'ep-' + Math.random().toString(36).slice(2, 9), name: '', url: 'http://localhost:8080', model: '' }); };
                 vm.removeLlamaEndpoint = function (index) { vm.llamaEndpoints.splice(index, 1); };
+
+                // ── Local AI server detection + model discovery ───────────────────
+                // The Settings panel uses these to show a model dropdown populated from
+                // the user's ACTUALLY loaded models, instead of a free-text field where
+                // the default (medgemma:4b) may not match anything on their server.
+                vm.availableModels = [];
+                vm.detectedServers = null;
+                vm.detectingServers = false;
+                vm.refreshingModels = false;
+                vm.swappingModel = false;
+                vm.modelActive = null;
+
+                vm.detectServers = function () {
+                    vm.detectingServers = true;
+                    $http.get('/api/ai/detect-servers').then(function (resp) {
+                        vm.detectedServers = (resp.data && resp.data.servers) || [];
+                        vm.detectingServers = false;
+                        if (vm.detectedServers.length === 1) {
+                            vm.selectDetectedServer(vm.detectedServers[0]);
+                        }
+                    }).catch(function () { vm.detectingServers = false; vm.detectedServers = []; });
+                };
+                vm.selectDetectedServer = function (server) {
+                    vm.llamaUrl = server.url;
+                    vm.availableModels = server.models || [];
+                    if (vm.availableModels.length) {
+                        if (!vm.availableModels.some(function (m) { return m.id === vm.llamaModel; })) {
+                            vm.llamaModel = vm.availableModels[0].id;
+                        }
+                    }
+                };
+                vm.refreshModels = function () {
+                    var url = vm.llamaUrl || 'http://localhost:8080';
+                    vm.refreshingModels = true;
+                    $http.get('/api/ai/models', { params: { url: url } }).then(function (resp) {
+                        vm.availableModels = (resp.data && resp.data.models) || [];
+                        vm.refreshingModels = false;
+                        if (vm.availableModels.length) {
+                            if (!vm.availableModels.some(function (m) { return m.id === vm.llamaModel; })) {
+                                vm.llamaModel = vm.availableModels[0].id;
+                            }
+                        }
+                    }).catch(function () { vm.refreshingModels = false; vm.availableModels = []; });
+                };
+                vm.onLlmUrlChange = function () {
+                    vm.availableModels = [];
+                    vm.detectedServers = null;
+                };
+                vm.onModelSelect = function () {
+                    // When the user picks a different model from the dropdown, swap it on the
+                    // server so it's actually loaded in VRAM. On Lemonade Server (pinned models),
+                    // this unloads the current model and loads the selected one — without it,
+                    // the next agent run would fail with a 409 slots_pinned_error. On Ollama/
+                    // LM Studio (auto-load), the swap is a no-op that returns immediately.
+                    if (!vm.llamaModel || !vm.llamaUrl) return;
+                    var url = vm.llamaUrl || 'http://localhost:8080';
+                    vm.swappingModel = true;
+                    $http.post('/api/ai/swap-model', { url: url, model: vm.llamaModel })
+                        .then(function (resp) {
+                            vm.swappingModel = false;
+                            if (resp.data && resp.data.success) {
+                                vm.modelActive = true;
+                            }
+                        }).catch(function () { vm.swappingModel = false; vm.modelActive = false; });
+                };
+                vm.modelIsInList = function () {
+                    if (!vm.availableModels || !vm.availableModels.length) return false;
+                    return vm.availableModels.some(function (m) { return m.id === vm.llamaModel; });
+                };
                 vm.endpointLabel = function (id) {
                     if (!id) return 'Default';
                     var ep = (vm.llamaEndpoints || []).find(function (e) { return e.id === id; });

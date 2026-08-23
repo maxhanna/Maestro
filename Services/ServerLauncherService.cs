@@ -236,6 +236,7 @@ public class ServerLauncherService
         var log = new StringBuilder();
         var npmInstallAttempted = false;
         var pipInstallAttempted = false;
+        var addrRetryAttempted = false;
         var process = ProcessFactory(psi);
         var pump = PumpOutputAsync(process, log);
 
@@ -290,6 +291,24 @@ public class ServerLauncherService
                         continue;
                     }
                 }
+                // ADDRESS-IN-USE RECOVERY: the server died because its chosen port was
+                // grabbed between FindFreePort and the listen call (a TOCTOU race, or a
+                // 0.0.0.0 listener that a connect probe missed on a dual-homed host). Re-pick
+                // a guaranteed-free OS-assigned port, rebuild the args + PORT env for it,
+                // and re-spawn ONCE — so a port collision never fails a live web test.
+                if (!addrRetryAttempted && IsAddressInUseFailure(tail))
+                {
+                    addrRetryAttempted = true;
+                    port = FindFreePort();
+                    url = $"http://127.0.0.1:{port}";
+                    psi.Arguments = plan.Arguments.Replace("{port}", port.ToString());
+                    psi.Environment["PORT"] = port.ToString();
+                    log.AppendLine($"[launcher] previous port was in use — re-spawning on {port}");
+                    KillTree(process);
+                    process = ProcessFactory(psi);
+                    pump = PumpOutputAsync(process, log);
+                    continue;
+                }
                 throw new InvalidOperationException(
                     $"Server process exited before becoming ready (code {process.ExitCode}). " +
                     $"Command: {plan.Command} {plan.Arguments}.\nOutput:\n{tail}");
@@ -299,6 +318,18 @@ public class ServerLauncherService
                 using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
                 if (resp.IsSuccessStatusCode)
                 {
+                    // RACE GUARD: a 200 from the port does not prove OUR server is up — if the
+                    // spawned process already died (EADDRINUSE on a port another server holds),
+                    // a pre-existing server on that port answers the poll and we'd hand back a
+                    // RunningServer pointing at the wrong app. Confirm the process is still
+                    // alive before accepting the response; if it has exited, fall through to
+                    // the HasExited branch so the address-in-use recovery can re-spawn on a
+                    // fresh port instead of silently verifying someone else's server.
+                    if (process.HasExited)
+                    {
+                        lastError = "process exited (port may be held by another server)";
+                        continue;
+                    }
                     return new RunningServer(url, plan.Kind, process, log);
                 }
                 lastError = $"HTTP {(int)resp.StatusCode}";
@@ -499,16 +530,50 @@ public class ServerLauncherService
         return port;
     }
 
-    private static bool IsPortFree(int port)
+    public static bool IsPortFree(int port)
+    {
+        // A port is only safe to hand a freshly spawned server when NOTHING is already
+        // listening on it. A bind-only probe is unreliable on Windows: a wildcard
+        // listener (0.0.0.0:port — the default for Next/Vite/Express on 3000) does NOT
+        // block a 127.0.0.1 bind, so the launcher would hand the spawned server an
+        // occupied port, the server would fail EADDRINUSE, and the readiness poll would
+        // get a 200 from the WRONG server and declare it "ready". A connect probe detects
+        // any listener on the port regardless of which address it bound, with no TIME_WAIT
+        // false-negatives that a second bind would introduce.
+        return !IsPortListening(port);
+    }
+
+    /// <summary>True when some process is already accepting TCP connections on loopback
+    /// for the given port (i.e. the port is NOT free to hand a new server). Capped with a
+    /// short timeout so a half-open/filtered port never hangs the launcher.</summary>
+    private static bool IsPortListening(int port)
     {
         try
         {
-            using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
-            listener.Start();
-            listener.Stop();
-            return true;
+            using var client = new System.Net.Sockets.TcpClient();
+            var ar = client.BeginConnect(System.Net.IPAddress.Loopback, port, null, null);
+            if (!ar.AsyncWaitHandle.WaitOne(TimeSpan.FromMilliseconds(200)))
+            {
+                try { client.Close(); } catch { }
+                return false; // connect did not complete → nothing listening on loopback
+            }
+            try { client.EndConnect(ar); }
+            catch { return false; } // refused/reset → nothing listening
+            return true; // a listener accepted the connection → port is occupied
         }
         catch { return false; }
+    }
+
+    /// <summary>True when the process output shows an address-in-use bind failure (Node
+    /// EADDRINUSE, Python/Ruby "Address already in use", .NET AddressAlreadyInUse) — the
+    /// spawned server could not bind the chosen port because something else grabbed it
+    /// (a TOCTOU race between FindFreePort and the server's listen call).</summary>
+    internal static bool IsAddressInUseFailure(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return false;
+        return output.Contains("EADDRINUSE", StringComparison.Ordinal) ||
+               output.Contains("address already in use", StringComparison.OrdinalIgnoreCase) ||
+               output.Contains("AddressAlreadyInUse", StringComparison.Ordinal);
     }
 
     // ── detection helpers ────────────────────────────────────────────────────

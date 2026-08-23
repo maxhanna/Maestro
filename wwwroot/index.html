@@ -1460,10 +1460,49 @@
             <summary class="settings-header">Default LLM Endpoint</summary>
             <div style="padding:8px 0;">
               <label for="settings-llama" style="font-size:0.85em;color:var(--muted);">URL</label>
-              <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width:100%;margin-top:2px;" />
+              <div style="display:flex;gap:4px;margin-top:2px;">
+                <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="flex:1;" ng-change="vm.onLlmUrlChange()" />
+                <button ng-click="vm.detectServers()" class="small ghost" ng-disabled="vm.detectingServers" title="Scan common ports for a running AI model server" style="white-space:nowrap;">
+                  {{vm.detectingServers ? 'Scanning…' : '🔍 Detect'}}
+                </button>
+              </div>
+              <div ng-if="vm.detectedServers && vm.detectedServers.length" style="margin-top:4px;display:flex;flex-direction:column;gap:3px;">
+                <div ng-repeat="s in vm.detectedServers" ng-click="vm.selectDetectedServer(s)"
+                  style="cursor:pointer;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:12px;display:flex;justify-content:space-between;align-items:center;"
+                  ng-class="{'detected-server-active': s.url === vm.llamaUrl}"
+                  title="Click to use this server">
+                  <span>{{s.url}} <span class="muted" style="font-size:10px;">{{s.serverType}} · {{s.models.length}} model(s)</span></span>
+                  <span ng-if="s.url === vm.llamaUrl">✓</span>
+                </div>
+              </div>
+              <div ng-if="vm.detectedServers && vm.detectedServers.length === 0 && !vm.detectingServers" style="margin-top:4px;font-size:11px;color:var(--muted);">
+                No AI servers found on common ports (8080, 11434, 1234, 13305, 8000, 7860, 5000, 9997). Start a model server and try again.
+              </div>
               <div style="margin-top:6px;">
-                <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model Name</label>
-                <input id="settings-llama-model" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" />
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                  <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model</label>
+                  <button ng-click="vm.refreshModels()" class="small ghost" ng-disabled="vm.refreshingModels" style="font-size:11px;padding:1px 8px;" title="Fetch available models from the server">
+                    {{vm.refreshingModels ? '…' : '↻ Refresh'}}
+                  </button>
+                </div>
+                <select id="settings-llama-model" ng-model="vm.llamaModel" ng-if="vm.availableModels && vm.availableModels.length"
+                  style="width:100%;margin-top:2px;" ng-change="vm.onModelSelect()">
+                  <option value="" ng-if="!vm.modelIsInList()">{{vm.llamaModel}} (not found on server)</option>
+                  <option ng-repeat="m in vm.availableModels" value="{{m.id}}">{{m.id}} <span class="muted">({{m.format}})</span></option>
+                </select>
+                <input id="settings-llama-model-fallback" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" ng-if="!vm.availableModels || !vm.availableModels.length" />
+                <div ng-if="vm.availableModels && vm.availableModels.length === 0 && !vm.refreshingModels" style="font-size:11px;color:var(--muted);margin-top:2px;">
+                  No models found — check the URL or click Refresh.
+                </div>
+                <div ng-if="vm.swappingModel" style="font-size:11px;color:var(--accent);margin-top:2px;">
+                  ⏳ Loading model into VRAM (this can take 10-30s)…
+                </div>
+                <div ng-if="!vm.swappingModel && vm.modelActive === true && vm.availableModels && vm.availableModels.length" style="font-size:11px;color:#4ade80;margin-top:2px;">
+                  ✓ Model loaded and ready.
+                </div>
+                <div ng-if="!vm.swappingModel && vm.modelActive === false && vm.availableModels && vm.availableModels.length" style="font-size:11px;color:#f87171;margin-top:2px;">
+                  ⚠ Model swap failed — the selected model may not be loaded. Run an agent to auto-swap, or load it manually in your model server.
+                </div>
               </div>
             </div>
           </details>
@@ -2058,6 +2097,27 @@
             <div class="bench-compare-summary ok" ng-if="!vm.compareResult.differs">
               ✓ No differing edits — both runs agreed on every file.
             </div>
+            <div class="bench-compare-summary" ng-if="vm.compareResult.correctnessDelta != null"
+              ng-class="{bad: vm.compareResult.correctnessDelta < 0, ok: vm.compareResult.correctnessDelta > 0}">
+              Acceptance correctness — A {{vm.benchmarkPct(vm.compareResult.correctnessA)}} / B {{vm.benchmarkPct(vm.compareResult.correctnessB)}}
+              ({{vm.compareResult.correctnessDelta > 0 ? '+' : ''}}{{vm.compareResult.correctnessDelta}})
+              <span ng-if="vm.compareResult.regressedChecks"> — ⚠ {{vm.compareResult.regressedChecks}} regressed</span>
+              <span ng-if="vm.compareResult.fixedChecks"> — ✓ {{vm.compareResult.fixedChecks}} fixed</span>
+            </div>
+            <div class="bench-compare-rows" ng-if="vm.compareResult.checkRows && vm.compareResult.checkRows.length">
+              <div class="bench-compare-row" ng-repeat="c in vm.compareResult.checkRows track by $index"
+                ng-class="{regressed: c.regressed, fixed: c.fixed}">
+                <span class="bench-compare-path" title="{{c.name}}">{{c.name}}</span>
+                <span class="bench-compare-cell">
+                  <span class="bench-change-status {{c.aPass ? 'ok' : 'bad'}}">{{c.aPass ? '✓' : '✕'}}</span>
+                  <span class="bench-compare-cell-label">A</span>
+                </span>
+                <span class="bench-compare-cell">
+                  <span class="bench-change-status {{c.bPass ? 'ok' : 'bad'}}">{{c.bPass ? '✓' : '✕'}}</span>
+                  <span class="bench-compare-cell-label">B</span>
+                </span>
+              </div>
+            </div>
             <div class="bench-compare-rows">
               <div class="bench-compare-row" ng-repeat="r in vm.compareResult.rows track by $index"
                 ng-class="r.state">
@@ -2104,10 +2164,19 @@
               <div class="bench-score-details" ng-if="vm.selectedBenchmarkScore === s">
                 <div class="bench-detail-grid">
                   <div><span class="muted">Status</span> {{s.status}}</div>
+                  <div ng-if="s.correctnessPercent != null"><span class="muted">Correctness</span> {{vm.benchmarkPct(s.correctnessPercent)}}</div>
                   <div><span class="muted">Duration</span> {{vm.formatBenchmarkDuration(s.durationMs) || '—'}}</div>
                   <div><span class="muted">Model</span> {{s.modelUsed || '—'}}</div>
                   <div><span class="muted">Edits</span> {{s.successfulEdits || 0}} ok / {{s.failedEdits || 0}} fail</div>
                   <div ng-if="s.errorReason"><span class="muted">Error</span> {{s.errorReason}}</div>
+                </div>
+                <div class="bench-checks" ng-if="s.checks && s.checks.length">
+                  <div class="bench-checks-head">Acceptance checks ({{vm.benchChecksPassed(s)}}/{{(s.checks || []).length}})</div>
+                  <div class="bench-check" ng-repeat="c in s.checks track by $index" ng-class="{pass: c.passed, fail: !c.passed}">
+                    <span class="bench-check-mark">{{c.passed ? '✓' : '✕'}}</span>
+                    <span class="bench-check-name">{{c.name}}</span>
+                    <span class="bench-check-msg" ng-if="!c.passed">{{c.message}}</span>
+                  </div>
                 </div>
                 <div class="bench-score-actions">
                   <button ng-click="s._showChanges = !s._showChanges; $event.stopPropagation()" class="btn btn-small"

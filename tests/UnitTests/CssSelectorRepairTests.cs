@@ -208,7 +208,7 @@ public class CssSelectorRepairTests
               display: block;
             }
             """;
-        var (repaired, warnings) = CssSelectorRepair.RepairBareClassSelectors(css);
+        var (repaired, warnings) = CssSelectorRepair.RepairBareClassSelectors(css.Replace("\r\n", "\n"));
         Assert.Equal(2, warnings.Count);
         Assert.Contains("\n  .titleMain a {", repaired);
         Assert.Contains("\n.titleMain {\n  display: block;", repaired);
