@@ -73,6 +73,39 @@ public class BrowserAutomationService
     /// where the browser is navigating and what it is verifying. Null (default) = silent.</summary>
     public Func<BrowserTestEvent, CancellationToken, Task>? OnProgress { get; set; }
 
+    /// <summary>When true, the service reuses a running server for subsequent test calls
+    /// against the SAME project root instead of launching a new one each time. This avoids
+    /// re-spawning the server process for benchmarks with multiple live checks (e.g. level
+    /// 22 has both a LiveUiTest and a LiveApiTest against the same directory). Call
+    /// <see cref="StopSharedServer"/> to tear down the cached server when done. The caller
+    /// MUST stop the shared server — the Run* methods skip their per-call Stop when this is
+    /// set.</summary>
+    public bool ReuseServer { get; set; }
+
+    private RunningServer? _sharedServer;
+    private string? _sharedServerProjectRoot;
+
+    /// <summary>Stops and clears the cached shared server (when <see cref="ReuseServer"/>
+    /// was used). Safe to call when no server is cached.</summary>
+    public void StopSharedServer()
+    {
+        var server = _sharedServer;
+        _sharedServer = null;
+        _sharedServerProjectRoot = null;
+        if (server != null && !server.IsStopped)
+            server.Stop();
+    }
+
+    /// <summary>True when the cached shared server is still alive and matches the project
+    /// root — i.e. it can be reused instead of launching a fresh process.</summary>
+    private bool IsSharedServerUsable(string projectRoot)
+    {
+        return _sharedServer != null
+            && string.Equals(_sharedServerProjectRoot, projectRoot, StringComparison.OrdinalIgnoreCase)
+            && !_sharedServer.IsStopped
+            && (_sharedServer.Process == null || !_sharedServer.Process.HasExited);
+    }
+
     private async Task Progress(string phase, string? url, string message, CancellationToken ct)
     {
         if (OnProgress == null) return;
@@ -141,7 +174,7 @@ public class BrowserAutomationService
         }
         finally
         {
-            server.Stop();
+            if (!ReuseServer) server.Stop();
         }
         report.Passed = !report.HasFailures;
         await Progress("done", report.ServerUrl, report.Passed
@@ -172,7 +205,7 @@ public class BrowserAutomationService
         }
         finally
         {
-            server.Stop();
+            if (!ReuseServer) server.Stop();
         }
         report.Passed = !report.HasFailures;
         await Progress("done", report.ServerUrl, report.Passed
@@ -216,7 +249,7 @@ public class BrowserAutomationService
         }
         finally
         {
-            server.Stop();
+            if (!ReuseServer) server.Stop();
         }
         report.Passed = !report.HasFailures;
         await Progress("done", report.ServerUrl, report.Passed ? "API test PASSED" : "API test FAILED", ct);
@@ -227,6 +260,22 @@ public class BrowserAutomationService
 
     private async Task<RunningServer?> LaunchServerAsync(string projectRoot, BrowserTestReport report, CancellationToken ct)
     {
+        // Server reuse: when ReuseServer is set and a cached server for this project root
+        // is still alive, hand it back instead of spawning a new process. This is what lets
+        // a benchmark with multiple live checks (level 22's LiveUiTest + LiveApiTest) share
+        // one server instead of launching/tearing down a process per check.
+        if (ReuseServer && IsSharedServerUsable(projectRoot))
+        {
+            report.ServerKind = _sharedServer!.Kind;
+            report.ServerUrl = _sharedServer.Url;
+            report.Findings.Add(new TestFinding("pass", $"Server reused: {_sharedServer.Kind} → {_sharedServer.Url}"));
+            return _sharedServer;
+        }
+        // If reusing but the project root changed (different benchmark dir), stop the stale
+        // cached server before launching a fresh one — otherwise it would leak.
+        if (ReuseServer && _sharedServer != null && !IsSharedServerUsable(projectRoot))
+            StopSharedServer();
+
         var plan = ServerLauncherService.DetectLaunchPlan(projectRoot);
         if (plan == null)
         {
@@ -242,6 +291,11 @@ public class BrowserAutomationService
             report.ServerUrl = server.Url;
             report.Findings.Add(new TestFinding("pass", $"Server started: {plan.Description} → {server.Url}"));
             await Progress("server", server.Url, $"Server started: {plan.Kind} → {server.Url}", ct);
+            if (ReuseServer)
+            {
+                _sharedServer = server;
+                _sharedServerProjectRoot = projectRoot;
+            }
             return server;
         }
         catch (Exception ex)

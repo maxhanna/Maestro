@@ -39,6 +39,7 @@ public partial class AgentController : ControllerBase
     private readonly PushNotificationService _push;
     private readonly DatabaseService _db;
     private readonly ChangelogService _changelog;
+    private readonly AiServerDiscoveryService _aiDiscovery;
     // Builds + runs KNOWN-GOOD scraper scripts for the host environment (OS, interpreters,
     // installed scraping packages) when _web_fetch keeps failing — the "_scraper" fallback
     // step. Tests swap this via reflection with a fake runner.
@@ -135,11 +136,11 @@ public partial class AgentController : ControllerBase
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
         ConfigFileService configFile, EmailService emailService, BoardDataService boardData,
-        PushNotificationService push, DatabaseService db, ChangelogService changelog)
+        PushNotificationService push, DatabaseService db, ChangelogService changelog, AiServerDiscoveryService aiDiscovery)
     {
         _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
-        _boardData = boardData; _push = push; _db = db; _changelog = changelog;
+        _boardData = boardData; _push = push; _db = db; _changelog = changelog; _aiDiscovery = aiDiscovery;
         // Wire the per-endpoint stream-health tracker to SQLite so badges reflect
         // reliability across app restarts, not just the current session. The static
         // hooks capture this controller's DatabaseService (same singleton in DI).

@@ -138,6 +138,44 @@ public class BrowserAutomationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReuseServer_TwoLiveChecksAgainstSameDir_ShareOneServerProcess()
+    {
+        // Benchmark 22 has both a LiveUiTest and a LiveApiTest. Without server reuse, each
+        // check independently spawns and tears down a full node process — doubling the
+        // server-spawn overhead. With ReuseServer, the second check reuses the first's
+        // running server (its findings say "Server reused", not "Server started"), and
+        // StopSharedServer tears it down once at the end.
+        var root = NewBenchmark22Project();
+        var service = new BrowserAutomationService
+        {
+            Launcher = new ServerLauncherService(),
+            BrowserFactory = null, // HTTP fallback — deterministic, no browser needed
+            ServerTimeout = TimeSpan.FromSeconds(60),
+            ReuseServer = true
+        };
+        try
+        {
+            var uiReport = await service.RunUiTestAsync(root, "Benchmark22", null);
+            var apiReport = await service.RunApiTestAsync(root, "/api/health");
+
+            Assert.True(uiReport.Passed, uiReport.ToString());
+            Assert.True(apiReport.Passed, apiReport.ToString());
+            // First check launched a fresh server.
+            Assert.Contains(uiReport.Findings, f => f.Kind == "pass" && f.Message.Contains("Server started"));
+            Assert.DoesNotContain(uiReport.Findings, f => f.Message.Contains("Server reused"));
+            // Second check REUSED the server — no new process spawned.
+            Assert.Contains(apiReport.Findings, f => f.Kind == "pass" && f.Message.Contains("Server reused"));
+            // Both checks hit the same URL (same port = same process).
+            Assert.Equal(uiReport.ServerUrl, apiReport.ServerUrl);
+        }
+        finally
+        {
+            service.ReuseServer = false;
+            service.StopSharedServer();
+        }
+    }
+
+    [Fact]
     public async Task Benchmark22_SubfolderServer_LiveBrowser_StreamsScreenshotOfTheSite()
     {
         // The "send a visual of the site to the user" half: with a real Chromium installed

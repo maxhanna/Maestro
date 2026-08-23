@@ -234,7 +234,15 @@ public class BenchmarkService
         return match ?? plans[^1];
     }
 
-    public static List<BenchmarkPlanDefinition> GetBenchmarkPlans()
+    private static readonly Lazy<List<BenchmarkPlanDefinition>> _plansCache = new(BuildPlansCore);
+
+    /// <summary>The 25 benchmark levels, cached after first build. The definitions are
+    /// immutable hardcode, so a lazy static avoids re-allocating 25 plan objects (with all
+    /// their acceptance checks) on every <see cref="EvaluateChecksAsync"/> /
+    /// <see cref="EvaluateAsync"/> call.</summary>
+    public static List<BenchmarkPlanDefinition> GetBenchmarkPlans() => _plansCache.Value;
+
+    private static List<BenchmarkPlanDefinition> BuildPlansCore()
     {
         return new List<BenchmarkPlanDefinition>
         {
@@ -633,11 +641,32 @@ public class BenchmarkService
         var plan = GetBenchmarkPlans().FirstOrDefault(p => p.Level == level)
             ?? throw new ArgumentOutOfRangeException(nameof(level), $"Unknown benchmark level {level}.");
 
-        var results = new List<BenchmarkCheckResult>();
-        foreach (var check in plan.AcceptanceChecks)
-            results.Add(await EvaluateCheckAsync(check, projectRoot, ct));
-        return results;
+        // When the benchmark has live web-test checks (levels 22/23), enable server reuse
+        // so a benchmark with multiple live checks against the same directory (e.g. level
+        // 22's LiveUiTest + LiveApiTest) shares ONE server process instead of spawning and
+        // tearing down a server per check. The shared server is always stopped in finally.
+        var hasLiveChecks = plan.AcceptanceChecks.Any(c => IsLiveCheckType(c.Type));
+        if (hasLiveChecks)
+            BrowserTest.ReuseServer = true;
+        try
+        {
+            var results = new List<BenchmarkCheckResult>();
+            foreach (var check in plan.AcceptanceChecks)
+                results.Add(await EvaluateCheckAsync(check, projectRoot, ct));
+            return results;
+        }
+        finally
+        {
+            if (hasLiveChecks)
+            {
+                BrowserTest.ReuseServer = false;
+                BrowserTest.StopSharedServer();
+            }
+        }
     }
+
+    private static bool IsLiveCheckType(BenchmarkCheckType type) =>
+        type is BenchmarkCheckType.LiveUiTest or BenchmarkCheckType.LiveApiTest or BenchmarkCheckType.LiveJsTest;
 
     public async Task<BenchmarkScore> EvaluateAsync(
         int level, string projectRoot, int successfulEdits, int failedEdits,
@@ -645,9 +674,9 @@ public class BenchmarkService
         List<BenchmarkEditRecord>? edits = null, string? errorReason = null,
         CancellationToken ct = default)
     {
-        var plan = GetBenchmarkPlans().FirstOrDefault(p => p.Level == level)
-            ?? throw new ArgumentOutOfRangeException(nameof(level), $"Unknown benchmark level {level}.");
-
+        // EvaluateChecksAsync validates the level and throws ArgumentOutOfRangeException
+        // for unknown levels — no need to fetch the plan separately here (it was previously
+        // fetched only for the throw, then fetched again inside EvaluateChecksAsync).
         var results = await EvaluateChecksAsync(level, projectRoot, ct);
 
         var totalWeight = results.Sum(r => r.Weight);
@@ -681,6 +710,7 @@ public class BenchmarkService
             DurationMs = durationMs,
             SystemInfo = ResolveSystemInfo(LoadCustomSystemInfo()),
             Edits = edits ?? new List<BenchmarkEditRecord>(),
+            Checks = results,
             FailedSteps = results.Where(r => !r.Passed).Select(r => r.Name).ToList(),
             ErrorReason = errorReason
         };
@@ -825,12 +855,52 @@ public class BenchmarkService
 
     public static BenchmarkRegressionComparison Compare(BenchmarkScore current, BenchmarkScore baseline)
     {
-        return new BenchmarkRegressionComparison
+        var cmp = new BenchmarkRegressionComparison
         {
             BaselineScoreId = baseline.Id,
+            CurrentScoreId = current.Id,
             ScoreDelta = Math.Round(current.ScorePercent - baseline.ScorePercent, 1),
             DurationDeltaMs = Math.Round(current.DurationMs - baseline.DurationMs, 1)
         };
+        // Correctness / edit / step deltas and the per-check breakdown are only meaningful
+        // when BOTH runs carry real acceptance-check data. Old scores (saved before checks
+        // were wired into scoring) have an empty Checks list and 0 correctness — comparing
+        // those to a real run would fabricate a huge "improvement", so the deltas stay null
+        // and CheckDeltas stays empty rather than misreporting a regression or a gain.
+        var baselineHasChecks = baseline.Checks is { Count: > 0 };
+        var currentHasChecks = current.Checks is { Count: > 0 };
+        if (baselineHasChecks && currentHasChecks)
+        {
+            cmp.CorrectnessDelta = Math.Round(current.CorrectnessPercent - baseline.CorrectnessPercent, 1);
+            if (current.EditSuccessPercent is { } ce && baseline.EditSuccessPercent is { } be)
+                cmp.EditSuccessDelta = Math.Round(ce - be, 1);
+            if (current.StepEfficiencyPercent is { } cs && baseline.StepEfficiencyPercent is { } bs)
+                cmp.StepEfficiencyDelta = Math.Round(cs - bs, 1);
+            cmp.CheckDeltas = BuildCheckDeltas(current.Checks!, baseline.Checks!);
+        }
+        return cmp;
+    }
+
+    /// <summary>Matches checks by name across two runs of the same benchmark and records
+    /// which ones regressed (passed before, fail now) or were fixed (failed before, pass
+    /// now) — the per-check signal that a single ScoreDelta cannot show.</summary>
+    private static List<BenchmarkCheckDelta> BuildCheckDeltas(
+        List<BenchmarkCheckResult> current, List<BenchmarkCheckResult> baseline)
+    {
+        var byName = baseline.Where(b => !string.IsNullOrWhiteSpace(b.Name))
+            .ToDictionary(b => b.Name, b => b.Passed, StringComparer.Ordinal);
+        var deltas = new List<BenchmarkCheckDelta>();
+        foreach (var c in current)
+        {
+            var passedBaseline = byName.TryGetValue(c.Name, out var p) ? p : false;
+            deltas.Add(new BenchmarkCheckDelta
+            {
+                Name = c.Name,
+                PassedBaseline = passedBaseline,
+                PassedCurrent = c.Passed
+            });
+        }
+        return deltas;
     }
 
     /// <summary>
@@ -1044,9 +1114,41 @@ public sealed record CommandCheckOutcome(int ExitCode, bool TimedOut, double Dur
 public class BenchmarkRegressionComparison
 {
     public string BaselineScoreId { get; set; } = "";
+    public string CurrentScoreId { get; set; } = "";
     public double ScoreDelta { get; set; }
+    /// <summary>Change in acceptance-check correctness (0–100). Null when either run predates
+    /// checks being wired into scoring (no real Checks data to compare).</summary>
+    public double? CorrectnessDelta { get; set; }
+    /// <summary>Change in edit-success rate (0–100). Null when either run lacks the metric.</summary>
+    public double? EditSuccessDelta { get; set; }
+    /// <summary>Change in step-efficiency (0–100). Null when either run lacks the metric.</summary>
+    public double? StepEfficiencyDelta { get; set; }
     public double DurationDeltaMs { get; set; }
-    public bool HasRegression => ScoreDelta < 0;
+    /// <summary>Per-check pass/fail changes between the two runs (matched by name). Empty
+    /// when either run has no Checks data.</summary>
+    public List<BenchmarkCheckDelta> CheckDeltas { get; set; } = new();
+    /// <summary>Number of acceptance checks that passed in the baseline but fail in the
+    /// current run — the precise regression signal a single ScoreDelta hides.</summary>
+    public int RegressedChecks => CheckDeltas.Count(d => d.Regressed);
+    /// <summary>Number of acceptance checks that failed in the baseline but pass now.</summary>
+    public int FixedChecks => CheckDeltas.Count(d => d.Fixed);
+    /// <summary>True when the overall score dropped OR any previously-passing check now
+    /// fails — the latter catches a regression that a recovered edit-success rate would
+    /// otherwise mask.</summary>
+    public bool HasRegression => ScoreDelta < 0 || RegressedChecks > 0;
+}
+
+/// <summary>One acceptance check's pass/fail change between two runs of the same
+/// benchmark, matched by check name.</summary>
+public class BenchmarkCheckDelta
+{
+    public string Name { get; set; } = "";
+    public bool PassedBaseline { get; set; }
+    public bool PassedCurrent { get; set; }
+    /// <summary>Was passing in the baseline, now failing — a real regression.</summary>
+    public bool Regressed => PassedBaseline && !PassedCurrent;
+    /// <summary>Was failing in the baseline, now passing — a fix.</summary>
+    public bool Fixed => !PassedBaseline && PassedCurrent;
 }
 
 public class SystemInfo

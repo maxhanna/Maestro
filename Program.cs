@@ -148,6 +148,7 @@ builder.Services.AddHttpClient("llama", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(30);
 });
+builder.Services.AddSingleton<AiServerDiscoveryService>();
 builder.Services.AddControllers();
 builder.Services.AddSingleton<BoardDataService>(sp =>
 {
@@ -277,24 +278,12 @@ static string EnsureFreePort(string url, out int originalPort)
     {
         var uri = new Uri(url);
         originalPort = uri.Port;
-        if (!IsPortInUse(originalPort)) return url;
+        if (ServerLauncherService.IsPortFree(originalPort)) return url;
         var next = originalPort + 1;
-        while (next < originalPort + 50 && IsPortInUse(next)) next++;
+        while (next < originalPort + 50 && !ServerLauncherService.IsPortFree(next)) next++;
         return $"http://127.0.0.1:{next}";
     }
     catch { return url; }
-}
-
-static bool IsPortInUse(int port)
-{
-    try
-    {
-        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
-        listener.Start();
-        listener.Stop();
-        return false;
-    }
-    catch { return true; }
 }
 
 static bool IsDirectoryWritable(string dir)

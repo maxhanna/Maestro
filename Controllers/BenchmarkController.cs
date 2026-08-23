@@ -74,6 +74,37 @@ public class BenchmarkController : ControllerBase
         return Ok(new { message = "Score saved", id = score.Id });
     }
 
+    /// <summary>
+    /// Runs a benchmark's acceptance checks end-to-end (filesystem + live web test) against
+    /// the resolved benchmark root, computes the REAL score (correctness from the checks +
+    /// edit success + step efficiency), persists it, and returns the full score — including
+    /// the per-check <see cref="BenchmarkScore.Checks"/> list. This is the verify-then-score
+    /// path: a saved score now reflects whether the benchmark's acceptance criteria actually
+    /// passed, not merely whether the agent's edit operations reported success. The root is
+    /// resolved exactly as <c>ExecuteBenchmarkVerifyStep</c> does (custom system-info root,
+    /// else the desktop benchmark_sandbox) so checks inspect the same workspace the agent
+    /// wrote to.
+    /// </summary>
+    [HttpPost("verify-and-score")]
+    public async Task<IActionResult> VerifyAndScore([FromBody] VerifyScoreRequest? req, CancellationToken ct)
+    {
+        if (req == null)
+            return BadRequest("Invalid verify-and-score request");
+        var custom = _benchmark.LoadCustomSystemInfo();
+        var root = BenchmarkService.ResolveBenchmarkRoot(custom?.BenchmarkProjectRoot);
+        try
+        {
+            var score = await _benchmark.EvaluateAsync(
+                req.Level, root, req.SuccessfulEdits, req.FailedEdits, req.StepCount,
+                req.DurationMs, req.ModelUsed ?? "", req.Edits, req.ErrorReason, ct);
+            return Ok(score);
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
     [HttpGet("system-info")]
     public IActionResult GetSystemInfoConfig()
     {
@@ -109,4 +140,19 @@ public class BenchmarkController : ControllerBase
         var count = _benchmark.ClearAllScores();
         return Ok(new { message = "Cleared " + count + " score(s)", cleared = count });
     }
+}
+
+/// <summary>Body for <c>POST /api/benchmark/verify-and-score</c>: the edit/step metrics the
+/// client captured while the agent ran the benchmark card. The server adds the missing
+/// half — the acceptance-check results — and returns the computed, persisted score.</summary>
+public class VerifyScoreRequest
+{
+    public int Level { get; set; }
+    public int SuccessfulEdits { get; set; }
+    public int FailedEdits { get; set; }
+    public int StepCount { get; set; }
+    public double DurationMs { get; set; }
+    public string? ModelUsed { get; set; }
+    public List<BenchmarkEditRecord>? Edits { get; set; }
+    public string? ErrorReason { get; set; }
 }
