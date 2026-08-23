@@ -1803,8 +1803,8 @@
                   <input ng-model="acct.imapPort" type="number" placeholder="993" style="width:80px;" />
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                  <input type="email" name="email-username-{{$index}}" autocomplete="username" ng-model="acct.username" placeholder="Email username" style="flex:1;" />
-                  <input type="password" name="email-password-{{$index}}" autocomplete="current-password" ng-model="acct.password" placeholder="Password" style="flex:1;" />
+                  <input type="email" name="email-username-{{$index}}" autocomplete="off" ng-model="acct.username" placeholder="Email username" style="flex:1;" />
+                  <input type="password" name="email-password-{{$index}}" autocomplete="new-password" ng-model="acct.password" placeholder="Password" style="flex:1;" />
                 </div>
                 <div style="display:flex;align-items:center;gap:12px;">
                   <label style="font-size:12px;"><input type="checkbox" ng-model="acct.useSsl" /> Use SSL</label>
@@ -1833,8 +1833,8 @@
             <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
             <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;">
-                <input type="text" name="bughosted-username" autocomplete="username" ng-model="vm.bughostedUsername" ng-change="vm.markBughostedCredsEdited()" placeholder="Username" style="flex:1;" />
-                <input type="password" name="bughosted-password" autocomplete="current-password" ng-model="vm.bughostedPassword" ng-change="vm.markBughostedCredsEdited()" placeholder="Password" style="flex:1;" />
+                <input type="text" name="bughosted-username" autocomplete="off" ng-model="vm.bughostedUsername" ng-change="vm.markBughostedCredsEdited()" placeholder="Username" style="flex:1;" />
+                <input type="password" name="bughosted-password" autocomplete="new-password" ng-model="vm.bughostedPassword" ng-change="vm.markBughostedCredsEdited()" placeholder="Password" style="flex:1;" />
               </div>
               <label style="font-size:12px;display:flex;align-items:center;gap:8px;">
                 <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" />
