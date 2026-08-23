@@ -65,9 +65,6 @@ public class ChangelogService
     private static string FormatReleases(List<GitHubRelease> releases)
     {
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("# Weaver Changelog");
-        sb.AppendLine($"# {releases.Count} release(s)");
-        sb.AppendLine();
 
         for (var i = 0; i < releases.Count; i++)
         {
@@ -76,21 +73,16 @@ public class ChangelogService
             var date = r.PublishedAt?.ToString("MMM dd, yyyy") ?? "unknown";
             var body = (r.Body ?? "").Trim();
 
-            sb.AppendLine($"# Release {version}");
-            sb.AppendLine($"Released {date}");
-            sb.AppendLine();
+            // Compact release header
+            sb.AppendLine($"v{version.TrimStart('v')}  ({date})");
 
             if (!string.IsNullOrWhiteSpace(body))
                 FormatReleaseBody(sb, body);
             else
-                sb.AppendLine("_(No release notes provided.)_");
+                sb.AppendLine("  No release notes provided.");
 
             if (i < releases.Count - 1)
-            {
                 sb.AppendLine();
-                sb.AppendLine(new string('─', 60));
-                sb.AppendLine();
-            }
         }
 
         return sb.ToString();
@@ -105,73 +97,27 @@ public class ChangelogService
     private static void FormatReleaseBody(System.Text.StringBuilder sb, string body)
     {
         var lines = body.Split('\n');
-        var hasSections = lines.Any(l =>
-            l.TrimStart().StartsWith("### ", StringComparison.OrdinalIgnoreCase) &&
-            (l.Contains("Added", StringComparison.OrdinalIgnoreCase) ||
-             l.Contains("Changed", StringComparison.OrdinalIgnoreCase) ||
-             l.Contains("Fixed", StringComparison.OrdinalIgnoreCase) ||
-             l.Contains("Removed", StringComparison.OrdinalIgnoreCase)));
 
-        if (hasSections)
-        {
-            sb.AppendLine(body);
-            return;
-        }
-
-        var added = new List<string>();
-        var changed = new List<string>();
-        var fixed_ = new List<string>();
-        var other = new List<string>();
-
+        // Flatten: strip markdown, bullet markers, blank lines
         foreach (var rawLine in lines)
         {
             var trimmed = rawLine.Trim().TrimStart('-', '*', '•', '·');
+            // Skip blank lines and markdown headers/labels
             if (string.IsNullOrWhiteSpace(trimmed)) continue;
-
-            var lower = trimmed.ToLowerInvariant();
-
-            if (lower.StartsWith("new ") || lower.StartsWith("added ") || lower.StartsWith("introducing ") ||
-                lower.Contains("new feature") || lower.Contains("added support"))
-                added.Add($"- {trimmed}");
-            else if (lower.StartsWith("fixed ") || lower.StartsWith("bug fix") || lower.Contains("fix for") ||
-                     lower.Contains("resolved ") || lower.Contains("patched "))
-                fixed_.Add($"- {trimmed}");
-            else if (lower.StartsWith("changed ") || lower.StartsWith("updated ") || lower.StartsWith("improved ") ||
-                     lower.StartsWith("enhanced ") || lower.Contains("now ") || lower.Contains("refactor"))
-                changed.Add($"- {trimmed}");
-            else
-                other.Add($"- {trimmed}");
-        }
-
-        if (added.Count > 0)
-        {
-            sb.AppendLine("### Added");
-            sb.AppendLine();
-            foreach (var l in added) sb.AppendLine(l);
-            sb.AppendLine();
-        }
-        if (changed.Count > 0)
-        {
-            sb.AppendLine("### Changed");
-            sb.AppendLine();
-            foreach (var l in changed) sb.AppendLine(l);
-            sb.AppendLine();
-        }
-        if (fixed_.Count > 0)
-        {
-            sb.AppendLine("### Fixed");
-            sb.AppendLine();
-            foreach (var l in fixed_) sb.AppendLine(l);
-            sb.AppendLine();
-        }
-        if (other.Count > 0)
-        {
-            if (added.Count > 0 || changed.Count > 0 || fixed_.Count > 0)
+            if (trimmed.StartsWith("### ", StringComparison.OrdinalIgnoreCase))
             {
-                sb.AppendLine("### Other");
-                sb.AppendLine();
+                // Keep section labels but render them as compact labels
+                var label = trimmed.Substring(4).Trim();
+                sb.AppendLine($"  [{label}]");
+                continue;
             }
-            foreach (var l in other) sb.AppendLine(l);
+            // Skip lines that are just section names with no content
+            if (string.Equals(trimmed, "Added", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "Changed", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "Fixed", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "Removed", StringComparison.OrdinalIgnoreCase))
+                continue;
+            sb.AppendLine($"  \u2022 {trimmed}");
         }
     }
 
