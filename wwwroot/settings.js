@@ -812,7 +812,17 @@ angular.module('kanbanApp')
                     $http.post('/api/config/projects/remove', { Path: p.Path }).then(function () { vm.loadConfig(); });
                 };
                 vm.openDiscordPanel = function () { vm.showDiscordPanel = true; vm.loadVersion(); };
-                vm.closeDiscordPanel = function () { vm.showDiscordPanel = false; };
+                vm.closeDiscordPanel = function () { vm.showDiscordPanel = false; vm.showChangelog = false; };
+                vm.showChangelog = false;
+                vm.changelogContent = '';
+                vm.toggleChangelog = function () {
+                    vm.showChangelog = !vm.showChangelog;
+                    if (vm.showChangelog && !vm.changelogContent) {
+                        $http.get('/api/changelog', { timeout: 8000 }).then(function (resp) {
+                            vm.changelogContent = (resp.data && resp.data.content) || '';
+                        }, function () { vm.changelogContent = ''; });
+                    }
+                };
                 vm.loadVersion = function () { $http.get('/api/bughosted/version', { timeout: 10000 }).then(function (resp) { vm.appVersion = resp.data; }, function () { vm.appVersion = { local: '?', remote: null, updateAvailable: false }; }); };
                 vm.triggerUpdate = function () {
                     vm.updating = true;

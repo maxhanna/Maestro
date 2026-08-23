@@ -1206,6 +1206,19 @@
         <p style="margin-top:10px; color:#888; font-size:0.85em; text-align:center;">The complete guide — features, settings,
           cron, benchmarks &amp; more.</p>
       </div>
+      <!-- Changelog toggle -->
+      <div class="popup-header" style="cursor:pointer;" ng-click="vm.toggleChangelog()">
+        <strong style="display:flex;align-items:center;gap:8px;">
+          📋 Changelog
+          <span style="font-size:0.7em;font-weight:normal;color:#888;">{{vm.showChangelog ? '▲ hide' : '▼ show'}}</span>
+        </strong>
+      </div>
+      <div ng-if="vm.showChangelog" style="padding:0 16px 12px;">
+        <div style="max-height:260px;overflow-y:auto;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:10px 12px;font-family:monospace;font-size:0.82em;color:#abb2bf;white-space:pre-wrap;line-height:1.55;">
+          <span ng-if="vm.changelogContent">{{vm.changelogContent}}</span>
+          <span ng-if="!vm.changelogContent" style="color:#555;">No changes recorded yet.</span>
+        </div>
+      </div>
       <div class="popup-footer">
         <button ng-click="vm.closeDiscordPanel()">Close</button>
       </div>

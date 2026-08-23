@@ -141,6 +141,7 @@ builder.Services.AddSingleton<ConfigFileService>(sp => new ConfigFileService(sp.
 builder.Services.AddSingleton<EmailService>();
 builder.Services.AddSingleton(new FileHintsManager(dbService));
 builder.Services.AddSingleton(new CalendarService(dbService));
+builder.Services.AddSingleton(new ChangelogService(weaverDataDir));
 builder.Services.AddSingleton<GitService>();
 builder.Services.AddSingleton<PushNotificationService>(sp => new PushNotificationService(dbService));
 builder.Services.AddHttpClient("llama", client =>
