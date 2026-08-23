@@ -23,11 +23,28 @@ public static class AgentSkeleton
     // .gitignore parse) only happens once per TTL window instead of per call.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime at, SkeletonResult result)> Cache =
         new();
+    // Per-project last-dirty stamp used to debounce filesystem invalidation.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> DirtySince = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.IO.FileSystemWatcher> Watchers = new();
+    private static readonly object WatcherLock = new();
+    // Directories the skeleton never walks (mirrors GenerateSkeletonAsync's list) —
+    // filesystem events under them are ignored so node_modules/.git/bin churn
+    // never clears the cache.
+    private static readonly HashSet<string> WatcherExcludes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "node_modules", "bin", "obj", "dist", ".git", ".vs", ".svn",
+        "packages", "coverage", ".idea", ".vscode", "__pycache__",
+        ".next", ".nuget"
+    };
 
     /// <summary>
     /// Returns the project skeleton, serving from the shared cache when it's
     /// fresher than <paramref name="ttlMinutes"/> (default 10 minutes — a
     /// project layout changes rarely, so a full walk every call is wasted work).
+    /// The project is registered with a filesystem watcher the first time it's
+    /// walked, so any real file/directory change (agent edits, editor saves,
+    /// external tooling) immediately invalidates the cache entry and the next
+    /// heartbeat/context call re-walks the up-to-date layout.
     /// </summary>
     public static async Task<SkeletonResult> GetCachedSkeletonAsync(string projectRoot, int ttlMinutes = 10)
     {
@@ -36,14 +53,89 @@ public static class AgentSkeleton
             return c.result;
         var result = await GenerateSkeletonAsync(projectRoot);
         Cache[projectRoot] = (DateTime.UtcNow, result);
+        EnsureProjectWatched(projectRoot);
         return result;
+    }
+
+    /// <summary>
+    /// Registers a recursive filesystem watcher on a project root so edits
+    /// invalidate the cached skeleton. No-op once registered; events under the
+    /// excluded directories are ignored, and clearing is debounced to ~2s per
+    /// project so a burst of edits coalesces into one re-walk.
+    /// </summary>
+    public static void EnsureProjectWatched(string projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot)) return;
+        if (Watchers.ContainsKey(projectRoot)) return;
+        lock (WatcherLock)
+        {
+            if (Watchers.ContainsKey(projectRoot)) return;
+            try
+            {
+                var watcher = new System.IO.FileSystemWatcher(projectRoot)
+                {
+                    IncludeSubdirectories = true,
+                    NotifyFilter = System.IO.NotifyFilters.FileName | System.IO.NotifyFilters.DirectoryName
+                        | System.IO.NotifyFilters.LastWrite | System.IO.NotifyFilters.Size
+                };
+                watcher.Changed += (_, e) => OnProjectFsChange(projectRoot, e.FullPath);
+                watcher.Created += (_, e) => OnProjectFsChange(projectRoot, e.FullPath);
+                watcher.Renamed += (_, e) => OnProjectFsChange(projectRoot, e.FullPath);
+                watcher.Deleted += (_, e) => OnProjectFsChange(projectRoot, e.FullPath);
+                watcher.EnableRaisingEvents = true;
+                Watchers[projectRoot] = watcher;
+            }
+            catch { /* unwatchable root — the 10-min TTL still bounds staleness */ }
+        }
+    }
+
+    private static void OnProjectFsChange(string projectRoot, string fullPath)
+    {
+        try
+        {
+            // Ignore changes under directories the skeleton never walks.
+            var rel = fullPath ?? "";
+            if (projectRoot.Length > 0 && rel.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                rel = rel.Substring(projectRoot.Length);
+            var segments = rel.Split(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+            foreach (var seg in segments)
+            {
+                if (!string.IsNullOrWhiteSpace(seg) && WatcherExcludes.Contains(seg)) return;
+            }
+            // Debounce bursts so a rapid series of edits coalesces into one clear.
+            var now = DateTime.UtcNow;
+            if (DirtySince.TryGetValue(projectRoot, out var last) && (now - last).TotalSeconds < 2) return;
+            DirtySince[projectRoot] = now;
+            Cache.TryRemove(projectRoot, out _);
+        }
+        catch { }
     }
 
     /// <summary>Drops cached skeletons (optionally just one project).</summary>
     public static void ClearSkeletonCache(string? projectRoot = null)
     {
-        if (projectRoot == null) Cache.Clear();
-        else Cache.TryRemove(projectRoot, out _);
+        if (projectRoot == null)
+        {
+            Cache.Clear();
+            DirtySince.Clear();
+        }
+        else
+        {
+            Cache.TryRemove(projectRoot, out _);
+            DirtySince.TryRemove(projectRoot, out _);
+        }
+    }
+
+    /// <summary>
+    /// UTC time the current cache entry for a project was generated (i.e. the
+    /// last time the layout was actually walked/refreshed), or null when the
+    /// project isn't cached. Lets consumers show a "skeleton last refreshed"
+    /// timestamp instead of the heartbeat time.
+    /// </summary>
+    public static DateTime? GetSkeletonCacheTimestamp(string projectRoot)
+    {
+        if (Cache.TryGetValue(projectRoot, out var c)) return c.at;
+        return null;
     }
 
     public static async Task<SkeletonResult> GenerateSkeletonAsync(string projectRoot)

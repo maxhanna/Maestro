@@ -6238,6 +6238,109 @@ h3 .small.ghost:hover {
 	background: rgba(6, 182, 212, 0.05);
 }
 
+/* Benchmark name as a collapsible header with a runs table inside */
+.bench-group {
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	margin-bottom: 8px;
+	overflow: hidden;
+	background: rgba(255, 255, 255, 0.02);
+	transition: border-color 0.15s;
+}
+
+.bench-group.open {
+	border-color: rgba(6, 182, 212, 0.45);
+}
+
+.bench-group-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 12px;
+	cursor: pointer;
+	user-select: none;
+	transition: background 0.15s;
+}
+
+.bench-group-head:hover {
+	background: rgba(6, 182, 212, 0.06);
+}
+
+.bench-group-head:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
+}
+
+.bench-group-name {
+	font-weight: 700;
+	font-size: 13px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.bench-group-best {
+	margin-left: auto;
+	font-size: 11px;
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.bench-group-date {
+	font-size: 11px;
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.bench-group-body {
+	border-top: 1px solid var(--border);
+	padding: 6px 8px 10px;
+}
+
+.bench-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.bench-table th {
+	text-align: left;
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.6px;
+	color: var(--muted);
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--border);
+	white-space: nowrap;
+}
+
+.bench-table td {
+	padding: 6px 8px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+	vertical-align: middle;
+}
+
+.bench-table tbody tr {
+	cursor: pointer;
+	transition: background 0.15s;
+}
+
+.bench-table tbody tr:hover {
+	background: rgba(6, 182, 212, 0.05);
+}
+
+.bench-table tbody tr.open {
+	background: rgba(6, 182, 212, 0.08);
+}
+
+.bench-table tbody tr.compare-a {
+	background: rgba(34, 197, 94, 0.1);
+}
+
+.bench-table tbody tr.compare-b {
+	background: rgba(249, 115, 22, 0.1);
+}
+
 .bench-score-head {
 	display: flex;
 	align-items: center;

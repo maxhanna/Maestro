@@ -226,9 +226,14 @@ public static class AgentTextUtilities
         return IsPlaceholderStem(fileName) ? parent : null;
     }
 
+    // Phrases only — NOT bare placeholder words. A real file's content can easily
+    // contain the words "keep", "empty", "tmp", "dummy", "temp" etc. as strings or
+    // identifiers (e.g. `unchanged(): return "keep"`), which previously made a real
+    // formatter.py get skipped as a "dummy folder-establishment file". Bare-word
+    // placeholders in content are only trustworthy inside an explicit folder-creation
+    // phrase or a placeholder-flagged file name (handled by IsPlaceholderStem).
     private static readonly Regex PlaceholderFolderContentRegex = new(
-        @"\b(placeholder|dummy|keep|gitkeep|scaffold|scaffolding|empty|temp(?:orary)?|tmp)\b|" +
-        @"(?:just\s+to\s+create|to\s+create\s+the\s+(?:folder|directory)|create\s+(?:the\s+)?(?:folder|directory)|directory\s+creation|folder\s+creation|establish(?:ing)?\s+(?:the\s+)?(?:folder|directory)|for\s+(?:directory|folder)\s+creation|to\s+establish\s+(?:the\s+)?(?:folder|directory))",
+        @"(?:just\s+to\s+create|to\s+create\s+the\s+(?:folder|directory)|create\s+(?:the\s+)?(?:folder|directory)|directory\s+creation|folder\s+creation|establish(?:ing)?\s+(?:the\s+)?(?:folder|directory)|for\s+(?:directory|folder)\s+creation|to\s+establish\s+(?:the\s+)?(?:folder|directory)|placeholder\s+(?:file|text|content)|dummy\s+(?:file|text|content)|empty\s+(?:file|folder|directory))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
@@ -246,7 +251,7 @@ public static class AgentTextUtilities
         {
             var norm = fileName.Replace('\\', '/');
             var last = norm[(norm.LastIndexOf('/') + 1)..];
-            if (PlaceholderHintRegex.IsMatch(last)) return true;
+            if (IsPlaceholderStem(last)) return true;
         }
         if (string.IsNullOrWhiteSpace(content)) return false;
         var trimmed = content.Trim();
@@ -254,9 +259,12 @@ public static class AgentTextUtilities
         return PlaceholderHintRegex.IsMatch(trimmed);
     }
 
+    // Phrases only — same rationale as PlaceholderFolderContentRegex: bare placeholder
+    // words in content are too likely to be real code, so the LLM fallback gate only
+    // fires on explicit folder-creation/placeholder intent. File names are covered by
+    // IsPlaceholderStem.
     private static readonly Regex PlaceholderHintRegex = new(
-        @"\b(placeholder|dummy|keep|gitkeep|keepme|scaffold|scaffolding|empty|temp(?:orary)?|tmp)\b|" +
-        @"(?:just\s+to\s+create|to\s+establish|establish(?:ing)?\s+the)",
+        @"(?:just\s+to\s+create|to\s+establish|establish(?:ing)?\s+the|create\s+(?:the\s+)?(?:folder|directory)|directory\s+creation|folder\s+creation|placeholder\s+(?:file|text|content)|dummy\s+(?:file|text|content)|empty\s+(?:file|folder|directory))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>

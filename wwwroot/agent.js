@@ -2459,6 +2459,47 @@ angular.module('kanbanApp')
                     var p = (vm.benchmarkPlans || []).find(function (x) { return x.level === level; });
                     return p ? p.name : 'Benchmark ' + level;
                 };
+                // Local scores grouped by benchmark, newest group first, runs newest-first
+                // inside each group. The group array is cached and only rebuilt when
+                // benchmarkScores changes (reference + length key) so ng-repeat stays
+                // stable across digests; open/closed state lives in benchGroupOpen so it
+                // survives re-renders and panel closes.
+                vm.benchGroupOpen = {};
+                vm._benchGroupsCache = null;
+                vm._benchGroupsKey = null;
+                vm._benchGroupsLen = -1;
+                vm.groupedBenchmarkScores = function () {
+                    var scores = vm.benchmarkScores || [];
+                    if (vm._benchGroupsKey === scores && vm._benchGroupsCache && vm._benchGroupsLen === scores.length) {
+                        return vm._benchGroupsCache;
+                    }
+                    vm._benchGroupsKey = scores;
+                    vm._benchGroupsLen = scores.length;
+                    var map = {};
+                    var groups = [];
+                    for (var i = 0; i < scores.length; i++) {
+                        var s = scores[i];
+                        var key = s.level || 'unknown';
+                        var g = map[key];
+                        if (!g) {
+                            g = map[key] = { level: key, name: vm.benchmarkLevelName(key) || 'Benchmark ' + key, scores: [], bestScore: null };
+                            groups.push(g);
+                        }
+                        g.scores.push(s);
+                        if (g.bestScore === null || vm.benchmarkPctNum(s.scorePercent) > vm.benchmarkPctNum(g.bestScore.scorePercent)) {
+                            g.bestScore = s;
+                        }
+                    }
+                    groups.sort(function (a, b) {
+                        var at = a.scores.length ? new Date(a.scores[0].timestamp || 0).getTime() : 0;
+                        var bt = b.scores.length ? new Date(b.scores[0].timestamp || 0).getTime() : 0;
+                        return bt - at;
+                    });
+                    vm._benchGroupsCache = groups;
+                    return groups;
+                };
+                vm.toggleBenchGroup = function (level) { vm.benchGroupOpen[level] = !vm.benchGroupOpen[level]; };
+                vm.isBenchGroupOpen = function (level) { return !!vm.benchGroupOpen[level]; };
                 vm.reconcileBenchmarkRunning = function () {
                     if (!vm.state) return;
                     if (vm.agentRuns.some(function (r) { return r.active; })) return;

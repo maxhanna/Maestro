@@ -444,9 +444,32 @@ angular.module('kanbanApp', [])
       });
 
       // === Global UI Methods ===
+      // Autoplay policy: audio.play() rejects with NotAllowedError unless the user
+      // has interacted with the page first. Prime playback on the first gesture so
+      // task-completion sounds work after that, and always swallow the rejection
+      // (the sound simply doesn't play until the user has engaged with the page).
+      var _audioUnlocked = false;
+      function unlockAudioOnGesture() {
+        if (_audioUnlocked) return;
+        _audioUnlocked = true;
+        try {
+          var silent = new Audio('/wwwroot/gold_skulltula.mp3');
+          silent.volume = 0;
+          silent.muted = true;
+          var sp = silent.play();
+          if (sp && sp.catch) sp.catch(function () { });
+        } catch (e) { /* ignore */ }
+      }
+      window.addEventListener('pointerdown', unlockAudioOnGesture, { once: true });
+      window.addEventListener('keydown', unlockAudioOnGesture, { once: true });
+
       vm.playSound = function () {
-        var audio = new Audio('/wwwroot/gold_skulltula.mp3');
-        audio.play();
+        try {
+          var audio = new Audio('/wwwroot/gold_skulltula.mp3');
+          audio.volume = 1;
+          var p = audio.play();
+          if (p && p.catch) p.catch(function () { /* autoplay blocked before first user gesture */ });
+        } catch (e) { /* ignore */ }
       };
 
       vm.showNotification = async function (message) {

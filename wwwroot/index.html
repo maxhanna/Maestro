@@ -1785,7 +1785,7 @@
         </div>
 
         <!-- ===== TAB: Integrations ===== -->
-        <div ng-show="vm.settingsTab === 'integrations'">
+        <div ng-if="vm.settingsTab === 'integrations'">
           <details>
             <summary class="settings-header">Email (IMAP)</summary>
             <div class="form-row" style="display:flex;flex-direction:column;padding-top:8px;gap:12px;">
@@ -2182,31 +2182,40 @@
           </div>
 
           <div ng-if="vm.benchmarkScores.length > 0">
-            <div ng-repeat="s in vm.benchmarkScores" class="bench-score-card"
-              ng-class="{open: vm.selectedBenchmarkScore === s, 'compare-a': vm.compareMode && vm.compareA === s, 'compare-b': vm.compareMode && vm.compareB === s}"
-              ng-click="vm.compareMode ? vm.toggleCompareScore(s) : (vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s))">
-              <div class="bench-score-head">
-                <span class="bench-compare-tag" ng-if="vm.compareMode && vm.compareA === s">A</span>
-                <span class="bench-compare-tag tag-b" ng-if="vm.compareMode && vm.compareB === s">B</span>
-                <span class="bench-badge {{vm.benchmarkStatusInfo(s.status).cls}}">{{vm.benchmarkStatusInfo(s.status).label}}</span>
-                <span class="bench-score-name">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</span>
-                <span class="bench-score-date" title="{{s.timestamp | date:'short'}}">{{s.timestamp | date:'short'}}</span>
-                <span class="bench-score-chevron">{{vm.compareMode ? (vm.compareA === s || vm.compareB === s ? '●' : '○') : (vm.selectedBenchmarkScore === s ? '▾' : '▸')}}</span>
+            <div ng-repeat="g in vm.groupedBenchmarkScores() track by g.level" class="bench-group"
+              ng-class="{open: vm.isBenchGroupOpen(g.level)}">
+              <div class="bench-group-head" role="button" tabindex="0"
+                ng-click="vm.toggleBenchGroup(g.level)"
+                ng-keydown="($event.key === 'Enter' || $event.key === ' ') && vm.toggleBenchGroup(g.level); $event.preventDefault()"
+                title="Click to expand / collapse runs for this benchmark">
+                <span class="bench-chevron">{{vm.isBenchGroupOpen(g.level) ? '▾' : '▸'}}</span>
+                <span class="bench-group-name" title="{{g.level}}">{{g.name}}</span>
+                <span class="bench-count">{{g.scores.length}} run{{g.scores.length !== 1 ? 's' : ''}}</span>
+                <span class="bench-group-best" ng-if="g.bestScore">Best {{vm.benchmarkPct(g.bestScore.scorePercent)}} · {{g.bestScore.points || 0}} pts</span>
+                <span class="bench-group-date">{{g.scores[0].timestamp | date:'short'}}</span>
               </div>
-              <div class="bench-score-body">
-                <div class="bench-progress" title="{{vm.benchmarkPct(s.scorePercent)}}">
-                  <div class="bench-progress-fill" ng-style="{width: vm.benchmarkPctNum(s.scorePercent) + '%'}"></div>
-                </div>
-                <span class="bench-score-pct">{{vm.benchmarkPct(s.scorePercent)}}</span>
-              </div>
-              <div class="bench-chips">
-                <span class="bench-chip ok">{{s.successfulEdits || 0}} ok</span>
-                <span class="bench-chip bad" ng-if="s.failedEdits">{{s.failedEdits}} fail</span>
-                <span class="bench-chip neutral">{{s.points || 0}} pts</span>
-                <span class="bench-chip neutral">{{vm.formatBenchmarkDuration(s.durationMs)}}</span>
-                <span class="bench-chip neutral" ng-if="s.modelUsed" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:24}}</span>
-              </div>
-              <div class="bench-score-details" ng-if="vm.selectedBenchmarkScore === s">
+              <div class="bench-group-body" ng-if="vm.isBenchGroupOpen(g.level)">
+                <table class="bench-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th><th>Status</th><th>Score</th><th>Points</th><th>Edits</th><th>Duration</th><th>Model</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr ng-repeat="s in g.scores track by (s.id || $index)"
+                      ng-class="{open: vm.selectedBenchmarkScore === s, 'compare-a': vm.compareMode && vm.compareA === s, 'compare-b': vm.compareMode && vm.compareB === s}"
+                      ng-click="vm.compareMode ? vm.toggleCompareScore(s) : (vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s))">
+                      <td>{{s.timestamp | date:'short'}}</td>
+                      <td><span class="bench-badge {{vm.benchmarkStatusInfo(s.status).cls}}">{{vm.benchmarkStatusInfo(s.status).label}}</span></td>
+                      <td>{{vm.benchmarkPct(s.scorePercent)}}</td>
+                      <td>{{s.points || 0}}</td>
+                      <td>{{s.successfulEdits || 0}} ok<span ng-if="s.failedEdits"> / {{s.failedEdits}} fail</span></td>
+                      <td>{{vm.formatBenchmarkDuration(s.durationMs) || '—'}}</td>
+                      <td title="{{s.modelUsed || ''}}">{{(s.modelUsed || '—') | limitTo:24}}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              <div class="bench-score-details" ng-if="vm.selectedBenchmarkScore && vm.selectedBenchmarkScore.level === g.level">
                 <div class="bench-detail-grid">
                   <div><span class="muted">Status</span> {{s.status}}</div>
                   <div ng-if="s.correctnessPercent != null"><span class="muted">Correctness</span> {{vm.benchmarkPct(s.correctnessPercent)}}</div>
@@ -2255,6 +2264,7 @@
                     </div>
                   </div>
                 </div>
+              </div>
               </div>
             </div>
           </div>

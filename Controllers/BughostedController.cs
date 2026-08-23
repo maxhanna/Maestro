@@ -289,7 +289,9 @@ public class BughostedController : ControllerBase
             if (tree.Length > 20000) tree = tree[..20000] + "\n... (skeleton truncated)";
             var paths = skeleton.Paths ?? new List<string>();
             if (paths.Count > 2000) paths = paths.Take(2000).ToList();
-            return new { tree, paths };
+            // generatedAt = when the cached skeleton was actually walked/refreshed,
+            // so the hosted dashboard can show "skeleton last refreshed" accurately.
+            return new { tree, paths, generatedAt = AgentSkeleton.GetSkeletonCacheTimestamp(root)?.ToString("O") };
         }
         catch (Exception ex)
         {
