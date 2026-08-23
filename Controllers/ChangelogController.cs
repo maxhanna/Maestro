@@ -14,23 +14,18 @@ public class ChangelogController : ControllerBase
         _changelog = changelog;
     }
 
+    /// <summary>Fetches fresh changelog data from GitHub releases.</summary>
     [HttpGet]
-    public IActionResult Get()
+    public async Task<IActionResult> Get()
     {
-        return Ok(new { content = _changelog.Read() });
+        try
+        {
+            var content = await _changelog.FetchChangelogAsync();
+            return Ok(new { content, lastSynced = _changelog.LastFetchTime?.ToString("o") });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(502, new { error = "Failed to fetch from GitHub", detail = ex.Message });
+        }
     }
-
-    [HttpPost]
-    public IActionResult Save([FromBody] ChangelogSaveRequest req)
-    {
-        if (req == null || string.IsNullOrEmpty(req.Content))
-            return BadRequest("Content is required");
-        _changelog.Overwrite(req.Content);
-        return Ok(new { ok = true });
-    }
-}
-
-public class ChangelogSaveRequest
-{
-    public string Content { get; set; } = "";
 }

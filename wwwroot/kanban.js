@@ -868,6 +868,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             delete card._feedbackSent;
             delete card._verification;
             delete card._groundTruth;
+            delete card.agentAnalysis;
             delete card.agentLog;
           }
 

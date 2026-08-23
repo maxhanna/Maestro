@@ -888,13 +888,32 @@ angular.module('kanbanApp')
                 vm.closeDiscordPanel = function () { vm.showDiscordPanel = false; vm.showChangelog = false; };
                 vm.showChangelog = false;
                 vm.changelogContent = '';
+                vm.changelogSyncLabel = '';
+                vm.changelogFontSize = parseInt(localStorage.getItem('weaverChangelogFontSize'), 10) || 78;
+                vm.changelogFontSizeUp = function () { vm.changelogFontSize = Math.min(vm.changelogFontSize + 12, 160); localStorage.setItem('weaverChangelogFontSize', vm.changelogFontSize); };
+                vm.changelogFontSizeDown = function () { vm.changelogFontSize = Math.max(vm.changelogFontSize - 12, 40); localStorage.setItem('weaverChangelogFontSize', vm.changelogFontSize); };
                 vm.toggleChangelog = function () {
                     vm.showChangelog = !vm.showChangelog;
-                    if (vm.showChangelog && !vm.changelogContent) {
-                        $http.get('/api/changelog', { timeout: 8000 }).then(function (resp) {
-                            vm.changelogContent = (resp.data && resp.data.content) || '';
-                        }, function () { vm.changelogContent = ''; });
-                    }
+                    if (vm.showChangelog) vm.loadChangelog();
+                };
+                vm.loadChangelog = function () {
+                    vm.changelogLoading = true;
+                    vm.changelogContent = '';
+                    vm.changelogSyncLabel = '';
+                    $http.get('/api/changelog', { timeout: 15000 }).then(function (resp) {
+                        vm.changelogContent = (resp.data && resp.data.content) || '';
+                        var lastSynced = resp.data && resp.data.lastSynced;
+                        if (lastSynced) {
+                            try {
+                                var d = new Date(lastSynced);
+                                var diffMin = Math.floor((new Date() - d) / 60000);
+                                var timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                                var dateStr = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+                                vm.changelogSyncLabel = diffMin < 1 ? 'Fetched just now' : diffMin < 60 ? 'Fetched ' + diffMin + 'm ago' : 'Fetched ' + dateStr + ' ' + timeStr;
+                            } catch (e) {}
+                        }
+                        vm.changelogLoading = false;
+                    }, function () { vm.changelogContent = ''; vm.changelogLoading = false; });
                 };
                 vm.loadVersion = function () { $http.get('/api/bughosted/version', { timeout: 10000 }).then(function (resp) { vm.appVersion = resp.data; }, function () { vm.appVersion = { local: '?', remote: null, updateAvailable: false }; }); };
                 vm.triggerUpdate = function () {

@@ -1,100 +1,189 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace Weaver.Services;
 
 /// <summary>
-/// Manages a plain-text changelog file in the Weaver data folder.
-/// The file is created on first run (empty header) and appended to
-/// every time the agent completes a task that involved file edits.
+/// Fetches changelog data directly from GitHub releases and formats it
+/// for display. No local file caching — the UI always shows live data.
 /// </summary>
 public class ChangelogService
 {
-    private readonly string _changelogPath;
+    private readonly IHttpClientFactory _clientFactory;
+    private const string GitHubOwner = "maxhanna";
+    private const string GitHubRepo = "Weaver";
+    private DateTime _lastFetch = DateTime.MinValue;
     private static readonly object _lock = new();
 
-    public ChangelogService(string dataDir)
+    public ChangelogService(IHttpClientFactory clientFactory)
     {
-        _changelogPath = Path.Combine(dataDir, "changelog.txt");
-        EnsureCreated();
+        _clientFactory = clientFactory;
     }
 
-    /// <summary>Full path to the changelog file.</summary>
-    public string FilePath => _changelogPath;
-
-    /// <summary>Returns the full changelog text, or an empty header if the file does not exist yet.</summary>
-    public string Read()
+    /// <summary>Last time the changelog was fetched from GitHub, or null if never.</summary>
+    public DateTime? LastFetchTime
     {
-        lock (_lock)
+        get { lock (_lock) { return _lastFetch == DateTime.MinValue ? null : _lastFetch; } }
+    }
+
+    /// <summary>Fetches all releases from GitHub and returns formatted changelog text.</summary>
+    public async Task<string> FetchChangelogAsync()
+    {
+        var client = _clientFactory.CreateClient();
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Weaver/1.0");
+        client.Timeout = TimeSpan.FromSeconds(15);
+
+        var releases = await FetchReleasesAsync(client);
+        var content = FormatReleases(releases);
+
+        lock (_lock) { _lastFetch = DateTime.UtcNow; }
+
+        return content;
+    }
+
+    private async Task<List<GitHubRelease>> FetchReleasesAsync(HttpClient client)
+    {
+        var releases = new List<GitHubRelease>();
+        var page = 1;
+
+        while (page <= 5)
         {
-            if (!File.Exists(_changelogPath)) return GetHeader();
-            try { return File.ReadAllText(_changelogPath); }
-            catch { return GetHeader(); }
+            var url = $"https://api.github.com/repos/{GitHubOwner}/{GitHubRepo}/releases?per_page=100&page={page}";
+            var json = await client.GetStringAsync(url);
+            var items = JsonSerializer.Deserialize<List<GitHubRelease>>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (items == null || items.Count == 0) break;
+            releases.AddRange(items);
+            if (items.Count < 100) break;
+            page++;
         }
+
+        return releases;
     }
 
-    /// <summary>
-    /// Appends a new changelog entry. Each call creates a timestamped block
-    /// with the task summary, files edited, and an optional step breakdown.
-    /// </summary>
-    public void AppendEntry(string taskSummary, List<string>? filesEdited = null, string? thinking = null)
+    private static string FormatReleases(List<GitHubRelease> releases)
     {
-        if (string.IsNullOrWhiteSpace(taskSummary) && (filesEdited == null || filesEdited.Count == 0))
-            return; // nothing meaningful to record
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("# Weaver Changelog");
+        sb.AppendLine($"# {releases.Count} release(s)");
+        sb.AppendLine();
 
-        lock (_lock)
+        for (var i = 0; i < releases.Count; i++)
         {
-            EnsureCreated();
-            try
+            var r = releases[i];
+            var version = NormalizeVersion(r.TagName ?? "unknown");
+            var date = r.PublishedAt?.ToString("MMM dd, yyyy") ?? "unknown";
+            var body = (r.Body ?? "").Trim();
+
+            sb.AppendLine($"# Release {version}");
+            sb.AppendLine($"Released {date}");
+            sb.AppendLine();
+
+            if (!string.IsNullOrWhiteSpace(body))
+                FormatReleaseBody(sb, body);
+            else
+                sb.AppendLine("_(No release notes provided.)_");
+
+            if (i < releases.Count - 1)
             {
-                var sb = new System.Text.StringBuilder();
                 sb.AppendLine();
-                sb.AppendLine($"## {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-
-                if (!string.IsNullOrWhiteSpace(taskSummary))
-                    sb.AppendLine($"Task: {taskSummary.Trim()}");
-
-                if (filesEdited != null && filesEdited.Count > 0)
-                {
-                    sb.AppendLine("Files changed:");
-                    foreach (var f in filesEdited)
-                        sb.AppendLine($"  - {f}");
-                }
-
-                if (!string.IsNullOrWhiteSpace(thinking))
-                {
-                    var trimmedThinking = thinking.Trim();
-                    if (trimmedThinking.Length > 500)
-                        trimmedThinking = trimmedThinking.Substring(0, 500) + "...";
-                    sb.AppendLine($"Notes: {trimmedThinking}");
-                }
-
-                File.AppendAllText(_changelogPath, sb.ToString());
+                sb.AppendLine(new string('─', 60));
+                sb.AppendLine();
             }
-            catch { /* best-effort */ }
         }
+
+        return sb.ToString();
     }
 
-    /// <summary>Overwrite the entire changelog (used for editing from the UI).</summary>
-    public void Overwrite(string content)
+    private static string NormalizeVersion(string tag)
     {
-        lock (_lock)
-        {
-            try { File.WriteAllText(_changelogPath, content); }
-            catch { /* best-effort */ }
-        }
+        tag = tag.Trim();
+        return tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? tag : "v" + tag;
     }
 
-    private void EnsureCreated()
+    private static void FormatReleaseBody(System.Text.StringBuilder sb, string body)
     {
-        if (File.Exists(_changelogPath)) return;
-        try
+        var lines = body.Split('\n');
+        var hasSections = lines.Any(l =>
+            l.TrimStart().StartsWith("### ", StringComparison.OrdinalIgnoreCase) &&
+            (l.Contains("Added", StringComparison.OrdinalIgnoreCase) ||
+             l.Contains("Changed", StringComparison.OrdinalIgnoreCase) ||
+             l.Contains("Fixed", StringComparison.OrdinalIgnoreCase) ||
+             l.Contains("Removed", StringComparison.OrdinalIgnoreCase)));
+
+        if (hasSections)
         {
-            var dir = Path.GetDirectoryName(_changelogPath);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(_changelogPath, GetHeader());
+            sb.AppendLine(body);
+            return;
         }
-        catch { /* best-effort */ }
+
+        var added = new List<string>();
+        var changed = new List<string>();
+        var fixed_ = new List<string>();
+        var other = new List<string>();
+
+        foreach (var rawLine in lines)
+        {
+            var trimmed = rawLine.Trim().TrimStart('-', '*', '•', '·');
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+
+            var lower = trimmed.ToLowerInvariant();
+
+            if (lower.StartsWith("new ") || lower.StartsWith("added ") || lower.StartsWith("introducing ") ||
+                lower.Contains("new feature") || lower.Contains("added support"))
+                added.Add($"- {trimmed}");
+            else if (lower.StartsWith("fixed ") || lower.StartsWith("bug fix") || lower.Contains("fix for") ||
+                     lower.Contains("resolved ") || lower.Contains("patched "))
+                fixed_.Add($"- {trimmed}");
+            else if (lower.StartsWith("changed ") || lower.StartsWith("updated ") || lower.StartsWith("improved ") ||
+                     lower.StartsWith("enhanced ") || lower.Contains("now ") || lower.Contains("refactor"))
+                changed.Add($"- {trimmed}");
+            else
+                other.Add($"- {trimmed}");
+        }
+
+        if (added.Count > 0)
+        {
+            sb.AppendLine("### Added");
+            sb.AppendLine();
+            foreach (var l in added) sb.AppendLine(l);
+            sb.AppendLine();
+        }
+        if (changed.Count > 0)
+        {
+            sb.AppendLine("### Changed");
+            sb.AppendLine();
+            foreach (var l in changed) sb.AppendLine(l);
+            sb.AppendLine();
+        }
+        if (fixed_.Count > 0)
+        {
+            sb.AppendLine("### Fixed");
+            sb.AppendLine();
+            foreach (var l in fixed_) sb.AppendLine(l);
+            sb.AppendLine();
+        }
+        if (other.Count > 0)
+        {
+            if (added.Count > 0 || changed.Count > 0 || fixed_.Count > 0)
+            {
+                sb.AppendLine("### Other");
+                sb.AppendLine();
+            }
+            foreach (var l in other) sb.AppendLine(l);
+        }
     }
 
-    private static string GetHeader() =>
-        "# Weaver Changelog\n" +
-        "# Automatically updated by the agent after each task with file edits.\n";
+    private class GitHubRelease
+    {
+        [JsonPropertyName("tag_name")]
+        public string? TagName { get; set; }
+        [JsonPropertyName("name")]
+        public string? Name { get; set; }
+        [JsonPropertyName("published_at")]
+        public DateTime? PublishedAt { get; set; }
+        [JsonPropertyName("body")]
+        public string? Body { get; set; }
+    }
 }

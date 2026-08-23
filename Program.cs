@@ -141,7 +141,7 @@ builder.Services.AddSingleton<ConfigFileService>(sp => new ConfigFileService(sp.
 builder.Services.AddSingleton<EmailService>();
 builder.Services.AddSingleton(new FileHintsManager(dbService));
 builder.Services.AddSingleton(new CalendarService(dbService));
-builder.Services.AddSingleton(new ChangelogService(weaverDataDir));
+builder.Services.AddSingleton<ChangelogService>();
 builder.Services.AddSingleton<GitService>();
 builder.Services.AddSingleton<PushNotificationService>(sp => new PushNotificationService(dbService));
 builder.Services.AddHttpClient("llama", client =>
@@ -246,6 +246,19 @@ app.Urls.Add(freeUrl);
 try
 {
     var runTask = app.RunAsync();
+
+    // Background-changelog refresh: fire-and-forget so the panel is ready
+    // with fresh GitHub release data the first time a user opens it.
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            var changelog = app.Services.GetRequiredService<ChangelogService>();
+            await changelog.FetchChangelogAsync();
+            Log("Changelog synced from GitHub.");
+        }
+        catch (Exception ex) { Log($"Changelog background sync failed: {ex.Message}"); }
+    });
 
     // Now Kestrel has started and URLs are populated
     var url = app.Urls.FirstOrDefault() ?? freeUrl;
