@@ -485,6 +485,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           autoPr: vm.prByDefault !== false,
           selfImproving: false,
           createTests: false,
+          strictVerifier: false,
           llmEndpointId: ''
         });
         vm.saveCards();
