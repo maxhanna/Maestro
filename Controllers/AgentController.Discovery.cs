@@ -1484,6 +1484,7 @@ partial class AgentController
         string? steeringContext = null, bool skipQualityCheck = false,
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
         string? cardId = null, bool createTests = false, string? buildCommands = null,
+        bool? strictVerifier = null,
         List<Dictionary<string, object?>>? webResults = null)
     {
         var runKey = !string.IsNullOrWhiteSpace(cardId) ? "card:" + cardId : "anon:" + Guid.NewGuid().ToString("N");
@@ -1493,6 +1494,7 @@ partial class AgentController
         {
             return await OrchestrateCore(prompt, projectRoot, emitSse, ct, attachedFiles, skipContextReview,
                 steeringContext, skipQualityCheck, existingPlan, completedStepIndices, cardId, createTests, buildCommands,
+                strictVerifier: strictVerifier,
                 webResults: webResults);
         }
         finally
@@ -1507,6 +1509,7 @@ partial class AgentController
         string? steeringContext = null, bool skipQualityCheck = false,
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
         string? cardId = null, bool createTests = false, string? buildCommands = null,
+        bool? strictVerifier = null,
         List<Dictionary<string, object?>>? webResults = null)
     {
         _gracefulStop = false;
@@ -1636,7 +1639,8 @@ partial class AgentController
 
         var (unifiedSteps, unifiedPlan, unifiedComplete) = await StepResolutionPipeline(prompt, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, skipContextReview: skipContextReview,
-                steeringContext: steeringContext, cardId: cardId, connectivityTask: connectivityTask);
+                steeringContext: steeringContext, cardId: cardId, connectivityTask: connectivityTask,
+                strictVerifier: strictVerifier);
         allSteps = unifiedSteps;
         plan = unifiedPlan;
         pipelineComplete = unifiedComplete;

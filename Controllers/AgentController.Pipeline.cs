@@ -46,7 +46,8 @@ partial class AgentController
         bool skipContextReview = false,
         string? steeringContext = null,
         string? cardId = null,
-        Task<bool>? connectivityTask = null)
+        Task<bool>? connectivityTask = null,
+        bool? strictVerifier = null)
     {
         var cfg = await LoadConfigAsync();
 
@@ -651,7 +652,7 @@ partial class AgentController
         if (anyEditsApplied || planCompleteDeclared || hasOsOutputDemand)
         {
             (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues, _) =
-                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
         }
         else
         {
@@ -671,7 +672,7 @@ partial class AgentController
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
                 var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative, _) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                 if (reverifyComplete)
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
@@ -726,13 +727,24 @@ partial class AgentController
         }
         if (!taskComplete)
         {
+            // STRICT VERIFIER HARD-GATE (outer guard): when StrictVerifier===true and the
+            // verifier tripped the hard-gate, PostExecuteVerify returned early with a
+            // "Strict verifier hard-gate: ..." details string and the deterministic issues
+            // as confirmedIssues. The whole point of the hard-gate is to NOT attempt repair
+            // (the deterministic finding is terminal and the LLM cannot fix it better), so
+            // skip the repair loop entirely. A non-gate incomplete verdict (strict mode on
+            // but no deterministic issue, so the LLM round ran and returned complete=false)
+            // still repairs normally.
+            var strictGateTripped = strictVerifier == true
+                && verificationDetails != null
+                && verificationDetails.StartsWith("Strict verifier hard-gate:", StringComparison.Ordinal);
             const int MaxPostVerifyRepairIterations = 3;
             const int MaxZeroChangeRepairs = 2; // consecutive repair passes that change NO files trip the churn circuit breaker
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
             var partialEditFeedback = new StringBuilder();
             var zeroChangeRepairs = 0;
-            while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)
+            while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations && !strictGateTripped)
             {
                 repairIteration++;
                 await EmitLog(emitSse, "warn",
@@ -765,7 +777,7 @@ partial class AgentController
                             $"💾 Repair auto-dumped web results to {dumpPath} — the task asked to write a file to {osDemand.DirectoryPath}", ct: ct);
                         var (dumpVerified, dumpDetails, dumpIssues, dumpSpeculative, _) =
                             await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext,
-                                atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                                atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                         taskComplete = dumpVerified;
                         verifierVerdict = dumpVerified;
                         verificationDetails = dumpDetails;
@@ -1047,7 +1059,7 @@ partial class AgentController
                         $"verifier issue likely false-positive; next no-change pass trips the circuit breaker.", ct: ct);
                 }
                 var (reVerified, reDetails, reIssues, reSpeculative, _) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                 taskComplete = reVerified;
                 verifierVerdict = reVerified;
                 verificationDetails = reDetails;
@@ -1115,6 +1127,15 @@ partial class AgentController
                         ["reason"] = verificationDetails + " — replanner proposed no further steps, treating as complete"
                     });
                 }
+            }
+            else if (strictGateTripped)
+            {
+                // Strict verifier hard-gate: the repair loop was intentionally skipped because a
+                // deterministic finding is terminal. The run stays incomplete with the exact
+                // deterministic issue(s) already published as ground truth.
+                await EmitLog(emitSse, "warn",
+                    $"🔒 Strict verifier hard-gate tripped — no repair attempted. Remaining issue(s): " +
+                    $"{string.Join("; ", verificationIssues ?? [])}", ct: ct);
             }
             else
             {
@@ -1661,7 +1682,8 @@ partial class AgentController
         List<object> allResults, CancellationToken ct,
         string? discoveryContext = null, int? atomicStepEstimate = null,
         Dictionary<string, string>? preEditSnapshots = null,
-        string? cardId = null, string? steeringContext = null)
+        string? cardId = null, string? steeringContext = null,
+        bool? strictVerifier = null)
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
@@ -1908,6 +1930,31 @@ partial class AgentController
             groundTruthItems.AddRange(deterministicIssues);
             if (groundTruthItems.Count > 0)
                 await PublishGroundTruthAsync(cardId, groundTruthItems, emitSse, ct);
+        }
+        // STRICT VERIFIER HARD-GATE — when the user opts in (StrictVerifier=true), a CONFIRMED
+        // deterministic finding is terminal: the run ends FAILED right here, BEFORE the LLM
+        // verifier round and the post-verify repair loop. This kills the 3× replan churn a
+        // compile-time / binding / wiring error otherwise triggers (each repair pass burns a
+        // full planner round + step resolution + another verifier round for an issue the LLM
+        // verifier cannot fix any better than the deterministic check already described), and
+        // it prevents the LLM verifier from "helpfully" re-wording a deterministic issue into
+        // a requirement the replanner then chases in the wrong direction. The ground truth was
+        // just published above, so the card shows the exact deterministic issue. StrictVerifier
+        // === null preserves the legacy behavior (the LLM round runs; deterministic issues
+        // still force complete=false but the run may attempt repair). StrictVerifier === false
+        // is the explicit relaxed mode: the early-return is skipped, so even a deterministic
+        // issue does not fail the run from this point (the relaxed handling below applies).
+        if (strictVerifier == true && deterministicIssues.Count > 0)
+        {
+            var strictDetails = $"Strict verifier hard-gate: {deterministicIssues.Count} deterministic issue(s) — " +
+                string.Join("; ", deterministicIssues);
+            await EmitLog(emitSse, "warn",
+                $"🔒 Strict verifier: FAILING run immediately ({deterministicIssues.Count} deterministic issue(s)) — " +
+                "skipping LLM verification round and repair loop.", ct: ct);
+            var strictGroundTruth = new List<string>();
+            strictGroundTruth.AddRange(confirmedEdits.Select(e => $"✓ Applied edit confirmed on disk: {e}"));
+            strictGroundTruth.AddRange(deterministicIssues);
+            return (false, strictDetails, deterministicIssues, new List<string>(), strictGroundTruth);
         }
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
@@ -2158,6 +2205,16 @@ partial class AgentController
             await EmitLog(emitSse, "warn", $"Verification LLM returned empty: {error}", ct: ct);
             if (deterministicIssues.Count > 0)
             {
+                // Legacy (null) → deterministic still fails. Relaxed (false) → the LLM gave no
+                // verdict and the user opted out of deterministic gating, so publish the findings
+                // as ground truth but do not fail the run. Strict (true) never reaches here: the
+                // hard-gate early-return above already handled any deterministicIssues.Count > 0.
+                if (strictVerifier == false)
+                {
+                    return (true,
+                        $"Verification LLM call failed: {error}. Deterministic checks (relaxed, non-blocking): {string.Join("; ", deterministicIssues)}",
+                        new List<string>(), new List<string>(), deterministicIssues);
+                }
                 return (false,
                     $"Verification LLM call failed: {error}. Deterministic checks found: {string.Join("; ", deterministicIssues)}",
                     deterministicIssues, new List<string>(), deterministicIssues);
@@ -2181,11 +2238,25 @@ partial class AgentController
                 var (confirmedIssues, speculativeIssues) = ParseVerifyIssues(doc.RootElement);
                 if (deterministicIssues.Count > 0)
                 {
-                    // Deterministic findings always fail verification and are never triaged away.
-                    isComplete = false;
-                    confirmedIssues.AddRange(deterministicIssues);
-                    if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
-                    reason += "Deterministic checks: " + string.Join("; ", deterministicIssues);
+                    // Deterministic findings always fail verification and are never triaged away
+                    // — UNLESS StrictVerifier===false (explicit relaxed mode), in which case the
+                    // user has opted out of the hard-gate AND out of deterministic failures: the
+                    // issues are published as ground truth (informational) but do not force
+                    // complete=false or seed the repair loop. Legacy mode (null) keeps the
+                    // original "deterministic always fails" behavior.
+                    if (strictVerifier != false)
+                    {
+                        isComplete = false;
+                        confirmedIssues.AddRange(deterministicIssues);
+                        if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
+                        reason += "Deterministic checks: " + string.Join("; ", deterministicIssues);
+                    }
+                    else
+                    {
+                        // Relaxed: record the deterministic findings as ground truth only.
+                        if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
+                        reason += "Deterministic checks (relaxed, non-blocking): " + string.Join("; ", deterministicIssues);
+                    }
                 }
                 var issuesJoined = string.Join("; ", confirmedIssues);
                 var details = reason + (string.IsNullOrWhiteSpace(issuesJoined) ? "" : $"\nIssues: {issuesJoined}");
@@ -2206,12 +2277,21 @@ partial class AgentController
             }
         }
         catch { }
-        // LLM output unparseable — deterministic findings still fail the run.
-        if (deterministicIssues.Count > 0)
+        // LLM output unparseable — deterministic findings still fail the run, unless the user
+        // opted into the relaxed mode (StrictVerifier===false), in which case the run is
+        // treated as complete (the LLM gave no verdict and deterministic issues are non-blocking).
+        if (deterministicIssues.Count > 0 && strictVerifier != false)
         {
             return (false,
                 "Verification LLM output unparseable. Deterministic checks found: " + string.Join("; ", deterministicIssues),
                 deterministicIssues, new List<string>(), deterministicIssues);
+        }
+        if (deterministicIssues.Count > 0 && strictVerifier == false)
+        {
+            // Relaxed: publish the deterministic findings as ground truth but complete the run.
+            return (true,
+                "Verification LLM output unparseable. Deterministic checks (relaxed, non-blocking): " + string.Join("; ", deterministicIssues),
+                new List<string>(), new List<string>(), deterministicIssues);
         }
         return (true, "", new List<string>(), new List<string>(), new List<string>());
     }

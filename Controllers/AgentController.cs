@@ -657,6 +657,10 @@ public partial class AgentController : ControllerBase
                 await EmitLog(true, "info", "Benchmark sandbox active", new { sandbox = projectRoot });
                 await SendSse(Response, "phase", new { phase = "sandbox", sandbox = projectRoot }, ct: Response.HttpContext.RequestAborted);
             }
+            // Resolve the strict-verifier mode: a card's explicit StrictVerifier value wins;
+            // when the card omitted it (null), fall back to the project-wide default
+            // (defaultStrictVerifier). Stays null when neither is set → legacy behavior.
+            var resolvedStrictVerifier = req.StrictVerifier ?? (await LoadConfigAsync()).defaultStrictVerifier;
             var (allSteps, plan, complete) = await Orchestrate(
                 req.Prompt, projectRoot, emitSse: true,
                 ct: Response.HttpContext.RequestAborted,
@@ -667,6 +671,7 @@ public partial class AgentController : ControllerBase
                 cardId: req.CardId,
                 createTests: req.CreateTests,
                 buildCommands: req.BuildCommands,
+                strictVerifier: resolvedStrictVerifier,
                 webResults: loadedWebResults);
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentProjectUtilities.HasSuccessfulEdits(allSteps);
