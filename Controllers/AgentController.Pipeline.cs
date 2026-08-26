@@ -41,7 +41,7 @@ partial class AgentController
         return header;
     }
     private async Task<(List<object> steps, AgentPlan plan, bool complete)> StepResolutionPipeline(
-        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        AgentRunContext runContext, string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         bool skipContextReview = false,
         string? steeringContext = null,
@@ -57,19 +57,9 @@ partial class AgentController
         // of one-after-another. The LLM connectivity probe (started in Orchestrate)
         // overlaps them too and is awaited before any LLM call below.
         var allSteps = new List<object>();
-        // The requirement checklist is per-run: reset it here so a reused controller instance
-        // (tests) never leaks a previous run's checklist into a run that did not extract one.
-        _requirementChecklist = null;
-        _taskPromptContextChars = 0;
-        // Per-step LLM token accounting is per-run: reset here so a reused controller instance
-        // (tests) never leaks a previous run's spend into the first step result of a new run.
-        _stepLlmPromptTokens = 0;
-        _stepLlmResponseTokens = 0;
-        _stepLlmCalls = 0;
-        // Run-level cumulative LLM spend (the live "tokens used" counter) is per-run too.
-        _runLlmPromptTokens = 0;
-        _runLlmResponseTokens = 0;
-        _runLlmCalls = 0;
+        // Run-scoped state is reset here rather than left on the controller. This keeps
+        // repeated executions isolated and makes ownership explicit.
+        runContext.Reset();
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         // These disk/DB tasks deliberately start before the connectivity probe is
         // awaited: on the rare probe failure their results are discarded, which is
@@ -92,12 +82,12 @@ partial class AgentController
             editKnowledgeTask = LoadEditKnowledgeHeaderAsync(projectRoot, emitSse, ct);
 
         // LLM connectivity must pass before any LLM call below.
-        connectivityTask ??= CheckLlmConnectivity(projectRoot, emitSse, ct);
+        connectivityTask ??= CheckLlmConnectivity(runContext, projectRoot, emitSse, ct);
         if (!await connectivityTask)
             throw new InvalidOperationException("LLM connectivity check failed.");
 
         var (discoveryContext, ds) = await bootstrapTask;
-        _discoverySteps = ds;
+        runContext.DiscoverySteps = ds;
         allSteps.AddRange(ds);
         string? editKnowledgeHeader = editKnowledgeTask != null ? await editKnowledgeTask : null;
         AgentSkeleton.SkeletonResult? skeleton = skeletonTask != null ? await skeletonTask : null;
@@ -158,7 +148,7 @@ partial class AgentController
                 // Track how much of the discovery context is the skeleton (layout + note) so
                 // the context-breakdown pop can show it as its own row instead of burying it
                 // in the "headers / steering" residual.
-                _skeletonContextChars = skeletonSection.Length;
+                runContext.SkeletonContextChars = skeletonSection.Length;
                 await EmitLog(emitSse, "info",
                     $"Skeleton trimmed from {skeleton!.Paths.Count} paths to {trimmed.Length} chars {(string.IsNullOrWhiteSpace(note) ? "" : "— " + note)}", ct: ct);
             }
@@ -177,13 +167,13 @@ partial class AgentController
         // separately (BuildIncrementalStepUserPrompt, AnalyzePromptAndPlanCodeChanges,
         // BuildReplanPrompt) so the planner still verifies each requirement without polluting
         // task classification.
-        _requirementChecklist = string.IsNullOrWhiteSpace(requirementChecklist) ? null : requirementChecklist;
+        runContext.RequirementChecklist = string.IsNullOrWhiteSpace(requirementChecklist) ? null : requirementChecklist;
         // The context-breakdown "task prompt + requirements" row: the raw task text plus the
         // checklist share (the checklist is threaded into the planner, never the discovery
         // context, so it is accounted for here, not in the scaffolding residual).
-        _taskPromptContextChars = prompt.Length + (_requirementChecklist?.Length ?? 0);
-        if (_requirementChecklist != null)
-            await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist }, ct: ct);
+        runContext.TaskPromptContextChars = prompt.Length + (runContext.RequirementChecklist?.Length ?? 0);
+        if (runContext.RequirementChecklist != null)
+            await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist = runContext.RequirementChecklist }, ct: ct);
         else
             await EmitLog(emitSse, "warn", "Requirement checklist was empty.", ct: ct);
         if (attachedFiles != null && attachedFiles.Count > 0)
@@ -313,7 +303,7 @@ partial class AgentController
         if (emitSse && !skipContextReview)
         {
             await EmitLog(emitSse, "info", $"Reviewing context from {ds.Count} discovery steps ...", ct: ct);
-            discoveryContext = await RunContextReview(ds, discoveryContext, allSteps, ct);
+            discoveryContext = await RunContextReview(runContext, ds, discoveryContext, allSteps, ct);
         }
         MetaPlanResult? metaPlan = null;
         var planAlreadyExecuted = false;
@@ -347,7 +337,7 @@ partial class AgentController
                     // prematurely truncate a valid multi-step stage. The budget is enforced in
                     // the top-level interleaved loop, which is the actual execution path.
                     var (incSubPlan, updatedCtx) = await RunIncrementalPlanningLoop(
-                        subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId,
+                        runContext, subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId,
                         atomicStepEstimate: null, attachedFiles: attachedFiles);
                     subPlanResult = incSubPlan;
                     discoveryContext = updatedCtx;
@@ -421,7 +411,7 @@ partial class AgentController
                     // Snapshot the sub-plan's HTML targets before execution so template-binding
                     // validation only flags bindings these edits introduce (first capture wins).
                     SnapshotPreEditFiles(projectRoot, subPlanResult, preEditSnapshots);
-                    await ExecutePlan(prompt, projectRoot, emitSse, "", subPlanResult, ct, subResults,
+                    await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, "", subPlanResult, ct, subResults,
                         steeringContext: subPlan.ContextNote, attachedFiles: attachedFiles, cardId: cardId);
                     await UpdateMetaPlanSubPlanStatusAsync(cardId, subPlan.Id, true, emitSse, ct);
                     accumulatedContext.AppendLine($"## Sub-plan {i + 1} ({subPlan.Title}) — COMPLETED ##");
@@ -456,11 +446,11 @@ partial class AgentController
             await EmitLog(emitSse, "info", "Phase 2 — PLAN & EXECUTE (interleaved, one atomic step at a time)", ct: ct);
             if (emitSse)
             {
-                var ctxBreakdown = BuildContextBreakdown(ds, discoveryContext);
+                var ctxBreakdown = BuildContextBreakdownForRun(runContext, ds, discoveryContext);
                 await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext), contextChars = discoveryContext.Length, contextBreakdown = ctxBreakdown, prompt }, ct);
             }
             var (interleavedPlan, interleavedResults, updatedContext, interleavedComplete, interleavedSnapshots) = await RunInterleavedPlanExecutionLoop(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles, atomicStepEstimate);
+                runContext, prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles, atomicStepEstimate);
             // Merge the loop's per-step pre-edit captures (captured right before each edit) so
             // post-execution template-binding validation sees the run's pre-edit content even
             // when the pre-loop meta-plan named no HTML files. First capture per file wins.
@@ -491,7 +481,7 @@ partial class AgentController
         if (!planAlreadyExecuted)
         {
             var validationReason = await ValidatePlanAsync(prompt, plan, ct);
-            if (_gracefulStop)
+            if (runContext.GracefulStop)
             {
                 await EmitLog(emitSse, "warn", "User did not respond to command confirmation — skipping card.", ct: ct);
                 return (allSteps, plan, false);
@@ -503,8 +493,8 @@ partial class AgentController
                 var validationSteering = $"A reviewer flagged the previous plan: {validationReason}. " +
                     "Fix exactly that issue — do not add unrelated files, features, or refactors." +
                     (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
-                var replan = await AnalyzePromptAndPlanCodeChanges(
-                    prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
+                var replan = await AnalyzePromptAndPlanCodeChangesCore(
+                    runContext, prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
                 if (replan != null && replan.Plan.Count > 0)
                 {
                     plan = MergePlans(plan, replan);
@@ -605,7 +595,7 @@ partial class AgentController
             }
             try
             {
-                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
+                await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
                     steeringContext: steeringContext, attachedFiles: attachedFiles,
                     cardId: cardId);
             }
@@ -652,7 +642,7 @@ partial class AgentController
         if (anyEditsApplied || planCompleteDeclared || hasOsOutputDemand)
         {
             (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues, _) =
-                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
+                 await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
         }
         else
         {
@@ -672,7 +662,7 @@ partial class AgentController
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
                 var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative, _) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
+                    await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                 if (reverifyComplete)
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
@@ -776,7 +766,7 @@ partial class AgentController
                         await EmitLog(emitSse, "success",
                             $"💾 Repair auto-dumped web results to {dumpPath} — the task asked to write a file to {osDemand.DirectoryPath}", ct: ct);
                         var (dumpVerified, dumpDetails, dumpIssues, dumpSpeculative, _) =
-                            await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext,
+                            await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext,
                                 atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                         taskComplete = dumpVerified;
                         verifierVerdict = dumpVerified;
@@ -911,7 +901,7 @@ partial class AgentController
                 }
                 else
                 {
-                    replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                    replanSteps = await GenerateReplanStepsAsync(runContext, prompt, allSteps, plan,
                         enhancedSteering, projectRoot, emitSse, ct,
                         attachedFiles: attachedFiles,
                         qualityCheckReason: qualityCheckReason.ToString());
@@ -990,7 +980,7 @@ partial class AgentController
                     // A repair step carrying a concrete oldString/newString (deterministic
                     // repairs, scripted replans) is applied directly — no LLM pre-resolution
                     // round-trip, mirroring the interleaved loop's ShouldApplyDirectly path.
-                    await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
+                    await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, "", plan, ct, allSteps,
                         steeringContext: enhancedSteering, attachedFiles: attachedFiles,
                         completedStepIndices: mergedDone, cardId: cardId,
                         skipLlmPreResolution: ShouldApplyDirectly(singleStep));
@@ -1059,7 +1049,7 @@ partial class AgentController
                         $"verifier issue likely false-positive; next no-change pass trips the circuit breaker.", ct: ct);
                 }
                 var (reVerified, reDetails, reIssues, reSpeculative, _) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
+                    await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                 taskComplete = reVerified;
                 verifierVerdict = reVerified;
                 verificationDetails = reDetails;
@@ -1164,7 +1154,7 @@ partial class AgentController
         // showing the peak size on the completed card instead of whatever mid-run value
         // was last streamed. Marked final so the frontend persists it to the card.
         if (emitSse)
-            await EmitContextUpdateAsync(discoveryContext, true, ct, final: true);
+            await EmitContextUpdateAsync(runContext, discoveryContext, true, ct, final: true);
         return (allSteps, plan ?? new AgentPlan(), taskComplete);
     }
     private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default, Object? additionalData = null)
@@ -1211,6 +1201,18 @@ partial class AgentController
     /// </summary>
     private List<object> BuildContextBreakdown(List<object> ds, string discoveryContext)
     {
+        var legacyContext = new AgentRunContext
+        {
+            DiscoverySteps = _discoverySteps,
+            SkeletonContextChars = _skeletonContextChars,
+            RequirementChecklist = _requirementChecklist,
+            TaskPromptContextChars = _taskPromptContextChars
+        };
+        return BuildContextBreakdownForRun(legacyContext, ds, discoveryContext);
+    }
+
+    private List<object> BuildContextBreakdownForRun(AgentRunContext runContext, List<object> ds, string discoveryContext)
+    {
         var rows = new List<object>();
         var accountedChars = 0;
         foreach (var item in ds.OfType<Dictionary<string, object?>>())
@@ -1229,7 +1231,7 @@ partial class AgentController
             accountedChars += output.Length;
         }
         var remainingChars = Math.Max(0, discoveryContext.Length - accountedChars);
-        var skeletonChars = Math.Min(_skeletonContextChars, remainingChars);
+        var skeletonChars = Math.Min(runContext.SkeletonContextChars, remainingChars);
         if (skeletonChars > 0)
         {
             rows.Add(new
@@ -1246,14 +1248,14 @@ partial class AgentController
         // is NOT subtracted from the scaffolding residual — the categories now cover every
         // part of what the LLM sees: files, skeleton, task prompt + requirements, and the
         // discovery scaffolding (headers / steering / plan-so-far).
-        if (_taskPromptContextChars > 0)
+        if (runContext.TaskPromptContextChars > 0)
         {
             rows.Add(new
             {
-                name = _requirementChecklist != null ? "task prompt + requirements checklist" : "task prompt",
+                name = runContext.RequirementChecklist != null ? "task prompt + requirements checklist" : "task prompt",
                 kind = "task",
-                chars = _taskPromptContextChars,
-                tokens = CharsToTokens(_taskPromptContextChars)
+                chars = runContext.TaskPromptContextChars,
+                tokens = CharsToTokens(runContext.TaskPromptContextChars)
             });
         }
         if (remainingChars > 0)
@@ -1281,7 +1283,7 @@ partial class AgentController
     /// size onto the card — the last mid-run value is often NOT the peak, because execution
     /// keeps reading files and fetching web results after the final context update fires.
     /// </summary>
-    private async Task EmitContextUpdateAsync(string discoveryContext, bool emitSse, CancellationToken ct,
+    private async Task EmitContextUpdateAsync(AgentRunContext runContext, string discoveryContext, bool emitSse, CancellationToken ct,
         bool final = false)
     {
         if (!emitSse) return;
@@ -1289,16 +1291,16 @@ partial class AgentController
         {
             contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext),
             contextChars = discoveryContext.Length,
-            contextBreakdown = BuildContextBreakdown(_discoverySteps, discoveryContext),
+            contextBreakdown = BuildContextBreakdownForRun(runContext, runContext.DiscoverySteps, discoveryContext),
             // The cumulative LLM spend so far — the live "tokens used" number. The context
             // size alone is meaningless on OS/benchmark tasks (empty sandbox ≈ 0 context
             // tokens) while every planner/verify round still costs thousands of tokens.
-            llmSpend = RunLlmSpend(),
+            llmSpend = RunLlmSpendForRun(runContext),
             final
         }, ct);
     }
     private async Task<string> RunContextReview(
-        List<object> ds, string discoveryContext, List<object> allSteps, CancellationToken ct)
+        AgentRunContext runContext, List<object> ds, string discoveryContext, List<object> allSteps, CancellationToken ct)
     {
         var readFiles = ds.OfType<Dictionary<string, object?>>()
             .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "read")
@@ -1321,7 +1323,7 @@ partial class AgentController
             files = readFiles.Select(f => new { path = f }).ToList(),
             contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext),
             contextChars = discoveryContext.Length,
-            contextBreakdown = BuildContextBreakdown(ds, discoveryContext)
+            contextBreakdown = BuildContextBreakdownForRun(runContext, ds, discoveryContext)
         }, ct);
         try
         {
@@ -1677,8 +1679,20 @@ partial class AgentController
         return snap;
     }
 
-    private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues, List<string> groundTruth)> PostExecuteVerify(
+    // Compatibility entry point retained for existing reflection-based tests. Production
+    // execution uses the explicit-context overload below.
+    private Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues, List<string> groundTruth)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
+        List<object> allResults, CancellationToken ct,
+        string? discoveryContext = null, int? atomicStepEstimate = null,
+        Dictionary<string, string>? preEditSnapshots = null,
+        string? cardId = null, string? steeringContext = null,
+        bool? strictVerifier = null)
+        => PostExecuteVerifyCore(new AgentRunContext(), originalPrompt, projectRoot, emitSse, allResults, ct,
+            discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier);
+
+    private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues, List<string> groundTruth)> PostExecuteVerifyCore(
+        AgentRunContext runContext, string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct,
         string? discoveryContext = null, int? atomicStepEstimate = null,
         Dictionary<string, string>? preEditSnapshots = null,
@@ -2296,7 +2310,7 @@ partial class AgentController
         return (true, "", new List<string>(), new List<string>(), new List<string>());
     }
     private async Task<List<PlanStep>> TryReplanAfterStep(
-        string prompt, List<object> allResults, AgentPlan plan,
+        AgentRunContext runContext, string prompt, List<object> allResults, AgentPlan plan,
         string? steeringContext, string projectRoot, bool emitSse,
         CancellationToken ct, List<PlanStep> planItems, int itemIdx,
         bool stepSkipped, bool stepSucceeded, List<string>? attachedFiles,
@@ -2312,7 +2326,7 @@ partial class AgentController
                 "Replan budget exhausted — any remaining gaps will be handled by post-execution verification.", ct: ct);
             return planItems;
         }
-        var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
+        var moreSteps = await GenerateReplanStepsAsync(runContext, prompt, allResults, plan,
             steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
         if (moreSteps != null && moreSteps.Count > 0)
         {

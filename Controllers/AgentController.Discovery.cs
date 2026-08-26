@@ -298,8 +298,13 @@ partial class AgentController
         catch { }
         return null;
     }
-    private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
+    private Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
      string prompt, string discoveryContext, string projectRoot, bool emitSse,
+     CancellationToken ct = default, string? steeringContext = null)
+        => AnalyzePromptAndPlanCodeChangesCore(new AgentRunContext(), prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
+
+    private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChangesCore(
+     AgentRunContext runContext, string prompt, string discoveryContext, string projectRoot, bool emitSse,
      CancellationToken ct = default, string? steeringContext = null)
     {
         var cfg = await LoadConfigAsync();
@@ -310,10 +315,10 @@ partial class AgentController
         // The extracted EXPLICIT REQUIREMENTS CHECKLIST rides in the planner user prompt as its
         // own section — never in the task text itself, so the web-need/OS-task heuristics that
         // scan the raw task never see checklist wording ("search", "fetch", "current").
-        if (!string.IsNullOrWhiteSpace(_requirementChecklist))
+        if (!string.IsNullOrWhiteSpace(runContext.RequirementChecklist))
         {
             userPrompt.AppendLine();
-            userPrompt.AppendLine(_requirementChecklist);
+            userPrompt.AppendLine(runContext.RequirementChecklist);
         }
         if (!string.IsNullOrWhiteSpace(steeringContext))
         {
@@ -338,7 +343,7 @@ partial class AgentController
             Console.WriteLine($"### CALLING LLM WITH PROMPT >>> {planningPrompt} >>> {userPrompt}");
             (raw, _, llmError) = await CallLlmRawStreaming(
                 planningPrompt, userPrompt.ToString(), emitSse, ct,
-                requestTimeout: _infiniteTimeout, maxTokens: 2048, llmRoundLabel: "full plan");
+                requestTimeout: _infiniteTimeout, maxTokens: 2048, llmRoundLabel: "full plan", runContext: runContext);
             if (string.IsNullOrWhiteSpace(raw))
             {
                 await EmitLog(emitSse, "error",
@@ -1487,12 +1492,13 @@ partial class AgentController
         bool? strictVerifier = null,
         List<Dictionary<string, object?>>? webResults = null)
     {
+        var runContext = new AgentRunContext();
         var runKey = !string.IsNullOrWhiteSpace(cardId) ? "card:" + cardId : "anon:" + Guid.NewGuid().ToString("N");
         _executingCards[runKey] = DateTime.UtcNow.Ticks;
         AbortAllInFlightSuggestions("a card started executing");
         try
         {
-            return await OrchestrateCore(prompt, projectRoot, emitSse, ct, attachedFiles, skipContextReview,
+            return await OrchestrateCore(runContext, prompt, projectRoot, emitSse, ct, attachedFiles, skipContextReview,
                 steeringContext, skipQualityCheck, existingPlan, completedStepIndices, cardId, createTests, buildCommands,
                 strictVerifier: strictVerifier,
                 webResults: webResults);
@@ -1504,7 +1510,7 @@ partial class AgentController
     }
 
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> OrchestrateCore(
-        string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
+        AgentRunContext runContext, string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
@@ -1512,8 +1518,8 @@ partial class AgentController
         bool? strictVerifier = null,
         List<Dictionary<string, object?>>? webResults = null)
     {
-        _gracefulStop = false;
-        var connectivityTask = CheckLlmConnectivity(projectRoot, emitSse, ct);
+        runContext.Reset();
+        var connectivityTask = CheckLlmConnectivity(runContext, projectRoot, emitSse, ct);
 
         // Surface the up-front dump-vs-build classification on the card (a "dump" badge) so a
         // run that will short-circuit deterministically is distinguishable from a script/build
@@ -1619,7 +1625,7 @@ partial class AgentController
                 await EmitLog(emitSse, "info",
                     $"♻ Seeding {webResults.Count} harvested web result(s) from the previous run into the replay context", ct: ct);
             }
-            await ExecutePlan(prompt, projectRoot, emitSse, replayContext, existingPlan, ct, resumeSteps,
+            await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, replayContext, existingPlan, ct, resumeSteps,
                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                 completedStepIndices: completedStepIndices, cardId: cardId);
             var resumeHasErrors = resumeSteps.OfType<Dictionary<string, object?>>()
@@ -1637,7 +1643,7 @@ partial class AgentController
         AgentPlan? plan = null;
         bool pipelineComplete = true;
 
-        var (unifiedSteps, unifiedPlan, unifiedComplete) = await StepResolutionPipeline(prompt, projectRoot, emitSse, ct,
+        var (unifiedSteps, unifiedPlan, unifiedComplete) = await StepResolutionPipeline(runContext, prompt, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, skipContextReview: skipContextReview,
                 steeringContext: steeringContext, cardId: cardId, connectivityTask: connectivityTask,
                 strictVerifier: strictVerifier);
@@ -1645,9 +1651,9 @@ partial class AgentController
         plan = unifiedPlan;
         pipelineComplete = unifiedComplete;
 
-        if (_gracefulStop)
+        if (runContext.GracefulStop)
         {
-            _gracefulStop = false;
+            runContext.GracefulStop = false;
             return (allSteps, plan, false);
         }
 
@@ -1689,7 +1695,7 @@ partial class AgentController
             if (verified) hasDone = true;
             if (!hasDone)
             {
-                var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
+                var (ok, reason) = await AssessCompletionCore(runContext, prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
                 if (ok && hasFatalStepErrors)
                 {
                     ok = false;
@@ -1717,11 +1723,11 @@ partial class AgentController
                         await EmitLog(emitSse, "info",
                            $"Replan: retrying {plan!.Plan.Count - doneIndices.Count} incomplete step(s)…", ct: ct);
                         var retryResults = new List<object>();
-                        await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, retryResults,
+                        await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, "", plan, ct, retryResults,
                             steeringContext: steeringContext, attachedFiles: attachedFiles,
                             completedStepIndices: doneIndices, cardId: cardId);
                         allSteps.AddRange(retryResults);
-                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
+                        var (ok2, _) = await AssessCompletionCore(runContext, prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
                         complete = ok2;
                     }
                     if (!complete && plan?.Plan?.Count > 0)
@@ -1747,7 +1753,7 @@ partial class AgentController
                             "features, refactors, or improvements the user did not ask for. If nothing explicit is " +
                             "missing, return an empty plan." +
                             (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
-                        var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                        var newSteps = await GenerateReplanStepsAsync(runContext, prompt, allSteps, plan,
                             scopedSteering, projectRoot, emitSse, ct,
                             attachedFiles: attachedFiles, qualityCheckReason: reason);
                         if (newSteps?.Count > 0)
@@ -1816,11 +1822,11 @@ partial class AgentController
                                 if (result != null) mergedDone.Add(i);
                             }
                             var newResults = new List<object>();
-                            await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, newResults,
+                            await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, "", plan, ct, newResults,
                                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                                 completedStepIndices: mergedDone, cardId: cardId);
                             allSteps.AddRange(newResults);
-                            var (ok3, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
+                            var (ok3, _) = await AssessCompletionCore(runContext, prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles, steeringContext: steeringContext);
                             complete = ok3;
                         }
                         else
@@ -1875,7 +1881,7 @@ partial class AgentController
         return (allSteps, plan, complete);
     }
     private async Task<List<PlanStep>?> GenerateReplanStepsAsync(
-        string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
+        AgentRunContext runContext, string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
         string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null, string qualityCheckReason = "")
     {
@@ -1907,7 +1913,7 @@ partial class AgentController
         var replanPrompt = BuildReplanPrompt(originalPrompt, new List<string> { failHist },
             steeringContext, existingPlan, executedSteps, qualityCheckReason,
             fileContents.ToString() + "\n\n## FAILED CODE SNIPPETS (do NOT reproduce)\n" + failedCodeSnippets.ToString(),
-            _requirementChecklist);
+            runContext.RequirementChecklist);
         var (raw, _, llmError) = await CallLlmRaw(
                 "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1, \"line\": 42}]}. For every edit step include the 1-based line number. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan. " +
                 "WHOLE-METHOD ADD/REPLACE STEPS USE FORMAT C: When the step ADDS a brand-new method/function or REPLACES an ENTIRE existing method, " +
@@ -1915,7 +1921,7 @@ partial class AgentController
                 "newCode carries only the new method code, one line per array element. Do NOT use oldString/newString for whole-method changes — FORMAT C saves tokens and prevents mid-method truncation. " +
                 "Reserve oldString/newString for small targeted edits inside a method. " +
                 NbspHeadingRule,
-                replanPrompt, ct, requestTimeout: _infiniteTimeout, llmRoundLabel: "replan");
+                replanPrompt, ct, requestTimeout: _infiniteTimeout, llmRoundLabel: "replan", runContext: runContext);
         if (string.IsNullOrWhiteSpace(raw)) return null;
         try
         {
@@ -1981,7 +1987,7 @@ partial class AgentController
         return allResults;
     }
     private async Task<(AgentPlan plan, string discoveryContext)> RunPlanningConvergenceLoop(
-        string prompt, string discoveryContext, string projectRoot, bool emitSse,
+        AgentRunContext runContext, string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext)
     {
         AgentPlan? best = null;
@@ -1989,8 +1995,8 @@ partial class AgentController
         var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var iter = 1; iter <= MAX_PLANNING_ITERATIONS; iter++)
         {
-            var plan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steering);
+            var plan = await AnalyzePromptAndPlanCodeChangesCore(
+                runContext, prompt, discoveryContext, projectRoot, emitSse, ct, steering);
             if (plan == null || plan.Plan.Count == 0)
             {
                 if (best != null) break;
@@ -2058,8 +2064,8 @@ partial class AgentController
         }
         if (best == null)
         {
-            var forced = await AnalyzePromptAndPlanCodeChanges(
-                prompt, discoveryContext, projectRoot, emitSse, ct, AppendExploreSteering(steeringContext));
+            var forced = await AnalyzePromptAndPlanCodeChangesCore(
+                runContext, prompt, discoveryContext, projectRoot, emitSse, ct, AppendExploreSteering(steeringContext));
             best = forced?.Plan.Count > 0
                 ? forced
                 : throw new InvalidOperationException("Planner did not produce an actionable plan after exploration.");
