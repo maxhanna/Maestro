@@ -126,7 +126,164 @@ family* but not cohesive *as a whole*. Candidate: one class per family behind a 
 
 ---
 
-## 3. Sequenced Decomposition Roadmap
+## 3. Partial classes vs composition: an empirical comparison
+
+The 20 `AgentController.*.cs` files use `partial` to split one class across files. This
+section answers the direct question: **is that decomposition, or just file-shredding?**
+The answer matters because it determines whether the roadmap (Section 4) should keep
+the partials or replace them with composed services.
+
+### 3.1 What `partial` actually guarantees
+
+`partial` is a *compiler* feature, not an *architecture* feature. All `partial`
+definitions of the same type merge into **one CLR type** before code generation. That
+means:
+
+- Every `private` member declared in any partial is visible to **all** other partials
+  with **no declaration, no interface, and no import**. The compiler does not enforce a
+  boundary.
+- The merged type has **one set of fields**, **one constructor**, and **one `this`**.
+  A field declared in `AgentController.cs` is mutated by code in `AgentController.Planning.cs`
+  as if it were local.
+- There is **no way to test, mock, or substitute** one partial in isolation — you get
+  all of them or none. This is why the tests use `RuntimeHelpers.GetUninitializedObject`
+  and reflect into privates.
+
+### 3.2 The measured coupling
+
+I traced every private member (method or field) declared in each partial and counted
+how many **other** partials reference it. This cross-reference count is the precise
+metric that distinguishes "decomposition" (low coupling, clear seams) from
+"shredding" (high coupling, no seam).
+
+```text
+Private members declared across all partials:           371
+Private members referenced from a DIFFERENT partial:   192
+Cross-partial coupling rate:                            51.8%
+```
+
+**Over half of all private members are used outside the partial that declares them.**
+That is the opposite of decomposition — it is a single class whose source happens to
+live in 20 files.
+
+Per-partial export/import (the hub-and-spoke pattern):
+
+| Partial | Exports (its privates used elsewhere) | Imports (uses others' privates) |
+| --- | ---: | ---: |
+| cs (the core) | **42** | 10 |
+| Formatting | 23 | 8 |
+| Prompts | 19 | 5 |
+| Steps | 15 | 18 |
+| Planning | 13 | **47** |
+| Terminal | 10 | 8 |
+| Llm | 8 | 10 |
+| Pipeline | 8 | **49** |
+| Execution | 7 | **35** |
+| Repair | 7 | 13 |
+| Constants | 7 | 0 |
+| StepExploration | 6 | 8 |
+| EditResolution | 6 | 8 |
+| BrowserTest | 5 | 5 |
+| Discovery | 5 | **45** |
+| EditPhases | 4 | 6 |
+| Complexity | 3 | 11 |
+| EditPipeline | 3 | **21** |
+| ApplyEdit | 1 | **28** |
+| CommandPipeline | 0 | 10 |
+
+The top cross-referenced members (what composition would force through an interface):
+
+| Member | Declared in | Referenced from N other partials |
+| --- | --- | ---: |
+| `EmitLog` | cs | **17** |
+| `SendSse` | cs | **16** |
+| `_infiniteTimeout` | cs | **16** |
+| `LoadConfigAsync` | cs | 10 |
+| `PersistBoardDataPlanStepAsync` | Formatting | 7 |
+| `ExecutePlan` | Execution | 6 |
+| `TruncateForLlm` | Formatting | 5 |
+| `_terminal` | cs | 5 |
+| `NormalizeChangeForDedup` | Formatting | 5 |
+| `_editKnowledge` | cs | 5 |
+
+### 3.3 What the numbers say
+
+Two structural facts fall out of the measurement:
+
+1. **There is a clear hub (the `cs` core), and clear leaves that only consume.**
+   `cs` exports 42 privates the rest depend on (`EmitLog`, `SendSse`, `LoadConfigAsync`,
+   the `_terminal`/`_editKnowledge`/`_boardData` collaborators). `Constants` exports 7
+   and imports 0 — a pure leaf. `CommandPipeline` exports 0 and imports 10 — a pure
+   consumer. **This is already a dependency graph in disguise**, but with no edges
+   declared: every partial silently reaches across the whole merged type.
+
+2. **The "pipeline" partials are sinks, not modules.** `Pipeline` imports 49, `Planning`
+   imports 47, `Discovery` imports 45, `Execution` imports 35. These partials are the
+   *orchestration spine* of the agent, and they touch nearly every private in the class.
+   Under partials, that coupling is invisible; under composition, each such import
+   becomes an explicit constructor-injected dependency — making the spine's real
+   collaborator count (and thus its true complexity) legible.
+
+### 3.4 Side-by-side: partials vs composition for this codebase
+
+| Property | `partial` (current) | Composition (proposed) |
+| --- | --- | --- |
+| Boundary enforcement | None — shared `private` scope | Compiler-enforced `public`/`internal` surface |
+| Coupling visibility | Hidden (51.8% cross-ref, silent) | Explicit (constructor params, interfaces) |
+| Unit testability | Must instantiate the whole 29k-line class (reflection) | Instantiate one service with fakes |
+| Mockable seams | None (tests reflect into privates) | One interface per service |
+| Adding a parameter | Breaks every reflection caller (7 test files) | Breaks only direct callers |
+| Independent evolution | Any partial can mutate any field | A service owns its state; others go through API |
+| Static state hazard | 13 statics shared across the merged type | Statics scoped per service or eliminated |
+| Compile-time size signal | Lost (shredded across files) | Preserved per class |
+| Refactor risk to introduce | None (already here) | Higher (but contained per-extract) |
+
+### 3.5 Why composition wins here (the deciding factor)
+
+The partial-class approach has **one legitimate use case**: generated + hand-written
+code merging into one type (e.g. `Designer.cs` + `Form.cs` in WinForms, EF model
+snapshots). Weaver's usage is the *opposite*: 20 hand-written files that all want to
+share state. That is exactly the case the C# design guidelines say to avoid, because
+"partial types [used to split implementation] allow all parts to access all private
+members of all other parts," defeating encapsulation.
+
+The empirical clincher: **51.8% cross-partial coupling + 13 static fields + 25
+collaborators** means the partials give the *appearance* of decomposition without any
+of its benefits — no enforced boundaries, no isolated tests, no mockable seams, no
+compile-time size signal. The 7 reflection-test callers and the `TargetParameterCountException`
+regression I hit during the StrictVerifier work are direct downstream symptoms.
+
+### 3.6 The composition target shape (concrete)
+
+The export/import table already reveals the natural service boundaries — the hub and
+leaves are *already* separated in all but the `partial` keyword:
+
+- **Infrastructure services (extract from `cs`):** `EmitLog`/`SendSse` →
+  `IRunEventSink`; `LoadConfigAsync` + `_cfgCache` → `ConfigProvider`;
+  `_infiniteTimeout` → part of `LlmClient`; the 13 statics → a scoped `RunRegistry`.
+  This alone removes the 42-export hub.
+- **Leaf services (pure extract, low risk):** `Constants`, `Complexity`,
+  `BrowserTest`, `StepExploration`, `EditPhases`, `Prompts`, `Formatting`,
+  `Terminal` — each becomes a class with an `internal`/`public` surface; the few
+  cross-refs become explicit calls.
+- **Orchestration services (the spine, higher risk):** `Pipeline`, `Planning`,
+  `Discovery`, `Execution`, `EditPipeline`, `ApplyEdit` — these become services that
+  *compose* the leaf services via constructor injection. Their high import counts (47–49)
+  become a visible dependency list that today is invisible — which is the *value* of
+  composition, not a cost.
+
+### 3.7 Conclusion
+
+For `AgentController`, **partial classes are the wrong tool**: they provide file-shredding
+without the encapsulation, testability, or coupling-control that the size of this class
+demands. The measured 51.8% silent cross-coupling, the reflection-based test harness,
+and the cross-request static state are all consequences of choosing `partial` where
+composition was needed. The roadmap in Section 4 therefore replaces partials with
+composed services, not merely better-organized partials.
+
+---
+
+## 4. Sequenced Decomposition Roadmap
 
 Ordered lowest-risk-first. Each step keeps `dotnet test` + `node tests/js/run-all.js`
 green and is one reviewable commit (the standard held for the StrictVerifier branch).
@@ -172,14 +329,14 @@ controller's dependency count drops from 25 to the handful of services it orches
 
 ---
 
-## 4. Non-goals (deliberately out of scope for this analysis)
+## 5. Non-goals (deliberately out of scope for this analysis)
 
 - No behavior changes, no API changes, no config-schema changes.
 - No new dependencies.
 - No changes to the public HTTP surface (`api/agent/*`, `api/config/*`, etc.).
 - Does not touch `feature/test-benchmark-gates` (in flight).
 
-## 5. Next steps
+## 6. Next steps
 
 1. Pick Phase 0's `AgentRunContext` extract as the first concrete commit — it's the
    safest, highest-leverage move and unblocks cleaner tests for everything that follows.
