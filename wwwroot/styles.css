@@ -1832,11 +1832,22 @@ h1 .brand-e:hover::before {
 	filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4)) drop-shadow(0 0 12px rgba(212, 175, 55, 0.25));
 }
 
-.discord-brand .brand-leg {
+/* Each leg pivots where it meets the body and steps in a metachronal wave
+   (back legs first, ripple forward; the right side runs anti-phased) so the
+   skulltula reads as a spider, not a rigid block. */
+.discord-brand .brand-leg path {
 	transform-box: view-box;
-	transform-origin: center;
-	animation: brandLegBreathe 3.6s ease-in-out infinite;
+	animation: brandLegStep 1.8s ease-in-out infinite;
 }
+
+.discord-brand .brand-leg path:nth-child(1) { transform-origin: 7.6px 7.4px; animation-delay: -0.675s; }
+.discord-brand .brand-leg path:nth-child(2) { transform-origin: 6.4px 9.2px; animation-delay: -0.45s; }
+.discord-brand .brand-leg path:nth-child(3) { transform-origin: 6.2px 12.2px; animation-delay: -0.225s; }
+.discord-brand .brand-leg path:nth-child(4) { transform-origin: 7.2px 15px; animation-delay: 0s; }
+.discord-brand .brand-leg path:nth-child(5) { transform-origin: 16.4px 7.4px; animation-delay: -1.575s; }
+.discord-brand .brand-leg path:nth-child(6) { transform-origin: 17.6px 9.2px; animation-delay: -1.35s; }
+.discord-brand .brand-leg path:nth-child(7) { transform-origin: 17.8px 12.2px; animation-delay: -1.125s; }
+.discord-brand .brand-leg path:nth-child(8) { transform-origin: 16.8px 15px; animation-delay: -0.9s; }
 
 .discord-brand .brand-ring {
 	transform-box: view-box;
@@ -1847,9 +1858,9 @@ h1 .brand-e:hover::before {
 /* Hover: the skulltula scuttles its legs and the whole spider pulses; the eyes
    brighten. Eyes-follow-mouse is driven from JS (vm.discordEyesFollow on the
    discord-brand element). */
-.discord-brand:hover .brand-leg {
+.discord-brand:hover .brand-leg path {
 	animation-name: brandLegScuttle;
-	animation-duration: 0.45s;
+	animation-duration: 0.55s;
 	animation-timing-function: ease-in-out;
 }
 
@@ -1857,27 +1868,128 @@ h1 .brand-e:hover::before {
 	animation: brandSpiderPulse 1.1s ease-in-out infinite;
 }
 
+/* Click: the skulltula pounces — squash down, spring up, settle. Pivots at the
+   bottom centre so it flattens into the ground and stretches upward. */
+.discord-brand .discord-brand-icon.brand-strike {
+	transform-box: view-box;
+	transform-origin: 12px 24px;
+	animation: brandSquashStretch 0.6s ease both;
+}
+
+@keyframes brandSquashStretch {
+
+	0% {
+		transform: scale(1);
+	}
+
+	35% {
+		transform: scale(1.18, 0.78);
+	}
+
+	60% {
+		transform: scale(0.82, 1.22);
+	}
+
+	80% {
+		transform: scale(1.06, 0.94);
+	}
+
+	100% {
+		transform: scale(1);
+	}
+}
+
+/* Idle: the skulltula's eyes glance around on a randomised schedule driven
+   from settings.js (random pause, random direction, random dwell), so the
+   movement happens at unpredictable moments. Hover pauses the scan so the JS
+   eyes-follow takes over via transform attributes, and brightens them. */
 .brand-pupil {
 	transition: fill 0.2s ease;
+	transform-box: view-box;
 }
 
 .discord-brand:hover .brand-pupil {
 	fill: #ffe082;
 }
 
+/* Glide easing for the JS idle scanner: quick look away, slower drift back.
+   Applied as a class only while a glance is in flight so the hover
+   eyes-follow (which sets transforms directly) stays snappy. */
+.brand-eye-out {
+	transition: transform 0.5s ease-in-out;
+}
+
+.brand-eye-back {
+	transition: transform 0.8s ease-in-out;
+}
+
+/* Eyelids for the idle blinks: socket-coloured circles pinned at the top of
+   each socket and collapsed to zero height, so they're invisible at rest. The
+   blink animation scales them down over the pupil and back in ~0.3s. */
+.brand-lid {
+	transform-box: view-box;
+	transform-origin: 10.1px 8.55px;
+	transform: scaleY(0);
+}
+
+.brand-lid-right {
+	transform-origin: 13.9px 8.55px;
+}
+
+.brand-lid.brand-blink {
+	animation: brandBlink 0.3s ease-in-out;
+}
+
+@keyframes brandBlink {
+
+	0% {
+		transform: scaleY(0);
+	}
+
+	40% {
+		transform: scaleY(1);
+	}
+
+	60% {
+		transform: scaleY(1);
+	}
+
+	100% {
+		transform: scaleY(0);
+	}
+}
+
+/* One leg cycle: lift the tip, reach forward, plant, ease back. */
+@keyframes brandLegStep {
+
+	0%,
+	100% {
+		transform: rotate(0deg);
+	}
+
+	25% {
+		transform: rotate(-13deg);
+	}
+
+	55% {
+		transform: rotate(4deg);
+	}
+}
+
+/* Hover: a quick, erratic per-leg twitch — a scuttle, not a march. */
 @keyframes brandLegScuttle {
 
 	0%,
 	100% {
-		transform: scale(1.02);
+		transform: rotate(0deg);
 	}
 
-	25% {
-		transform: scale(0.94) rotate(-3deg);
+	30% {
+		transform: rotate(-19deg);
 	}
 
-	75% {
-		transform: scale(0.94) rotate(3deg);
+	65% {
+		transform: rotate(11deg);
 	}
 }
 
@@ -1893,14 +2005,6 @@ h1 .brand-e:hover::before {
 	}
 }
 
-@media (prefers-reduced-motion: reduce) {
-
-	.discord-brand:hover .brand-leg,
-	.discord-brand:hover .discord-brand-icon {
-		animation: none;
-	}
-}
-
 .discord-brand-ascii {
 	margin: 0;
 	font-family: Consolas, 'Courier New', monospace;
@@ -1911,14 +2015,6 @@ h1 .brand-e:hover::before {
 	text-shadow: 0 0 10px rgba(212, 175, 55, 0.35);
 	white-space: pre;
 	user-select: all;
-}
-
-@media (prefers-reduced-motion: reduce) {
-
-	.discord-brand .brand-leg,
-	.discord-brand .brand-ring {
-		animation: none;
-	}
 }
 
 h1 .brand-text {

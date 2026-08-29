@@ -886,14 +886,35 @@ angular.module('kanbanApp')
                     if (!$window.confirm('Remove project "' + (p.Name || '') + '" (' + p.Path + ')?')) return;
                     $http.post('/api/config/projects/remove', { Path: p.Path }).then(function () { vm.loadConfig(); });
                 };
-                vm.openDiscordPanel = function () { vm.showDiscordPanel = true; vm.loadVersion(); };
-                vm.closeDiscordPanel = function () { vm.showDiscordPanel = false; vm.showChangelog = false; };
+                vm.openDiscordPanel = function () {
+                    vm.showDiscordPanel = true; vm.loadVersion();
+                    // Warm up the chitter AudioContext inside this click (a real user
+                    // gesture) so hover sounds play even if the panel was opened a
+                    // while ago (browser autoplay policies suspend un-gestured audio).
+                    vm._ensureChitterCtx();
+                    // Kick off the randomised idle eye scan.
+                    vm._scheduleDiscordEyeScan();
+                };
+                vm.closeDiscordPanel = function () {
+                    vm.showDiscordPanel = false; vm.showChangelog = false;
+                    vm._cancelDiscordEyeScan();
+                };
                 // Eyes-follow-mouse on the big skulltula in the Discord panel. Mousemove over
                 // the brand shifts each amber pupil (and its highlight) a little toward the
                 // cursor within its socket; mouseleave resets it. Disabled under reduced motion.
                 vm.discordEyesFollow = function (ev) {
-                    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
                     var host = ev && ev.currentTarget;
+                    // Hover hands control from the idle scanner to the mouse: kill any
+                    // in-flight glance/blink and drop their classes so the direct
+                    // transform writes below stay instant.
+                    vm._discordBrandHovered = true;
+                    vm._cancelDiscordEyeScan();
+                    if (host) vm._discordEyeSetPupils(host, '', '');
+                    if (host && host.querySelectorAll) {
+                        Array.prototype.forEach.call(host.querySelectorAll('.brand-lid'), function (el) {
+                            el.classList.remove('brand-blink');
+                        });
+                    }
                     var svg = host && host.querySelector && host.querySelector('.discord-brand-icon');
                     if (!svg) return;
                     var ctm = typeof svg.getScreenCTM === 'function' ? svg.getScreenCTM() : null;
@@ -934,6 +955,161 @@ angular.module('kanbanApp')
                     Array.prototype.forEach.call(host.querySelectorAll('.brand-pupil'), function (el) {
                         el.removeAttribute('transform');
                     });
+                    // Back to idle: resume the randomised scan from a fresh pause.
+                    vm._discordBrandHovered = false;
+                    vm._scheduleDiscordEyeScan();
+                };
+                // Randomised idle eye scan: instead of a fixed CSS loop, each glance is
+                // scheduled with a random pause (2.6–9s), a random direction, and a
+                // random dwell before looking back — occasionally a quick double-glance
+                // the other way. The scan pauses on hover (eyes-follow takes over via
+                // transform attributes) and resumes on mouseleave.
+                vm._discordEyeScanTimer = null;
+                vm._discordBrandHovered = false;
+                vm._cancelDiscordEyeScan = function () {
+                    if (vm._discordEyeScanTimer) {
+                        $timeout.cancel(vm._discordEyeScanTimer);
+                        vm._discordEyeScanTimer = null;
+                    }
+                };
+                vm._discordEyeSetPupils = function (host, cls, transform) {
+                    if (!host || !host.querySelectorAll) return;
+                    Array.prototype.forEach.call(host.querySelectorAll('.brand-pupil'), function (el) {
+                        if (cls) {
+                            el.classList.add(cls);
+                        } else {
+                            el.classList.remove('brand-eye-out');
+                            el.classList.remove('brand-eye-back');
+                        }
+                        if (transform) el.setAttribute('transform', transform);
+                        else el.removeAttribute('transform');
+                    });
+                };
+                vm._scheduleDiscordEyeScan = function () {
+                    vm._cancelDiscordEyeScan();
+                    if (!vm.showDiscordPanel) return;
+                    vm._discordEyeScanTimer = $timeout(vm._discordEyeScanMove, 2600 + Math.random() * 6400);
+                };
+                vm._discordEyeScanMove = function () {
+                    vm._discordEyeScanTimer = null;
+                    if (!vm.showDiscordPanel) return;
+                    // Hovering? mouseleave will reschedule — don't fight the cursor.
+                    if (vm._discordBrandHovered) return;
+                    var host = document.querySelector('.discord-brand');
+                    if (!host || !host.querySelectorAll || !host.querySelectorAll('.brand-pupil').length) return;
+                    // Random action each beat: mostly a quick blink, sometimes a
+                    // glance, sometimes a double-glance — all on unpredictable
+                    // intervals so the spider never moves on a visible beat.
+                    var roll = Math.random();
+                    if (roll < 0.4) {
+                        vm._discordEyeBlink(host, function () { vm._scheduleDiscordEyeScan(); });
+                    } else if (roll < 0.55) {
+                        var dir = Math.random() < 0.5 ? -1 : 1;
+                        vm._discordEyeGlance(host, dir, function () {
+                            // A blink right after a glance reads very naturally.
+                            if (Math.random() < 0.35) {
+                                vm._discordEyeBlink(host, function () { vm._scheduleDiscordEyeScan(); });
+                            } else {
+                                vm._scheduleDiscordEyeScan();
+                            }
+                        });
+                    } else {
+                        var d = Math.random() < 0.5 ? -1 : 1;
+                        vm._discordEyeGlance(host, d, function () {
+                            vm._discordEyeGlance(host, -d, function () { vm._scheduleDiscordEyeScan(); });
+                        });
+                    }
+                };
+                vm._discordEyeBlink = function (host, done) {
+                    if (!host || !host.querySelectorAll) { done(); return; }
+                    Array.prototype.forEach.call(host.querySelectorAll('.brand-lid'), function (el) {
+                        el.classList.remove('brand-blink');
+                        void el.getBoundingClientRect(); // restart cleanly on rapid blinks
+                        el.classList.add('brand-blink');
+                    });
+                    vm._discordEyeScanTimer = $timeout(function () {
+                        vm._discordEyeScanTimer = null;
+                        Array.prototype.forEach.call(host.querySelectorAll('.brand-lid'), function (el) {
+                            el.classList.remove('brand-blink');
+                        });
+                        done();
+                    }, 330);
+                };
+                vm._discordEyeGlance = function (host, dir, done) {
+                    vm._discordEyeSetPupils(host, 'brand-eye-out', 'translate(' + (0.8 * dir) + ' 0)');
+                    vm._discordEyeScanTimer = $timeout(function () {
+                        vm._discordEyeScanTimer = null;
+                        if (!vm.showDiscordPanel || vm._discordBrandHovered) {
+                            vm._discordEyeSetPupils(host, '', '');
+                            done();
+                            return;
+                        }
+                        // Drift back to centre on the slower easing.
+                        vm._discordEyeSetPupils(host, 'brand-eye-back', '');
+                        vm._discordEyeScanTimer = $timeout(done, 850 + Math.random() * 350);
+                    }, 900 + Math.random() * 1500);
+                };
+                // Click: the big skulltula pounces — replay a quick squash-and-stretch.
+                // Removing the class first (with a forced reflow) lets rapid re-clicks
+                // restart the animation from scratch.
+                vm.discordLogoClick = function (ev) {
+                    var host = ev && ev.currentTarget;
+                    var svg = host && host.querySelector && host.querySelector('.discord-brand-icon');
+                    if (!svg) return;
+                    if (svg.classList.contains('brand-strike')) {
+                        svg.classList.remove('brand-strike');
+                        void svg.getBoundingClientRect();
+                    }
+                    svg.classList.add('brand-strike');
+                };
+                // Subtle spider chitter: a short burst of bandpass-filtered noise
+                // ticks synthesised with the Web Audio API (no asset file needed).
+                vm._chitterCtx = null;
+                vm._ensureChitterCtx = function () {
+                    if (vm._chitterCtx) return vm._chitterCtx;
+                    var AC = window.AudioContext || window.webkitAudioContext;
+                    if (!AC) return null;
+                    var ctx = new AC();
+                    vm._chitterCtx = ctx;
+                    if (ctx.state === 'suspended' && ctx.resume) { try { ctx.resume(); } catch (e) { /* noop */ } }
+                    return ctx;
+                };
+                vm.discordLogoHover = function () {
+                    var ctx = vm._ensureChitterCtx();
+                    if (!ctx) return;
+                    // Debounce: don't re-chitter on a quick leave/re-enter.
+                    var nowMs = Date.now();
+                    if (vm._lastChitterAt && nowMs - vm._lastChitterAt < 700) return;
+                    vm._lastChitterAt = nowMs;
+                    if (ctx.state === 'suspended' && ctx.resume) { try { ctx.resume(); } catch (e) { /* noop */ } }
+                    var now = ctx.currentTime;
+                    var master = ctx.createGain();
+                    master.gain.value = 0.055; // quiet on purpose
+                    master.connect(ctx.destination);
+                    var ticks = 5 + Math.floor(Math.random() * 3);
+                    var start = now + 0.02;
+                    for (var i = 0; i < ticks; i++) {
+                        (function (t0) {
+                            var dur = 0.028 + Math.random() * 0.025;
+                            var size = Math.max(1, Math.floor(ctx.sampleRate * dur));
+                            var buf = ctx.createBuffer(1, size, ctx.sampleRate);
+                            var d = buf.getChannelData(0);
+                            for (var j = 0; j < size; j++) d[j] = Math.random() * 2 - 1;
+                            var src = ctx.createBufferSource();
+                            src.buffer = buf;
+                            var bp = ctx.createBiquadFilter();
+                            bp.type = 'bandpass';
+                            bp.frequency.value = 2600 + Math.random() * 2400;
+                            bp.Q.value = 3 + Math.random() * 3;
+                            var g = ctx.createGain();
+                            g.gain.setValueAtTime(0.0001, t0);
+                            g.gain.exponentialRampToValueAtTime(1, t0 + 0.004);
+                            g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+                            src.connect(bp); bp.connect(g); g.connect(master);
+                            src.start(t0);
+                            src.stop(t0 + dur + 0.01);
+                        })(start + i * (0.055 + Math.random() * 0.05));
+                    }
                 };
                 vm.showChangelog = false;
                 vm.changelogContent = '';

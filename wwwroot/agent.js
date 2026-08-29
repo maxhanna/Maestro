@@ -2465,16 +2465,11 @@ angular.module('kanbanApp')
                 // stable across digests; open/closed state lives in benchGroupOpen so it
                 // survives re-renders and panel closes.
                 vm.benchGroupOpen = {};
-                vm._benchGroupsCache = null;
-                vm._benchGroupsKey = null;
-                vm._benchGroupsLen = -1;
-                vm.groupedBenchmarkScores = function () {
-                    var scores = vm.benchmarkScores || [];
-                    if (vm._benchGroupsKey === scores && vm._benchGroupsCache && vm._benchGroupsLen === scores.length) {
-                        return vm._benchGroupsCache;
-                    }
-                    vm._benchGroupsKey = scores;
-                    vm._benchGroupsLen = scores.length;
+                // Shared grouping: scores bucketed by level, newest group first,
+                // runs newest-first inside each group. Cached per input array so
+                // ng-repeat stays stable across digests; open/closed state lives
+                // in benchGroupOpen so it survives re-renders and panel closes.
+                vm._groupScoresByLevel = function (scores) {
                     var map = {};
                     var groups = [];
                     for (var i = 0; i < scores.length; i++) {
@@ -2495,8 +2490,33 @@ angular.module('kanbanApp')
                         var bt = b.scores.length ? new Date(b.scores[0].timestamp || 0).getTime() : 0;
                         return bt - at;
                     });
-                    vm._benchGroupsCache = groups;
                     return groups;
+                };
+                vm._benchGroupsCache = null;
+                vm._benchGroupsKey = null;
+                vm._benchGroupsLen = -1;
+                vm.groupedBenchmarkScores = function () {
+                    var scores = vm.benchmarkScores || [];
+                    if (vm._benchGroupsKey === scores && vm._benchGroupsCache && vm._benchGroupsLen === scores.length) {
+                        return vm._benchGroupsCache;
+                    }
+                    vm._benchGroupsKey = scores;
+                    vm._benchGroupsLen = scores.length;
+                    vm._benchGroupsCache = vm._groupScoresByLevel(scores);
+                    return vm._benchGroupsCache;
+                };
+                vm._serverGroupsCache = null;
+                vm._serverGroupsKey = null;
+                vm._serverGroupsLen = -1;
+                vm.groupedServerBenchmarks = function () {
+                    var scores = vm.serverBenchmarks || [];
+                    if (vm._serverGroupsKey === scores && vm._serverGroupsCache && vm._serverGroupsLen === scores.length) {
+                        return vm._serverGroupsCache;
+                    }
+                    vm._serverGroupsKey = scores;
+                    vm._serverGroupsLen = scores.length;
+                    vm._serverGroupsCache = vm._groupScoresByLevel(scores);
+                    return vm._serverGroupsCache;
                 };
                 vm.toggleBenchGroup = function (level) { vm.benchGroupOpen[level] = !vm.benchGroupOpen[level]; };
                 vm.isBenchGroupOpen = function (level) { return !!vm.benchGroupOpen[level]; };
