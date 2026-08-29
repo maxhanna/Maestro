@@ -888,6 +888,53 @@ angular.module('kanbanApp')
                 };
                 vm.openDiscordPanel = function () { vm.showDiscordPanel = true; vm.loadVersion(); };
                 vm.closeDiscordPanel = function () { vm.showDiscordPanel = false; vm.showChangelog = false; };
+                // Eyes-follow-mouse on the big skulltula in the Discord panel. Mousemove over
+                // the brand shifts each amber pupil (and its highlight) a little toward the
+                // cursor within its socket; mouseleave resets it. Disabled under reduced motion.
+                vm.discordEyesFollow = function (ev) {
+                    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+                    var host = ev && ev.currentTarget;
+                    var svg = host && host.querySelector && host.querySelector('.discord-brand-icon');
+                    if (!svg) return;
+                    var ctm = typeof svg.getScreenCTM === 'function' ? svg.getScreenCTM() : null;
+                    if (!ctm) return;
+                    var pt;
+                    try {
+                        if (typeof svg.createSVGPoint === 'function') {
+                            pt = svg.createSVGPoint();
+                            pt.x = ev.clientX;
+                            pt.y = ev.clientY;
+                            pt = pt.matrixTransform(ctm.inverse());
+                        } else {
+                            pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(ctm.inverse());
+                        }
+                    } catch (e) { return; }
+                    [
+                        { homeX: 10.1, homeY: 10.3, maxDX: 0.8, maxDY: 0.55, cls: 'brand-pupil-left' },
+                        { homeX: 13.9, homeY: 10.3, maxDX: 0.8, maxDY: 0.55, cls: 'brand-pupil-right' }
+                    ].forEach(function (eye) {
+                        // Small dead-zone keeps the pupils at rest when the cursor is centred
+                        // on the eye so they don't jitter as the mouse crosses the logo.
+                        var tx = 0, ty = 0;
+                        if (Math.abs(pt.x - eye.homeX) > 0.15) {
+                            tx = Math.max(-eye.maxDX, Math.min(eye.maxDX, pt.x - eye.homeX));
+                        }
+                        if (Math.abs(pt.y - eye.homeY) > 0.15) {
+                            ty = Math.max(-eye.maxDY, Math.min(eye.maxDY, pt.y - eye.homeY));
+                        }
+                        var transform = (tx === 0 && ty === 0) ? '' : 'translate(' + tx + ' ' + ty + ')';
+                        Array.prototype.forEach.call(host.querySelectorAll('.' + eye.cls), function (el) {
+                            el.setAttribute('transform', transform);
+                        });
+                    });
+                };
+                vm.discordEyesReset = function (ev) {
+                    var host = ev && ev.currentTarget;
+                    if (!host || !host.querySelectorAll) return;
+                    Array.prototype.forEach.call(host.querySelectorAll('.brand-pupil'), function (el) {
+                        el.removeAttribute('transform');
+                    });
+                };
                 vm.showChangelog = false;
                 vm.changelogContent = '';
                 vm.changelogHtml = function () {

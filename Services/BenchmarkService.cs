@@ -214,6 +214,18 @@ public class BenchmarkService
         return true;
     }
 
+    /// <summary>Marks a local score as already uploaded to BugHosted so "Send all" skips
+    /// it on subsequent runs. Returns false when no score matches the id.</summary>
+    public bool MarkScoreSent(string id)
+    {
+        var scores = LoadScores();
+        var score = scores.FirstOrDefault(s => s.Id == id);
+        if (score == null) return false;
+        score.SentToServer = true;
+        WriteScores(scores);
+        return true;
+    }
+
     public int ClearAllScores()
     {
         var count = LoadScores().Count;
@@ -1074,6 +1086,9 @@ public class BenchmarkScore
     public double? StepEfficiencyPercent { get; set; }
     public double? EditSuccessPercent { get; set; }
     public string Status { get; set; } = "";
+    /// <summary>True once this local score has been successfully uploaded to the BugHosted
+    /// server; "Send all" skips sent scores. Persisted with the score so it survives reloads.</summary>
+    public bool SentToServer { get; set; }
     public SystemInfo? SystemInfo { get; set; }
     public string ModelUsed { get; set; } = "";
     public string? ErrorReason { get; set; }

@@ -134,6 +134,19 @@ public class BenchmarkController : ControllerBase
         return Ok(new { message = "Score deleted" });
     }
 
+    /// <summary>Records that a local score was successfully uploaded to BugHosted, so
+    /// subsequent "Send all" runs skip it. Idempotent; returns 404 for unknown ids.</summary>
+    [HttpPost("scores/{id}/mark-sent")]
+    public IActionResult MarkScoreSent(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return BadRequest("Missing score id");
+        var marked = _benchmark.MarkScoreSent(id);
+        if (!marked)
+            return NotFound(new { message = "Score not found" });
+        return Ok(new { message = "Score marked as sent" });
+    }
+
     [HttpDelete("scores")]
     public IActionResult ClearAllScores()
     {

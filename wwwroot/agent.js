@@ -2479,7 +2479,7 @@ angular.module('kanbanApp')
                     var groups = [];
                     for (var i = 0; i < scores.length; i++) {
                         var s = scores[i];
-                        var key = s.level || 'unknown';
+                        var key = s.level || 0;
                         var g = map[key];
                         if (!g) {
                             g = map[key] = { level: key, name: vm.benchmarkLevelName(key) || 'Benchmark ' + key, scores: [], bestScore: null };
@@ -3096,11 +3096,8 @@ angular.module('kanbanApp')
                         correctnessA: corrA, correctnessB: corrB, correctnessDelta: corrDelta,
                         checkRows: checkRows, regressedChecks: regressed, fixedChecks: fixed };
                 };
-                vm.sendBenchmarkToServer = function (s) {
-                    if (!s || !s.id || vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]) return;
-                    vm._sendingBenchmarkIds = vm._sendingBenchmarkIds || {};
-                    vm._sendingBenchmarkIds[s.id] = true;
-                    var benchmarkDto = {
+                vm._benchmarkDtoFor = function (s) {
+                    return {
                         ClientId: vm.bughostedClientId,
                         Token: vm.bughostedClientId,
                         Date: s.date,
@@ -3115,30 +3112,120 @@ angular.module('kanbanApp')
                         RAM: String(vm.systemInfoCustom.ramGb || vm.systemInfoDetected.ramBytes || ''),
                         GPU: String(vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '')
                     };
-                    $http.post('/api/bughosted/addbenchmark', benchmarkDto)
+                };
+                vm.markBenchmarkSent = function (s) {
+                    s.sentToServer = true;
+                    // Persist the flag so reloads don't re-send it; failure to persist is
+                    // non-fatal (the upload itself already succeeded).
+                    $http.post('/api/benchmark/scores/' + encodeURIComponent(s.id) + '/mark-sent').catch(function () { });
+                };
+                // Transient per-row upload badge: 'sending' | 'ok' | 'fail'. Cleared shortly
+                // after the upload settles so the row falls back to its persistent state
+                // (the ✓ Sent chip for successes, plain '—' for failures).
+                vm._clearSendState = function (s) {
+                    $timeout(function () { delete s._sendState; }, 10000);
+                };
+                vm.unsentBenchmarkCount = function () {
+                    return (vm.benchmarkScores || []).filter(function (s) { return !s.sentToServer; }).length;
+                };
+                vm.sendBenchmarkToServer = function (s) {
+                    if (!s || !s.id || s.sentToServer || vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]) return;
+                    vm._sendingBenchmarkIds = vm._sendingBenchmarkIds || {};
+                    vm._sendingBenchmarkIds[s.id] = true;
+                    s._sendState = 'sending';
+                    $http.post('/api/bughosted/addbenchmark', vm._benchmarkDtoFor(s))
                         .then(function (response) {
                             console.log('Successfully sent benchmark to server:', response.data);
-                            alert('Benchmark successfully sent to BugHosted!');
+                            vm.markBenchmarkSent(s);
+                            s._sendState = 'ok';
+                            vm._clearSendState(s);
+                            if (vm.showSideToast) vm.showSideToast('✅ Benchmark successfully sent to BugHosted!');
                         })
                         .catch(function (error) {
                             console.error('Error sending benchmark to server:', error);
+                            s._sendState = 'fail';
+                            vm._clearSendState(s);
                             if (error && error.message) {
-                                alert('Failed to send benchmark. Error details:\n' + error.message);
-                            } else {
-                                alert('Failed to send benchmark due to an unknown error.');
+                                if (vm.showErrorToast) vm.showErrorToast('Failed to send benchmark: ' + error.message);
+                            } else if (vm.showErrorToast) {
+                                vm.showErrorToast('Failed to send benchmark due to an unknown error.');
                             }
                         })
                         .finally(function () {
                             delete vm._sendingBenchmarkIds[s.id];
                         });
                 };
+                // Core batch sender shared by the global "Send all" and each group's button.
+                // progressKey names the in-flight guard + progress counter so parallel batches
+                // (e.g. two groups at once) don't collide; per-score flags (_sendingBenchmarkIds,
+                // _sendState) prevent a score from being uploaded twice regardless.
+                vm.sendBenchmarksBatch = function (allScores, progressKey) {
+                    if (vm._batchSending && vm._batchSending[progressKey]) return;
+                    if (!vm.bughostedClientId) {
+                        if (vm.showErrorToast) vm.showErrorToast('Not connected to BugHosted. Login first.');
+                        return;
+                    }
+                    var scores = (allScores || []).filter(function (s) {
+                        return s && s.id && !s.sentToServer && !(vm._sendingBenchmarkIds && vm._sendingBenchmarkIds[s.id]);
+                    });
+                    if (!scores.length) return;
+                    vm._batchSending = vm._batchSending || {};
+                    vm._batchProgress = vm._batchProgress || {};
+                    vm._batchSending[progressKey] = true;
+                    vm._batchProgress[progressKey] = { sent: 0, total: scores.length };
+                    vm._sendingBenchmarkIds = vm._sendingBenchmarkIds || {};
+                    var failed = 0;
+                    scores.forEach(function (s) {
+                        vm._sendingBenchmarkIds[s.id] = true;
+                        s._sendState = 'sending';
+                    });
+                    var posts = scores.map(function (s) {
+                        return $http.post('/api/bughosted/addbenchmark', vm._benchmarkDtoFor(s))
+                            .then(function () {
+                                vm.markBenchmarkSent(s);
+                                s._sendState = 'ok';
+                                vm._clearSendState(s);
+                            })
+                            .catch(function () {
+                                failed++;
+                                s._sendState = 'fail';
+                                vm._clearSendState(s);
+                            })
+                            .finally(function () {
+                                delete vm._sendingBenchmarkIds[s.id];
+                                vm._batchProgress[progressKey].sent++;
+                            });
+                    });
+                    $q.all(posts).finally(function () {
+                        vm._batchSending[progressKey] = false;
+                        var total = scores.length;
+                        var sent = total - failed;
+                        if (failed === 0) {
+                            if (vm.showSideToast) vm.showSideToast('✅ All ' + total + ' benchmark(s) successfully sent to BugHosted!');
+                        } else if (sent === 0) {
+                            if (vm.showErrorToast) vm.showErrorToast('Failed to send any of the ' + total + ' benchmark(s). Check your connection and try again.');
+                        } else if (vm.showErrorToast) {
+                            vm.showErrorToast(sent + ' of ' + total + ' benchmark(s) sent successfully; ' + failed + ' failed.');
+                        }
+                    });
+                };
+                vm.sendAllBenchmarksToServer = function () {
+                    vm.sendBenchmarksBatch(vm.benchmarkScores || [], 'all');
+                };
+                vm.sendGroupBenchmarksToServer = function (g) {
+                    vm.sendBenchmarksBatch((g && g.scores) || [], 'group-' + g.level);
+                };
+                vm.unsentGroupCount = function (g) {
+                    return (g && g.scores || []).filter(function (s) { return !s.sentToServer; }).length;
+                };
                 vm.msToDigitalTime = function (ms) {
                     if (!ms || isNaN(ms)) return '00:00:00';
                     return new Date(ms).toISOString().slice(11, 19);
                 }
                 vm.fetchBenchmarksFromServer = function () {
+                    if (vm.fetchingBenchmarks) return;
                     if (!vm.bughostedClientId) {
-                        alert('Not connected to BugHosted. Login first.');
+                        if (vm.showErrorToast) vm.showErrorToast('Not connected to BugHosted. Login first.');
                         return;
                     }
                     vm.fetchingBenchmarks = true;
@@ -3151,22 +3238,45 @@ angular.module('kanbanApp')
                             vm.fetchingBenchmarks = false;
                             console.error('Error fetching benchmarks:', error);
                             var msg = error.data && (error.data.detail || error.data.error || error.data.title) || error.message || 'Unknown error';
-                            alert('Failed to fetch benchmarks:\n' + msg);
+                            if (vm.showErrorToast) vm.showErrorToast('Failed to fetch benchmarks: ' + msg);
                         });
                 };
                 vm.saveSystemInfo = function () { $http.post('/api/benchmark/system-info', vm.systemInfoCustom).then(function () { vm.systemInfoSaved = true; $timeout(function () { vm.systemInfoSaved = false; }, 2000); }); };
                 vm.resetSystemInfo = function () { vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: '' }; vm.saveSystemInfo(); };
-                vm.deleteBenchmarkScore = function (score) { $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () { var idx = vm.benchmarkScores.indexOf(score); if (idx >= 0) vm.benchmarkScores.splice(idx, 1); if (vm.compareA === score) vm.compareA = null; if (vm.compareB === score) vm.compareB = null; vm.compareResult = vm.compareData(); }).catch(function () { }); };
+                vm.deleteBenchmarkScore = function (score) {
+                    if (!score || !score.id || vm._deletingScoreIds && vm._deletingScoreIds[score.id]) return;
+                    vm._deletingScoreIds = vm._deletingScoreIds || {};
+                    vm._deletingScoreIds[score.id] = true;
+                    $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id))
+                        .then(function () {
+                            var idx = vm.benchmarkScores.indexOf(score);
+                            if (idx >= 0) vm.benchmarkScores.splice(idx, 1);
+                            if (vm.compareA === score) vm.compareA = null;
+                            if (vm.compareB === score) vm.compareB = null;
+                            vm.compareResult = vm.compareData();
+                        })
+                        .catch(function () { })
+                        .finally(function () {
+                            delete vm._deletingScoreIds[score.id];
+                        });
+                };
                 vm.clearAllBenchmarkScores = function () {
+                    if (vm._clearingAllBenchmarks) return;
                     if (!vm.benchmarkScores || !vm.benchmarkScores.length) return;
                     if (!$window.confirm('Delete all ' + vm.benchmarkScores.length + ' local benchmark score(s)? This cannot be undone.')) return;
-                    $http.delete('/api/benchmark/scores').then(function () {
-                        vm.benchmarkScores = [];
-                        vm.compareA = null;
-                        vm.compareB = null;
-                        vm.compareResult = vm.compareData();
-                        vm.selectedBenchmarkScore = null;
-                    }).catch(function () { });
+                    vm._clearingAllBenchmarks = true;
+                    $http.delete('/api/benchmark/scores')
+                        .then(function () {
+                            vm.benchmarkScores = [];
+                            vm.compareA = null;
+                            vm.compareB = null;
+                            vm.compareResult = vm.compareData();
+                            vm.selectedBenchmarkScore = null;
+                        })
+                        .catch(function () { })
+                        .finally(function () {
+                            vm._clearingAllBenchmarks = false;
+                        });
                 };
             }
         };

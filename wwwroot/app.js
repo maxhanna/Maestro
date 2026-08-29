@@ -520,6 +520,37 @@ angular.module('kanbanApp', [])
         }, duration);
       };
 
+      // Error-styled sibling of showSideToast (red border/gradient, warning glyph) for
+      // non-blocking failure notifications — mirrors _showErrorToast above.
+      vm.showErrorToast = function (message, duration = 5000) {
+        const container = document.getElementById("weaver-toast-container");
+        if (!container) return;
+
+        const toast = document.createElement("div");
+        toast.className = "weaver-toast error";
+
+        const glyph = document.createElement("div");
+        glyph.className = "toast-glyph";
+        glyph.textContent = "⚠";
+
+        const body = document.createElement("span");
+        body.className = "toast-text";
+        body.textContent = message;
+
+        toast.appendChild(glyph);
+        toast.appendChild(body);
+        container.appendChild(toast);
+
+        void toast.offsetHeight;
+        toast.classList.add("show");
+
+        setTimeout(() => {
+          toast.classList.remove("show");
+          toast.classList.add("hide");
+          setTimeout(() => toast.remove(), 30000);
+        }, duration);
+      };
+
 
       vm.exportKanbanData = function () {
         const data = JSON.stringify(vm.state);

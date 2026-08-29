@@ -1844,6 +1844,63 @@ h1 .brand-e:hover::before {
 	animation: brandWebSpin 40s linear infinite;
 }
 
+/* Hover: the skulltula scuttles its legs and the whole spider pulses; the eyes
+   brighten. Eyes-follow-mouse is driven from JS (vm.discordEyesFollow on the
+   discord-brand element). */
+.discord-brand:hover .brand-leg {
+	animation-name: brandLegScuttle;
+	animation-duration: 0.45s;
+	animation-timing-function: ease-in-out;
+}
+
+.discord-brand:hover .discord-brand-icon {
+	animation: brandSpiderPulse 1.1s ease-in-out infinite;
+}
+
+.brand-pupil {
+	transition: fill 0.2s ease;
+}
+
+.discord-brand:hover .brand-pupil {
+	fill: #ffe082;
+}
+
+@keyframes brandLegScuttle {
+
+	0%,
+	100% {
+		transform: scale(1.02);
+	}
+
+	25% {
+		transform: scale(0.94) rotate(-3deg);
+	}
+
+	75% {
+		transform: scale(0.94) rotate(3deg);
+	}
+}
+
+@keyframes brandSpiderPulse {
+
+	0%,
+	100% {
+		transform: scale(1);
+	}
+
+	50% {
+		transform: scale(1.05);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+	.discord-brand:hover .brand-leg,
+	.discord-brand:hover .discord-brand-icon {
+		animation: none;
+	}
+}
+
 .discord-brand-ascii {
 	margin: 0;
 	font-family: Consolas, 'Courier New', monospace;
